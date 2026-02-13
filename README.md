@@ -18,12 +18,19 @@ Modern C++14/17 header-only embedded infrastructure library for ARM-Linux, extra
 
 ## Modules
 
+### Foundation Layer
+
 | Module | Description |
 |--------|-------------|
 | `platform.hpp` | Platform/architecture detection, compiler hints, `OSP_ASSERT` macro |
 | `vocabulary.hpp` | `expected`, `optional`, `FixedVector`, `FixedString`, `FixedFunction`, `function_ref`, `not_null`, `NewType`, `ScopeGuard` |
 | `config.hpp` | Multi-format config parser (INI/JSON/YAML) with template-based backend dispatch |
 | `log.hpp` | Logging macros with compile-time level filtering (stderr backend) |
+
+### Core Layer
+
+| Module | Description |
+|--------|-------------|
 | `timer.hpp` | Timer task scheduler based on `std::chrono::steady_clock` |
 | `shell.hpp` | Remote debug shell (telnet) with TAB completion, command history, `OSP_SHELL_CMD` registration |
 | `mem_pool.hpp` | Fixed-block memory pool (`FixedPool<BlockSize, MaxBlocks>`) with embedded free list |
@@ -31,23 +38,58 @@ Modern C++14/17 header-only embedded infrastructure library for ARM-Linux, extra
 | `bus.hpp` | Lock-free MPSC message bus (`AsyncBus<PayloadVariant>`) with type-based routing |
 | `node.hpp` | Lightweight pub/sub node abstraction (`Node<PayloadVariant>`) inspired by ROS2/CyberRT |
 | `worker_pool.hpp` | Multi-worker thread pool built on AsyncBus with SPSC per-worker queues |
+| `executor.hpp` | Scheduler (Single/Static/Pinned + Realtime SCHED_FIFO/DEADLINE) |
+| `hsm.hpp` | Hierarchical state machine (LCA-based transitions, nested states) |
+| `bt.hpp` | Behavior tree (Sequence/Fallback/Parallel composite nodes) |
+
+### Network Layer
+
+| Module | Description |
+|--------|-------------|
+| `socket.hpp` | TCP/UDP RAII wrapper (based on sockpp) |
+| `connection.hpp` | Connection pool management (auto-reconnect, heartbeat) |
+| `io_poller.hpp` | epoll event loop (edge-triggered + timeout) |
+| `transport.hpp` | Transparent network transport (TCP/UDP frame protocol) |
+| `semaphore.hpp` | Lightweight semaphore (futex-based) |
+| `shm_transport.hpp` | Shared memory IPC (lock-free SPSC ring buffer) |
+| `data_fusion.hpp` | Multi-source data fusion (time alignment, interpolation) |
+| `discovery.hpp` | Node discovery (UDP multicast + static config) |
+| `service.hpp` | RPC service (request-response pattern) |
+| `node_manager.hpp` | Node management + heartbeat monitoring |
+| `node_manager_hsm.hpp` | HSM-driven node connection management |
+
+### Advanced Features
+
+| Module | Description |
+|--------|-------------|
+| `lifecycle_node.hpp` | Lifecycle node (Unconfigured → Inactive → Active → Finalized) |
+| `qos.hpp` | QoS configuration (Reliability/History/Deadline/Lifespan) |
+| `serial_transport.hpp` | Industrial serial transport (CRC-CCITT, PTY testing, IEC 61508) |
+| `app.hpp` | Application/Instance two-tier model (compatible with original OSP) |
+| `post.hpp` | Unified posting (local/remote/broadcast + sync messages) |
+| `transport_factory.hpp` | Automatic transport selection (inproc/shm/tcp) |
+| `net.hpp` | Network layer wrapper (address resolution, socket options) |
 
 ## Architecture
 
 ```
-                    Config (INI/JSON/YAML)
-                    Log (stderr)
-                    Timer (std::chrono)
-                         |
-   Submit ──> AsyncBus (lock-free MPSC ring buffer)
-                  |
-            ProcessBatch / SpinOnce
-                  |
-         ┌───────┼───────┐
-         v       v       v
-      Node 0   Node 1   Node 2    (type-based pub/sub)
-         |
-   WorkerPool (dispatcher -> SPSC -> worker threads)
+┌─────────────────────────────────────────────────────────────────┐
+│  Application: App/Instance, LifecycleNode, QoS                  │
+├─────────────────────────────────────────────────────────────────┤
+│  Service: Service (RPC), Discovery, NodeManager                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Transport: Transport (TCP/UDP), ShmTransport, SerialTransport  │
+│             TransportFactory (inproc/shm/tcp auto-selection)    │
+├─────────────────────────────────────────────────────────────────┤
+│  Network: Socket, Connection, IoPoller (epoll), Net             │
+├─────────────────────────────────────────────────────────────────┤
+│  Messaging: AsyncBus (MPSC), Node (Pub/Sub), Post (unified)     │
+├─────────────────────────────────────────────────────────────────┤
+│  Scheduling: Executor (Realtime), WorkerPool, HSM, BT           │
+├─────────────────────────────────────────────────────────────────┤
+│  Foundation: Config, Log, Timer, Shell, MemPool, Shutdown       │
+│              Platform, Vocabulary (expected/optional/Fixed*)     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Build
@@ -77,6 +119,8 @@ cmake --build build -j$(nproc)
 | `OSP_CONFIG_INI` | ON | Enable INI config backend (inih) |
 | `OSP_CONFIG_JSON` | OFF | Enable JSON config backend (nlohmann/json) |
 | `OSP_CONFIG_YAML` | OFF | Enable YAML config backend (fkYAML) |
+| `OSP_NO_EXCEPTIONS` | OFF | Disable exceptions (`-fno-exceptions`) |
+| `OSP_WITH_SOCKPP` | ON | Enable sockpp network library (socket/transport) |
 
 ## Quick Start
 
@@ -108,7 +152,7 @@ sensor.SpinOnce();
 
 | Job | Description |
 |-----|-------------|
-| **build-and-test** | Ubuntu + macOS, Debug + Release |
+| **build-and-test** | Ubuntu, Debug + Release |
 | **build-with-options** | `-fno-exceptions -fno-rtti` compatibility |
 | **sanitizers** | AddressSanitizer, ThreadSanitizer, UBSan |
 | **code-quality** | clang-format, cpplint |
@@ -117,7 +161,7 @@ sensor.SpinOnce();
 
 - CMake >= 3.14
 - C++17 compiler (GCC >= 7, Clang >= 5)
-- POSIX (Linux / macOS)
+- Linux (ARM-Linux embedded platform)
 
 ## Third-party Dependencies
 
@@ -128,7 +172,13 @@ All dependencies are fetched automatically via CMake FetchContent:
 | [inih](https://github.com/benhoyt/inih) | r58 | INI config parsing | `OSP_CONFIG_INI=ON` |
 | [nlohmann/json](https://github.com/nlohmann/json) | v3.11.3 | JSON config parsing | `OSP_CONFIG_JSON=ON` |
 | [fkYAML](https://github.com/fktn-k/fkYAML) | v0.4.0 | YAML config parsing | `OSP_CONFIG_YAML=ON` |
+| [sockpp](https://github.com/fpagliughi/sockpp) | v1.0.0 | TCP/UDP socket wrapper | `OSP_WITH_SOCKPP=ON` |
 | [Catch2](https://github.com/catchorg/Catch2) | v3.5.2 | Unit testing | `OSP_BUILD_TESTS=ON` |
+
+## Examples and Tests
+
+- Example programs: `examples/` directory, see [examples/README.md](examples/README.md)
+- Unit tests: `tests/` directory, 328+ test cases, see [tests/README.md](tests/README.md)
 
 ## Design Patterns
 

@@ -130,19 +130,93 @@ class Instance {
 using InstanceFactory = Instance* (*)();
 
 // ============================================================================
-// Application message
+// Application message - hybrid inline/pointer storage with bit-field packing
 // ============================================================================
 
-#ifndef OSP_APP_MSG_DATA_SIZE
-#define OSP_APP_MSG_DATA_SIZE 256U
+// Inline buffer threshold: messages <= this size are stored inline,
+// larger messages use an external pointer. Must be a multiple of 8
+// for alignment.
+#ifndef OSP_APP_MSG_INLINE_SIZE
+#define OSP_APP_MSG_INLINE_SIZE 48U
 #endif
 
-struct AppMessage {
+static_assert((OSP_APP_MSG_INLINE_SIZE % 8) == 0,
+              "OSP_APP_MSG_INLINE_SIZE must be 8-byte aligned");
+
+/**
+ * AppMessage layout (all fields naturally aligned, struct 64-byte / 1 cache line):
+ *
+ * Offset  Size  Field
+ * ------  ----  -----
+ *   0       2   ins_id   (uint16_t)
+ *   2       2   event    (uint16_t)
+ *   4       4   flags_and_len (bit-field: is_external:1, reserved:7, len:24)
+ *   8       8   response_channel (pointer)
+ *  16      48   payload (inline_data[48] or ext_ptr)
+ * ------
+ *  64 bytes total = exactly 1 cache line on most ARM/x86 platforms
+ *
+ * flags_and_len bit layout (32 bits, single load/store):
+ *   bit  0:     is_external (1 = data via pointer, 0 = inline)
+ *   bit  1-7:   reserved (future: priority, urgency, etc.)
+ *   bit  8-31:  data_len (24 bits, max 16MB)
+ *
+ * All fields are naturally aligned:
+ *   - ins_id/event at 2-byte boundary (16-bit aligned)
+ *   - flags_and_len at 4-byte boundary (32-bit aligned)
+ *   - response_channel at 8-byte boundary (64-bit aligned)
+ *   - payload at 8-byte boundary (64-bit aligned)
+ */
+struct alignas(8) AppMessage {
+  // -- Word 0: instance + event (4 bytes, 16-bit aligned each) --
   uint16_t ins_id;
   uint16_t event;
-  uint32_t data_len;
-  uint8_t data[OSP_APP_MSG_DATA_SIZE];
-  ResponseChannel* response_channel;  // non-null for sync messages
+
+  // -- Word 1: flags + length packed in 32 bits (4-byte aligned) --
+  uint32_t flags_and_len;
+
+  // -- Word 2: response channel pointer (8-byte aligned) --
+  ResponseChannel* response_channel;
+
+  // -- Payload: inline buffer or external pointer (8-byte aligned) --
+  union alignas(8) {
+    uint8_t  inline_data[OSP_APP_MSG_INLINE_SIZE];
+    const void* ext_ptr;
+  } payload;
+
+  // -- Bit-field accessors (single 32-bit load, no mask overhead on ARM) --
+
+  bool IsExternal() const noexcept {
+    return (flags_and_len & 0x01U) != 0;
+  }
+
+  uint32_t DataLen() const noexcept {
+    return flags_and_len >> 8;
+  }
+
+  const void* Data() const noexcept {
+    return IsExternal() ? payload.ext_ptr : payload.inline_data;
+  }
+
+  // Store data: inline copy for small, pointer for large
+  void Store(const void* data, uint32_t len) noexcept {
+    if (data == nullptr || len == 0) {
+      flags_and_len = 0;  // clear all: not external, len=0
+      return;
+    }
+    // Clamp to 24-bit max (16MB)
+    if (len > 0x00FFFFFFU) len = 0x00FFFFFFU;
+
+    if (len <= OSP_APP_MSG_INLINE_SIZE) {
+      // Inline: copy into buffer, is_external = 0
+      flags_and_len = (len << 8);
+      std::memcpy(payload.inline_data, data, len);
+    } else {
+      // External: store pointer, is_external = 1
+      flags_and_len = (len << 8) | 0x01U;
+      payload.ext_ptr = data;
+    }
+  }
 };
 
 // ============================================================================
@@ -252,11 +326,9 @@ class Application {
     AppMessage& msg = queue_[queue_tail_];
     msg.ins_id = ins_id;
     msg.event = event;
-    msg.data_len = (len <= OSP_APP_MSG_DATA_SIZE) ? len : OSP_APP_MSG_DATA_SIZE;
-    if (data != nullptr && msg.data_len > 0) {
-      std::memcpy(msg.data, data, msg.data_len);
-    }
+    msg.flags_and_len = 0;
     msg.response_channel = response_ch;
+    msg.Store(data, len);
     queue_tail_ = next_tail;
     return true;
   }
@@ -268,12 +340,15 @@ class Application {
     const AppMessage& msg = queue_[queue_head_];
     queue_head_ = (queue_head_ + 1) % OSP_APP_QUEUE_DEPTH;
 
+    const void* data = msg.Data();
+    uint32_t data_len = msg.DataLen();
+
     if (msg.ins_id == kInsEach) {
       // Broadcast to all instances
       for (uint16_t i = 0; i < MaxInstances; ++i) {
         if (instances_[i] != nullptr) {
           instances_[i]->SetResponseChannel(msg.response_channel);
-          instances_[i]->OnMessage(msg.event, msg.data, msg.data_len);
+          instances_[i]->OnMessage(msg.event, data, data_len);
           instances_[i]->SetResponseChannel(nullptr);
         }
       }
@@ -281,7 +356,7 @@ class Application {
       Instance* inst = GetInstance(msg.ins_id);
       if (inst != nullptr) {
         inst->SetResponseChannel(msg.response_channel);
-        inst->OnMessage(msg.event, msg.data, msg.data_len);
+        inst->OnMessage(msg.event, data, data_len);
         inst->SetResponseChannel(nullptr);
       }
     }

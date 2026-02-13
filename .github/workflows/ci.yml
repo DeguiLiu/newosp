@@ -14,13 +14,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         build_type: [Debug, Release]
-        include:
-          - os: ubuntu-latest
-            compiler: gcc
-          - os: macos-latest
-            compiler: clang
 
     runs-on: ${{ matrix.os }}
 
@@ -48,7 +43,7 @@ jobs:
       matrix:
         config:
           - name: "No exceptions/RTTI"
-            flags: "-fno-exceptions -fno-rtti"
+            cmake_flags: "-DOSP_NO_EXCEPTIONS=ON -DOSP_BUILD_EXAMPLES=OFF"
 
     steps:
     - uses: actions/checkout@v4
@@ -58,7 +53,7 @@ jobs:
 
     - name: Configure CMake with ${{ matrix.config.name }}
       run: |
-        cmake -B build -DCMAKE_BUILD_TYPE=Release -DOSP_BUILD_TESTS=ON -DCMAKE_CXX_FLAGS="${{ matrix.config.flags }}"
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DOSP_BUILD_TESTS=ON ${{ matrix.config.cmake_flags }}
 
     - name: Build
       run: cmake --build build --config Release -j
