@@ -47,7 +47,8 @@ enum class PostError : uint8_t {
 class AppRegistry {
  public:
   using PostFn = bool (*)(void* app, uint16_t ins_id, uint16_t event,
-                          const void* data, uint32_t len);
+                          const void* data, uint32_t len,
+                          ResponseChannel* response_ch);
 
   static AppRegistry& Instance() noexcept {
     static AppRegistry instance;
@@ -90,13 +91,14 @@ class AppRegistry {
   }
 
   bool PostLocal(uint32_t dst_iid, uint16_t event,
-                 const void* data, uint32_t len) noexcept {
+                 const void* data, uint32_t len,
+                 ResponseChannel* response_ch = nullptr) noexcept {
     uint16_t app_id = GetAppId(dst_iid);
     uint16_t ins_id = GetInsId(dst_iid);
     for (uint32_t i = 0; i < OSP_POST_MAX_APPS; ++i) {
       if (entries_[i].active && entries_[i].app_id == app_id) {
         return entries_[i].post_fn(entries_[i].app_ptr, ins_id, event,
-                                   data, len);
+                                   data, len, response_ch);
       }
     }
     return false;
@@ -142,9 +144,10 @@ bool RegisterApp(Application<MaxInstances>& app) noexcept {
   return AppRegistry::Instance().Register(
       app.AppId(), &app,
       [](void* ptr, uint16_t ins_id, uint16_t event,
-         const void* data, uint32_t len) -> bool {
+         const void* data, uint32_t len,
+         ResponseChannel* response_ch) -> bool {
         auto* a = static_cast<Application<MaxInstances>*>(ptr);
-        return a->Post(ins_id, event, data, len);
+        return a->Post(ins_id, event, data, len, response_ch);
       });
 }
 
@@ -168,31 +171,71 @@ inline bool OspPost(uint32_t dst_iid, uint16_t event,
 }
 
 // ============================================================================
-// OspSendAndWait - Synchronous request-response (simplified)
+// OspSendAndWait - Synchronous request-response
 // ============================================================================
 
+/**
+ * @brief Send a message and wait for a synchronous reply.
+ *
+ * Posts the message to the target instance. The instance handler can call
+ * Reply() to send response data back. This function blocks until the reply
+ * is received or the timeout expires.
+ *
+ * @param dst_iid Destination instance ID (MakeIID(app_id, ins_id)).
+ * @param event Event identifier.
+ * @param data Request payload.
+ * @param len Request payload length.
+ * @param ack_buf Buffer to receive the response data.
+ * @param ack_buf_size Size of the ack buffer.
+ * @param dst_node Destination node (0 = local).
+ * @param timeout_ms Timeout in milliseconds.
+ * @return Number of bytes written to ack_buf on success, or PostError.
+ */
 inline expected<uint32_t, PostError> OspSendAndWait(
     uint32_t dst_iid, uint16_t event,
     const void* data, uint32_t len,
     void* ack_buf, uint32_t ack_buf_size,
     uint16_t dst_node = 0,
     int timeout_ms = 2000) noexcept {
-  (void)ack_buf;
-  (void)ack_buf_size;
 
   if (dst_node != 0) {
     return expected<uint32_t, PostError>::error(PostError::kSendFailed);
   }
 
-  // Post the message
-  if (!OspPost(dst_iid, event, data, len, dst_node)) {
+  // Create a response channel on the stack
+  ResponseChannel channel;
+
+  // Post the message with the response channel attached
+  if (!AppRegistry::Instance().PostLocal(dst_iid, event, data, len,
+                                          &channel)) {
     return expected<uint32_t, PostError>::error(PostError::kAppNotFound);
   }
 
-  // For local delivery, message is already queued - return success with 0 ack
-  // Full sync response would require a response channel (future enhancement)
-  (void)timeout_ms;
-  return expected<uint32_t, PostError>::success(0);
+  // Wait for the reply with timeout
+  {
+    std::unique_lock<std::mutex> lock(channel.mtx);
+    if (!channel.replied) {
+      auto deadline = std::chrono::steady_clock::now() +
+                      std::chrono::milliseconds(timeout_ms);
+      channel.cv.wait_until(lock, deadline,
+                            [&channel]() { return channel.replied; });
+    }
+  }
+
+  if (!channel.replied) {
+    return expected<uint32_t, PostError>::error(PostError::kTimeout);
+  }
+
+  // Copy response to caller's buffer
+  uint32_t copy_len = channel.data_len;
+  if (copy_len > ack_buf_size) {
+    copy_len = ack_buf_size;
+  }
+  if (ack_buf != nullptr && copy_len > 0) {
+    std::memcpy(ack_buf, channel.data, copy_len);
+  }
+
+  return expected<uint32_t, PostError>::success(copy_len);
 }
 
 }  // namespace osp

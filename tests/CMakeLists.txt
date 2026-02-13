@@ -37,17 +37,24 @@ add_executable(osp_tests
     test_discovery.cpp
     test_service.cpp
     test_node_manager.cpp
+    test_node_manager_hsm.cpp
     test_integration.cpp
     test_serial_transport.cpp
     test_qos.cpp
     test_app.cpp
     test_post.cpp
+    test_transport_factory.cpp
 )
 target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
 
 if(OSP_WITH_SOCKPP)
     target_sources(osp_tests PRIVATE test_net.cpp)
     target_link_libraries(osp_tests sockpp-static)
+endif()
+
+# Apply -fno-exceptions -fno-rtti only to osp_tests, not to dependencies
+if(OSP_NO_EXCEPTIONS)
+    target_compile_options(osp_tests PRIVATE -fno-exceptions -fno-rtti)
 endif()
 
 catch_discover_tests(osp_tests)

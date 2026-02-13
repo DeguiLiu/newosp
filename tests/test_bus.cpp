@@ -308,3 +308,185 @@ TEST_CASE("AsyncBus multi-threaded publish", "[bus]") {
   int total = kNumThreads * kMsgsPerThread;
   REQUIRE(received.load() >= total * 99 / 100);
 }
+
+TEST_CASE("Bus publish with no subscribers", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  // Publish without any subscribers - should not crash
+  REQUIRE(bus.Publish(SensorData{25.5f, 1}, 42));
+  REQUIRE(bus.Publish(MotorCmd{100}, 1));
+  REQUIRE(bus.Publish(AlarmEvent{999}, 2));
+
+  uint32_t processed = bus.ProcessBatch();
+  REQUIRE(processed == 3);
+
+  auto stats = bus.GetStatistics();
+  REQUIRE(stats.messages_published == 3);
+  REQUIRE(stats.messages_processed == 3);
+}
+
+TEST_CASE("Bus subscribe and unsubscribe rapidly", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::atomic<int> count{0};
+
+  // Subscribe and unsubscribe in tight loop
+  for (int i = 0; i < 100; ++i) {
+    auto handle = bus.Subscribe<SensorData>(
+        [&count](const TestEnvelope&) { ++count; });
+    REQUIRE(handle.IsValid());
+    REQUIRE(bus.Unsubscribe(handle));
+  }
+
+  // Final subscription that stays
+  bus.Subscribe<SensorData>(
+      [&count](const TestEnvelope&) { ++count; });
+
+  bus.Publish(SensorData{1.0f, 0}, 0);
+  bus.ProcessBatch();
+
+  REQUIRE(count.load() == 1);
+}
+
+TEST_CASE("Bus multiple message types", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  int sensor_count = 0;
+  int motor_count = 0;
+  int alarm_count = 0;
+
+  float last_temp = 0.0f;
+  int32_t last_speed = 0;
+  uint32_t last_code = 0;
+
+  bus.Subscribe<SensorData>(
+      [&sensor_count, &last_temp](const TestEnvelope& env) {
+        const SensorData* data = std::get_if<SensorData>(&env.payload);
+        if (data) {
+          last_temp = data->temperature;
+          ++sensor_count;
+        }
+      });
+
+  bus.Subscribe<MotorCmd>(
+      [&motor_count, &last_speed](const TestEnvelope& env) {
+        const MotorCmd* cmd = std::get_if<MotorCmd>(&env.payload);
+        if (cmd) {
+          last_speed = cmd->speed;
+          ++motor_count;
+        }
+      });
+
+  bus.Subscribe<AlarmEvent>(
+      [&alarm_count, &last_code](const TestEnvelope& env) {
+        const AlarmEvent* alarm = std::get_if<AlarmEvent>(&env.payload);
+        if (alarm) {
+          last_code = alarm->code;
+          ++alarm_count;
+        }
+      });
+
+  // Publish different types and verify correct routing
+  bus.Publish(SensorData{20.5f, 1}, 1);
+  bus.Publish(MotorCmd{150}, 2);
+  bus.Publish(AlarmEvent{404}, 3);
+  bus.Publish(SensorData{30.0f, 2}, 1);
+  bus.Publish(MotorCmd{-50}, 2);
+
+  bus.ProcessBatch();
+
+  REQUIRE(sensor_count == 2);
+  REQUIRE(motor_count == 2);
+  REQUIRE(alarm_count == 1);
+  REQUIRE(last_temp == 30.0f);
+  REQUIRE(last_speed == -50);
+  REQUIRE(last_code == 404);
+}
+
+TEST_CASE("Bus queue overflow behavior", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::atomic<int> received{0};
+  bus.Subscribe<SensorData>(
+      [&received](const TestEnvelope&) { ++received; });
+
+  // Publish more messages than queue depth (4096)
+  // The bus should drop messages when full
+  static constexpr int kOverflowCount = 5000;
+  int publish_success = 0;
+  int publish_failed = 0;
+
+  for (int i = 0; i < kOverflowCount; ++i) {
+    if (bus.Publish(SensorData{static_cast<float>(i),
+                                static_cast<uint32_t>(i)}, 0)) {
+      ++publish_success;
+    } else {
+      ++publish_failed;
+    }
+  }
+
+  // Process all messages
+  uint32_t total_processed = 0;
+  for (int round = 0; round < 200; ++round) {
+    uint32_t batch = bus.ProcessBatch();
+    total_processed += batch;
+    if (batch == 0 && bus.Depth() == 0) break;
+  }
+
+  auto stats = bus.GetStatistics();
+
+  // Verify: messages that returned true from Publish should be processed
+  REQUIRE(received.load() == stats.messages_processed);
+  // Some messages should have been dropped due to overflow
+  REQUIRE(publish_failed > 0);
+  REQUIRE(stats.messages_dropped > 0);
+}
+
+TEST_CASE("Bus concurrent publish from multiple threads", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::atomic<int> received{0};
+  bus.Subscribe<SensorData>(
+      [&received](const TestEnvelope&) { ++received; });
+
+  static constexpr int kNumThreads = 4;
+  static constexpr int kMsgsPerThread = 250;
+
+  std::thread threads[kNumThreads];
+  std::atomic<bool> start_flag{false};
+
+  // Create threads that wait for start signal
+  for (int t = 0; t < kNumThreads; ++t) {
+    threads[t] = std::thread([&bus, &start_flag, t]() {
+      // Wait for start signal to maximize concurrency
+      while (!start_flag.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+
+      for (int i = 0; i < kMsgsPerThread; ++i) {
+        bus.Publish(SensorData{static_cast<float>(i),
+                                static_cast<uint32_t>(t)},
+                    static_cast<uint32_t>(t));
+      }
+    });
+  }
+
+  // Start all threads simultaneously
+  start_flag.store(true, std::memory_order_release);
+
+  for (auto& t : threads) t.join();
+
+  // Drain all messages
+  for (int round = 0; round < 100; ++round) {
+    if (bus.ProcessBatch() == 0 && bus.Depth() == 0) break;
+  }
+
+  // Under high CAS contention, accept >= 99% delivery
+  int total = kNumThreads * kMsgsPerThread;
+  REQUIRE(received.load() >= total * 99 / 100);
+}

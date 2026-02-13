@@ -12,12 +12,17 @@ function(add_osp_example target source)
 endfunction()
 
 # --- demo executables -----------------------------------------------------
-add_osp_example(osp_basic_demo      basic_demo.cpp)
-add_osp_example(osp_protocol_demo   protocol_demo.cpp)
-add_osp_example(osp_client_demo     client_demo.cpp)
-add_osp_example(osp_priority_demo   priority_demo.cpp)
-add_osp_example(osp_benchmark       benchmark.cpp)
-add_osp_example(serial_demo         serial_demo.cpp)
+add_osp_example(osp_basic_demo              basic_demo.cpp)
+add_osp_example(osp_protocol_demo           protocol_demo.cpp)
+add_osp_example(osp_client_demo             client_demo.cpp)
+add_osp_example(osp_priority_demo           priority_demo.cpp)
+add_osp_example(osp_benchmark               benchmark.cpp)
+add_osp_example(serial_demo                 serial_demo.cpp)
+add_osp_example(osp_bt_patrol_demo          bt_patrol_demo.cpp)
+add_osp_example(osp_node_manager_hsm_demo   node_manager_hsm_demo.cpp)
+add_osp_example(osp_realtime_demo           realtime_executor_demo.cpp)
+add_osp_example(osp_hsm_bt_combo_demo       hsm_bt_combo_demo.cpp)
+add_osp_example(osp_hsm_protocol_demo       hsm_protocol_demo.cpp)
 
 # Benchmark builds with -O3 regardless of the global build type
 target_compile_options(osp_benchmark PRIVATE -O3)

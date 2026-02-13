@@ -9,6 +9,7 @@
 
 #include "osp/net.hpp"
 
+#include <atomic>
 #include <thread>
 #include <chrono>
 #include <cstring>
@@ -34,25 +35,35 @@ TEST_CASE("TcpServer can listen and accept connections", "[net][tcp]") {
   REQUIRE(port > 0);
 
   // Connect from client in a separate thread
-  std::thread client_thread([port]() {
+  std::atomic<bool> client_success{true};
+  std::thread client_thread([port, &client_success]() {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     auto client_r = TcpClient::Connect("127.0.0.1", port, 1000);
-    REQUIRE(client_r.has_value());
+    if (!client_r.has_value()) {
+      client_success.store(false, std::memory_order_relaxed);
+      return;
+    }
     auto client = std::move(client_r.value());
-    REQUIRE(client.IsOpen());
+    if (!client.IsOpen()) {
+      client_success.store(false, std::memory_order_relaxed);
+      return;
+    }
 
     // Send a message
     const char* msg = "Hello";
     auto send_r = client.Send(msg, std::strlen(msg));
-    REQUIRE(send_r.has_value());
-    REQUIRE(send_r.value() == std::strlen(msg));
+    if (!send_r.has_value() || send_r.value() != std::strlen(msg)) {
+      client_success.store(false, std::memory_order_relaxed);
+      return;
+    }
 
     // Receive response
     char buf[64] = {};
     auto recv_r = client.Recv(buf, sizeof(buf));
-    REQUIRE(recv_r.has_value());
-    REQUIRE(recv_r.value() == 5);
-    REQUIRE(std::strcmp(buf, "World") == 0);
+    if (!recv_r.has_value() || recv_r.value() != 5 || std::strcmp(buf, "World") != 0) {
+      client_success.store(false, std::memory_order_relaxed);
+      return;
+    }
   });
 
   // Accept connection
@@ -75,6 +86,7 @@ TEST_CASE("TcpServer can listen and accept connections", "[net][tcp]") {
   REQUIRE(send_r.value() == std::strlen(response));
 
   client_thread.join();
+  REQUIRE(client_success.load(std::memory_order_relaxed));
 }
 
 TEST_CASE("TcpClient can connect to server", "[net][tcp]") {
@@ -119,20 +131,29 @@ TEST_CASE("TcpClient can send and receive data", "[net][tcp]") {
   uint16_t port = ntohs(addr.sin_port);
 
   // Server thread
-  std::thread server_thread([&server]() {
+  std::atomic<bool> server_success{true};
+  std::thread server_thread([&server, &server_success]() {
     auto accepted_r = server.Accept();
-    REQUIRE(accepted_r.has_value());
+    if (!accepted_r.has_value()) {
+      server_success.store(false, std::memory_order_relaxed);
+      return;
+    }
     auto accepted = std::move(accepted_r.value());
 
     // Echo server
     char buf[1024];
     auto recv_r = accepted.Recv(buf, sizeof(buf));
-    REQUIRE(recv_r.has_value());
+    if (!recv_r.has_value()) {
+      server_success.store(false, std::memory_order_relaxed);
+      return;
+    }
     size_t n = recv_r.value();
 
     auto send_r = accepted.Send(buf, n);
-    REQUIRE(send_r.has_value());
-    REQUIRE(send_r.value() == n);
+    if (!send_r.has_value() || send_r.value() != n) {
+      server_success.store(false, std::memory_order_relaxed);
+      return;
+    }
   });
 
   // Client
@@ -153,6 +174,7 @@ TEST_CASE("TcpClient can send and receive data", "[net][tcp]") {
   REQUIRE(std::strcmp(buf, msg) == 0);
 
   server_thread.join();
+  REQUIRE(server_success.load(std::memory_order_relaxed));
 }
 
 TEST_CASE("UdpPeer can bind to a port", "[net][udp]") {

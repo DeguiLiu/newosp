@@ -87,9 +87,9 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 
 | 优先级 | 含义 | 开发原则 | 对应 Phase |
 |--------|------|---------|-----------|
-| P0 | 架构基础，必须先行 | 不完成 P0 不启动 P1；设计文档同步更新 | Phase A-N (已完成), Phase O (规划中) |
-| P1 | 功能扩展，核心可用 | P0 全部完成后启动；兼容性和功能覆盖优先 | Phase P (规划中) |
-| P2 | 高级特性，锦上添花 | P1 基本完成后启动；可按需裁剪 | Phase Q (规划中) |
+| P0 | 架构基础，必须先行 | 不完成 P0 不启动 P1；设计文档同步更新 | Phase A-N (已完成), Phase O (已实现) |
+| P1 | 功能扩展，核心可用 | P0 全部完成后启动；兼容性和功能覆盖优先 | Phase P (已实现) |
+| P2 | 高级特性，锦上添花 | P1 基本完成后启动；可按需裁剪 | Phase Q (已实现) |
 
 关键约束:
 - 设计文档 (design_zh.md) 的及时更新永远是 P0 级别，任何架构调整必须先更新文档再编码
@@ -102,7 +102,7 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 
 #### P0-1: AsyncBus 单消费者瓶颈 + variant 内存膨胀
 
-**优先级**: P0 | **状态**: 设计中
+**优先级**: P0 | **状态**: 已实现
 
 **问题描述**:
 - 当前 AsyncBus 采用 MPSC (多生产者单消费者) 架构，单消费者 `ProcessBatch()` 串行处理所有消息类型，在高频消息场景下成为吞吐瓶颈
@@ -138,7 +138,7 @@ class MpmcBus { /* 按类型哈希分片到多个消费者 */ };
 
 #### P0-2: Node 全局单例 Bus + 纯类型路由局限
 
-**优先级**: P0 | **状态**: 设计中
+**优先级**: P0 | **状态**: 已实现
 
 **问题描述**:
 - 当前 Node 使用全局单例 Bus，不同 Node 无法隔离，子系统间耦合严重
@@ -172,7 +172,7 @@ sensor.Publish(SensorData{25.0f}, "imu/temperature");
 
 #### P0-3: Executor 缺少实时调度支持
 
-**优先级**: P0 | **状态**: 设计中
+**优先级**: P0 | **状态**: 已实现
 
 **问题描述**:
 - 当前 Executor 使用普通线程 (`SCHED_OTHER`)，无法满足工业实时性要求
@@ -217,7 +217,7 @@ class RealtimeExecutor {
 
 #### P0-4: Transport 帧缺少 seq_num 和 timestamp
 
-**优先级**: P0 | **状态**: 设计中
+**优先级**: P0 | **状态**: 已实现
 
 **问题描述**:
 - 网络传输帧头缺少序列号和时间戳，无法检测丢帧和测量延迟
@@ -255,7 +255,7 @@ class RealtimeExecutor {
 
 #### P0-5: ShmRingBuffer ARM 弱内存序
 
-**优先级**: P0 | **状态**: 设计中
+**优先级**: P0 | **状态**: 已实现
 
 **问题描述**:
 - ARM 是弱内存序 (weakly-ordered) 架构，与 x86 的 TSO (Total Store Order) 不同
@@ -310,7 +310,7 @@ void Release() noexcept {
 
 #### P0-6: 缺少 QoS 配置层
 
-**优先级**: P0 | **状态**: 设计中
+**优先级**: P0 | **状态**: 已实现
 
 **问题描述**:
 - 无法配置消息传输的可靠性、历史深度、截止时间等质量属性
@@ -371,7 +371,7 @@ void Subscribe(const char* topic, Callback<T> cb, const QosProfile& qos);
 
 #### P0-7: 缺少 Lifecycle Node
 
-**优先级**: P0 | **状态**: 设计中
+**优先级**: P0 | **状态**: 已实现
 
 **问题描述**:
 - 节点缺少标准化的生命周期管理 (类似 ROS2 Lifecycle Node)
@@ -2362,7 +2362,7 @@ motor.Activate();
 98. **shm_transport.hpp -- ShmTransport**: 实现 Transport 接口、Bind/Connect/Send/Poll
 99. **shm_transport.hpp -- 零拷贝 LoanedMessage**: 借鉴 ROS2 loaned_messages API，发布者直接写入共享内存 (仅限 POD 类型)
 100. **test_shm_transport.cpp**: 单进程 SHM 回环、多线程并发读写、通道创建/销毁
-101. **transport.hpp -- TransportFactory**: 自动传输选择策略 (借鉴 CyberRT) -- 部分完成
+101. **transport.hpp -- TransportFactory**: 自动传输选择策略 (借鉴 CyberRT) -- 已完成 (transport_factory.hpp)
     - 同进程同 PayloadVariant: inproc (AsyncBus 零拷贝)
     - 同机器不同进程: shm (共享内存无锁队列)
     - 跨机器: tcp/udp (网络传输)
@@ -2384,7 +2384,7 @@ motor.Activate();
 110. **shell.hpp 统一**: DebugShell 的 TCP 监听切换为 sockpp (与 socket.hpp 共享依赖)
 111. **test_sockpp_integration.cpp**: sockpp 集成回归测试
 
-### Phase O: P0 架构加固 -- QoS / Lifecycle / 实时调度 / 节点管理 (规划中)
+### Phase O: P0 架构加固 -- QoS / Lifecycle / 实时调度 / 节点管理 (已实现)
 
 > P0 优先级。基于 ROS2 rclcpp、CyberRT、iceoryx、eCAL 等中间件的最佳实践，
 > 针对嵌入式 ARM-Linux 实时场景，补齐 P0 级别的架构缺陷。
@@ -2408,7 +2408,7 @@ motor.Activate();
 127. **test_node_manager.cpp**: 连接建立、心跳超时、断开通知
 128. **性能基准回归**: 全传输路径 (inproc/shm/tcp) 吞吐量/延迟基线
 
-### Phase P: P1 功能扩展 -- OSP 兼容 / 串口 / 统一投递 (规划中)
+### Phase P: P1 功能扩展 -- OSP 兼容 / 串口 / 统一投递 (已实现)
 
 > P1 优先级。确保 newosp 覆盖原始 OSP (osp_legacy_analysis.md) 的核心功能。
 > 表现形式不同，但功能等价。仅支持 Linux 平台 (含 ARM-Linux)。
@@ -2425,7 +2425,7 @@ motor.Activate();
 138. **test_post.cpp**: 本地投递、远程投递、广播投递、同步消息
 139. **test_serial_transport.cpp**: 串口回环测试、帧解析、CRC 校验
 
-### Phase Q: P2 高级特性 -- 节点发现 / 服务 (规划中)
+### Phase Q: P2 高级特性 -- 节点发现 / 服务 (已实现)
 
 > P2 优先级。借鉴 ROS2 的 Service/Client 模式和 CyberRT 的拓扑自动发现。
 > 这些特性对核心功能非必需，但对完整的分布式系统至关重要。
@@ -2446,15 +2446,16 @@ motor.Activate();
 | **ospvos -- 信号量** | semaphore.hpp | 已完成 | LightSemaphore/PosixSemaphore |
 | **ospvos -- 消息队列** | bus.hpp (AsyncBus) | 已完成 | 无锁 MPSC 替代 VOS 消息队列 |
 | **ospvos -- Socket** | socket.hpp + sockpp (Phase N) | 已完成/重构中 | RAII 封装 |
-| **ospvos -- 串口** | serial_transport.hpp (CSerialPort) | 规划中 | NATIVE_SYNC 模式，IoPoller 集成 |
+| **ospvos -- 串口** | serial_transport.hpp (CSerialPort) | 已实现 | NATIVE_SYNC 模式，IoPoller 集成 |
 | **osppost -- 本地投递** | bus.hpp Publish() | 已完成 | 类型路由替代 ID 路由 |
 | **osppost -- 远程投递** | transport.hpp NetworkNode | 已完成 | TCP/UDP 透明传输 |
 | **osppost -- 广播投递** | bus.hpp (所有订阅者) | 已完成 | 类型订阅天然广播 |
 | **osppost -- 别名投递** | -- | 不实现 | 类型路由更安全，应用层可维护名称映射 |
-| **osppost -- 同步消息** | service.hpp (Phase Q) | 规划中 | Service/Client 请求-响应 |
+| **osppost -- 同步消息** | post.hpp OspSendAndWait + service.hpp | 已实现 | ResponseChannel 阻塞等待回复，支持超时 |
 | **ospnodeman -- TCP 连接** | connection.hpp + transport.hpp | 已完成 | ConnectionPool 管理 |
-| **ospnodeman -- 心跳检测** | node_manager.hpp (Phase O) | 规划中 | P0，可配置心跳 + 超时断开 |
-| **ospnodeman -- 断开通知** | node_manager.hpp (Phase O) | 规划中 | P0，回调通知 |
+| **ospnodeman -- 心跳检测** | node_manager.hpp + node_manager_hsm.hpp | 已实现 | P0，TCP 心跳 + HSM 状态机驱动 |
+| **ospnodeman -- 断开通知** | node_manager.hpp + node_manager_hsm.hpp | 已实现 | P0，回调通知 + HSM Connected/Suspect/Disconnected |
+| **ospnodeman -- HSM 状态机** | node_manager_hsm.hpp (Phase O) | 已实现 | 每连接独立 HSM，三状态生命周期管理 |
 | **ospsch -- 调度器** | executor.hpp | 已完成 | Single/Static/Pinned 三种模式 |
 | **ospsch -- 内存池** | mem_pool.hpp | 已完成 | FixedPool + ObjectPool |
 | **osptimer -- 定时器** | timer.hpp | 已完成 | TimerScheduler 后台线程 |
@@ -2463,18 +2464,18 @@ motor.Activate();
 | **osplog -- 文件轮转** | -- | 未来扩展 | 可集成 zlog |
 | **ospteleserver -- Telnet** | shell.hpp (DebugShell) | 已完成 | TCP Telnet + 命令注册 |
 | **osptest -- 测试框架** | Catch2 v3.5.2 | 已完成 | 现代测试框架替代 |
-| **CApp -- 应用** | app.hpp Application (Phase P) | 规划中 | 消息队列 + 实例池 |
-| **CInstance -- 实例** | app.hpp Instance (Phase P) | 规划中 | 状态机驱动 |
-| **-- QoS 服务质量** | qos.hpp (Phase O) | 规划中 | P0，简化版 QoS，5 个核心参数 |
-| **-- 生命周期节点** | lifecycle_node.hpp (Phase O) | 规划中 | P0，借鉴 ROS2 Lifecycle Node |
-| **-- 实时调度** | executor.hpp RealtimeExecutor (Phase O) | 规划中 | P0，SCHED_FIFO + mlockall + 优先级队列 |
+| **CApp -- 应用** | app.hpp Application (Phase P) | 已实现 | 消息队列 + 实例池 |
+| **CInstance -- 实例** | app.hpp Instance (Phase P) | 已实现 | 状态机驱动 |
+| **-- QoS 服务质量** | qos.hpp (Phase O) | 已实现 | P0，简化版 QoS，5 个核心参数 |
+| **-- 生命周期节点** | lifecycle_node.hpp (Phase O) | 已实现 | P0，借鉴 ROS2 Lifecycle Node |
+| **-- 实时调度** | executor.hpp RealtimeExecutor (Phase O) | 已实现 | P0，SCHED_FIFO + mlockall + 优先级队列 |
 | **CMessage -- 消息** | MessageEnvelope (bus.hpp) | 已完成 | header + variant payload |
 | **COspStack -- 栈内存** | mem_pool.hpp FixedPool | 已完成 | 固定块分配 |
 | **进程内通信** | AsyncBus (inproc, 零拷贝) | 已完成 | 无锁 MPSC |
 | **进程间通信 (同机)** | ShmTransport (Phase M) | 已完成 | 共享内存无锁队列 |
 | **网络间通信 (跨机)** | TcpTransport/UdpTransport | 已完成 | sockpp 重构 (Phase N) |
-| **自动传输选择** | TransportFactory (Phase M) | 规划中 | inproc/shm/tcp 自动路由 |
-| **节点发现** | discovery.hpp (Phase Q) | 规划中 | P2，UDP 多播 + 静态配置 |
+| **自动传输选择** | TransportFactory (Phase M) | 已实现 | inproc/shm/tcp 自动路由 |
+| **节点发现** | discovery.hpp (Phase Q) | 已实现 | P2，UDP 多播 + 静态配置 |
 | **字节序转换** | Serializer<T> (transport.hpp) | 已完成 | POD memcpy，可扩展 protobuf |
 
 ---
