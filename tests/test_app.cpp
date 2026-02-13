@@ -298,9 +298,26 @@ TEST_CASE("app - AppMessage null data", "[app]") {
   REQUIRE(msg.DataLen() == 0);
 }
 
-TEST_CASE("app - AppMessage size fits cache line", "[app]") {
-  // Inline mode: 8 (header) + 8 (response_ch) + 48 (inline) = 64 bytes
+TEST_CASE("app - AppMessage size and alignment", "[app]") {
+  // 4 (ins_id+event) + 4 (flags_and_len) + 8 (response_ch) + 48 (payload) = 64
+  // Exactly 1 cache line (64 bytes), alignas(8) for 64-bit alignment
   REQUIRE(sizeof(osp::AppMessage) == 64);
+  REQUIRE(alignof(osp::AppMessage) >= 8);
+
+  // Verify all fields are naturally aligned
+  osp::AppMessage msg{};
+  auto base = reinterpret_cast<uintptr_t>(&msg);
+  auto ins_off = reinterpret_cast<uintptr_t>(&msg.ins_id) - base;
+  auto evt_off = reinterpret_cast<uintptr_t>(&msg.event) - base;
+  auto fl_off = reinterpret_cast<uintptr_t>(&msg.flags_and_len) - base;
+  auto rc_off = reinterpret_cast<uintptr_t>(&msg.response_channel) - base;
+  auto pl_off = reinterpret_cast<uintptr_t>(&msg.payload) - base;
+
+  CHECK(ins_off % 2 == 0);  // 16-bit aligned
+  CHECK(evt_off % 2 == 0);  // 16-bit aligned
+  CHECK(fl_off % 4 == 0);   // 32-bit aligned
+  CHECK(rc_off % 8 == 0);   // 64-bit aligned (pointer)
+  CHECK(pl_off % 8 == 0);   // 64-bit aligned (union)
 }
 
 TEST_CASE("app - Post and process large message via pointer", "[app]") {

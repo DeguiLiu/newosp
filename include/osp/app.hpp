@@ -144,67 +144,76 @@ static_assert((OSP_APP_MSG_INLINE_SIZE % 8) == 0,
               "OSP_APP_MSG_INLINE_SIZE must be 8-byte aligned");
 
 /**
- * AppMessage layout (bit-field packed, 8-byte aligned):
+ * AppMessage layout (all fields naturally aligned, struct 64-byte / 1 cache line):
  *
- * +--------+--------+--------+--------+
- * | ins_id | event  | flags  | length |  (8 bytes: header word)
- * | 16-bit | 16-bit | 8-bit  | 24-bit |
- * +--------+--------+--------+--------+
- * | response_channel (pointer)        |  (8 bytes)
- * +-----------------------------------+
- * | inline data / external pointer    |  (48 bytes or 8 bytes)
- * +-----------------------------------+
+ * Offset  Size  Field
+ * ------  ----  -----
+ *   0       2   ins_id   (uint16_t)
+ *   2       2   event    (uint16_t)
+ *   4       4   flags_and_len (bit-field: is_external:1, reserved:7, len:24)
+ *   8       8   response_channel (pointer)
+ *  16      48   payload (inline_data[48] or ext_ptr)
+ * ------
+ *  64 bytes total = exactly 1 cache line on most ARM/x86 platforms
  *
- * flags layout (8 bits):
- *   bit 0: is_external (1 = data via pointer, 0 = inline)
- *   bit 1-7: reserved
+ * flags_and_len bit layout (32 bits, single load/store):
+ *   bit  0:     is_external (1 = data via pointer, 0 = inline)
+ *   bit  1-7:   reserved (future: priority, urgency, etc.)
+ *   bit  8-31:  data_len (24 bits, max 16MB)
  *
- * Total size: 64 bytes (inline mode) -- fits in one cache line
+ * All fields are naturally aligned:
+ *   - ins_id/event at 2-byte boundary (16-bit aligned)
+ *   - flags_and_len at 4-byte boundary (32-bit aligned)
+ *   - response_channel at 8-byte boundary (64-bit aligned)
+ *   - payload at 8-byte boundary (64-bit aligned)
  */
 struct alignas(8) AppMessage {
-  // -- Header word 1: packed control fields (8 bytes) --
+  // -- Word 0: instance + event (4 bytes, 16-bit aligned each) --
   uint16_t ins_id;
   uint16_t event;
-  uint8_t  flags;       // bit 0: is_external
-  uint8_t  reserved_[1];
-  uint16_t data_len;    // max 65535 bytes (enough for any message)
 
-  // -- Header word 2: response channel pointer (8 bytes) --
+  // -- Word 1: flags + length packed in 32 bits (4-byte aligned) --
+  uint32_t flags_and_len;
+
+  // -- Word 2: response channel pointer (8-byte aligned) --
   ResponseChannel* response_channel;
 
-  // -- Payload: inline buffer or external pointer (union) --
+  // -- Payload: inline buffer or external pointer (8-byte aligned) --
   union alignas(8) {
     uint8_t  inline_data[OSP_APP_MSG_INLINE_SIZE];
     const void* ext_ptr;
   } payload;
 
-  // -- Accessors --
+  // -- Bit-field accessors (single 32-bit load, no mask overhead on ARM) --
 
-  bool IsExternal() const noexcept { return (flags & 0x01) != 0; }
+  bool IsExternal() const noexcept {
+    return (flags_and_len & 0x01U) != 0;
+  }
+
+  uint32_t DataLen() const noexcept {
+    return flags_and_len >> 8;
+  }
 
   const void* Data() const noexcept {
     return IsExternal() ? payload.ext_ptr : payload.inline_data;
   }
 
-  uint32_t DataLen() const noexcept {
-    return static_cast<uint32_t>(data_len);
-  }
-
   // Store data: inline copy for small, pointer for large
   void Store(const void* data, uint32_t len) noexcept {
-    data_len = static_cast<uint16_t>(len > 0xFFFF ? 0xFFFF : len);
     if (data == nullptr || len == 0) {
-      flags &= ~0x01;
-      data_len = 0;
+      flags_and_len = 0;  // clear all: not external, len=0
       return;
     }
+    // Clamp to 24-bit max (16MB)
+    if (len > 0x00FFFFFFU) len = 0x00FFFFFFU;
+
     if (len <= OSP_APP_MSG_INLINE_SIZE) {
-      // Inline: copy into buffer
-      flags &= ~0x01;
+      // Inline: copy into buffer, is_external = 0
+      flags_and_len = (len << 8);
       std::memcpy(payload.inline_data, data, len);
     } else {
-      // External: store pointer (caller must keep data alive until processed)
-      flags |= 0x01;
+      // External: store pointer, is_external = 1
+      flags_and_len = (len << 8) | 0x01U;
       payload.ext_ptr = data;
     }
   }
@@ -317,8 +326,7 @@ class Application {
     AppMessage& msg = queue_[queue_tail_];
     msg.ins_id = ins_id;
     msg.event = event;
-    msg.flags = 0;
-    msg.reserved_[0] = 0;
+    msg.flags_and_len = 0;
     msg.response_channel = response_ch;
     msg.Store(data, len);
     queue_tail_ = next_tail;
