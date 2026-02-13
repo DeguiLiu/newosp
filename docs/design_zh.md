@@ -881,18 +881,23 @@ class FusedSubscription {
 | AsyncBus(4096) | ~320 KB | 0 | 0 |
 | Node (per node) | ~1 KB | 0 | 0 |
 | WorkerPool(4 workers) | ~64 KB | ~16 KB | 5 |
-| **典型总计** | **~450 KB** | **~21 KB** | **9** |
+| TcpSocket (per conn) | ~128 B | 0 | 0 |
+| IoPoller (64 fds) | ~2 KB | <1 KB | 0 |
+| ConnectionPool<32> | ~4 KB | 0 | 0 |
+| StateMachine<Ctx,16> | ~1 KB | 0 | 0 |
+| BehaviorTree<Ctx,32> | ~4 KB | 0 | 0 |
+| StaticExecutor | <1 KB | 0 | 1 |
+| PinnedExecutor | <1 KB | 0 | 1 |
+| TcpTransport (per conn) | ~256 B | 0 | 0 |
+| **典型总计** | **~462 KB** | **~22 KB** | **11** |
 
 ### 7.2 规划模块 (估算)
 
 | 模块 | 静态内存 | 堆内存 | 线程数 |
 |------|----------|--------|--------|
-| TcpSocket (per conn) | ~128 B | 0 | 0 |
-| IoPoller (64 fds) | ~2 KB | <1 KB | 0 |
-| ConnectionPool<32> | ~4 KB | 0 | 0 |
-| StateMachine | ~1 KB | <1 KB | 0 |
-| BehaviorTree (32 nodes) | ~4 KB | 0 | 0 |
-| StaticExecutor | <1 KB | 0 | N (节点数) |
+| FusedSubscription | <1 KB | 0 | 0 |
+| TimeSynchronizer | <1 KB | 0 | 0 |
+| LightSemaphore | <128 B | 0 | 0 |
 
 ---
 
@@ -1014,7 +1019,7 @@ class FusedSubscription {
 55. **docs/design_zh.md**: 本文档 -- 完整架构设计、模块详细设计、30+实施步骤
 56. **更新 CI workflow**: 增加 examples 构建、cpplint 完整路径覆盖
 
-### Phase F: 扩展模块 -- Socket 与 I/O (规划中)
+### Phase F: 扩展模块 -- Socket 与 I/O (已完成)
 
 57. **socket.hpp -- TcpSocket RAII**: fd 封装、Connect/Send/Recv/Close、move 语义
 58. **socket.hpp -- UdpSocket**: 无连接 Socket、SendTo/RecvFrom
@@ -1024,7 +1029,7 @@ class FusedSubscription {
 62. **io_poller.hpp -- 事件循环集成**: Add/Modify/Remove/Wait 接口
 63. **test_io_poller.cpp**: 多 fd 就绪、超时、边缘触发
 
-### Phase G: 扩展模块 -- 透明网络传输 (规划中)
+### Phase G: 扩展模块 -- 透明网络传输 (已完成)
 
 64. **transport.hpp -- Endpoint/TransportType**: 端点定义、传输类型枚举
 65. **transport.hpp -- Serializer<T>**: POD memcpy 默认序列化、模板特化扩展点
@@ -1036,13 +1041,13 @@ class FusedSubscription {
 71. **test_transport.cpp**: 本地回环、TCP 收发、序列化正确性、帧解析
 72. **transport.hpp -- 节点发现 (Phase 2)**: 多播自动发现、端点注册表
 
-### Phase H: 扩展模块 -- 连接管理 (规划中)
+### Phase H: 扩展模块 -- 连接管理 (已完成)
 
 73. **connection.hpp -- ConnectionPool**: 固定容量连接池、ConnectionId 强类型
 74. **connection.hpp -- 连接生命周期**: Add/Remove/ForEach、超时清理
 75. **test_connection.cpp**: 池满测试、ID 回收、遍历一致性
 
-### Phase I: 扩展模块 -- 状态机与行为树 (规划中)
+### Phase I: 扩展模块 -- 状态机与行为树 (已完成)
 
 76. **hsm.hpp**: 集成 hsm-cpp State/StateMachine 模板
 77. **hsm.hpp -- 消息总线桥接**: Bus 消息 -> Event(id) -> Dispatch()
@@ -1051,7 +1056,7 @@ class FusedSubscription {
 80. **bt.hpp -- 异步任务集成**: 叶节点通过 WorkerPool 提交任务
 81. **test_bt.cpp**: Sequence/Selector/Parallel 执行、异步完成
 
-### Phase J: 扩展模块 -- Executor 调度 (规划中)
+### Phase J: 扩展模块 -- Executor 调度 (已完成)
 
 82. **executor.hpp -- SingleThreadExecutor**: 单线程轮询多节点
 83. **executor.hpp -- StaticExecutor**: 固定节点-线程映射、确定性调度
@@ -1114,6 +1119,12 @@ class FusedSubscription {
 | `OSP_CONFIG_INI_ENABLED` | (CMake) | config.hpp | INI 后端开关 |
 | `OSP_CONFIG_JSON_ENABLED` | (CMake) | config.hpp | JSON 后端开关 |
 | `OSP_CONFIG_YAML_ENABLED` | (CMake) | config.hpp | YAML 后端开关 |
+| `OSP_IO_POLLER_MAX_EVENTS` | 64 | io_poller.hpp | 单次 Wait 最大事件数 |
+| `OSP_BT_MAX_NODES` | 32 | bt.hpp | 行为树最大节点数 |
+| `OSP_BT_MAX_CHILDREN` | 8 | bt.hpp | 复合节点最大子节点数 |
+| `OSP_EXECUTOR_MAX_NODES` | 16 | executor.hpp | Executor 最大节点数 |
+| `OSP_TRANSPORT_MAX_FRAME_SIZE` | 4096 | transport.hpp | 最大帧大小 |
+| `OSP_CONNECTION_POOL_CAPACITY` | 32 | connection.hpp | 连接池默认容量 |
 
 ### 10.3 线程安全性总结
 
@@ -1130,3 +1141,10 @@ class FusedSubscription {
 | bus | 无锁 MPSC + SharedMutex 订阅 |
 | node | 发布线程安全; SpinOnce 单消费者 |
 | worker_pool | 原子标志 + CV + SPSC 无锁 |
+| socket | 单线程使用，fd 不可共享 |
+| io_poller | 单线程 (事件循环线程) |
+| connection | mutex 保护连接池操作 |
+| transport | TcpTransport 单线程; NetworkNode 继承 Node 线程安全性 |
+| hsm | 单线程 Dispatch; guard/handler 不可重入 |
+| bt | 单线程 Tick; 叶节点回调不可重入 |
+| executor | 内部线程安全; Stop 可跨线程调用 |
