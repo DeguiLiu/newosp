@@ -1,11 +1,28 @@
 /**
  * @file config.hpp
- * @brief Header-only configuration parser with INI backend.
+ * @brief Multi-format configuration parser with template-based backend dispatch.
  *
- * Stack-allocated key-value store with fixed-capacity entry table.
- * INI parsing powered by inih library (FetchContent'd by CMake).
- * JSON and YAML backends are reserved for future implementation.
+ * Design patterns:
+ *   - Tag dispatch: IniBackend / JsonBackend / YamlBackend type tags
+ *   - Template specialization: ConfigParser<Backend> per-format parsers
+ *   - Variadic templates: Config<Backends...> compile-time composition
+ *   - Recursive if-constexpr: zero-overhead format dispatch
+ *   - CRTP-friendly base: ConfigStore provides shared data + getters
+ *
+ * Supported backends (CMake opt-in):
+ *   - IniBackend  : inih library       (OSP_CONFIG_INI_ENABLED)
+ *   - JsonBackend : nlohmann/json       (OSP_CONFIG_JSON_ENABLED)
+ *   - YamlBackend : fkYAML             (OSP_CONFIG_YAML_ENABLED)
+ *
+ * All formats are flattened to "section + key = value" model.
  * Compatible with -fno-exceptions -fno-rtti.
+ *
+ * Usage:
+ * @code
+ *   osp::MultiConfig cfg;
+ *   cfg.LoadFile("app.yaml");
+ *   int32_t port = cfg.GetInt("network", "port", 8080);
+ * @endcode
  */
 
 #ifndef OSP_CONFIG_HPP_
@@ -19,288 +36,162 @@
 #include <cstring>
 
 #ifdef OSP_CONFIG_INI_ENABLED
-#include "ini.h"  // inih library header (provided via FetchContent)
+#include "ini.h"
+#endif
+
+#ifdef OSP_CONFIG_JSON_ENABLED
+#include <nlohmann/json.hpp>
+#endif
+
+#ifdef OSP_CONFIG_YAML_ENABLED
+#include <fkYAML/node.hpp>
 #endif
 
 namespace osp {
 
 // ============================================================================
-// ConfigFormat - Supported configuration file formats
+// ConfigFormat
 // ============================================================================
 
-/**
- * @brief Enumeration of supported configuration file formats.
- *
- * kAuto attempts to detect the format from the file extension.
- */
 enum class ConfigFormat : uint8_t {
-  kAuto = 0,  ///< Detect from file extension
-  kIni,       ///< INI format (requires OSP_CONFIG_INI_ENABLED)
-  kJson,      ///< JSON format (requires OSP_CONFIG_JSON_ENABLED)
-  kYaml,      ///< YAML format (requires OSP_CONFIG_YAML_ENABLED)
+  kAuto = 0,
+  kIni,
+  kJson,
+  kYaml,
 };
 
 // ============================================================================
-// Config - Fixed-capacity configuration parser
+// Backend Tag Types (tag dispatch)
 // ============================================================================
 
-/**
- * @brief Header-only configuration parser with fixed-capacity storage.
- *
- * Stores up to kMaxEntries key-value pairs organized by [section].
- * All storage is stack-allocated within the Config object itself.
- *
- * Usage:
- * @code
- *   osp::Config cfg;
- *   auto result = cfg.LoadFile("/etc/myapp.ini");
- *   if (result.has_value()) {
- *     int32_t port = cfg.GetInt("network", "port", 8080);
- *     const char* host = cfg.GetString("network", "host", "0.0.0.0");
- *   }
- * @endcode
- */
-class Config final {
+namespace detail {
+
+inline bool ExtCaseEqual(const char* a, const char* b) noexcept {
+  while (*a != '\0' && *b != '\0') {
+    char la = (*a >= 'A' && *a <= 'Z') ? static_cast<char>(*a + 32) : *a;
+    char lb = (*b >= 'A' && *b <= 'Z') ? static_cast<char>(*b + 32) : *b;
+    if (la != lb) return false;
+    ++a; ++b;
+  }
+  return *a == *b;
+}
+
+}  // namespace detail
+
+struct IniBackend {
+  static constexpr ConfigFormat kFormat = ConfigFormat::kIni;
+  static bool MatchesExtension(const char* ext) noexcept {
+    return detail::ExtCaseEqual(ext, "ini") ||
+           detail::ExtCaseEqual(ext, "cfg") ||
+           detail::ExtCaseEqual(ext, "conf");
+  }
+};
+
+struct JsonBackend {
+  static constexpr ConfigFormat kFormat = ConfigFormat::kJson;
+  static bool MatchesExtension(const char* ext) noexcept {
+    return detail::ExtCaseEqual(ext, "json");
+  }
+};
+
+struct YamlBackend {
+  static constexpr ConfigFormat kFormat = ConfigFormat::kYaml;
+  static bool MatchesExtension(const char* ext) noexcept {
+    return detail::ExtCaseEqual(ext, "yaml") ||
+           detail::ExtCaseEqual(ext, "yml");
+  }
+};
+
+// ============================================================================
+// ConfigStore - Flat key-value storage base
+// ============================================================================
+
+#ifndef OSP_CONFIG_MAX_FILE_SIZE
+#define OSP_CONFIG_MAX_FILE_SIZE 8192U
+#endif
+
+class ConfigStore {
  public:
-  Config() = default;
+  // --- Typed Getters ---
 
-  // --------------------------------------------------------------------------
-  // Loading
-  // --------------------------------------------------------------------------
-
-  /**
-   * @brief Load configuration from a file on disk.
-   *
-   * @param path     Null-terminated file path
-   * @param format   File format; kAuto detects from extension
-   * @return success or ConfigError
-   */
-  expected<void, ConfigError> LoadFile(const char* path,
-                                       ConfigFormat format = ConfigFormat::kAuto) {
-    OSP_ASSERT(path != nullptr);
-
-    if (format == ConfigFormat::kAuto) {
-      format = DetectFormat(path);
-    }
-
-    switch (format) {
-#ifdef OSP_CONFIG_INI_ENABLED
-      case ConfigFormat::kIni:
-        return LoadFileIni(path);
-#endif
-      case ConfigFormat::kJson:
-        return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
-      case ConfigFormat::kYaml:
-        return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
-      default:
-        return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
-    }
-  }
-
-  /**
-   * @brief Load configuration from an in-memory buffer.
-   *
-   * @param data     Pointer to buffer (must be null-terminated for INI)
-   * @param size     Size of the buffer in bytes (excluding null terminator)
-   * @param format   File format (kAuto is not supported here; specify explicitly)
-   * @return success or ConfigError
-   */
-  expected<void, ConfigError> LoadBuffer(const char* data, uint32_t size,
-                                         ConfigFormat format) {
-    OSP_ASSERT(data != nullptr);
-    (void)size;  // INI parser relies on null-terminated string
-
-    switch (format) {
-#ifdef OSP_CONFIG_INI_ENABLED
-      case ConfigFormat::kIni:
-        return LoadBufferIni(data);
-#endif
-      case ConfigFormat::kJson:
-        return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
-      case ConfigFormat::kYaml:
-        return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
-      default:
-        return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
-    }
-  }
-
-  // --------------------------------------------------------------------------
-  // Typed Getters (with defaults)
-  // --------------------------------------------------------------------------
-
-  /**
-   * @brief Get a string value from the configuration.
-   *
-   * @param section     Section name (use "" for global/root)
-   * @param key         Key name
-   * @param default_val Returned if key is not found
-   * @return Pointer to the stored value, or default_val
-   */
   const char* GetString(const char* section, const char* key,
                         const char* default_val = "") const {
     const Entry* e = FindEntry(section, key);
     return (e != nullptr) ? e->value : default_val;
   }
 
-  /**
-   * @brief Get an integer value from the configuration.
-   *
-   * Parses the stored string with strtol (base 10).
-   *
-   * @param section     Section name
-   * @param key         Key name
-   * @param default_val Returned if key is not found or parse fails
-   * @return Parsed int32_t value
-   */
   int32_t GetInt(const char* section, const char* key,
                  int32_t default_val = 0) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) {
-      return default_val;
-    }
+    if (e == nullptr) return default_val;
     char* end = nullptr;
     long val = std::strtol(e->value, &end, 10);
-    if (end == e->value) {
-      return default_val;  // no digits parsed
-    }
-    return static_cast<int32_t>(val);
+    return (end == e->value) ? default_val : static_cast<int32_t>(val);
   }
 
-  /**
-   * @brief Get a port number (uint16_t) from the configuration.
-   *
-   * Clamps the parsed integer to the [0, 65535] range.
-   *
-   * @param section     Section name
-   * @param key         Key name
-   * @param default_val Returned if key is not found
-   * @return Parsed and clamped uint16_t value
-   */
   uint16_t GetPort(const char* section, const char* key,
                    uint16_t default_val = 0) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) {
-      return default_val;
-    }
+    if (e == nullptr) return default_val;
     char* end = nullptr;
     long val = std::strtol(e->value, &end, 10);
-    if (end == e->value) {
-      return default_val;
-    }
-    if (val < 0) {
-      return 0;
-    }
-    if (val > 65535) {
-      return 65535;
-    }
+    if (end == e->value) return default_val;
+    if (val < 0) return 0;
+    if (val > 65535) return 65535;
     return static_cast<uint16_t>(val);
   }
 
-  /**
-   * @brief Get a boolean value from the configuration.
-   *
-   * Recognizes (case-insensitive): "true", "1", "yes", "on" as true.
-   * Everything else (including missing key) returns default_val.
-   *
-   * @param section     Section name
-   * @param key         Key name
-   * @param default_val Returned if key is not found
-   * @return Parsed boolean value
-   */
   bool GetBool(const char* section, const char* key,
                bool default_val = false) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) {
-      return default_val;
-    }
-    return ParseBool(e->value);
+    return (e != nullptr) ? ParseBool(e->value) : default_val;
   }
 
-  /**
-   * @brief Get a double-precision floating-point value from the configuration.
-   *
-   * @param section     Section name
-   * @param key         Key name
-   * @param default_val Returned if key is not found or parse fails
-   * @return Parsed double value
-   */
   double GetDouble(const char* section, const char* key,
                    double default_val = 0.0) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) {
-      return default_val;
-    }
+    if (e == nullptr) return default_val;
     char* end = nullptr;
     double val = std::strtod(e->value, &end);
-    if (end == e->value) {
-      return default_val;
-    }
-    return val;
+    return (end == e->value) ? default_val : val;
   }
 
-  // --------------------------------------------------------------------------
-  // Optional Getters (return empty optional if not found)
-  // --------------------------------------------------------------------------
+  // --- Optional Getters ---
 
-  /**
-   * @brief Find an integer value, returning empty optional if not present.
-   */
   optional<int32_t> FindInt(const char* section, const char* key) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) {
-      return optional<int32_t>{};
-    }
+    if (e == nullptr) return {};
     char* end = nullptr;
     long val = std::strtol(e->value, &end, 10);
-    if (end == e->value) {
-      return optional<int32_t>{};
-    }
-    return optional<int32_t>{static_cast<int32_t>(val)};
+    return (end == e->value) ? optional<int32_t>{}
+                             : optional<int32_t>{static_cast<int32_t>(val)};
   }
 
-  /**
-   * @brief Find a boolean value, returning empty optional if not present.
-   */
   optional<bool> FindBool(const char* section, const char* key) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) {
-      return optional<bool>{};
-    }
-    return optional<bool>{ParseBool(e->value)};
+    return (e == nullptr) ? optional<bool>{} : optional<bool>{ParseBool(e->value)};
   }
 
-  // --------------------------------------------------------------------------
-  // Query
-  // --------------------------------------------------------------------------
+  // --- Query ---
 
-  /**
-   * @brief Check whether a section exists in the loaded configuration.
-   */
   bool HasSection(const char* section) const {
     OSP_ASSERT(section != nullptr);
     for (uint32_t i = 0; i < count_; ++i) {
-      if (StrCaseEqual(entries_[i].section, section)) {
-        return true;
-      }
+      if (StrCaseEqual(entries_[i].section, section)) return true;
     }
     return false;
   }
 
-  /**
-   * @brief Check whether a specific key exists in the given section.
-   */
   bool HasKey(const char* section, const char* key) const {
     return FindEntry(section, key) != nullptr;
   }
 
- private:
-  // --------------------------------------------------------------------------
-  // Storage Constants and Entry Structure
-  // --------------------------------------------------------------------------
+  uint32_t EntryCount() const noexcept { return count_; }
 
-  static constexpr uint32_t kMaxEntries = 128;   ///< Max key-value pairs
-  static constexpr uint32_t kMaxKeyLen = 64;      ///< Max section/key length
-  static constexpr uint32_t kMaxValueLen = 256;   ///< Max value length
+ protected:
+  static constexpr uint32_t kMaxEntries = 128;
+  static constexpr uint32_t kMaxKeyLen = 64;
+  static constexpr uint32_t kMaxValueLen = 256;
 
   struct Entry {
     char section[kMaxKeyLen];
@@ -311,80 +202,7 @@ class Config final {
   Entry entries_[kMaxEntries];
   uint32_t count_ = 0;
 
-  // --------------------------------------------------------------------------
-  // Format Detection
-  // --------------------------------------------------------------------------
-
-  /**
-   * @brief Detect configuration format from file extension.
-   *
-   * @param path  File path to inspect
-   * @return Detected ConfigFormat, or kIni as fallback
-   */
-  static ConfigFormat DetectFormat(const char* path) noexcept {
-    const char* dot = nullptr;
-    for (const char* p = path; *p != '\0'; ++p) {
-      if (*p == '.') {
-        dot = p;
-      }
-    }
-    if (dot == nullptr) {
-      return ConfigFormat::kIni;  // default fallback
-    }
-    ++dot;  // skip the '.'
-    if (StrCaseEqual(dot, "ini") || StrCaseEqual(dot, "cfg") ||
-        StrCaseEqual(dot, "conf")) {
-      return ConfigFormat::kIni;
-    }
-    if (StrCaseEqual(dot, "json")) {
-      return ConfigFormat::kJson;
-    }
-    if (StrCaseEqual(dot, "yaml") || StrCaseEqual(dot, "yml")) {
-      return ConfigFormat::kYaml;
-    }
-    return ConfigFormat::kIni;  // default fallback
-  }
-
-  // --------------------------------------------------------------------------
-  // Entry Lookup
-  // --------------------------------------------------------------------------
-
-  /**
-   * @brief Linear scan for an entry matching section and key.
-   *
-   * @param section  Section name (case-insensitive comparison)
-   * @param key      Key name (case-insensitive comparison)
-   * @return Pointer to matching entry, or nullptr
-   */
-  const Entry* FindEntry(const char* section, const char* key) const {
-    OSP_ASSERT(section != nullptr);
-    OSP_ASSERT(key != nullptr);
-    for (uint32_t i = 0; i < count_; ++i) {
-      if (StrCaseEqual(entries_[i].section, section) &&
-          StrCaseEqual(entries_[i].key, key)) {
-        return &entries_[i];
-      }
-    }
-    return nullptr;
-  }
-
-  // --------------------------------------------------------------------------
-  // Entry Insertion
-  // --------------------------------------------------------------------------
-
-  /**
-   * @brief Add or update an entry in the table.
-   *
-   * Performs a linear scan for an existing section+key pair.
-   * If found, the value is overwritten. If not found, a new entry is appended.
-   *
-   * @param section  Section name (truncated to kMaxKeyLen - 1)
-   * @param key      Key name (truncated to kMaxKeyLen - 1)
-   * @param value    Value string (truncated to kMaxValueLen - 1)
-   * @return true on success, false if the table is full
-   */
   bool AddEntry(const char* section, const char* key, const char* value) {
-    // Look for existing entry to update
     for (uint32_t i = 0; i < count_; ++i) {
       if (StrCaseEqual(entries_[i].section, section) &&
           StrCaseEqual(entries_[i].key, key)) {
@@ -392,12 +210,7 @@ class Config final {
         return true;
       }
     }
-
-    // Append new entry
-    if (count_ >= kMaxEntries) {
-      return false;
-    }
-
+    if (count_ >= kMaxEntries) return false;
     Entry& e = entries_[count_];
     SafeCopy(e.section, section, kMaxKeyLen);
     SafeCopy(e.key, key, kMaxKeyLen);
@@ -406,144 +219,323 @@ class Config final {
     return true;
   }
 
-  // --------------------------------------------------------------------------
-  // String Utilities
-  // --------------------------------------------------------------------------
+  static expected<uint32_t, ConfigError> ReadFileToBuffer(
+      const char* path, char* buf, uint32_t buf_size) {
+    FILE* f = std::fopen(path, "r");
+    if (f == nullptr)
+      return expected<uint32_t, ConfigError>::error(ConfigError::kFileNotFound);
+    size_t bytes = std::fread(buf, 1, buf_size - 1, f);
+    std::fclose(f);
+    buf[bytes] = '\0';
+    return expected<uint32_t, ConfigError>::success(static_cast<uint32_t>(bytes));
+  }
 
-  /**
-   * @brief Case-insensitive string equality check.
-   */
+  const Entry* FindEntry(const char* section, const char* key) const {
+    OSP_ASSERT(section != nullptr && key != nullptr);
+    for (uint32_t i = 0; i < count_; ++i) {
+      if (StrCaseEqual(entries_[i].section, section) &&
+          StrCaseEqual(entries_[i].key, key))
+        return &entries_[i];
+    }
+    return nullptr;
+  }
+
   static bool StrCaseEqual(const char* a, const char* b) noexcept {
     while (*a != '\0' && *b != '\0') {
-      if (ToLower(static_cast<unsigned char>(*a)) !=
-          ToLower(static_cast<unsigned char>(*b))) {
-        return false;
-      }
-      ++a;
-      ++b;
+      char la = (*a >= 'A' && *a <= 'Z') ? static_cast<char>(*a + 32) : *a;
+      char lb = (*b >= 'A' && *b <= 'Z') ? static_cast<char>(*b + 32) : *b;
+      if (la != lb) return false;
+      ++a; ++b;
     }
-    return *a == *b;  // both must be '\0'
+    return *a == *b;
   }
 
-  /**
-   * @brief ASCII lowercase conversion (avoids locale-dependent tolower).
-   */
-  static char ToLower(unsigned char c) noexcept {
-    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A'))
-                                  : static_cast<char>(c);
-  }
-
-  /**
-   * @brief Safe string copy with truncation and null termination.
-   *
-   * @param dst      Destination buffer
-   * @param src      Source string
-   * @param dst_size Total size of the destination buffer
-   */
   static void SafeCopy(char* dst, const char* src, uint32_t dst_size) noexcept {
-    if (src == nullptr) {
-      dst[0] = '\0';
-      return;
-    }
+    if (src == nullptr) { dst[0] = '\0'; return; }
     uint32_t i = 0;
-    while (i < (dst_size - 1U) && src[i] != '\0') {
-      dst[i] = src[i];
-      ++i;
-    }
+    while (i < (dst_size - 1U) && src[i] != '\0') { dst[i] = src[i]; ++i; }
     dst[i] = '\0';
   }
 
-  /**
-   * @brief Parse a string as boolean (case-insensitive).
-   *
-   * Recognizes "true", "1", "yes", "on" as true; everything else as false.
-   */
   static bool ParseBool(const char* str) noexcept {
-    if (str == nullptr) {
-      return false;
-    }
+    if (str == nullptr) return false;
     return StrCaseEqual(str, "true") || StrCaseEqual(str, "1") ||
            StrCaseEqual(str, "yes") || StrCaseEqual(str, "on");
   }
 
-  // --------------------------------------------------------------------------
-  // INI Backend
-  // --------------------------------------------------------------------------
+  static const char* GetExtension(const char* path) noexcept {
+    const char* dot = nullptr;
+    for (const char* p = path; *p != '\0'; ++p) {
+      if (*p == '.') dot = p;
+    }
+    return (dot != nullptr) ? dot + 1 : nullptr;
+  }
+
+  template <typename> friend struct ConfigParser;
+};
+
+// ============================================================================
+// ConfigParser<Backend> - Template specialization per format
+// ============================================================================
+
+/** Default: format not supported (compile-time safe fallback). */
+template <typename Backend>
+struct ConfigParser {
+  static expected<void, ConfigError> ParseFile(ConfigStore&, const char*) {
+    return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
+  }
+  static expected<void, ConfigError> ParseBuffer(ConfigStore&, const char*,
+                                                  uint32_t) {
+    return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
+  }
+};
+
+// --- INI Backend ---
 
 #ifdef OSP_CONFIG_INI_ENABLED
-
-  /**
-   * @brief inih callback for ini_parse / ini_parse_string.
-   *
-   * Signature required by inih:
-   *   int handler(void* user, const char* section, const char* name,
-   *               const char* value)
-   *
-   * @return 1 on success, 0 to signal parse error (stops parsing)
-   */
-  static int IniHandler(void* user, const char* section, const char* name,
-                        const char* value) {
-    Config* self = static_cast<Config*>(user);
-    if (!self->AddEntry(section != nullptr ? section : "",
-                        name != nullptr ? name : "",
-                        value != nullptr ? value : "")) {
-      return 0;  // entry table full, signal error
-    }
-    return 1;
-  }
-
-  /**
-   * @brief Load INI file directly via inih's ini_parse.
-   */
-  expected<void, ConfigError> LoadFileIni(const char* path) {
-    int result = ini_parse(path, IniHandler, this);
-    if (result == -1) {
+template <>
+struct ConfigParser<IniBackend> {
+  static expected<void, ConfigError> ParseFile(ConfigStore& store,
+                                                const char* path) {
+    int result = ini_parse(path, Handler, &store);
+    if (result == -1)
       return expected<void, ConfigError>::error(ConfigError::kFileNotFound);
-    }
-    if (result != 0) {
+    if (result != 0)
       return expected<void, ConfigError>::error(ConfigError::kParseError);
-    }
     return expected<void, ConfigError>::success();
   }
 
-  /**
-   * @brief Load INI data from a null-terminated buffer via inih's
-   *        ini_parse_string.
-   */
-  expected<void, ConfigError> LoadBufferIni(const char* data) {
-    int result = ini_parse_string(data, IniHandler, this);
-    if (result != 0) {
+  static expected<void, ConfigError> ParseBuffer(ConfigStore& store,
+                                                  const char* data, uint32_t) {
+    int result = ini_parse_string(data, Handler, &store);
+    if (result != 0)
       return expected<void, ConfigError>::error(ConfigError::kParseError);
-    }
     return expected<void, ConfigError>::success();
   }
 
-#endif  // OSP_CONFIG_INI_ENABLED
+ private:
+  static int Handler(void* user, const char* section, const char* name,
+                     const char* value) {
+    auto* s = static_cast<ConfigStore*>(user);
+    return s->AddEntry(section ? section : "", name ? name : "",
+                       value ? value : "") ? 1 : 0;
+  }
+};
+#endif
 
-  // --------------------------------------------------------------------------
-  // JSON Backend (placeholder)
-  // --------------------------------------------------------------------------
+// --- JSON Backend ---
 
 #ifdef OSP_CONFIG_JSON_ENABLED
-  // TODO: JSON backend implementation
-  // Will use a lightweight JSON parser (e.g., cJSON or sajson).
-  // The CMake target will define OSP_CONFIG_JSON_ENABLED when
-  // the OSP_CONFIG_JSON option is ON and a suitable JSON library
-  // is available via FetchContent.
-#endif  // OSP_CONFIG_JSON_ENABLED
+template <>
+struct ConfigParser<JsonBackend> {
+  static expected<void, ConfigError> ParseFile(ConfigStore& store,
+                                                const char* path) {
+    char buf[OSP_CONFIG_MAX_FILE_SIZE];
+    auto r = ConfigStore::ReadFileToBuffer(path, buf, sizeof(buf));
+    if (!r.has_value()) return expected<void, ConfigError>::error(r.get_error());
+    return ParseBuffer(store, buf, r.value());
+  }
 
-  // --------------------------------------------------------------------------
-  // YAML Backend (placeholder)
-  // --------------------------------------------------------------------------
+  static expected<void, ConfigError> ParseBuffer(ConfigStore& store,
+                                                  const char* data, uint32_t) {
+    auto j = nlohmann::json::parse(data, nullptr, false);
+    if (j.is_discarded() || !j.is_object())
+      return expected<void, ConfigError>::error(ConfigError::kParseError);
+
+    for (auto it = j.begin(); it != j.end(); ++it) {
+      if (it->is_object()) {
+        for (auto kit = it->begin(); kit != it->end(); ++kit) {
+          char val[ConfigStore::kMaxValueLen];
+          ToStr(*kit, val, sizeof(val));
+          if (!store.AddEntry(it.key().c_str(), kit.key().c_str(), val))
+            return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+        }
+      } else {
+        char val[ConfigStore::kMaxValueLen];
+        ToStr(*it, val, sizeof(val));
+        if (!store.AddEntry("", it.key().c_str(), val))
+          return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+      }
+    }
+    return expected<void, ConfigError>::success();
+  }
+
+ private:
+  static void ToStr(const nlohmann::json& n, char* b, uint32_t sz) noexcept {
+    if (n.is_string()) {
+      ConfigStore::SafeCopy(b, n.get_ref<const std::string&>().c_str(), sz);
+    } else if (n.is_boolean()) {
+      ConfigStore::SafeCopy(b, n.get<bool>() ? "true" : "false", sz);
+    } else if (n.is_number_integer()) {
+      std::snprintf(b, sz, "%ld", static_cast<long>(n.get<int64_t>()));
+    } else if (n.is_number_float()) {
+      std::snprintf(b, sz, "%g", n.get<double>());
+    } else {
+      auto s = n.dump();
+      ConfigStore::SafeCopy(b, s.c_str(), sz);
+    }
+  }
+};
+#endif
+
+// --- YAML Backend ---
 
 #ifdef OSP_CONFIG_YAML_ENABLED
-  // TODO: YAML backend implementation
-  // Will use a lightweight YAML parser (e.g., mini-yaml or libyaml).
-  // The CMake target will define OSP_CONFIG_YAML_ENABLED when
-  // the OSP_CONFIG_YAML option is ON and a suitable YAML library
-  // is available via FetchContent.
-#endif  // OSP_CONFIG_YAML_ENABLED
+template <>
+struct ConfigParser<YamlBackend> {
+  static expected<void, ConfigError> ParseFile(ConfigStore& store,
+                                                const char* path) {
+    char buf[OSP_CONFIG_MAX_FILE_SIZE];
+    auto r = ConfigStore::ReadFileToBuffer(path, buf, sizeof(buf));
+    if (!r.has_value()) return expected<void, ConfigError>::error(r.get_error());
+    return ParseBuffer(store, buf, r.value());
+  }
+
+  static expected<void, ConfigError> ParseBuffer(ConfigStore& store,
+                                                  const char* data,
+                                                  uint32_t size) {
+    std::string yaml_str(data, size);
+    auto root = fkyaml::node::deserialize(yaml_str);
+    if (root.is_null() || !root.is_mapping())
+      return expected<void, ConfigError>::error(ConfigError::kParseError);
+
+    for (auto it = root.begin(); it != root.end(); ++it) {
+      auto sec = it.key().get_value<std::string>();
+      auto& node = *it;
+
+      if (node.is_mapping()) {
+        for (auto kit = node.begin(); kit != node.end(); ++kit) {
+          auto key = kit.key().get_value<std::string>();
+          char val[ConfigStore::kMaxValueLen];
+          ToStr(*kit, val, sizeof(val));
+          if (!store.AddEntry(sec.c_str(), key.c_str(), val))
+            return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+        }
+      } else {
+        char val[ConfigStore::kMaxValueLen];
+        ToStr(node, val, sizeof(val));
+        if (!store.AddEntry("", sec.c_str(), val))
+          return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+      }
+    }
+    return expected<void, ConfigError>::success();
+  }
+
+ private:
+  static void ToStr(const fkyaml::node& n, char* b, uint32_t sz) noexcept {
+    if (n.is_string()) {
+      auto s = n.get_value<std::string>();
+      ConfigStore::SafeCopy(b, s.c_str(), sz);
+    } else if (n.is_boolean()) {
+      ConfigStore::SafeCopy(b, n.get_value<bool>() ? "true" : "false", sz);
+    } else if (n.is_integer()) {
+      std::snprintf(b, sz, "%ld", static_cast<long>(n.get_value<int64_t>()));
+    } else if (n.is_float_number()) {
+      std::snprintf(b, sz, "%g", n.get_value<double>());
+    } else {
+      b[0] = '\0';
+    }
+  }
 };
+#endif
+
+// ============================================================================
+// Config<Backends...> - Compile-time composable config reader
+// ============================================================================
+
+template <typename... Backends>
+class Config final : public ConfigStore {
+  static_assert(sizeof...(Backends) > 0, "Config requires at least one backend");
+
+ public:
+  Config() = default;
+
+  expected<void, ConfigError> LoadFile(
+      const char* path, ConfigFormat format = ConfigFormat::kAuto) {
+    OSP_ASSERT(path != nullptr);
+    if (format == ConfigFormat::kAuto) format = DetectFormat(path);
+    return DispatchFile<Backends...>(path, format);
+  }
+
+  expected<void, ConfigError> LoadBuffer(const char* data, uint32_t size,
+                                          ConfigFormat format) {
+    OSP_ASSERT(data != nullptr);
+    return DispatchBuffer<Backends...>(data, size, format);
+  }
+
+ private:
+  // --- Recursive dispatch (file) ---
+  template <typename First, typename... Rest>
+  expected<void, ConfigError> DispatchFile(const char* path,
+                                            ConfigFormat format) {
+    if (First::kFormat == format)
+      return ConfigParser<First>::ParseFile(*this, path);
+    if constexpr (sizeof...(Rest) > 0)
+      return DispatchFile<Rest...>(path, format);
+    return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
+  }
+
+  // --- Recursive dispatch (buffer) ---
+  template <typename First, typename... Rest>
+  expected<void, ConfigError> DispatchBuffer(const char* data, uint32_t size,
+                                              ConfigFormat format) {
+    if (First::kFormat == format)
+      return ConfigParser<First>::ParseBuffer(*this, data, size);
+    if constexpr (sizeof...(Rest) > 0)
+      return DispatchBuffer<Rest...>(data, size, format);
+    return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
+  }
+
+  // --- Auto-detect from file extension ---
+  ConfigFormat DetectFormat(const char* path) const noexcept {
+    const char* ext = GetExtension(path);
+    if (ext == nullptr) return Head::kFormat;
+    return DetectExt<Backends...>(ext);
+  }
+
+  template <typename First, typename... Rest>
+  ConfigFormat DetectExt(const char* ext) const noexcept {
+    if (First::MatchesExtension(ext)) return First::kFormat;
+    if constexpr (sizeof...(Rest) > 0) return DetectExt<Rest...>(ext);
+    return Head::kFormat;
+  }
+
+  // First backend type (used as fallback format)
+  using Head = typename std::tuple_element<0, std::tuple<Backends...>>::type;
+};
+
+// ============================================================================
+// Convenience Type Aliases
+// ============================================================================
+
+using MultiConfig = Config<
+#ifdef OSP_CONFIG_INI_ENABLED
+    IniBackend
+#endif
+#if defined(OSP_CONFIG_INI_ENABLED) && \
+    (defined(OSP_CONFIG_JSON_ENABLED) || defined(OSP_CONFIG_YAML_ENABLED))
+    ,
+#endif
+#ifdef OSP_CONFIG_JSON_ENABLED
+    JsonBackend
+#endif
+#if defined(OSP_CONFIG_JSON_ENABLED) && defined(OSP_CONFIG_YAML_ENABLED)
+    ,
+#endif
+#ifdef OSP_CONFIG_YAML_ENABLED
+    YamlBackend
+#endif
+    >;
+
+#ifdef OSP_CONFIG_INI_ENABLED
+using IniConfig = Config<IniBackend>;
+#endif
+#ifdef OSP_CONFIG_JSON_ENABLED
+using JsonConfig = Config<JsonBackend>;
+#endif
+#ifdef OSP_CONFIG_YAML_ENABLED
+using YamlConfig = Config<YamlBackend>;
+#endif
 
 }  // namespace osp
 
