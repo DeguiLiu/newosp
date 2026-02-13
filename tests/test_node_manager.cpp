@@ -370,3 +370,118 @@ TEST_CASE("NodeManager - DisconnectNotFound", "[NodeManager]") {
   CHECK_FALSE(r.has_value());
   CHECK(r.get_error() == osp::NodeManagerError::kNotFound);
 }
+
+// ============================================================================
+// Phase 2: TimerScheduler Injection Mode Tests
+// ============================================================================
+
+#include "osp/timer.hpp"
+
+TEST_CASE("NodeManager - Scheduler injection basic lifecycle", "[NodeManager][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 100;
+  osp::NodeManager<8> mgr(cfg, &sched);
+
+  CHECK_FALSE(mgr.IsRunning());
+
+  auto start_r = mgr.Start();
+  CHECK(start_r.has_value());
+  CHECK(mgr.IsRunning());
+
+  // Starting again should fail
+  auto start_r2 = mgr.Start();
+  CHECK_FALSE(start_r2.has_value());
+  CHECK(start_r2.get_error() == osp::NodeManagerError::kAlreadyRunning);
+
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+
+  // Can restart
+  auto start_r3 = mgr.Start();
+  CHECK(start_r3.has_value());
+  CHECK(mgr.IsRunning());
+
+  mgr.Stop();
+  sched.Stop();
+}
+
+TEST_CASE("NodeManager - Scheduler injection timeout detection", "[NodeManager][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 100;
+  cfg.heartbeat_timeout_count = 2;  // 200ms timeout
+  osp::NodeManager<8> mgr(cfg, &sched);
+
+  std::atomic<bool> callback_fired{false};
+  std::atomic<uint16_t> disconnected_node_id{0};
+
+  struct Context {
+    std::atomic<bool>* fired;
+    std::atomic<uint16_t>* id;
+  };
+  Context context{&callback_fired, &disconnected_node_id};
+
+  mgr.OnDisconnect(
+      [](uint16_t node_id, void* ctx) {
+        auto* c = static_cast<Context*>(ctx);
+        c->fired->store(true);
+        c->id->store(node_id);
+      },
+      &context);
+
+  uint16_t port = 0;
+  int listener_fd = CreateTestListener(port);
+
+  auto r = mgr.Connect("127.0.0.1", port);
+  REQUIRE(r.has_value());
+  uint16_t node_id = r.value();
+
+  int client_fd = ::accept(listener_fd, nullptr, nullptr);
+  CHECK(client_fd >= 0);
+
+  auto start_r = mgr.Start();
+  CHECK(start_r.has_value());
+
+  // Close client to simulate connection loss
+  ::close(client_fd);
+
+  // Wait for timeout (200ms + margin)
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+  CHECK(callback_fired.load());
+  CHECK(disconnected_node_id.load() == node_id);
+  CHECK_FALSE(mgr.IsConnected(node_id));
+
+  mgr.Stop();
+  sched.Stop();
+  ::close(listener_fd);
+}
+
+TEST_CASE("NodeManager - Scheduler injection connect and query", "[NodeManager][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManager<8> mgr({}, &sched);
+
+  uint16_t port = 0;
+  int listener_fd = CreateTestListener(port);
+
+  auto r = mgr.Connect("127.0.0.1", port);
+  REQUIRE(r.has_value());
+  CHECK(mgr.NodeCount() == 1U);
+  CHECK(mgr.IsConnected(r.value()));
+
+  int client_fd = ::accept(listener_fd, nullptr, nullptr);
+
+  mgr.Disconnect(r.value());
+  CHECK(mgr.NodeCount() == 0U);
+
+  ::close(client_fd);
+  ::close(listener_fd);
+  sched.Stop();
+}

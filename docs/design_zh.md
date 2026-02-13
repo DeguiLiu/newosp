@@ -458,10 +458,21 @@ class LifecycleNode : public Node<PayloadVariant> {
     |          newosp Infrastructure           |
     |                                          |
     |  ┌─────────────────────────────────────┐ |
+    |  |     App Layer                       | |
+    |  |  App/Instance(HSM) + Post           | |
+    |  |  LifecycleNode(HSM) + QoS           | |
+    |  └──────────────┬──────────────────────┘ |
+    |                 |                        |
+    |  ┌──────────────┴──────────────────────┐ |
+    |  |     Service Layer                   | |
+    |  |  Service(RPC) + Discovery           | |
+    |  |  NodeManager + *_hsm.hpp            | |
+    |  └──────────────┬──────────────────────┘ |
+    |                 |                        |
+    |  ┌──────────────┴──────────────────────┐ |
     |  |     Network Transport Layer         | |
-    |  |  NetworkNode (Pub/Sub 透明传输)     | |
-    |  |  Transport (TCP/UDP/Unix/Inproc)    | |
-    |  |  IoPoller (epoll/kqueue)            | |
+    |  |  Transport (TCP/UDP/SHM/Serial)     | |
+    |  |  TransportFactory + IoPoller        | |
     |  └──────────────┬──────────────────────┘ |
     |                 |                        |
     |  ┌──────────────┴──────────────────────┐ |
@@ -471,14 +482,16 @@ class LifecycleNode : public Node<PayloadVariant> {
     |  └──────────────┬──────────────────────┘ |
     |                 |                        |
     |  ┌──────────────┴──────────────────────┐ |
-    |  |     Service Layer                   | |
+    |  |     Core Layer                      | |
+    |  |  HSM + BT + Semaphore               | |
     |  |  Config + Log + Timer + Shell       | |
     |  |  MemPool + Shutdown                 | |
     |  └──────────────┬──────────────────────┘ |
     |                 |                        |
     |  ┌──────────────┴──────────────────────┐ |
     |  |     Foundation Layer                | |
-    |  |  Platform + Vocabulary              | |
+    |  |  Platform (SteadyNowUs/Ns)          | |
+    |  |  Vocabulary (FixedString/Vector)     | |
     |  └─────────────────────────────────────┘ |
     ============================================
                    POSIX / Linux Kernel
@@ -1683,6 +1696,12 @@ class Application {
 }  // namespace osp
 ```
 
+**Phase S 改进**:
+
+- Instance 集成 HSM: 11 状态层次结构 (Idle/Initializing/Running/Processing/Paused/Stopping/Stopped/Error/Recovering/Fatal/Terminated)，替代手动 SetState/CurState
+- Application::name_ 从 `char name_[kAppNameMaxLen + 1]` 改为 `FixedString<kAppNameMaxLen>`，消除手动字符串拷贝
+- 构造函数使用 `TruncateToCapacity` 标签初始化
+
 ### 6.12 统一消息投递 (P1, post.hpp)
 
 **目标**: 兼容原始 OSP 的 OspPost() 统一投递接口，自动路由本地/进程间/网络消息。
@@ -1708,6 +1727,12 @@ expected<uint32_t, PostError> OspSendAndWait(
 
 }  // namespace osp
 ```
+
+**Phase S 改进**:
+
+- AppRegistry 内部存储从 `AppEntry entries_[N] + count_ + bool active` 改为 `FixedVector<AppEntry, N> entries_`
+- Register 使用 `push_back()`，Unregister 使用 `erase_unordered()`
+- 消除 active 标志位，简化遍历逻辑
 
 ### 6.13 节点管理器 (P0, node_manager.hpp)
 
@@ -2112,6 +2137,38 @@ lidar.Activate();    // 恢复工作
 // 系统关闭
 lidar.Shutdown();    // 释放所有资源
 ```
+
+**Phase S 改进: HSM 驱动重构**:
+
+LifecycleNode 从手动 if-else 状态机重构为 HSM 驱动的 16 状态层次结构:
+
+```
+Root
+├── Operational
+│   ├── Unconfigured
+│   ├── Configuring (过渡)
+│   ├── Inactive
+│   │   ├── Idle
+│   │   └── Ready
+│   ├── Activating (过渡)
+│   ├── Active
+│   │   ├── Running
+│   │   └── Degraded
+│   ├── Deactivating (过渡)
+│   └── CleaningUp (过渡)
+├── Error
+│   ├── Recoverable
+│   └── Fatal
+├── ShuttingDown (过渡)
+└── Finalized
+```
+
+关键改进:
+- 过渡状态显式建模 (Configuring/Activating/Deactivating/CleaningUp/ShuttingDown)
+- Degraded 子状态支持运行时降级
+- Error 层次 (Recoverable/Fatal) 区分可恢复和不可恢复错误
+- Guard 条件控制状态转换合法性
+- HSM 的 LCA 算法自动处理 entry/exit 路径
 
 **与 Executor 集成**:
 
@@ -2579,7 +2636,7 @@ python3 tools/ospgen.py --input defs/protocol_messages.yaml \
 143. **test_discovery.cpp**: 多播发现、节点上下线通知
 144. **test_service.cpp**: 请求-响应、超时处理、并发调用
 
-### Phase R: HSM 驱动模块 + 代码生成 (已实现, 527 tests)
+### Phase R: HSM 驱动模块 + 代码生成 (已实现, 575 tests)
 
 > HSM 驱动的高级状态管理模块，为 service、discovery、node_manager 提供独立的
 > 状态机生命周期管理。同时引入 YAML 驱动的编译期代码生成工具 ospgen。
@@ -2598,6 +2655,20 @@ python3 tools/ospgen.py --input defs/protocol_messages.yaml \
 156. **test_discovery_hsm.cpp**: 10 test cases
 157. **test_net.cpp**: 11 test cases
 158. **test_transport_factory.cpp**: 10 test cases
+
+### Phase S: 基础组件统一采用 + MISRA 合规 (已实现, 575 tests)
+
+> 上层模块 (应用层/服务层/传输层) 全面采用基础层组件，消除重复实现。
+> 同时完成 HSM 集成到 Instance 和 LifecycleNode，以及 MISRA C++ 合规修复。
+
+159. **char[] → FixedString**: app.hpp name_, node_manager.hpp remote_host, service.hpp Entry name/host, discovery.hpp DiscoveredNode/TopicInfo/ServiceInfo, transport.hpp Endpoint host, serial_transport.hpp port_name, transport_factory.hpp TransportConfig
+160. **固定数组+active → FixedVector**: post.hpp AppRegistry entries_, service.hpp ServiceRegistry entries_
+161. **chrono/gettimeofday → SteadyNowUs/SteadyNowNs**: node_manager_hsm.hpp MonitorLoop, service.hpp AsyncClient::GetResult, serial_transport.hpp (移除 NowMs+gettimeofday), transport.hpp (移除 SteadyClockNs)
+162. **CopyString 辅助函数删除**: discovery.hpp 两处 CopyString 替换为 FixedString::assign(TruncateToCapacity, ...)
+163. **Instance HSM 集成**: 11 状态层次结构 (Idle/Running/Processing/Paused/Error/Fatal 等)
+164. **LifecycleNode HSM 重构**: 16 状态层次结构 (含 Degraded/Recoverable/Fatal 子状态)
+165. **MISRA C++ 合规**: enum class 替代裸枚举, inline constexpr 替代 #define, static_cast<void> 弃值标注
+166. **测试更新**: test_transport.cpp, test_transport_factory.cpp, test_service.cpp, test_discovery.cpp, test_serial_transport.cpp 适配 FixedString API
 
 ---
 
@@ -2627,10 +2698,10 @@ python3 tools/ospgen.py --input defs/protocol_messages.yaml \
 | **osplog -- 文件轮转** | -- | 未来扩展 | 可集成 zlog |
 | **ospteleserver -- Telnet** | shell.hpp (DebugShell) | 已完成 | TCP Telnet + 命令注册 |
 | **osptest -- 测试框架** | Catch2 v3.5.2 | 已完成 | 现代测试框架替代 |
-| **CApp -- 应用** | app.hpp Application (Phase P) | 已完成 | 消息队列 + 实例池 + ResponseChannel |
-| **CInstance -- 实例** | app.hpp Instance (Phase P) | 已完成 | 状态机驱动 + Reply() 同步回复 |
+| **CApp -- 应用** | app.hpp Application (Phase P+S) | 已完成 | 消息队列 + 实例池 + FixedString name_ |
+| **CInstance -- 实例** | app.hpp Instance (Phase P+S) | 已完成 | HSM 11 状态驱动 + Reply() 同步回复 |
 | **-- QoS 服务质量** | qos.hpp (Phase O) | 已完成 | 简化版 QoS，5 个核心参数 |
-| **-- 生命周期节点** | lifecycle_node.hpp (Phase O) | 已完成 | 借鉴 ROS2 Lifecycle Node |
+| **-- 生命周期节点** | lifecycle_node.hpp (Phase O+S) | 已完成 | HSM 16 状态驱动，含 Degraded/Error 子状态 |
 | **-- 实时调度** | executor.hpp RealtimeExecutor (Phase O) | 已完成 | SCHED_FIFO + mlockall + 优先级队列 |
 | **CMessage -- 消息** | MessageEnvelope (bus.hpp) | 已完成 | header + variant payload |
 | **COspStack -- 栈内存** | mem_pool.hpp FixedPool | 已完成 | 固定块分配 |
@@ -2676,6 +2747,9 @@ python3 tools/ospgen.py --input defs/protocol_messages.yaml \
 | eventfd 轻量通知 | Linux kernel | ShmChannel 消费者唤醒 |
 | Service/Client RPC | ROS2 rclcpp | service.hpp 请求-响应 |
 | UDP 多播发现 | ROS2 DDS | discovery.hpp 节点自动发现 |
+| 基础组件统一采用 | 内部演进 | 上层模块全面使用 FixedString/FixedVector/SteadyNowUs |
+| HSM 驱动实例生命周期 | hsm-cpp + 原始 OSP | app.hpp Instance 11 状态层次结构 |
+| HSM 驱动生命周期节点 | ROS2 Lifecycle + hsm-cpp | lifecycle_node.hpp 16 状态层次结构 |
 | App-Instance 两层模型 | 原始 OSP | app.hpp 应用-实例架构 |
 | 全局实例 ID (IID) | 原始 OSP | post.hpp MAKEIID 寻址 |
 | 心跳检测 + 断开通知 | 原始 OSP | node_manager.hpp 连接管理 |

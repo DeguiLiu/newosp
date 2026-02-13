@@ -529,6 +529,10 @@ static_assert((OSP_APP_MSG_INLINE_SIZE % 8) == 0,
               "OSP_APP_MSG_INLINE_SIZE must be 8-byte aligned");
 
 struct alignas(8) AppMessage {
+  static constexpr uint32_t kMaxDataLen = 0x00FFFFFFU;
+  static constexpr uint32_t kLenShift = 8U;
+  static constexpr uint32_t kExternalFlag = 0x01U;
+
   uint16_t ins_id;
   uint16_t event;
   uint32_t flags_and_len;
@@ -540,11 +544,11 @@ struct alignas(8) AppMessage {
   } payload;
 
   bool IsExternal() const noexcept {
-    return (flags_and_len & 0x01U) != 0;
+    return (flags_and_len & kExternalFlag) != 0;
   }
 
   uint32_t DataLen() const noexcept {
-    return flags_and_len >> 8;
+    return flags_and_len >> kLenShift;
   }
 
   const void* Data() const noexcept {
@@ -556,13 +560,13 @@ struct alignas(8) AppMessage {
       flags_and_len = 0;
       return;
     }
-    if (len > 0x00FFFFFFU) len = 0x00FFFFFFU;
+    if (len > kMaxDataLen) len = kMaxDataLen;
 
     if (len <= OSP_APP_MSG_INLINE_SIZE) {
-      flags_and_len = (len << 8);
+      flags_and_len = (len << kLenShift);
       std::memcpy(payload.inline_data, data, len);
     } else {
-      flags_and_len = (len << 8) | 0x01U;
+      flags_and_len = (len << kLenShift) | kExternalFlag;
       payload.ext_ptr = data;
     }
   }

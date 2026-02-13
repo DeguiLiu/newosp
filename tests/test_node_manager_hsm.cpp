@@ -373,3 +373,99 @@ TEST_CASE("node_manager_hsm - IsConnected query", "[HsmNodeManager]") {
   // Non-existent node
   CHECK_FALSE(mgr.IsConnected(999));
 }
+
+// ============================================================================
+// Phase 2: TimerScheduler Injection Mode Tests
+// ============================================================================
+
+#include "osp/timer.hpp"
+
+TEST_CASE("node_manager_hsm - Scheduler injection basic lifecycle", "[HsmNodeManager][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::HsmNodeManager<64> mgr(&sched);
+  mgr.SetHeartbeatInterval(100);
+
+  CHECK_FALSE(mgr.IsRunning());
+
+  bool started = mgr.Start();
+  CHECK(started);
+  CHECK(mgr.IsRunning());
+
+  // Starting again should fail
+  bool started_again = mgr.Start();
+  CHECK_FALSE(started_again);
+
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+
+  // Can restart
+  bool restarted = mgr.Start();
+  CHECK(restarted);
+  CHECK(mgr.IsRunning());
+
+  mgr.Stop();
+  sched.Stop();
+}
+
+TEST_CASE("node_manager_hsm - Scheduler injection auto timeout", "[HsmNodeManager][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::HsmNodeManager<64> mgr(&sched);
+  mgr.SetHeartbeatInterval(100);
+
+  std::atomic<bool> callback_fired{false};
+  std::atomic<uint16_t> disconnected_node_id{0};
+
+  struct Context {
+    std::atomic<bool>* fired;
+    std::atomic<uint16_t>* id;
+  };
+  Context context{&callback_fired, &disconnected_node_id};
+
+  mgr.OnDisconnect(
+      [](uint16_t node_id, void* ctx) {
+        auto* c = static_cast<Context*>(ctx);
+        c->fired->store(true);
+        c->id->store(node_id);
+      },
+      &context);
+
+  mgr.AddNode(1, 2);
+  mgr.Start();
+
+  CHECK(std::strcmp(mgr.GetNodeState(1), "Connected") == 0);
+
+  // Wait for automatic timeout detection (2 missed * 100ms + margin)
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+  CHECK(callback_fired.load());
+  CHECK(disconnected_node_id.load() == 1);
+  CHECK(std::strcmp(mgr.GetNodeState(1), "Disconnected") == 0);
+
+  mgr.Stop();
+  sched.Stop();
+}
+
+TEST_CASE("node_manager_hsm - Scheduler injection heartbeat keeps connected", "[HsmNodeManager][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::HsmNodeManager<64> mgr(&sched);
+  mgr.SetHeartbeatInterval(100);
+
+  mgr.AddNode(1, 3);
+  mgr.Start();
+
+  // Send heartbeats to keep connection alive
+  for (int i = 0; i < 5; ++i) {
+    mgr.OnHeartbeat(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(std::strcmp(mgr.GetNodeState(1), "Connected") == 0);
+  }
+
+  mgr.Stop();
+  sched.Stop();
+}

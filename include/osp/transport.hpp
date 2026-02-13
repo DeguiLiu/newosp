@@ -984,7 +984,7 @@ class NetworkNode : public Node<PayloadVariant> {
     listener_ = static_cast<TcpListener&&>(listener_r.value());
 
     // Set SO_REUSEADDR
-    int opt = 1;
+    int32_t opt = 1;
     ::setsockopt(listener_.Fd(), SOL_SOCKET, SO_REUSEADDR, &opt,
                  static_cast<socklen_t>(sizeof(opt)));
 

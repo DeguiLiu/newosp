@@ -13,6 +13,7 @@
 #include "osp/hsm.hpp"
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
+#include "osp/timer.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -140,9 +141,10 @@ inline void OnEnterDisconnected(NodeConnectionContext& ctx) {
 template <uint32_t MaxNodes = 64>
 class HsmNodeManager {
  public:
-  HsmNodeManager() noexcept
+  explicit HsmNodeManager(TimerScheduler<>* scheduler = nullptr) noexcept
       : running_(false), node_count_(0), heartbeat_interval_ms_(1000),
-        global_disconnect_fn_(nullptr), global_disconnect_ctx_(nullptr) {}
+        global_disconnect_fn_(nullptr), global_disconnect_ctx_(nullptr),
+        scheduler_(scheduler), timer_task_id_(0) {}
 
   ~HsmNodeManager() { Stop(); }
 
@@ -350,15 +352,33 @@ class HsmNodeManager {
     std::lock_guard<std::mutex> lock(mutex_);
     if (running_.load()) return false;
     running_.store(true);
-    monitor_thread_ = std::thread([this]() { MonitorLoop(); });
+
+    if (scheduler_ != nullptr) {
+      auto r = scheduler_->Add(heartbeat_interval_ms_, MonitorTick, this);
+      if (r.has_value()) {
+        timer_task_id_ = r.value();
+      } else {
+        running_.store(false);
+        return false;
+      }
+    } else {
+      monitor_thread_ = std::thread([this]() { MonitorLoop(); });
+    }
+
     return true;
   }
 
   void Stop() noexcept {
     running_.store(false);
-    if (monitor_thread_.joinable()) {
-      monitor_thread_.join();
+
+    if (scheduler_ != nullptr) {
+      static_cast<void>(scheduler_->Remove(timer_task_id_));
+    } else {
+      if (monitor_thread_.joinable()) {
+        monitor_thread_.join();
+      }
     }
+
     std::lock_guard<std::mutex> lock(mutex_);
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (entries_[i].active && entries_[i].hsm_initialized) {
@@ -413,6 +433,14 @@ class HsmNodeManager {
 
   NodeDisconnectFn global_disconnect_fn_;
   void* global_disconnect_ctx_;
+
+  TimerScheduler<>* scheduler_;
+  TimerTaskId timer_task_id_{0};
+
+  static void MonitorTick(void* ctx) noexcept {
+    auto* self = static_cast<HsmNodeManager*>(ctx);
+    self->CheckTimeouts();
+  }
 
   void MonitorLoop() noexcept {
     while (running_.load()) {

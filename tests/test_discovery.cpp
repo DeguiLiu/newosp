@@ -512,3 +512,116 @@ TEST_CASE("discovery - TopicAwareDiscovery topic overflow", "[discovery][topic]"
   REQUIRE(r.get_error() == osp::DiscoveryError::kSocketFailed);
   REQUIRE(discovery.TopicCount() == 4);
 }
+
+// ============================================================================
+// Phase 2: TimerScheduler Injection Mode Tests
+// ============================================================================
+
+#include "osp/timer.hpp"
+
+TEST_CASE("discovery - MulticastDiscovery scheduler injection start/stop", "[discovery][multicast][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::MulticastDiscovery<32>::Config cfg;
+  cfg.port = 19990;
+  osp::MulticastDiscovery<32> discovery(cfg, &sched);
+
+  discovery.SetLocalNode("sched_test_node", 8000);
+
+  auto r = discovery.Start();
+  REQUIRE(r.has_value());
+  REQUIRE(discovery.IsRunning());
+
+  discovery.Stop();
+  REQUIRE(!discovery.IsRunning());
+
+  sched.Stop();
+}
+
+TEST_CASE("discovery - MulticastDiscovery scheduler injection self-discovery", "[discovery][multicast][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::MulticastDiscovery<32>::Config cfg;
+  cfg.port = 19989;
+  cfg.announce_interval_ms = 500;
+  osp::MulticastDiscovery<32> discovery(cfg, &sched);
+
+  discovery.SetLocalNode("sched_self_node", 8000);
+
+  auto r = discovery.Start();
+  REQUIRE(r.has_value());
+
+  // Wait for self-announcement to be processed
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+  // Should discover itself
+  const osp::DiscoveredNode* node = discovery.FindNode("sched_self_node");
+  REQUIRE(node != nullptr);
+  REQUIRE(node->name == "sched_self_node");
+  REQUIRE(node->port == 8000);
+  REQUIRE(node->alive);
+
+  discovery.Stop();
+  sched.Stop();
+}
+
+TEST_CASE("discovery - MulticastDiscovery scheduler injection join callback", "[discovery][multicast][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::MulticastDiscovery<32>::Config cfg;
+  cfg.port = 19988;
+  cfg.announce_interval_ms = 500;
+  osp::MulticastDiscovery<32> discovery(cfg, &sched);
+
+  struct Context {
+    std::atomic<uint32_t> join_count{0};
+    char joined_name[64];
+  };
+  Context ctx;
+
+  discovery.SetOnNodeJoin(
+      [](const osp::DiscoveredNode& node, void* user_ctx) {
+        Context* c = static_cast<Context*>(user_ctx);
+        std::strcpy(c->joined_name, node.name.c_str());
+        c->join_count.fetch_add(1, std::memory_order_release);
+      },
+      &ctx);
+
+  discovery.SetLocalNode("sched_join_node", 8000);
+
+  auto r = discovery.Start();
+  REQUIRE(r.has_value());
+
+  // Wait for self-announcement
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+  REQUIRE(ctx.join_count.load(std::memory_order_acquire) >= 1);
+  REQUIRE(std::strcmp(ctx.joined_name, "sched_join_node") == 0);
+
+  discovery.Stop();
+  sched.Stop();
+}
+
+TEST_CASE("discovery - MulticastDiscovery scheduler injection start twice fails", "[discovery][multicast][scheduler]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::MulticastDiscovery<32>::Config cfg;
+  cfg.port = 19987;
+  osp::MulticastDiscovery<32> discovery(cfg, &sched);
+
+  discovery.SetLocalNode("test_node", 8000);
+
+  auto r1 = discovery.Start();
+  REQUIRE(r1.has_value());
+
+  auto r2 = discovery.Start();
+  REQUIRE(!r2.has_value());
+  REQUIRE(r2.get_error() == osp::DiscoveryError::kAlreadyRunning);
+
+  discovery.Stop();
+  sched.Stop();
+}

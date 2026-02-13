@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
 
-现代 C++17 纯头文件嵌入式基础设施库，面向 ARM-Linux 平台，从 OSP (Open Streaming Platform) 代码库 (~140k LOC) 提取并现代化重构。34 个头文件，527 测试用例，ASan/TSan/UBSan 全部通过。
+现代 C++17 纯头文件嵌入式基础设施库，面向 ARM-Linux 平台，从 OSP (Open Streaming Platform) 代码库 (~140k LOC) 提取并现代化重构。35 个头文件，575 测试用例，ASan/TSan/UBSan 全部通过。
 
 ## 特性
 
@@ -39,6 +39,7 @@
 | `executor.hpp` | 调度器 (Single/Static/Pinned + Realtime SCHED_FIFO/DEADLINE) |
 | `hsm.hpp` | 层次状态机 (LCA-based transitions, 嵌套状态) |
 | `bt.hpp` | 行为树 (Sequence/Fallback/Parallel 组合节点) |
+| `semaphore.hpp` | 轻量信号量 (futex-based LightSemaphore/PosixSemaphore) |
 
 ### 网络层
 
@@ -47,48 +48,60 @@
 | `socket.hpp` | TCP/UDP RAII 封装 (基于 sockpp) |
 | `connection.hpp` | 连接池管理 (自动重连、心跳) |
 | `io_poller.hpp` | epoll 事件循环 (边缘触发 + 超时) |
-| `transport.hpp` | 透明网络传输 (TCP/UDP 帧协议) |
-| `semaphore.hpp` | 轻量信号量 (futex-based) |
+| `net.hpp` | 网络层封装 (地址解析、套接字选项) |
+
+### 传输层
+
+| 模块 | 说明 |
+|------|------|
+| `transport.hpp` | 透明网络传输 (TCP/UDP 帧协议, v0/v1 双版本帧头) |
 | `shm_transport.hpp` | 共享内存 IPC (无锁 SPSC 环形缓冲区) |
+| `serial_transport.hpp` | 工业串口传输 (CRC-CCITT, PTY 测试, IEC 61508) |
+| `transport_factory.hpp` | 自动传输选择 (inproc/shm/tcp, FixedString 配置) |
 | `data_fusion.hpp` | 多源数据融合 (时间对齐、插值) |
-| `discovery.hpp` | 节点发现 (UDP 多播 + 静态配置) |
-| `service.hpp` | RPC 服务 (请求-响应模式) |
-| `node_manager.hpp` | 节点管理 + 心跳监控 |
+
+### 服务层
+
+| 模块 | 说明 |
+|------|------|
+| `service.hpp` | RPC 服务 (请求-响应模式, ServiceRegistry FixedVector) |
+| `discovery.hpp` | 节点发现 (UDP 多播 + 静态配置, FixedString) |
+| `node_manager.hpp` | 节点管理 + 心跳监控 (FixedString remote_host) |
 | `node_manager_hsm.hpp` | HSM 驱动的节点连接管理 (Connected/Suspect/Disconnected) |
 | `service_hsm.hpp` | HSM 驱动的服务生命周期 (Idle/Listening/Active/Error) |
 | `discovery_hsm.hpp` | HSM 驱动的节点发现流程 (Idle/Announcing/Stable/Degraded) |
 
-### 高级特性
+### 应用层
 
 | 模块 | 说明 |
 |------|------|
-| `lifecycle_node.hpp` | 生命周期节点 (Unconfigured → Inactive → Active → Finalized) |
+| `lifecycle_node.hpp` | HSM 驱动生命周期节点 (16 状态层次结构，含 Degraded/Error/Fatal) |
 | `qos.hpp` | QoS 服务质量配置 (Reliability/History/Deadline/Lifespan) |
-| `serial_transport.hpp` | 工业串口传输 (CRC-CCITT, PTY 测试, IEC 61508) |
-| `app.hpp` | Application/Instance 两层模型 (兼容原始 OSP) |
-| `post.hpp` | 统一投递 (本地/远程/广播 + 同步消息) |
-| `transport_factory.hpp` | 自动传输选择 (inproc/shm/tcp) |
-| `net.hpp` | 网络层封装 (地址解析、套接字选项) |
+| `app.hpp` | HSM 驱动 Application/Instance 两层模型 (11 状态层次结构) |
+| `post.hpp` | 统一投递 (FixedVector 注册表 + 同步消息) |
 
 ## 架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  应用层: App/Instance, LifecycleNode, QoS                       │
+│  应用层: App/Instance(HSM), LifecycleNode(HSM), QoS            │
 ├─────────────────────────────────────────────────────────────────┤
-│  服务层: Service (RPC), Discovery, NodeManager                  │
+│  服务层: Service(RPC), Discovery, NodeManager                   │
+│          ServiceRegistry(FixedVector), NodeEntry(FixedString)   │
 ├─────────────────────────────────────────────────────────────────┤
-│  传输层: Transport (TCP/UDP), ShmTransport, SerialTransport     │
-│          TransportFactory (inproc/shm/tcp 自动选择)             │
+│  传输层: Transport(TCP/UDP), ShmTransport, SerialTransport      │
+│          TransportFactory(FixedString), Endpoint(FixedString)   │
 ├─────────────────────────────────────────────────────────────────┤
-│  网络层: Socket, Connection, IoPoller (epoll), Net              │
+│  网络层: Socket, Connection, IoPoller(epoll), Net               │
 ├─────────────────────────────────────────────────────────────────┤
-│  消息层: AsyncBus (MPSC), Node (Pub/Sub), Post (统一投递)       │
+│  消息层: AsyncBus(MPSC), Node(Pub/Sub), Post(FixedVector)      │
 ├─────────────────────────────────────────────────────────────────┤
-│  调度层: Executor (Realtime), WorkerPool, HSM, BT               │
+│  调度层: Executor(Realtime), WorkerPool                         │
+├─────────────────────────────────────────────────────────────────┤
+│  核心层: HSM(层次状态机), BT(行为树), Semaphore                 │
 ├─────────────────────────────────────────────────────────────────┤
 │  基础层: Config, Log, Timer, Shell, MemPool, Shutdown           │
-│          Platform, Vocabulary (expected/optional/Fixed*)         │
+│          Platform(SteadyNowUs), Vocabulary(FixedString/Vector)  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -179,7 +192,7 @@ sensor.SpinOnce();
 ## 示例和测试
 
 - 示例程序: `examples/` 目录 (12 个示例)，参见 [examples/README.md](examples/README.md)
-- 单元测试: `tests/` 目录，527 测试用例，参见 [tests/README.md](tests/README.md)
+- 单元测试: `tests/` 目录，575 测试用例，参见 [tests/README.md](tests/README.md)
 - 代码生成: `tools/ospgen.py` (YAML → C++ 头文件)，参见 `defs/` 目录
 
 ## 设计模式
@@ -192,6 +205,7 @@ sensor.SpinOnce();
 - **SBO 回调**: `FixedFunction<Sig, Cap>` 零堆分配
 - **无锁 MPSC**: `AsyncBus` 基于序列号的环形缓冲区 + CAS 发布
 - **基于类型的路由**: `std::variant` + `VariantIndex<T>` 编译期分发
+- **基础组件复用**: 上层模块统一使用 FixedString/FixedVector/SteadyNowUs，零重复实现
 
 ## 许可证
 

@@ -72,6 +72,8 @@ enum class ShmError : uint8_t {
  * Movable but not copyable.
  */
 class SharedMemorySegment final {
+  static constexpr mode_t kShmPermissions = 0600;  ///< Owner read/write
+
  public:
   SharedMemorySegment() noexcept
       : fd_(-1), addr_(nullptr), size_(0), name_{} {}
@@ -156,7 +158,7 @@ class SharedMemorySegment final {
       }
     }
 
-    seg.fd_ = ::shm_open(seg.name_.c_str(), O_CREAT | O_RDWR | O_EXCL, 0600);
+    seg.fd_ = ::shm_open(seg.name_.c_str(), O_CREAT | O_RDWR | O_EXCL, kShmPermissions);
     if (seg.fd_ < 0) {
       return expected<SharedMemorySegment, ShmError>::error(
           ShmError::kCreateFailed);
@@ -212,7 +214,7 @@ class SharedMemorySegment final {
       }
     }
 
-    seg.fd_ = ::shm_open(seg.name_.c_str(), O_RDWR, 0600);
+    seg.fd_ = ::shm_open(seg.name_.c_str(), O_RDWR, kShmPermissions);
     if (seg.fd_ < 0) {
       return expected<SharedMemorySegment, ShmError>::error(
           ShmError::kOpenFailed);
@@ -254,7 +256,7 @@ class SharedMemorySegment final {
   const char* Name() const noexcept { return name_.c_str(); }
 
  private:
-  int fd_;
+  int32_t fd_;
   void* addr_;
   uint32_t size_;
   FixedString<OSP_SHM_CHANNEL_NAME_MAX> name_;

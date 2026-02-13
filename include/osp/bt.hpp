@@ -475,6 +475,7 @@ class BehaviorTree final {
       return -1;
     }
 
+    OSP_ASSERT(node_count_ <= static_cast<uint32_t>(INT32_MAX));
     int32_t idx = static_cast<int32_t>(node_count_);
     BtNode<Context>& node = nodes_[node_count_];
     ++node_count_;

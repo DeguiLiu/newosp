@@ -13,6 +13,7 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 #include "osp/socket.hpp"
+#include "osp/timer.hpp"
 
 #if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
 
@@ -103,9 +104,11 @@ struct NodeEntry {
 template <uint32_t MaxNodes = OSP_NODE_MANAGER_MAX_NODES>
 class NodeManager {
  public:
-  explicit NodeManager(const NodeManagerConfig& cfg = {}) noexcept
+  explicit NodeManager(const NodeManagerConfig& cfg = {},
+                       TimerScheduler<>* scheduler = nullptr) noexcept
       : config_(cfg), running_(false), next_node_id_(1),
-        node_count_(0), disconnect_fn_(nullptr), disconnect_ctx_(nullptr) {}
+        node_count_(0), disconnect_fn_(nullptr), disconnect_ctx_(nullptr),
+        scheduler_(scheduler), timer_task_id_(0) {}
 
   ~NodeManager() { Stop(); }
 
@@ -137,7 +140,7 @@ class NodeManager {
     }
 
     // Set SO_REUSEADDR
-    int opt = 1;
+    int32_t opt = 1;
     ::setsockopt(listener_r.value().Fd(), SOL_SOCKET, SO_REUSEADDR, &opt,
                  static_cast<socklen_t>(sizeof(opt)));
 
@@ -303,7 +306,19 @@ class NodeManager {
     }
 
     running_.store(true);
-    heartbeat_thread_ = std::thread([this]() { HeartbeatLoop(); });
+
+    if (scheduler_ != nullptr) {
+      auto r = scheduler_->Add(config_.heartbeat_interval_ms, HeartbeatTick, this);
+      if (r.has_value()) {
+        timer_task_id_ = r.value();
+      } else {
+        running_.store(false);
+        return expected<void, NodeManagerError>::error(
+            NodeManagerError::kNotRunning);
+      }
+    } else {
+      heartbeat_thread_ = std::thread([this]() { HeartbeatLoop(); });
+    }
 
     return expected<void, NodeManagerError>::success();
   }
@@ -313,8 +328,13 @@ class NodeManager {
    */
   void Stop() noexcept {
     running_.store(false);
-    if (heartbeat_thread_.joinable()) {
-      heartbeat_thread_.join();
+
+    if (scheduler_ != nullptr) {
+      static_cast<void>(scheduler_->Remove(timer_task_id_));
+    } else {
+      if (heartbeat_thread_.joinable()) {
+        heartbeat_thread_.join();
+      }
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -367,12 +387,26 @@ class NodeManager {
   mutable std::mutex mutex_;
   std::thread heartbeat_thread_;
 
+  TimerScheduler<>* scheduler_;
+  TimerTaskId timer_task_id_{0};
+
   NodeDisconnectFn disconnect_fn_;
   void* disconnect_ctx_;
 
   // ==========================================================================
   // Heartbeat Implementation
   // ==========================================================================
+
+  static void HeartbeatTick(void* ctx) noexcept {
+    auto* self = static_cast<NodeManager*>(ctx);
+    std::lock_guard<std::mutex> lock(self->mutex_);
+    for (uint32_t i = 0; i < MaxNodes; ++i) {
+      if (self->nodes_[i].active && !self->nodes_[i].is_listener) {
+        self->SendHeartbeat(self->nodes_[i]);
+      }
+    }
+    self->CheckTimeouts();
+  }
 
   void HeartbeatLoop() noexcept {
     while (running_.load()) {

@@ -14,6 +14,7 @@
 
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
+#include "osp/timer.hpp"
 
 #if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
 
@@ -203,7 +204,8 @@ class MulticastDiscovery {
     uint32_t timeout_ms = OSP_DISCOVERY_TIMEOUT_MS;
   };
 
-  explicit MulticastDiscovery(const Config& cfg = {}) noexcept
+  explicit MulticastDiscovery(const Config& cfg = {},
+                              TimerScheduler<>* scheduler = nullptr) noexcept
       : config_(cfg),
         sockfd_(-1),
         running_(false),
@@ -212,7 +214,10 @@ class MulticastDiscovery {
         on_node_leave_(nullptr),
         join_ctx_(nullptr),
         leave_ctx_(nullptr),
-        node_count_(0) {
+        node_count_(0),
+        scheduler_(scheduler),
+        announce_task_id_(0),
+        timeout_task_id_(0) {
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       nodes_[i].alive = false;
     }
@@ -316,10 +321,26 @@ class MulticastDiscovery {
 
     running_.store(true, std::memory_order_release);
 
-    // Spawn announce thread
-    announce_thread_ = std::thread([this]() { AnnounceLoop(); });
+    if (scheduler_ != nullptr) {
+      // Register periodic tasks with external scheduler
+      auto ann_r = scheduler_->Add(config_.announce_interval_ms, AnnounceTick, this);
+      if (ann_r.has_value()) {
+        announce_task_id_ = ann_r.value();
+      }
 
-    // Spawn receive thread
+      // Check timeouts ~3x per timeout period
+      uint32_t timeout_check_ms = config_.timeout_ms / 3U;
+      if (timeout_check_ms == 0U) timeout_check_ms = 1U;
+      auto to_r = scheduler_->Add(timeout_check_ms, TimeoutTick, this);
+      if (to_r.has_value()) {
+        timeout_task_id_ = to_r.value();
+      }
+    } else {
+      // Spawn announce thread (legacy mode)
+      announce_thread_ = std::thread([this]() { AnnounceLoop(); });
+    }
+
+    // Receive thread is always needed (blocking I/O)
     receive_thread_ = std::thread([this]() { ReceiveLoop(); });
 
     return expected<void, DiscoveryError>::success();
@@ -333,9 +354,15 @@ class MulticastDiscovery {
 
     running_.store(false, std::memory_order_release);
 
-    if (announce_thread_.joinable()) {
-      announce_thread_.join();
+    if (scheduler_ != nullptr) {
+      static_cast<void>(scheduler_->Remove(announce_task_id_));
+      static_cast<void>(scheduler_->Remove(timeout_task_id_));
+    } else {
+      if (announce_thread_.joinable()) {
+        announce_thread_.join();
+      }
     }
+
     if (receive_thread_.joinable()) {
       receive_thread_.join();
     }
@@ -391,6 +418,29 @@ class MulticastDiscovery {
   static constexpr uint32_t kAnnounceMagic = 0x4F535044;  // "OSPD"
   static constexpr uint32_t kAnnounceSize = 4 + 64 + 2;
 
+  static void AnnounceTick(void* ctx) noexcept {
+    auto* self = static_cast<MulticastDiscovery*>(ctx);
+
+    sockaddr_in mcast_addr{};
+    mcast_addr.sin_family = AF_INET;
+    ::inet_pton(AF_INET, self->config_.multicast_group, &mcast_addr.sin_addr);
+    mcast_addr.sin_port = htons(self->config_.port);
+
+    uint8_t packet[kAnnounceSize];
+    std::memcpy(packet, &kAnnounceMagic, 4);
+    std::memset(packet + 4, 0, 64);
+    std::memcpy(packet + 4, self->local_name_.c_str(), self->local_name_.size());
+    std::memcpy(packet + 68, &self->local_port_, 2);
+
+    ::sendto(self->sockfd_, packet, kAnnounceSize, 0,
+             reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
+  }
+
+  static void TimeoutTick(void* ctx) noexcept {
+    auto* self = static_cast<MulticastDiscovery*>(ctx);
+    self->CheckTimeouts();
+  }
+
   void AnnounceLoop() noexcept {
     sockaddr_in mcast_addr{};
     mcast_addr.sin_family = AF_INET;
@@ -431,8 +481,10 @@ class MulticastDiscovery {
         ProcessAnnounce(packet, sender_addr);
       }
 
-      // Check for timeouts
-      CheckTimeouts();
+      // Check for timeouts (only in legacy mode; scheduler handles this)
+      if (scheduler_ == nullptr) {
+        CheckTimeouts();
+      }
 
       // Sleep briefly to avoid busy-wait
       std::this_thread::sleep_for(std::chrono::milliseconds(kSleepIntervalMs));
@@ -518,7 +570,7 @@ class MulticastDiscovery {
   }
 
   Config config_;
-  int sockfd_;
+  int32_t sockfd_;
   std::atomic<bool> running_;
   std::thread announce_thread_;
   std::thread receive_thread_;
@@ -534,6 +586,10 @@ class MulticastDiscovery {
   mutable std::mutex mutex_;
   DiscoveredNode nodes_[MaxNodes];
   uint32_t node_count_;
+
+  TimerScheduler<>* scheduler_;
+  TimerTaskId announce_task_id_{0};
+  TimerTaskId timeout_task_id_{0};
 };
 
 // ============================================================================

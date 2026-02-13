@@ -393,21 +393,21 @@ TEST_CASE("service - ServiceRegistry register and lookup", "[service][registry]"
   REQUIRE(registry.Count() == 2);
 
   // Lookup existing service
-  const auto* entry1 = registry.Lookup("add_service");
-  REQUIRE(entry1 != nullptr);
-  REQUIRE(entry1->name == "add_service");
-  REQUIRE(entry1->host == "127.0.0.1");
-  REQUIRE(entry1->port == 8080);
+  auto entry1 = registry.Lookup("add_service");
+  REQUIRE(entry1.has_value());
+  REQUIRE(entry1.value().name == "add_service");
+  REQUIRE(entry1.value().host == "127.0.0.1");
+  REQUIRE(entry1.value().port == 8080);
 
-  const auto* entry2 = registry.Lookup("echo_service");
-  REQUIRE(entry2 != nullptr);
-  REQUIRE(entry2->name == "echo_service");
-  REQUIRE(entry2->host == "192.168.1.100");
-  REQUIRE(entry2->port == 9090);
+  auto entry2 = registry.Lookup("echo_service");
+  REQUIRE(entry2.has_value());
+  REQUIRE(entry2.value().name == "echo_service");
+  REQUIRE(entry2.value().host == "192.168.1.100");
+  REQUIRE(entry2.value().port == 9090);
 
   // Lookup non-existent service
-  const auto* entry3 = registry.Lookup("nonexistent");
-  REQUIRE(entry3 == nullptr);
+  auto entry3 = registry.Lookup("nonexistent");
+  REQUIRE(!entry3.has_value());
 }
 
 // ============================================================================
@@ -428,12 +428,12 @@ TEST_CASE("service - ServiceRegistry unregister", "[service][registry]") {
   REQUIRE(registry.Count() == 2);
 
   // Verify it's gone
-  const auto* entry = registry.Lookup("service2");
-  REQUIRE(entry == nullptr);
+  auto entry = registry.Lookup("service2");
+  REQUIRE(!entry.has_value());
 
   // Other services still exist
-  REQUIRE(registry.Lookup("service1") != nullptr);
-  REQUIRE(registry.Lookup("service3") != nullptr);
+  REQUIRE(registry.Lookup("service1").has_value());
+  REQUIRE(registry.Lookup("service3").has_value());
 
   // Unregister non-existent service
   bool removed2 = registry.Unregister("nonexistent");
@@ -457,9 +457,9 @@ TEST_CASE("service - ServiceRegistry duplicate name", "[service][registry]") {
   REQUIRE(r2.get_error() == osp::ServiceError::kBindFailed);
 
   // Original entry unchanged
-  const auto* entry = registry.Lookup("my_service");
-  REQUIRE(entry != nullptr);
-  REQUIRE(entry->port == 8080);
+  auto entry = registry.Lookup("my_service");
+  REQUIRE(entry.has_value());
+  REQUIRE(entry.value().port == 8080);
 }
 
 // ============================================================================

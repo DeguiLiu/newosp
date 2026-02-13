@@ -25,7 +25,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <type_traits>
@@ -187,12 +189,12 @@ class Service {
 
     // Wait for worker threads to finish
     std::lock_guard<std::mutex> lock(threads_mutex_);
-    for (auto& t : worker_threads_) {
-      if (t.joinable()) {
-        t.join();
+    for (auto& entry : worker_entries_) {
+      if (entry.thread.joinable()) {
+        entry.thread.join();
       }
     }
-    worker_threads_.clear();
+    worker_entries_.clear();
   }
 
   /** @brief Check if the service is running. */
@@ -211,8 +213,45 @@ class Service {
   }
 
  private:
+  struct WorkerEntry {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> finished;
+  };
+
+  class WorkerScope {
+   public:
+    explicit WorkerScope(std::atomic<uint32_t>& counter) noexcept
+        : counter_(counter) {
+      counter_.fetch_add(1, std::memory_order_relaxed);
+    }
+    ~WorkerScope() { counter_.fetch_sub(1, std::memory_order_relaxed); }
+    WorkerScope(const WorkerScope&) = delete;
+    WorkerScope& operator=(const WorkerScope&) = delete;
+
+   private:
+    std::atomic<uint32_t>& counter_;
+  };
+
+  void ReapFinishedWorkers() noexcept {
+    std::lock_guard<std::mutex> lock(threads_mutex_);
+    for (uint32_t i = 0; i < worker_entries_.size();) {
+      if (worker_entries_[i].finished->load(std::memory_order_acquire)) {
+        if (worker_entries_[i].thread.joinable()) {
+          worker_entries_[i].thread.join();
+        }
+        worker_entries_[i] = std::move(worker_entries_.back());
+        worker_entries_.pop_back();
+      } else {
+        ++i;
+      }
+    }
+  }
+
   void AcceptLoop() noexcept {
     while (running_.load(std::memory_order_acquire)) {
+      // Reap finished workers
+      ReapFinishedWorkers();
+
       sockaddr_in client_addr{};
       socklen_t addr_len = sizeof(client_addr);
 
@@ -226,11 +265,22 @@ class Service {
         continue;
       }
 
+      // Check max_concurrent limit
+      if (active_workers_.load(std::memory_order_relaxed) >= config_.max_concurrent) {
+        ::close(client_fd);
+        continue;
+      }
+
       // Spawn worker thread to handle this connection
+      auto finished = std::make_shared<std::atomic<bool>>(false);
       std::lock_guard<std::mutex> lock(threads_mutex_);
-      worker_threads_.emplace_back([this, client_fd]() {
-        HandleConnection(client_fd);
-      });
+      worker_entries_.push_back(WorkerEntry{
+          std::thread([this, client_fd, finished]() {
+            WorkerScope scope(active_workers_);
+            HandleConnection(client_fd);
+            finished->store(true, std::memory_order_release);
+          }),
+          finished});
     }
   }
 
@@ -282,7 +332,11 @@ class Service {
     uint64_t remaining = len;
     while (remaining > 0) {
       int64_t n = ::recv(fd, ptr, remaining, 0);
-      if (n <= 0) return false;
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        return false;
+      }
+      if (n == 0) return false;  // EOF
       ptr += n;
       remaining -= static_cast<uint64_t>(n);
     }
@@ -294,7 +348,11 @@ class Service {
     uint64_t remaining = len;
     while (remaining > 0) {
       int64_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
-      if (n <= 0) return false;
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        return false;
+      }
+      if (n == 0) return false;  // EOF
       ptr += n;
       remaining -= static_cast<uint64_t>(n);
     }
@@ -305,8 +363,9 @@ class Service {
   std::atomic<int32_t> sockfd_;
   std::atomic<bool> running_;
   std::thread accept_thread_;
-  std::vector<std::thread> worker_threads_;
+  std::vector<WorkerEntry> worker_entries_;
   std::mutex threads_mutex_;
+  std::atomic<uint32_t> active_workers_{0};
 
   Handler handler_;
   void* handler_ctx_;
@@ -526,7 +585,11 @@ class Client {
     uint64_t remaining = len;
     while (remaining > 0) {
       int64_t n = ::recv(fd, ptr, remaining, 0);
-      if (n <= 0) return false;
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        return false;
+      }
+      if (n == 0) return false;  // EOF
       ptr += n;
       remaining -= static_cast<uint64_t>(n);
     }
@@ -538,7 +601,11 @@ class Client {
     uint64_t remaining = len;
     while (remaining > 0) {
       int64_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
-      if (n <= 0) return false;
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        return false;
+      }
+      if (n == 0) return false;  // EOF
       ptr += n;
       remaining -= static_cast<uint64_t>(n);
     }
@@ -634,17 +701,17 @@ class ServiceRegistry {
   /**
    * @brief Lookup a service by name.
    * @param name Service name.
-   * @return Pointer to entry if found, nullptr otherwise.
+   * @return Entry value if found, empty optional otherwise.
    */
-  const Entry* Lookup(const char* name) const noexcept {
+  optional<Entry> Lookup(const char* name) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
 
     for (uint32_t i = 0; i < entries_.size(); ++i) {
       if (std::strcmp(entries_[i].name.c_str(), name) == 0) {
-        return &entries_[i];
+        return optional<Entry>(entries_[i]);
       }
     }
-    return nullptr;
+    return optional<Entry>();
   }
 
   /**
