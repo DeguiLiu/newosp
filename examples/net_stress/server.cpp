@@ -57,6 +57,8 @@ static std::atomic<uint32_t>   g_active_count{0};
 static std::atomic<uint32_t>   g_total_echo{0};
 static std::atomic<uint32_t>   g_total_handshake{0};
 static std::atomic<uint64_t>   g_total_bytes{0};
+static std::atomic<uint32_t>   g_total_file_chunks{0};
+static std::atomic<uint64_t>   g_total_file_bytes{0};
 static std::atomic<bool>       g_running{true};
 static uint64_t                g_start_time_ms{0};
 
@@ -139,6 +141,38 @@ static net_stress::EchoResp HandleEcho(
   return resp;
 }
 
+static net_stress::FileTransferResp HandleFileTransfer(
+    const net_stress::FileTransferReq& req, void* /*ctx*/) {
+  net_stress::FileTransferResp resp{};
+  resp.server_id = net_stress::kServerId;
+  resp.chunk_seq = req.chunk_seq;
+
+  uint32_t chunk_len = (req.chunk_len > net_stress::kMaxPayloadBytes)
+                           ? net_stress::kMaxPayloadBytes : req.chunk_len;
+
+  // Simulate receiving file data (verify pattern)
+  bool valid = net_stress::VerifyPattern(req.data, chunk_len, req.chunk_seq);
+  if (!valid) {
+    OSP_LOG_WARN("FILE", "Chunk %u from client %u: pattern mismatch",
+                 req.chunk_seq, req.client_id);
+    resp.accepted = 0;
+    return resp;
+  }
+
+  g_total_file_chunks.fetch_add(1, std::memory_order_relaxed);
+  g_total_file_bytes.fetch_add(chunk_len, std::memory_order_relaxed);
+
+  resp.received_bytes = chunk_len;
+  resp.accepted = 1;
+  resp.complete = (req.chunk_seq + 1 >= req.total_chunks) ? 1 : 0;
+
+  if (resp.complete != 0) {
+    OSP_LOG_INFO("FILE", "File from client %u complete: %u chunks, %u bytes",
+                 req.client_id, req.total_chunks, req.file_size);
+  }
+  return resp;
+}
+
 // ============================================================================
 // Timer Callback: periodic stats log
 // ============================================================================
@@ -148,15 +182,18 @@ static void StatsTimerCb(void* /*ctx*/) {
   uint32_t echo = g_total_echo.load(std::memory_order_relaxed);
   uint64_t bytes = g_total_bytes.load(std::memory_order_relaxed);
   uint32_t active = g_active_count.load(std::memory_order_relaxed);
+  uint32_t fchunks = g_total_file_chunks.load(std::memory_order_relaxed);
+  uint64_t fbytes = g_total_file_bytes.load(std::memory_order_relaxed);
 
   double throughput_kbps = (elapsed > 0)
-      ? static_cast<double>(bytes) * 8.0 / static_cast<double>(elapsed)
+      ? static_cast<double>(bytes + fbytes) * 8.0 /
+        static_cast<double>(elapsed)
       : 0.0;
 
   OSP_LOG_INFO("STATS", "elapsed=%lums clients=%u echo=%u "
-               "bytes=%lu throughput=%.1f kbps",
+               "file_chunks=%u file_bytes=%lu throughput=%.1f kbps",
                static_cast<unsigned long>(elapsed), active, echo,
-               static_cast<unsigned long>(bytes), throughput_kbps);
+               fchunks, static_cast<unsigned long>(fbytes), throughput_kbps);
 }
 
 // ============================================================================

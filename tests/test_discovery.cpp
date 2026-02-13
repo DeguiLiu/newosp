@@ -5,6 +5,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include "osp/discovery.hpp"
+#include "osp/node_manager.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -623,5 +624,168 @@ TEST_CASE("discovery - MulticastDiscovery scheduler injection start twice fails"
   REQUIRE(r2.get_error() == osp::DiscoveryError::kAlreadyRunning);
 
   discovery.Stop();
+  sched.Stop();
+}
+
+// ============================================================================
+// Edge Case Tests: Scheduler Injection
+// ============================================================================
+
+TEST_CASE("discovery - MulticastDiscovery scheduler injection Stop before Start", "[discovery][multicast][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::MulticastDiscovery<32>::Config cfg;
+  cfg.port = 19980;
+  osp::MulticastDiscovery<32> discovery(cfg, &sched);
+
+  discovery.SetLocalNode("test_node", 8000);
+
+  CHECK_FALSE(discovery.IsRunning());
+
+  // Call Stop() without ever calling Start() - should not crash
+  discovery.Stop();
+  CHECK_FALSE(discovery.IsRunning());
+
+  sched.Stop();
+}
+
+TEST_CASE("discovery - MulticastDiscovery scheduler injection restart cycle", "[discovery][multicast][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::MulticastDiscovery<32>::Config cfg;
+  cfg.port = 19981;
+  cfg.announce_interval_ms = 500;
+  osp::MulticastDiscovery<32> discovery(cfg, &sched);
+
+  discovery.SetLocalNode("restart_test_node", 8000);
+
+  // Cycle 1
+  CHECK_FALSE(discovery.IsRunning());
+  auto start1 = discovery.Start();
+  CHECK(start1.has_value());
+  CHECK(discovery.IsRunning());
+  discovery.Stop();
+  CHECK_FALSE(discovery.IsRunning());
+
+  // Cycle 2
+  auto start2 = discovery.Start();
+  CHECK(start2.has_value());
+  CHECK(discovery.IsRunning());
+  discovery.Stop();
+  CHECK_FALSE(discovery.IsRunning());
+
+  // Cycle 3
+  auto start3 = discovery.Start();
+  CHECK(start3.has_value());
+  CHECK(discovery.IsRunning());
+  discovery.Stop();
+  CHECK_FALSE(discovery.IsRunning());
+
+  sched.Stop();
+}
+
+TEST_CASE("MulticastDiscovery: scheduler injection - timer cleanup on Stop", "[discovery][multicast][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::MulticastDiscovery<32>::Config cfg;
+  cfg.port = 19970;
+  cfg.announce_interval_ms = 500;
+  osp::MulticastDiscovery<32> discovery(cfg, &sched);
+
+  discovery.SetLocalNode("timer_test_node", 8000);
+
+  uint32_t initial_count = sched.TaskCount();
+
+  auto r = discovery.Start();
+  REQUIRE(r.has_value());
+  CHECK(discovery.IsRunning());
+
+  // Verify timers registered (Discovery registers 2 timers: announce + timeout)
+  CHECK(sched.TaskCount() == initial_count + 2);
+
+  discovery.Stop();
+  CHECK_FALSE(discovery.IsRunning());
+
+  // Verify timers removed (TaskCount back to original)
+  CHECK(sched.TaskCount() == initial_count);
+
+  sched.Stop();
+}
+
+TEST_CASE("MulticastDiscovery: scheduler injection - double Stop safe", "[discovery][multicast][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::MulticastDiscovery<32>::Config cfg;
+  cfg.port = 19971;
+  osp::MulticastDiscovery<32> discovery(cfg, &sched);
+
+  discovery.SetLocalNode("double_stop_node", 8000);
+
+  auto r = discovery.Start();
+  REQUIRE(r.has_value());
+
+  discovery.Stop();
+  CHECK_FALSE(discovery.IsRunning());
+
+  // Stop twice - should not crash
+  discovery.Stop();
+  CHECK_FALSE(discovery.IsRunning());
+
+  sched.Stop();
+}
+
+TEST_CASE("MulticastDiscovery: scheduler injection - shared scheduler with NodeManager", "[discovery][multicast][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::MulticastDiscovery<32>::Config cfg;
+  cfg.port = 19972;
+  cfg.announce_interval_ms = 500;
+  osp::MulticastDiscovery<32> discovery(cfg, &sched);
+
+  osp::NodeManagerConfig node_cfg;
+  node_cfg.heartbeat_interval_ms = 100;
+  osp::NodeManager<8> node_mgr(node_cfg, &sched);
+
+  discovery.SetLocalNode("shared_sched_node", 8000);
+
+  struct Context {
+    std::atomic<uint32_t> join_count{0};
+  };
+  Context ctx;
+
+  discovery.SetOnNodeJoin(
+      [](const osp::DiscoveredNode& node, void* user_ctx) {
+        Context* c = static_cast<Context*>(user_ctx);
+        c->join_count.fetch_add(1, std::memory_order_release);
+      },
+      &ctx);
+
+  // Start both
+  auto disc_r = discovery.Start();
+  auto node_r = node_mgr.Start();
+  CHECK(disc_r.has_value());
+  CHECK(node_r.has_value());
+
+  // Both should be running
+  CHECK(discovery.IsRunning());
+  CHECK(node_mgr.IsRunning());
+
+  // Wait for discovery to work
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+  // Discovery should have found at least itself
+  CHECK(ctx.join_count.load(std::memory_order_acquire) >= 1);
+
+  // Both Stop cleanly
+  discovery.Stop();
+  node_mgr.Stop();
+  CHECK_FALSE(discovery.IsRunning());
+  CHECK_FALSE(node_mgr.IsRunning());
+
   sched.Stop();
 }

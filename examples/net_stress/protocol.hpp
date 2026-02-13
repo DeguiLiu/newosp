@@ -33,6 +33,7 @@ namespace net_stress {
 
 static constexpr uint16_t kHandshakePort     = 20000U;
 static constexpr uint16_t kEchoPort          = 20001U;
+static constexpr uint16_t kFilePort          = 20002U;
 static constexpr uint16_t kServerShellPort   = 9600U;
 static constexpr uint16_t kClientShellPort   = 9601U;
 static constexpr uint16_t kMonitorShellPort  = 9602U;
@@ -126,9 +127,39 @@ struct EchoResult {
   uint8_t  success;
 };
 
+/// File transfer request (client -> server via dedicated RPC).
+struct FileTransferReq {
+  uint32_t client_id;
+  uint32_t chunk_seq;       // chunk sequence number (0 = header)
+  uint32_t total_chunks;
+  uint32_t chunk_len;
+  uint32_t file_size;       // total file size (only in chunk_seq==0)
+  uint8_t  data[kMaxPayloadBytes];
+};
+
+struct FileTransferResp {
+  uint32_t server_id;
+  uint32_t chunk_seq;
+  uint32_t received_bytes;
+  uint8_t  accepted;        // 1=ok, 0=error
+  uint8_t  complete;        // 1=all chunks received
+  uint8_t  reserved[2];
+};
+
+/// File transfer progress (published via Bus).
+struct FileProgress {
+  uint32_t client_id;
+  uint32_t chunks_sent;
+  uint32_t total_chunks;
+  uint32_t bytes_sent;
+  uint32_t file_size;
+  uint8_t  complete;
+  uint8_t  success;
+};
+
 /// The variant type for the bus.
 using BusPayload = std::variant<PeerEvent, StartTestCmd, StopTestCmd,
-                                StatsSnapshot, EchoResult>;
+                                StatsSnapshot, EchoResult, FileProgress>;
 
 // ============================================================================
 // Utility

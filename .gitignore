@@ -18,3 +18,6 @@ build_san/
 build_check/
 build_misra/
 build_misra2/
+build_asan/
+build_asan/
+build_tsan/

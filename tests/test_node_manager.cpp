@@ -485,3 +485,262 @@ TEST_CASE("NodeManager - Scheduler injection connect and query", "[NodeManager][
   ::close(listener_fd);
   sched.Stop();
 }
+
+// ============================================================================
+// Edge Case Tests: Scheduler Injection
+// ============================================================================
+
+TEST_CASE("node_manager - Scheduler injection multiple modules share scheduler", "[node_manager][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 100;
+  cfg.heartbeat_timeout_count = 2;
+
+  osp::NodeManager<64> mgr1(cfg, &sched);
+  osp::NodeManager<64> mgr2(cfg, &sched);
+
+  std::atomic<uint32_t> mgr1_disconnects{0};
+  std::atomic<uint32_t> mgr2_disconnects{0};
+
+  mgr1.OnDisconnect(
+      [](uint16_t node_id, void* ctx) {
+        auto* counter = static_cast<std::atomic<uint32_t>*>(ctx);
+        counter->fetch_add(1, std::memory_order_release);
+      },
+      &mgr1_disconnects);
+
+  mgr2.OnDisconnect(
+      [](uint16_t node_id, void* ctx) {
+        auto* counter = static_cast<std::atomic<uint32_t>*>(ctx);
+        counter->fetch_add(1, std::memory_order_release);
+      },
+      &mgr2_disconnects);
+
+  // Create test listeners
+  uint16_t port1 = 0, port2 = 0;
+  int listener1 = CreateTestListener(port1);
+  int listener2 = CreateTestListener(port2);
+
+  // Connect both managers
+  auto r1 = mgr1.Connect("127.0.0.1", port1);
+  auto r2 = mgr2.Connect("127.0.0.1", port2);
+  REQUIRE(r1.has_value());
+  REQUIRE(r2.has_value());
+
+  int client1 = ::accept(listener1, nullptr, nullptr);
+  int client2 = ::accept(listener2, nullptr, nullptr);
+
+  // Start both managers
+  auto start1 = mgr1.Start();
+  auto start2 = mgr2.Start();
+  CHECK(start1.has_value());
+  CHECK(start2.has_value());
+
+  // Close clients to trigger timeouts
+  ::close(client1);
+  ::close(client2);
+
+  // Wait for timeout detection (200ms + margin)
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+  // Both should detect timeouts independently
+  CHECK(mgr1_disconnects.load(std::memory_order_acquire) >= 1);
+  CHECK(mgr2_disconnects.load(std::memory_order_acquire) >= 1);
+
+  mgr1.Stop();
+  mgr2.Stop();
+  ::close(listener1);
+  ::close(listener2);
+  sched.Stop();
+}
+
+TEST_CASE("node_manager - Scheduler injection Stop before Start is safe", "[node_manager][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 100;
+  osp::NodeManager<64> mgr(cfg, &sched);
+
+  CHECK_FALSE(mgr.IsRunning());
+
+  // Call Stop() without ever calling Start() - should not crash
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+
+  sched.Stop();
+}
+
+TEST_CASE("node_manager - Scheduler injection restart cycle", "[node_manager][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 100;
+  osp::NodeManager<64> mgr(cfg, &sched);
+
+  // Cycle 1
+  CHECK_FALSE(mgr.IsRunning());
+  auto start1 = mgr.Start();
+  CHECK(start1.has_value());
+  CHECK(mgr.IsRunning());
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+
+  // Cycle 2
+  auto start2 = mgr.Start();
+  CHECK(start2.has_value());
+  CHECK(mgr.IsRunning());
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+
+  // Cycle 3
+  auto start3 = mgr.Start();
+  CHECK(start3.has_value());
+  CHECK(mgr.IsRunning());
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+
+  sched.Stop();
+}
+
+TEST_CASE("NodeManager: scheduler injection - Remove timer on Stop", "[node_manager][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 100;
+  osp::NodeManager<8> mgr(cfg, &sched);
+
+  uint32_t initial_count = sched.TaskCount();
+
+  auto start_r = mgr.Start();
+  REQUIRE(start_r.has_value());
+  CHECK(mgr.IsRunning());
+
+  // Verify timer registered (TaskCount increased by 1)
+  CHECK(sched.TaskCount() == initial_count + 1);
+
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+
+  // Verify timer removed (TaskCount back to original)
+  CHECK(sched.TaskCount() == initial_count);
+
+  sched.Stop();
+}
+
+TEST_CASE("NodeManager: scheduler injection - double Stop is safe", "[node_manager][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 100;
+  osp::NodeManager<8> mgr(cfg, &sched);
+
+  auto start_r = mgr.Start();
+  REQUIRE(start_r.has_value());
+
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+
+  // Stop again - should not crash
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+
+  sched.Stop();
+}
+
+TEST_CASE("NodeManager: scheduler injection - Start after scheduler Stop", "[node_manager][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 100;
+  osp::NodeManager<8> mgr(cfg, &sched);
+
+  auto start_r = mgr.Start();
+  REQUIRE(start_r.has_value());
+  CHECK(mgr.IsRunning());
+
+  // Stop scheduler first
+  sched.Stop();
+
+  // Then stop NodeManager - should not crash
+  mgr.Stop();
+  CHECK_FALSE(mgr.IsRunning());
+}
+
+TEST_CASE("NodeManager: scheduler injection - shared scheduler multiple NodeManagers", "[node_manager][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 50;
+
+  osp::NodeManager<8> mgr1(cfg, &sched);
+  osp::NodeManager<8> mgr2(cfg, &sched);
+
+  uint32_t before = sched.TaskCount();
+
+  // Start both managers - each registers a timer
+  auto start1 = mgr1.Start();
+  auto start2 = mgr2.Start();
+  CHECK(start1.has_value());
+  CHECK(start2.has_value());
+  CHECK(mgr1.IsRunning());
+  CHECK(mgr2.IsRunning());
+
+  // Both should have registered timers
+  CHECK(sched.TaskCount() == before + 2);
+
+  // Let heartbeat ticks run a few cycles
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Both Stop cleanly, timers removed
+  mgr1.Stop();
+  mgr2.Stop();
+  CHECK_FALSE(mgr1.IsRunning());
+  CHECK_FALSE(mgr2.IsRunning());
+  CHECK(sched.TaskCount() == before);
+
+  sched.Stop();
+}
+
+TEST_CASE("NodeManager: scheduler injection - heartbeat fires with injected scheduler", "[node_manager][scheduler][edge]") {
+  osp::TimerScheduler<> sched;
+  sched.Start();
+
+  osp::NodeManagerConfig cfg;
+  cfg.heartbeat_interval_ms = 100;
+  cfg.heartbeat_timeout_count = 3;
+
+  osp::NodeManager<8> mgr(cfg, &sched);
+
+  uint16_t port = 0;
+  int listener_fd = CreateTestListener(port);
+
+  auto r = mgr.Connect("127.0.0.1", port);
+  REQUIRE(r.has_value());
+  uint16_t node_id = r.value();
+
+  int client_fd = ::accept(listener_fd, nullptr, nullptr);
+  CHECK(client_fd >= 0);
+
+  // Start with injected scheduler
+  auto start_r = mgr.Start();
+  CHECK(start_r.has_value());
+
+  // Wait for heartbeat interval
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+
+  // Node should stay connected (heartbeats are being sent)
+  CHECK(mgr.IsConnected(node_id));
+
+  mgr.Stop();
+  ::close(client_fd);
+  ::close(listener_fd);
+  sched.Stop();
+}

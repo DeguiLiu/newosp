@@ -23,6 +23,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -341,37 +343,371 @@ static std::atomic<uint32_t> g_timer_fire_count{0};
 static void TimerCallback(void* /*ctx*/) {
   g_timer_fire_count.fetch_add(1, std::memory_order_relaxed);
 }
+
+struct AccuracyCtx {
+  std::atomic<uint32_t> fire_count{0};
+  uint64_t first_fire_ns{0};
+  uint64_t last_fire_ns{0};
+  std::mutex mtx;
+};
+
+static void AccuracyCallback(void* ctx) {
+  auto* c = static_cast<AccuracyCtx*>(ctx);
+  uint64_t now = osp::SteadyNowNs();
+  std::lock_guard<std::mutex> lock(c->mtx);
+  if (c->fire_count.load(std::memory_order_relaxed) == 0) {
+    c->first_fire_ns = now;
+  }
+  c->last_fire_ns = now;
+  c->fire_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void OneShotCallback(void* ctx) {
+  auto* c = static_cast<AccuracyCtx*>(ctx);
+  uint64_t now = osp::SteadyNowNs();
+  std::lock_guard<std::mutex> lock(c->mtx);
+  c->first_fire_ns = now;
+  c->fire_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Context for periodic load testing
+struct PeriodicCtx {
+  std::atomic<uint32_t> fire_count{0};
+  std::vector<uint64_t> fire_times;
+  std::mutex mtx;
+  uint32_t period_ms;
+};
+
+static void PeriodicLoadCallback(void* ctx) {
+  auto* c = static_cast<PeriodicCtx*>(ctx);
+  uint64_t now = osp::SteadyNowNs();
+  std::lock_guard<std::mutex> lock(c->mtx);
+  c->fire_times.push_back(now);
+  c->fire_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void CycleCallback(void* ctx) {
+  auto* count = static_cast<std::atomic<uint32_t>*>(ctx);
+  count->fetch_add(1, std::memory_order_relaxed);
+}
+
 static void BenchTimer() {
-  printf("\n=== Timer Scheduling Overhead (schedule + cancel cycle) ===\n");
-  osp::TimerScheduler<16> sched;
-  auto start_r = sched.Start();
-  if (!start_r.has_value()) {
-    printf("  [ERROR] Failed to start timer scheduler\n");
-    return;
-  }
-  static constexpr uint32_t kIterations = 10000;
-  std::vector<osp::TimerTaskId> task_ids;
-  task_ids.reserve(kIterations);
-  auto t0 = Clock::now();
-  for (uint32_t i = 0; i < kIterations; ++i) {
-    auto add_r = sched.Add(1000, TimerCallback, nullptr);
-    if (add_r.has_value()) {
-      task_ids.push_back(add_r.value());
+  printf("\n=== Timer Benchmark ===\n");
+
+  // --- 1. Add/Remove throughput (cold — scheduler not running) ---
+  {
+    printf("\n  --- Add/Remove Throughput (scheduler stopped) ---\n");
+    osp::TimerScheduler<16> sched;
+    static constexpr uint32_t kIterations = 10000;
+    g_timer_fire_count.store(0);
+
+    auto t0 = Clock::now();
+    for (uint32_t i = 0; i < kIterations; ++i) {
+      auto add_r = sched.Add(1000, TimerCallback, nullptr);
+      if (add_r.has_value()) {
+        sched.Remove(add_r.value());
+      }
     }
-    if (!task_ids.empty()) {
-      sched.Remove(task_ids.back());
-      task_ids.pop_back();
+    auto t1 = Clock::now();
+
+    uint64_t ns = ElapsedNs(t0, t1);
+    double secs = static_cast<double>(ns) / 1e9;
+    double kops = (secs > 0) ? (static_cast<double>(kIterations * 2) / secs / 1e3) : 0;
+    printf("    Iterations: %u (Add + Remove pairs)\n", kIterations);
+    printf("    Time      : %.2f ms\n", secs * 1e3);
+    printf("    Throughput: %.1f K ops/s\n", kops);
+  }
+
+  // --- 2. Add/Remove throughput (hot — scheduler running with active tasks) ---
+  {
+    printf("\n  --- Add/Remove Throughput (scheduler running, 8 active tasks) ---\n");
+    osp::TimerScheduler<16> sched;
+    g_timer_fire_count.store(0);
+
+    // Pre-fill 8 active periodic tasks
+    for (int i = 0; i < 8; ++i) {
+      sched.Add(10, TimerCallback, nullptr);
+    }
+    sched.Start();
+
+    static constexpr uint32_t kIterations = 10000;
+    auto t0 = Clock::now();
+    for (uint32_t i = 0; i < kIterations; ++i) {
+      auto add_r = sched.Add(1000, TimerCallback, nullptr);
+      if (add_r.has_value()) {
+        sched.Remove(add_r.value());
+      }
+    }
+    auto t1 = Clock::now();
+    sched.Stop();
+
+    uint64_t ns = ElapsedNs(t0, t1);
+    double secs = static_cast<double>(ns) / 1e9;
+    double kops = (secs > 0) ? (static_cast<double>(kIterations * 2) / secs / 1e3) : 0;
+    printf("    Iterations: %u (Add + Remove pairs)\n", kIterations);
+    printf("    Time      : %.2f ms\n", secs * 1e3);
+    printf("    Throughput: %.1f K ops/s\n", kops);
+    printf("    BG fires  : %u\n", g_timer_fire_count.load());
+  }
+
+  // --- 3. Periodic timer firing accuracy ---
+  {
+    printf("\n  --- Periodic Timer Accuracy (50ms period, 500ms run) ---\n");
+    osp::TimerScheduler<4> sched;
+    AccuracyCtx ctx;
+
+    sched.Add(50, AccuracyCallback, &ctx);
+
+    uint64_t start_ns = osp::SteadyNowNs();
+    sched.Start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    sched.Stop();
+
+    uint32_t fires = ctx.fire_count.load();
+    double expected = 10.0;  // 500ms / 50ms
+    double error_pct = (fires > 0) ? (std::abs(static_cast<double>(fires) - expected) / expected * 100.0) : 100.0;
+
+    double avg_interval_ms = 0;
+    if (fires > 1) {
+      uint64_t span = ctx.last_fire_ns - ctx.first_fire_ns;
+      avg_interval_ms = static_cast<double>(span) / (fires - 1) / 1e6;
+    }
+
+    printf("    Expected  : ~%.0f fires\n", expected);
+    printf("    Actual    : %u fires\n", fires);
+    printf("    Error     : %.1f%%\n", error_pct);
+    printf("    Avg intv  : %.2f ms (target 50.00 ms)\n", avg_interval_ms);
+    printf("    %s\n", (error_pct < 30.0) ? "[PASS]" : "[WARN] accuracy outside 30%");
+  }
+
+  // --- 4. One-shot timer accuracy ---
+  {
+    printf("\n  --- One-shot Timer Accuracy (50ms delay, 10 samples) ---\n");
+    static constexpr uint32_t kSamples = 10;
+    uint64_t delays[kSamples];
+
+    for (uint32_t s = 0; s < kSamples; ++s) {
+      osp::TimerScheduler<1> sched;
+      AccuracyCtx ctx;
+
+      uint64_t before = osp::SteadyNowNs();
+      sched.AddOneShot(50, OneShotCallback, &ctx);
+      sched.Start();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      sched.Stop();
+
+      if (ctx.fire_count.load() > 0) {
+        delays[s] = (ctx.first_fire_ns - before) / 1000000ULL;  // ms
+      } else {
+        delays[s] = 0;
+      }
+    }
+
+    uint64_t sum = 0, min_d = UINT64_MAX, max_d = 0;
+    for (uint32_t s = 0; s < kSamples; ++s) {
+      sum += delays[s];
+      if (delays[s] < min_d) min_d = delays[s];
+      if (delays[s] > max_d) max_d = delays[s];
+    }
+    double avg = static_cast<double>(sum) / kSamples;
+    double error_pct = std::abs(avg - 50.0) / 50.0 * 100.0;
+
+    printf("    Target    : 50 ms\n");
+    printf("    Avg delay : %.1f ms\n", avg);
+    printf("    Min/Max   : %lu / %lu ms\n", static_cast<unsigned long>(min_d), static_cast<unsigned long>(max_d));
+    printf("    Error     : %.1f%%\n", error_pct);
+    printf("    %s\n", (error_pct < 30.0) ? "[PASS]" : "[WARN] accuracy outside 30%");
+  }
+
+  // --- 5. One-shot firing accuracy (100 samples, 10ms delay) ---
+  {
+    printf("\n  --- One-shot Firing Accuracy (10ms delay, 100 samples) ---\n");
+    static constexpr uint32_t kSamples = 100;
+    std::vector<int64_t> jitters;
+    jitters.reserve(kSamples);
+
+    for (uint32_t s = 0; s < kSamples; ++s) {
+      osp::TimerScheduler<1> sched;
+      AccuracyCtx ctx;
+
+      uint64_t before = osp::SteadyNowNs();
+      sched.AddOneShot(10, OneShotCallback, &ctx);
+      sched.Start();
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      sched.Stop();
+
+      if (ctx.fire_count.load() > 0) {
+        int64_t actual_us = static_cast<int64_t>((ctx.first_fire_ns - before) / 1000ULL);
+        int64_t expected_us = 10000;
+        jitters.push_back(actual_us - expected_us);
+      }
+    }
+
+    if (!jitters.empty()) {
+      int64_t sum = 0, max_jitter = INT64_MIN;
+      for (int64_t j : jitters) {
+        sum += j;
+        if (std::abs(j) > std::abs(max_jitter)) max_jitter = j;
+      }
+      double mean_jitter = static_cast<double>(sum) / jitters.size();
+      printf("    Samples   : %zu\n", jitters.size());
+      printf("    Mean jitter: %.1f us\n", mean_jitter);
+      printf("    Max jitter : %ld us\n", static_cast<long>(max_jitter));
+      printf("    %s\n", (std::abs(mean_jitter) < 5000.0) ? "[PASS]" : "[WARN] mean jitter > 5ms");
     }
   }
-  auto t1 = Clock::now();
-  sched.Stop();
-  uint64_t ns = ElapsedNs(t0, t1);
-  double secs = static_cast<double>(ns) / 1e9;
-  double ops_per_sec = (secs > 0) ? (static_cast<double>(kIterations * 2) / secs / 1e3) : 0;
-  printf("  Iterations: %u (schedule + cancel)\n", kIterations);
-  printf("  Time      : %.2f ms\n", secs * 1e3);
-  printf("  Throughput: %.3f K ops/s\n", ops_per_sec);
-  printf("  Fired     : %u (should be ~0)\n", g_timer_fire_count.load());
+
+  // --- 6. Periodic timer accuracy under load (8 timers, different periods) ---
+  {
+    printf("\n  --- Periodic Timer Accuracy Under Load (8 timers, 500ms run) ---\n");
+    osp::TimerScheduler<16> sched;
+
+    PeriodicCtx ctxs[8];
+    uint32_t periods[] = {5, 10, 20, 50, 5, 10, 20, 50};
+
+    for (int i = 0; i < 8; ++i) {
+      ctxs[i].period_ms = periods[i];
+      ctxs[i].fire_times.reserve(100);
+      sched.Add(periods[i], PeriodicLoadCallback, &ctxs[i]);
+    }
+
+    sched.Start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    sched.Stop();
+
+    printf("    Period(ms)  Fires  Mean Jitter(us)  Max Jitter(us)\n");
+    printf("    -----------------------------------------------\n");
+    for (int i = 0; i < 8; ++i) {
+      uint32_t fires = ctxs[i].fire_count.load();
+      if (fires > 1 && ctxs[i].fire_times.size() > 1) {
+        std::vector<int64_t> jitters;
+        uint64_t expected_interval_ns = static_cast<uint64_t>(ctxs[i].period_ms) * 1000000ULL;
+        for (size_t j = 1; j < ctxs[i].fire_times.size(); ++j) {
+          int64_t actual_interval = static_cast<int64_t>(ctxs[i].fire_times[j] - ctxs[i].fire_times[j-1]);
+          int64_t jitter = actual_interval - static_cast<int64_t>(expected_interval_ns);
+          jitters.push_back(jitter / 1000);  // convert to us
+        }
+        int64_t sum = 0, max_jitter = 0;
+        for (int64_t j : jitters) {
+          sum += j;
+          if (std::abs(j) > std::abs(max_jitter)) max_jitter = j;
+        }
+        double mean_jitter = static_cast<double>(sum) / jitters.size();
+        printf("    %5u       %5u  %15.1f  %15ld\n",
+               ctxs[i].period_ms, fires, mean_jitter, static_cast<long>(max_jitter));
+      }
+    }
+  }
+
+  // --- 7. Add/Remove throughput while running with callbacks firing ---
+  {
+    printf("\n  --- Add/Remove Throughput (separate thread, 8 active firing timers) ---\n");
+    osp::TimerScheduler<32> sched;
+    g_timer_fire_count.store(0);
+
+    // Pre-fill 8 active periodic tasks with short period
+    for (int i = 0; i < 8; ++i) {
+      sched.Add(5, TimerCallback, nullptr);
+    }
+    sched.Start();
+
+    std::atomic<bool> worker_done{false};
+    std::atomic<uint32_t> ops_count{0};
+
+    std::thread worker([&]() {
+      auto t0 = Clock::now();
+      while (ElapsedNs(t0, Clock::now()) < 200000000ULL) {  // 200ms
+        auto add_r = sched.Add(1000, TimerCallback, nullptr);
+        if (add_r.has_value()) {
+          sched.Remove(add_r.value());
+          ops_count.fetch_add(2, std::memory_order_relaxed);
+        }
+      }
+      worker_done.store(true);
+    });
+
+    worker.join();
+    sched.Stop();
+
+    uint32_t total_ops = ops_count.load();
+    double kops = static_cast<double>(total_ops) / 200.0;  // ops per ms
+    printf("    Duration  : 200 ms\n");
+    printf("    Total ops : %u (Add + Remove)\n", total_ops);
+    printf("    Throughput: %.1f K ops/s\n", kops);
+    printf("    BG fires  : %u\n", g_timer_fire_count.load());
+  }
+
+  // --- 8. One-shot Add throughput (add, fire, add cycle) ---
+  {
+    printf("\n  --- One-shot Add Throughput (add-fire-add cycle) ---\n");
+    osp::TimerScheduler<4> sched;
+    std::atomic<uint32_t> cycle_count{0};
+
+    sched.Start();
+    auto t0 = Clock::now();
+
+    static constexpr uint32_t kCycles = 100;
+    for (uint32_t i = 0; i < kCycles; ++i) {
+      sched.AddOneShot(1, CycleCallback, &cycle_count);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    auto t1 = Clock::now();
+    sched.Stop();
+
+    uint64_t ns = ElapsedNs(t0, t1);
+    double secs = static_cast<double>(ns) / 1e9;
+    double rate = (secs > 0) ? (static_cast<double>(kCycles) / secs) : 0;
+    printf("    Cycles    : %u\n", kCycles);
+    printf("    Fired     : %u\n", cycle_count.load());
+    printf("    Time      : %.2f ms\n", secs * 1e3);
+    printf("    Rate      : %.1f cycles/s\n", rate);
+  }
+
+  // --- 9. Concurrent Add/Remove throughput (4 threads) ---
+  {
+    printf("\n  --- Concurrent Add/Remove Throughput (4 threads) ---\n");
+    osp::TimerScheduler<64> sched;
+    sched.Start();
+
+    std::atomic<uint32_t> total_ops{0};
+    std::atomic<bool> stop_flag{false};
+
+    auto worker_fn = [&]() {
+      uint32_t local_ops = 0;
+      while (!stop_flag.load(std::memory_order_relaxed)) {
+        auto add_r = sched.Add(1000, TimerCallback, nullptr);
+        if (add_r.has_value()) {
+          sched.Remove(add_r.value());
+          local_ops += 2;
+        }
+      }
+      total_ops.fetch_add(local_ops, std::memory_order_relaxed);
+    };
+
+    std::thread workers[4];
+    auto t0 = Clock::now();
+    for (int i = 0; i < 4; ++i) {
+      workers[i] = std::thread(worker_fn);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    stop_flag.store(true, std::memory_order_relaxed);
+
+    for (int i = 0; i < 4; ++i) {
+      workers[i].join();
+    }
+    auto t1 = Clock::now();
+    sched.Stop();
+
+    uint64_t ns = ElapsedNs(t0, t1);
+    double secs = static_cast<double>(ns) / 1e9;
+    uint32_t ops = total_ops.load();
+    double mops = (secs > 0) ? (static_cast<double>(ops) / secs / 1e6) : 0;
+    printf("    Duration  : %.2f ms\n", secs * 1e3);
+    printf("    Total ops : %u (4 threads)\n", ops);
+    printf("    Throughput: %.3f M ops/s\n", mops);
+  }
 }
 
 // -- WorkerPool task dispatch throughput -------------------------------------

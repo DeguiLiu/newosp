@@ -178,6 +178,10 @@ class TimerScheduler final {
       return expected<TimerTaskId, TimerError>::error(
           TimerError::kInvalidPeriod);
     }
+    if (fn == nullptr) {
+      return expected<TimerTaskId, TimerError>::error(
+          TimerError::kInvalidPeriod);
+    }
 
     std::lock_guard<std::mutex> lock(mutex_);
 

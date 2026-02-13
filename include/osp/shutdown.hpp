@@ -94,14 +94,15 @@ class ShutdownManager final {
   explicit ShutdownManager(uint32_t max_callbacks = 16) noexcept
       : callback_count_(0),
         max_callbacks_((max_callbacks <= kMaxCallbacks) ? max_callbacks : kMaxCallbacks),
-        shutdown_flag_(false) {
+        shutdown_flag_(false),
+        valid_(false) {
     pipe_fd_[0] = -1;
     pipe_fd_[1] = -1;
 
     // Enforce single-instance constraint at runtime (not just debug assert).
     // If another instance already exists, do NOT overwrite the global pointer.
     if (detail::GetShutdownInstance() != nullptr) {
-      // Mark as invalid -- pipe remains {-1, -1}, all operations become no-ops.
+      // Mark as invalid -- pipe remains {-1, -1}, all operations return error.
       return;
     }
     detail::GetShutdownInstance() = this;
@@ -109,7 +110,9 @@ class ShutdownManager final {
     if (::pipe(pipe_fd_) != 0) {
       pipe_fd_[0] = -1;
       pipe_fd_[1] = -1;
+      return;
     }
+    valid_ = true;
   }
 
   /**
@@ -141,11 +144,26 @@ class ShutdownManager final {
   // ==========================================================================
 
   /**
+   * @brief Check if this instance is the active (valid) shutdown manager.
+   *
+   * Returns false if another instance already existed at construction time
+   * or if pipe creation failed.  All API calls on an invalid instance
+   * return errors or are no-ops.
+   */
+  bool IsValid() const noexcept { return valid_; }
+
+  /**
    * @brief Register a cleanup callback to be invoked on shutdown (LIFO order).
    * @param fn Callback function pointer. Must not be nullptr.
-   * @return success on registration, or ShutdownError::kCallbacksFull.
+   * @return success on registration, or ShutdownError on failure:
+   *         - kAlreadyInstantiated if this instance is invalid (duplicate).
+   *         - kCallbacksFull if fn is nullptr or capacity reached.
    */
   expected<void, ShutdownError> Register(ShutdownFn fn) noexcept {
+    if (!valid_) {
+      return expected<void, ShutdownError>::error(
+          ShutdownError::kAlreadyInstantiated);
+    }
     if (fn == nullptr) {
       return expected<void, ShutdownError>::error(ShutdownError::kCallbacksFull);
     }
@@ -164,6 +182,10 @@ class ShutdownManager final {
    * Uses sigaction(2) (not signal(2)) with SA_RESTART flag.
    */
   expected<void, ShutdownError> InstallSignalHandlers() noexcept {
+    if (!valid_) {
+      return expected<void, ShutdownError>::error(
+          ShutdownError::kAlreadyInstantiated);
+    }
     if (pipe_fd_[1] < 0) {
       return expected<void, ShutdownError>::error(
           ShutdownError::kPipeCreationFailed);
@@ -274,6 +296,7 @@ class ShutdownManager final {
   std::atomic<bool> shutdown_flag_;
   int pipe_fd_[2];
   std::atomic<int> signo_{0};  ///< Signal number, written from signal handler (lock-free)
+  bool valid_;                 ///< True if this is the active (valid) instance.
 };
 
 }  // namespace osp

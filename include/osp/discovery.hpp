@@ -354,6 +354,15 @@ class MulticastDiscovery {
 
     running_.store(false, std::memory_order_release);
 
+    // Close socket first to unblock recvfrom/sendto in threads
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (sockfd_ >= 0) {
+        ::close(sockfd_);
+        sockfd_ = -1;
+      }
+    }
+
     if (scheduler_ != nullptr) {
       static_cast<void>(scheduler_->Remove(announce_task_id_));
       static_cast<void>(scheduler_->Remove(timeout_task_id_));
@@ -365,11 +374,6 @@ class MulticastDiscovery {
 
     if (receive_thread_.joinable()) {
       receive_thread_.join();
-    }
-
-    if (sockfd_ >= 0) {
-      ::close(sockfd_);
-      sockfd_ = -1;
     }
   }
 
@@ -432,8 +436,13 @@ class MulticastDiscovery {
     std::memcpy(packet + 4, self->local_name_.c_str(), self->local_name_.size());
     std::memcpy(packet + 68, &self->local_port_, 2);
 
-    ::sendto(self->sockfd_, packet, kAnnounceSize, 0,
-             reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
+    {
+      std::lock_guard<std::mutex> lock(self->mutex_);
+      if (self->sockfd_ >= 0) {
+        ::sendto(self->sockfd_, packet, kAnnounceSize, 0,
+                 reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
+      }
+    }
   }
 
   static void TimeoutTick(void* ctx) noexcept {
@@ -456,8 +465,13 @@ class MulticastDiscovery {
       std::memcpy(packet + 4, local_name_.c_str(), local_name_.size());
       std::memcpy(packet + 68, &local_port_, 2);
 
-      ::sendto(sockfd_, packet, kAnnounceSize, 0,
-               reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sockfd_ >= 0) {
+          ::sendto(sockfd_, packet, kAnnounceSize, 0,
+                   reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
+        }
+      }
 
       // Sleep for announce interval
       std::this_thread::sleep_for(
@@ -473,9 +487,15 @@ class MulticastDiscovery {
       sockaddr_in sender_addr{};
       socklen_t addr_len = sizeof(sender_addr);
 
-      ssize_t n = ::recvfrom(sockfd_, packet, sizeof(packet), 0,
-                             reinterpret_cast<sockaddr*>(&sender_addr),
-                             &addr_len);
+      ssize_t n = -1;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sockfd_ >= 0) {
+          n = ::recvfrom(sockfd_, packet, sizeof(packet), 0,
+                         reinterpret_cast<sockaddr*>(&sender_addr),
+                         &addr_len);
+        }
+      }
 
       if (n == static_cast<ssize_t>(kAnnounceSize)) {
         ProcessAnnounce(packet, sender_addr);
@@ -511,42 +531,59 @@ class MulticastDiscovery {
 
     uint64_t now = SteadyNowUs();
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Collect-release-execute: update state under lock, call callback outside
+    bool should_notify_join = false;
+    DiscoveredNode join_node_copy;
+    NodeCallback join_cb = nullptr;
+    void* join_cb_ctx = nullptr;
 
-    // Find or create node entry
-    uint32_t slot = MaxNodes;
-    for (uint32_t i = 0; i < MaxNodes; ++i) {
-      if (nodes_[i].alive && std::strcmp(nodes_[i].name.c_str(), name_buf) == 0) {
-        slot = i;
-        break;
-      }
-    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
 
-    if (slot == MaxNodes) {
-      // New node - find free slot
+      // Find or create node entry
+      uint32_t slot = MaxNodes;
       for (uint32_t i = 0; i < MaxNodes; ++i) {
-        if (!nodes_[i].alive) {
+        if (nodes_[i].alive && std::strcmp(nodes_[i].name.c_str(), name_buf) == 0) {
           slot = i;
           break;
         }
       }
-    }
 
-    if (slot == MaxNodes) return;  // No free slots
-
-    bool is_new = !nodes_[slot].alive;
-
-    nodes_[slot].name.assign(TruncateToCapacity, name_buf);
-    nodes_[slot].address.assign(TruncateToCapacity, address_buf);
-    nodes_[slot].port = port;
-    nodes_[slot].last_seen_us = now;
-    nodes_[slot].alive = true;
-
-    if (is_new) {
-      ++node_count_;
-      if (on_node_join_ != nullptr) {
-        on_node_join_(nodes_[slot], join_ctx_);
+      if (slot == MaxNodes) {
+        // New node - find free slot
+        for (uint32_t i = 0; i < MaxNodes; ++i) {
+          if (!nodes_[i].alive) {
+            slot = i;
+            break;
+          }
+        }
       }
+
+      if (slot == MaxNodes) return;  // No free slots
+
+      bool is_new = !nodes_[slot].alive;
+
+      nodes_[slot].name.assign(TruncateToCapacity, name_buf);
+      nodes_[slot].address.assign(TruncateToCapacity, address_buf);
+      nodes_[slot].port = port;
+      nodes_[slot].last_seen_us = now;
+      nodes_[slot].alive = true;
+
+      if (is_new) {
+        ++node_count_;
+        if (on_node_join_ != nullptr) {
+          should_notify_join = true;
+          join_node_copy = nodes_[slot];
+          join_cb = on_node_join_;
+          join_cb_ctx = join_ctx_;
+        }
+      }
+    }
+    // mutex_ released
+
+    // Execute callback outside lock — safe for callback to call discovery API
+    if (should_notify_join) {
+      join_cb(join_node_copy, join_cb_ctx);
     }
   }
 
@@ -554,18 +591,38 @@ class MulticastDiscovery {
     uint64_t now = SteadyNowUs();
     uint64_t timeout_us = static_cast<uint64_t>(config_.timeout_ms) * 1000;
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Collect-release-execute: collect timed-out nodes under lock,
+    // invoke leave callbacks outside lock to prevent deadlock.
+    DiscoveredNode leave_copies[MaxNodes];
+    uint32_t leave_count = 0;
+    NodeCallback leave_cb = nullptr;
+    void* leave_cb_ctx = nullptr;
 
-    for (uint32_t i = 0; i < MaxNodes; ++i) {
-      if (nodes_[i].alive) {
-        if (now - nodes_[i].last_seen_us > timeout_us) {
-          nodes_[i].alive = false;
-          --node_count_;
-          if (on_node_leave_ != nullptr) {
-            on_node_leave_(nodes_[i], leave_ctx_);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      leave_cb = on_node_leave_;
+      leave_cb_ctx = leave_ctx_;
+
+      for (uint32_t i = 0; i < MaxNodes; ++i) {
+        if (nodes_[i].alive) {
+          if (now > nodes_[i].last_seen_us &&
+              (now - nodes_[i].last_seen_us) > timeout_us) {
+            nodes_[i].alive = false;
+            --node_count_;
+            if (leave_cb != nullptr) {
+              leave_copies[leave_count] = nodes_[i];
+              ++leave_count;
+            }
           }
         }
       }
+    }
+    // mutex_ released
+
+    // Execute leave callbacks outside lock
+    for (uint32_t i = 0; i < leave_count; ++i) {
+      leave_cb(leave_copies[i], leave_cb_ctx);
     }
   }
 
