@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        build_type: [Debug, Release]
+        include:
+          - os: ubuntu-latest
+            compiler: gcc
+          - os: macos-latest
+            compiler: clang
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up CMake
+      uses: lukka/get-cmake@latest
+
+    - name: Configure CMake
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DOSP_BUILD_TESTS=ON -DOSP_BUILD_EXAMPLES=OFF
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }} -j
+
+    - name: Run Tests
+      working-directory: build
+      run: ctest -C ${{ matrix.build_type }} --output-on-failure --verbose
+
+  build-with-options:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: "No exceptions/RTTI"
+            flags: "-fno-exceptions -fno-rtti"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up CMake
+      uses: lukka/get-cmake@latest
+
+    - name: Configure CMake with ${{ matrix.config.name }}
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DOSP_BUILD_TESTS=ON -DCMAKE_CXX_FLAGS="${{ matrix.config.flags }}"
+
+    - name: Build
+      run: cmake --build build --config Release -j
+
+    - name: Run Tests
+      working-directory: build
+      run: ctest -C Release --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer:
+          - address
+          - thread
+          - undefined
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang
+
+    - name: Set up CMake
+      uses: lukka/get-cmake@latest
+
+    - name: Configure CMake with ${{ matrix.sanitizer }} sanitizer
+      env:
+        CC: clang
+        CXX: clang++
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DOSP_BUILD_TESTS=ON \
+          -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer" \
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
+
+    - name: Build
+      run: cmake --build build -j
+
+    - name: Run Tests
+      working-directory: build
+      run: ctest --output-on-failure --verbose
+
+  code-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-format
+        pip install cpplint
+
+    - name: Check clang-format
+      run: |
+        find include examples tests \( -name '*.hpp' -o -name '*.cpp' \) | xargs clang-format --dry-run --Werror || true
+
+    - name: Run cpplint
+      run: |
+        cpplint --recursive --filter=-legal/copyright,-build/header_guard include/ tests/ || true
