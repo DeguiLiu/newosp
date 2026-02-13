@@ -15,3 +15,6 @@ cmake-build-*/
 examples/basic_demo
 docs/osp_analysis_summary.txt
 build_san/
+build_check/
+build_misra/
+build_misra2/

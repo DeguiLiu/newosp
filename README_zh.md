@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
 
-现代 C++14/17 纯头文件嵌入式基础设施库，面向 ARM-Linux 平台，从 OSP (Open Streaming Platform) 代码库 (~140k LOC) 提取并现代化重构。
+现代 C++17 纯头文件嵌入式基础设施库，面向 ARM-Linux 平台，从 OSP (Open Streaming Platform) 代码库 (~140k LOC) 提取并现代化重构。34 个头文件，527 测试用例，ASan/TSan/UBSan 全部通过。
 
 ## 特性
 
@@ -54,7 +54,9 @@
 | `discovery.hpp` | 节点发现 (UDP 多播 + 静态配置) |
 | `service.hpp` | RPC 服务 (请求-响应模式) |
 | `node_manager.hpp` | 节点管理 + 心跳监控 |
-| `node_manager_hsm.hpp` | HSM 驱动的节点连接管理 |
+| `node_manager_hsm.hpp` | HSM 驱动的节点连接管理 (Connected/Suspect/Disconnected) |
+| `service_hsm.hpp` | HSM 驱动的服务生命周期 (Idle/Listening/Active/Error) |
+| `discovery_hsm.hpp` | HSM 驱动的节点发现流程 (Idle/Announcing/Stable/Degraded) |
 
 ### 高级特性
 
@@ -119,6 +121,7 @@ cmake --build build -j$(nproc)
 | `OSP_CONFIG_YAML` | OFF | 启用 YAML 配置后端 (fkYAML) |
 | `OSP_NO_EXCEPTIONS` | OFF | 禁用异常 (`-fno-exceptions`) |
 | `OSP_WITH_SOCKPP` | ON | 启用 sockpp 网络库 (socket/transport) |
+| `OSP_CODEGEN` | OFF | 启用 YAML → C++ 代码生成 (需要 Python3 + PyYAML + Jinja2) |
 
 ## 快速开始
 
@@ -175,8 +178,9 @@ sensor.SpinOnce();
 
 ## 示例和测试
 
-- 示例程序: `examples/` 目录，参见 [examples/README.md](examples/README.md)
-- 单元测试: `tests/` 目录，328+ 测试用例，参见 [tests/README.md](tests/README.md)
+- 示例程序: `examples/` 目录 (12 个示例)，参见 [examples/README.md](examples/README.md)
+- 单元测试: `tests/` 目录，527 测试用例，参见 [tests/README.md](tests/README.md)
+- 代码生成: `tools/ospgen.py` (YAML → C++ 头文件)，参见 `defs/` 目录
 
 ## 设计模式
 

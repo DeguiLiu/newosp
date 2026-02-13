@@ -105,7 +105,7 @@ class ConnectionPool {
     // Find first inactive slot
     for (uint32_t i = 0U; i < MaxConnections; ++i) {
       if (!slots_[i].active) {
-        const uint64_t now = NowUs();
+        const uint64_t now = SteadyNowUs();
         ConnectionInfo& info = slots_[i].info;
         info.id = ConnectionId{next_id_++};
         info.state = ConnectionState::kIdle;
@@ -199,7 +199,7 @@ class ConnectionPool {
           ConnectionError::kNotFound);
     }
 
-    slots_[static_cast<uint32_t>(idx)].info.last_active_us = NowUs();
+    slots_[static_cast<uint32_t>(idx)].info.last_active_us = SteadyNowUs();
     return expected<void, ConnectionError>::success();
   }
 
@@ -248,7 +248,7 @@ class ConnectionPool {
    * @return Number of connections removed
    */
   uint32_t RemoveTimedOut(uint64_t timeout_us) {
-    const uint64_t now = NowUs();
+    const uint64_t now = SteadyNowUs();
     uint32_t removed = 0U;
 
     for (uint32_t i = 0U; i < MaxConnections; ++i) {
@@ -293,17 +293,6 @@ class ConnectionPool {
   Slot slots_[MaxConnections];
   uint32_t count_;
   uint32_t next_id_;
-
-  /**
-   * @brief Get current time in microseconds from steady_clock.
-   */
-  static uint64_t NowUs() {
-    const auto now = std::chrono::steady_clock::now();
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            now.time_since_epoch())
-            .count());
-  }
 
   /**
    * @brief Linear scan to find slot index for a given ConnectionId.

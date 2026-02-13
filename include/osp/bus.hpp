@@ -427,7 +427,7 @@ class AsyncBus {
    */
   bool Publish(PayloadVariant&& payload, uint32_t sender_id) noexcept {
     return PublishInternal(std::move(payload), sender_id,
-                           GetTimestampUs(), MessagePriority::kMedium, 0);
+                           SteadyNowUs(), MessagePriority::kMedium, 0);
   }
 
   /**
@@ -436,7 +436,7 @@ class AsyncBus {
   bool PublishWithPriority(PayloadVariant&& payload, uint32_t sender_id,
                             MessagePriority priority) noexcept {
     return PublishInternal(std::move(payload), sender_id,
-                           GetTimestampUs(), priority, 0);
+                           SteadyNowUs(), priority, 0);
   }
 
   /**
@@ -459,7 +459,7 @@ class AsyncBus {
                      const char* topic) noexcept {
     uint32_t topic_hash = Fnv1a32(topic);
     return PublishInternal(std::move(payload), sender_id,
-                           GetTimestampUs(), MessagePriority::kMedium, topic_hash);
+                           SteadyNowUs(), MessagePriority::kMedium, topic_hash);
   }
 
   /**
@@ -469,7 +469,7 @@ class AsyncBus {
                                   const char* topic, MessagePriority priority) noexcept {
     uint32_t topic_hash = Fnv1a32(topic);
     return PublishInternal(std::move(payload), sender_id,
-                           GetTimestampUs(), priority, topic_hash);
+                           SteadyNowUs(), priority, topic_hash);
   }
 
   // ======================== Subscribe API ========================
@@ -775,7 +775,7 @@ class AsyncBus {
   }
 
   void DispatchMessage(const EnvelopeType& envelope) noexcept {
-    size_t type_idx = envelope.payload.index();
+    uint32_t type_idx = static_cast<uint32_t>(envelope.payload.index());
     if (type_idx >= OSP_BUS_MAX_MESSAGE_TYPES) return;
 
     callback_spin_lock_.lock_shared();
@@ -801,13 +801,6 @@ class AsyncBus {
     if (cb != nullptr) {
       cb(error, msg_id);
     }
-  }
-
-  static uint64_t GetTimestampUs() noexcept {
-    auto now = std::chrono::steady_clock::now();
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-        now.time_since_epoch());
-    return static_cast<uint64_t>(us.count());
   }
 
   // ======================== Data Members ========================

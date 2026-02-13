@@ -205,7 +205,7 @@ int main() {
 
   // ---- Step 2: periodic heartbeats via TimerScheduler ----
   OSP_LOG_INFO("Proto", "--- step 2: heartbeat monitoring ---");
-  osp::TimerScheduler timer(4);
+  osp::TimerScheduler<4> timer;
   timer.Add(50, HeartbeatTimerCb, &client);  // 50 ms period
   timer.Start();
 

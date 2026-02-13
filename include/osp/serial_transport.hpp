@@ -26,7 +26,6 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
-#include <sys/time.h>
 #endif
 
 namespace osp {
@@ -64,25 +63,25 @@ enum class SerialPortHealth : uint8_t {
 // Serial Frame Constants (MISRA C++: Named constants, no magic numbers)
 // ============================================================================
 
-static constexpr uint16_t kSerialSyncWord   = 0xAA55U;
-static constexpr uint16_t kSerialMagic      = 0x4F53U;  // "OS"
-static constexpr uint16_t kSerialAckMagic   = 0x4F41U;  // "OA"
-static constexpr uint8_t  kSerialTailByte   = 0x0DU;
-static constexpr uint8_t  kSerialSyncByte1  = 0xAAU;
-static constexpr uint8_t  kSerialSyncByte2  = 0x55U;
+inline constexpr uint16_t kSerialSyncWord   = 0xAA55U;
+inline constexpr uint16_t kSerialMagic      = 0x4F53U;  // "OS"
+inline constexpr uint16_t kSerialAckMagic   = 0x4F41U;  // "OA"
+inline constexpr uint8_t  kSerialTailByte   = 0x0DU;
+inline constexpr uint8_t  kSerialSyncByte1  = 0xAAU;
+inline constexpr uint8_t  kSerialSyncByte2  = 0x55U;
 
 /// Header: sync(2) + magic(2) + msg_len(2) + seq(2) + type(2) = 10 bytes
-static constexpr uint32_t kSerialHeaderSize = 10U;
+inline constexpr uint32_t kSerialHeaderSize = 10U;
 /// Trailer: crc16(2) + tail(1) = 3 bytes
-static constexpr uint32_t kSerialTrailerSize = 3U;
+inline constexpr uint32_t kSerialTrailerSize = 3U;
 /// Minimum frame: header + trailer, no payload
-static constexpr uint32_t kSerialMinFrameSize = kSerialHeaderSize + kSerialTrailerSize;
+inline constexpr uint32_t kSerialMinFrameSize = kSerialHeaderSize + kSerialTrailerSize;
 
 /// ACK frame: sync(2) + ack_magic(2) + ack_seq(2) + crc16(2) = 8 bytes
-static constexpr uint32_t kSerialAckFrameSize = 8U;
+inline constexpr uint32_t kSerialAckFrameSize = 8U;
 
 /// CRC field size in bytes
-static constexpr uint32_t kSerialCrcSize = 2U;
+inline constexpr uint32_t kSerialCrcSize = 2U;
 
 /// Default maximum frame size
 #ifndef OSP_SERIAL_MAX_FRAME_SIZE
@@ -112,7 +111,7 @@ struct ReliabilityConfig {
 
 /// @brief Configuration for serial port transport with industrial safety features
 struct SerialConfig {
-  char port_name[64] = "/dev/ttyS0";
+  FixedString<63> port_name{"/dev/ttyS0"};
   uint32_t baud_rate = 115200U;
   uint8_t data_bits = 8U;
   uint8_t stop_bits = 1U;
@@ -268,7 +267,7 @@ class SerialTransport {
       return expected<void, SerialError>::success();
     }
 
-    fd_ = ::open(cfg_.port_name, O_RDWR | O_NOCTTY | O_NONBLOCK);
+    fd_ = ::open(cfg_.port_name.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd_ < 0) {
       return expected<void, SerialError>::error(SerialError::kOpenFailed);
     }
@@ -281,7 +280,7 @@ class SerialTransport {
     }
 
     // Initialize health monitoring timestamps
-    const uint64_t now = NowMs();
+    const uint64_t now = SteadyNowUs() / 1000U;
     last_tx_time_ms_ = now;
     last_rx_time_ms_ = now;
     frame_count_window_start_ms_ = now;
@@ -325,7 +324,7 @@ class SerialTransport {
 
     // Rate limiting check
     if (cfg_.max_frames_per_second > 0U) {
-      const uint64_t now = NowMs();
+      const uint64_t now = SteadyNowUs() / 1000U;
       const uint64_t window_duration_ms = 1000U;
 
       if (now - frame_count_window_start_ms_ >= window_duration_ms) {
@@ -395,7 +394,7 @@ class SerialTransport {
 
     if (result.has_value()) {
       ++frames_sent_in_window_;
-      last_tx_time_ms_ = NowMs();
+      last_tx_time_ms_ = SteadyNowUs() / 1000U;
     }
 
     return result;
@@ -421,7 +420,7 @@ class SerialTransport {
         break;
       }
 
-      const uint64_t now = NowMs();
+      const uint64_t now = SteadyNowUs() / 1000U;
       stats_.bytes_received += static_cast<uint64_t>(n);
 
       for (ssize_t i = 0; i < n; ++i) {
@@ -480,7 +479,7 @@ class SerialTransport {
   /// @brief Check port health status
   /// @return Health status enum
   SerialPortHealth GetHealth() const noexcept {
-    const uint64_t now = NowMs();
+    const uint64_t now = SteadyNowUs() / 1000U;
 
     // Check watchdog timeout
     const uint64_t time_since_tx = now - last_tx_time_ms_;
@@ -533,7 +532,7 @@ class SerialTransport {
     ++error_count_in_window_;
 
     // Reset window if needed
-    const uint64_t now = NowMs();
+    const uint64_t now = SteadyNowUs() / 1000U;
     const uint64_t window_duration_ms = 10000U;  // 10 second window
 
     if (now - frame_count_window_start_ms_ >= window_duration_ms) {
@@ -728,7 +727,7 @@ class SerialTransport {
     }
     // ACK received - in a full implementation we'd mark the seq as acknowledged
     // For now, just count it
-    (void)ReadLE16(rx_buf_ + 4U);  // ack_seq
+    static_cast<void>(ReadLE16(rx_buf_ + 4U));  // ack_seq
   }
 
   /// @brief Send ACK frame for received sequence number
@@ -743,7 +742,7 @@ class SerialTransport {
     WriteLE16(ack + 6U, crc);
     // Best-effort write
     if (fd_ >= 0) {
-      (void)::write(fd_, ack, kSerialAckFrameSize);
+      static_cast<void>(::write(fd_, ack, kSerialAckFrameSize));
     }
   }
 
@@ -935,15 +934,7 @@ class SerialTransport {
   // ------------------------------------------------------------------
   // Timestamp helper
   // ------------------------------------------------------------------
-
-  /// @brief Get current time in milliseconds
-  /// @return Timestamp in milliseconds
-  static uint64_t NowMs() noexcept {
-    struct timeval tv;
-    ::gettimeofday(&tv, nullptr);
-    return static_cast<uint64_t>(tv.tv_sec) * 1000U +
-           static_cast<uint64_t>(tv.tv_usec) / 1000U;
-  }
+  // Note: SteadyNowUs() is provided by platform.hpp
 
   // ------------------------------------------------------------------
   // Data members (Google C++ Style: snake_case_ with trailing underscore)

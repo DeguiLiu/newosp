@@ -23,7 +23,7 @@ namespace osp {
 // HSM Events
 // ============================================================================
 
-enum DiscoveryHsmEvent : uint32_t {
+enum class DiscoveryHsmEvent : uint32_t {
   kDiscEvtStart = 1,
   kDiscEvtNodeFound = 2,
   kDiscEvtNodeLost = 3,
@@ -71,7 +71,7 @@ namespace detail {
 // Idle state: discovery service not started
 inline TransitionResult DiscStateIdle(DiscoveryHsmContext& ctx,
                                       const Event& event) {
-  if (event.id == kDiscEvtStart) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStart)) {
     return ctx.sm->RequestTransition(ctx.idx_announcing);
   }
   return TransitionResult::kUnhandled;
@@ -80,11 +80,11 @@ inline TransitionResult DiscStateIdle(DiscoveryHsmContext& ctx,
 // Announcing state: broadcasting self existence
 inline TransitionResult DiscStateAnnouncing(DiscoveryHsmContext& ctx,
                                             const Event& event) {
-  if (event.id == kDiscEvtNodeFound) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeFound)) {
     ++ctx.discovered_count;
     return ctx.sm->RequestTransition(ctx.idx_discovering);
   }
-  if (event.id == kDiscEvtStop) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStop)) {
     return ctx.sm->RequestTransition(ctx.idx_stopped);
   }
   return TransitionResult::kUnhandled;
@@ -93,21 +93,21 @@ inline TransitionResult DiscStateAnnouncing(DiscoveryHsmContext& ctx,
 // Discovering state: receiving other node broadcasts
 inline TransitionResult DiscStateDiscovering(DiscoveryHsmContext& ctx,
                                              const Event& event) {
-  if (event.id == kDiscEvtNodeFound) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeFound)) {
     ++ctx.discovered_count;
     return TransitionResult::kHandled;
   }
-  if (event.id == kDiscEvtNetworkStable) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNetworkStable)) {
     if (ctx.discovered_count >= ctx.stable_threshold) {
       return ctx.sm->RequestTransition(ctx.idx_stable);
     }
     return TransitionResult::kHandled;
   }
-  if (event.id == kDiscEvtNodeLost) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeLost)) {
     ++ctx.lost_count;
     return TransitionResult::kHandled;
   }
-  if (event.id == kDiscEvtStop) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStop)) {
     return ctx.sm->RequestTransition(ctx.idx_stopped);
   }
   return TransitionResult::kUnhandled;
@@ -116,15 +116,15 @@ inline TransitionResult DiscStateDiscovering(DiscoveryHsmContext& ctx,
 // Stable state: network topology stable
 inline TransitionResult DiscStateStable(DiscoveryHsmContext& ctx,
                                         const Event& event) {
-  if (event.id == kDiscEvtNodeFound) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeFound)) {
     ++ctx.discovered_count;
     return TransitionResult::kHandled;
   }
-  if (event.id == kDiscEvtNodeLost) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeLost)) {
     ++ctx.lost_count;
     return ctx.sm->RequestTransition(ctx.idx_degraded);
   }
-  if (event.id == kDiscEvtStop) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStop)) {
     return ctx.sm->RequestTransition(ctx.idx_stopped);
   }
   return TransitionResult::kUnhandled;
@@ -133,31 +133,29 @@ inline TransitionResult DiscStateStable(DiscoveryHsmContext& ctx,
 // Degraded state: partial node timeout, network unstable
 inline TransitionResult DiscStateDegraded(DiscoveryHsmContext& ctx,
                                           const Event& event) {
-  if (event.id == kDiscEvtNodeFound) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeFound)) {
     ++ctx.discovered_count;
     return ctx.sm->RequestTransition(ctx.idx_discovering);
   }
-  if (event.id == kDiscEvtNetworkStable) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNetworkStable)) {
     if (ctx.discovered_count >= ctx.stable_threshold) {
       return ctx.sm->RequestTransition(ctx.idx_stable);
     }
     return TransitionResult::kHandled;
   }
-  if (event.id == kDiscEvtNodeLost) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeLost)) {
     ++ctx.lost_count;
     return TransitionResult::kHandled;
   }
-  if (event.id == kDiscEvtStop) {
+  if (event.id == static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStop)) {
     return ctx.sm->RequestTransition(ctx.idx_stopped);
   }
   return TransitionResult::kUnhandled;
 }
 
 // Stopped state: discovery stopped
-inline TransitionResult DiscStateStopped(DiscoveryHsmContext& ctx,
-                                         const Event& event) {
-  (void)ctx;
-  (void)event;
+inline TransitionResult DiscStateStopped(DiscoveryHsmContext& /*ctx*/,
+                                         const Event& /*event*/) {
   return TransitionResult::kUnhandled;
 }
 
@@ -280,14 +278,14 @@ class HsmDiscovery {
       hsm_.Start();
       started_ = true;
     }
-    Event evt{kDiscEvtStart, nullptr};
+    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStart), nullptr};
     hsm_.Dispatch(evt);
   }
 
   void Stop() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kDiscEvtStop, nullptr};
+    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStop), nullptr};
     hsm_.Dispatch(evt);
   }
 
@@ -298,28 +296,28 @@ class HsmDiscovery {
   void OnNodeFound() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kDiscEvtNodeFound, nullptr};
+    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeFound), nullptr};
     hsm_.Dispatch(evt);
   }
 
   void OnNodeLost() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kDiscEvtNodeLost, nullptr};
+    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeLost), nullptr};
     hsm_.Dispatch(evt);
   }
 
   void CheckStability() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kDiscEvtNetworkStable, nullptr};
+    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNetworkStable), nullptr};
     hsm_.Dispatch(evt);
   }
 
   void TriggerDegraded() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kDiscEvtNetworkDegraded, nullptr};
+    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNetworkDegraded), nullptr};
     hsm_.Dispatch(evt);
   }
 

@@ -361,3 +361,330 @@ TEST_CASE("app - Post and process small message inline", "[app]") {
   std::memcpy(&out, inst->captured, sizeof(out));
   REQUIRE(out == 0x1234567890ABCDEF);
 }
+
+// ============================================================================
+// Instance HSM lifecycle tests
+// ============================================================================
+
+TEST_CASE("app - Instance starts in Created state", "[app][hsm]") {
+  osp::Application<4> app(60, "hsm_test");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  REQUIRE(r.has_value());
+  auto* inst = app.GetInstance(r.value());
+  REQUIRE(inst != nullptr);
+
+  REQUIRE(inst->CoarseState() == osp::InstanceState::kCreated);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kCreated);
+  REQUIRE(std::strcmp(inst->DetailedStateName(), "Created") == 0);
+}
+
+TEST_CASE("app - Instance Initialize lifecycle", "[app][hsm]") {
+  osp::Application<4> app(61, "hsm_init");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  REQUIRE(r.has_value());
+  auto* inst = app.GetInstance(r.value());
+
+  // Created -> Initialize -> Ready/Idle
+  inst->Initialize();
+  REQUIRE(inst->CoarseState() == osp::InstanceState::kReady);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kIdle);
+  REQUIRE(std::strcmp(inst->DetailedStateName(), "Idle") == 0);
+}
+
+TEST_CASE("app - Instance Suspend and Resume", "[app][hsm]") {
+  osp::Application<4> app(62, "hsm_susp");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+  inst->Initialize();
+
+  // Idle -> Suspended
+  inst->Suspend();
+  REQUIRE(inst->CoarseState() == osp::InstanceState::kReady);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kSuspended);
+  REQUIRE(std::strcmp(inst->DetailedStateName(), "Suspended") == 0);
+
+  // Suspended -> Idle
+  inst->Resume();
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kIdle);
+  REQUIRE(std::strcmp(inst->DetailedStateName(), "Idle") == 0);
+}
+
+TEST_CASE("app - Instance MarkError recoverable", "[app][hsm]") {
+  osp::Application<4> app(63, "hsm_err");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+  inst->Initialize();
+
+  // Idle -> Error/Recoverable
+  inst->MarkError(false);
+  REQUIRE(inst->CoarseState() == osp::InstanceState::kError);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kRecoverable);
+  REQUIRE(std::strcmp(inst->DetailedStateName(), "Recoverable") == 0);
+}
+
+TEST_CASE("app - Instance MarkError fatal", "[app][hsm]") {
+  osp::Application<4> app(64, "hsm_fatal");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+  inst->Initialize();
+
+  // Idle -> Error/Fatal
+  inst->MarkError(true);
+  REQUIRE(inst->CoarseState() == osp::InstanceState::kError);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kFatal);
+  REQUIRE(std::strcmp(inst->DetailedStateName(), "Fatal") == 0);
+}
+
+TEST_CASE("app - Instance Recover from error", "[app][hsm]") {
+  osp::Application<4> app(65, "hsm_recov");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+  inst->Initialize();
+
+  // Idle -> Recoverable -> Idle
+  inst->MarkError(false);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kRecoverable);
+
+  inst->Recover();
+  REQUIRE(inst->CoarseState() == osp::InstanceState::kReady);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kIdle);
+}
+
+TEST_CASE("app - Instance Recover from fatal does nothing", "[app][hsm]") {
+  osp::Application<4> app(66, "hsm_no_recov");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+  inst->Initialize();
+
+  // Fatal state: Recover should not transition
+  inst->MarkError(true);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kFatal);
+
+  inst->Recover();  // should be ignored
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kFatal);
+}
+
+TEST_CASE("app - Instance Destroy from any state", "[app][hsm]") {
+  osp::Application<4> app(67, "hsm_destroy");
+  app.SetFactory(TestInstanceFactory);
+
+  SECTION("Destroy from Created") {
+    auto r = app.CreateInstance();
+    auto* inst = app.GetInstance(r.value());
+    inst->Destroy();
+    REQUIRE(inst->CoarseState() == osp::InstanceState::kDestroying);
+    REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kDestroying);
+  }
+
+  SECTION("Destroy from Idle") {
+    auto r = app.CreateInstance();
+    auto* inst = app.GetInstance(r.value());
+    inst->Initialize();
+    inst->Destroy();
+    REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kDestroying);
+  }
+
+  SECTION("Destroy from Error") {
+    auto r = app.CreateInstance();
+    auto* inst = app.GetInstance(r.value());
+    inst->Initialize();
+    inst->MarkError(false);
+    inst->Destroy();
+    REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kDestroying);
+  }
+}
+
+TEST_CASE("app - Instance DispatchMessage transitions through Processing", "[app][hsm]") {
+  osp::Application<4> app(68, "hsm_msg");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+  inst->Initialize();
+
+  // DispatchMessage: Idle -> Processing -> (OnMessage) -> Idle
+  uint32_t payload = 99;
+  inst->DispatchMessage(42, &payload, sizeof(payload));
+
+  auto* ti = static_cast<TestInstance*>(inst);
+  REQUIRE(ti->last_event == 42);
+  REQUIRE(ti->msg_count == 1);
+  // After DispatchMessage completes, should be back in Idle
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kIdle);
+}
+
+TEST_CASE("app - Instance coarse state mapping", "[app][hsm]") {
+  osp::Application<4> app(69, "hsm_coarse");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+
+  // Created -> coarse 0
+  REQUIRE(inst->CurState() == static_cast<uint16_t>(osp::InstanceState::kCreated));
+
+  // Initialize -> coarse 2 (Ready)
+  inst->Initialize();
+  REQUIRE(inst->CurState() == static_cast<uint16_t>(osp::InstanceState::kReady));
+
+  // Suspend -> still coarse Ready
+  inst->Suspend();
+  REQUIRE(inst->CurState() == static_cast<uint16_t>(osp::InstanceState::kReady));
+
+  // MarkError -> coarse 3 (Error)
+  inst->Resume();
+  inst->MarkError(false);
+  REQUIRE(inst->CurState() == static_cast<uint16_t>(osp::InstanceState::kError));
+
+  // Recover -> coarse Ready
+  inst->Recover();
+  REQUIRE(inst->CurState() == static_cast<uint16_t>(osp::InstanceState::kReady));
+
+  // Destroy -> coarse 4 (Destroying)
+  inst->Destroy();
+  REQUIRE(inst->CurState() == static_cast<uint16_t>(osp::InstanceState::kDestroying));
+}
+
+TEST_CASE("app - Instance legacy SetState still works", "[app][hsm]") {
+  osp::Application<4> app(70, "hsm_legacy");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+
+  // Legacy SetState overrides CurState
+  inst->SetState(5);
+  REQUIRE(inst->CurState() == 5);
+
+  inst->SetState(100);
+  REQUIRE(inst->CurState() == 100);
+
+  // HSM transition clears legacy override
+  inst->Initialize();
+  REQUIRE(inst->CurState() == static_cast<uint16_t>(osp::InstanceState::kReady));
+}
+
+TEST_CASE("app - Instance MarkError from Created", "[app][hsm]") {
+  osp::Application<4> app(71, "hsm_err_created");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+
+  // MarkError from Created (via Root handler)
+  inst->MarkError(false);
+  REQUIRE(inst->CoarseState() == osp::InstanceState::kError);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kRecoverable);
+}
+
+TEST_CASE("app - Instance Suspend from non-Ready is ignored", "[app][hsm]") {
+  osp::Application<4> app(72, "hsm_susp_noop");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+
+  // Suspend from Created: should be ignored (no Ready parent)
+  inst->Suspend();
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kCreated);
+}
+
+TEST_CASE("app - Instance Resume from non-Suspended is ignored", "[app][hsm]") {
+  osp::Application<4> app(73, "hsm_resume_noop");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+  inst->Initialize();
+
+  // Resume from Idle: should be ignored
+  inst->Resume();
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kIdle);
+}
+
+TEST_CASE("app - Instance HsmContext access", "[app][hsm]") {
+  osp::Application<4> app(74, "hsm_ctx");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+
+  const auto& ctx = inst->HsmContext();
+  REQUIRE(ctx.sm != nullptr);
+  REQUIRE(ctx.idx_root >= 0);
+  REQUIRE(ctx.idx_created >= 0);
+  REQUIRE(ctx.idx_idle >= 0);
+  REQUIRE(ctx.idx_fatal >= 0);
+  REQUIRE(ctx.idx_destroying >= 0);
+}
+
+TEST_CASE("app - Instance IsInState hierarchy check", "[app][hsm]") {
+  osp::Application<4> app(75, "hsm_isin");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+  const auto& ctx = inst->HsmContext();
+
+  inst->Initialize();
+  // Idle is child of Ready, which is child of Root
+  REQUIRE(inst->IsInState(ctx.idx_idle));
+  REQUIRE(inst->IsInState(ctx.idx_ready));
+  REQUIRE(inst->IsInState(ctx.idx_root));
+  REQUIRE(!inst->IsInState(ctx.idx_error));
+  REQUIRE(!inst->IsInState(ctx.idx_created));
+}
+
+TEST_CASE("app - Instance full lifecycle round-trip", "[app][hsm]") {
+  osp::Application<4> app(76, "hsm_full");
+  app.SetFactory(TestInstanceFactory);
+
+  auto r = app.CreateInstance();
+  auto* inst = app.GetInstance(r.value());
+
+  // Created
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kCreated);
+
+  // Initialize -> Idle
+  inst->Initialize();
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kIdle);
+
+  // Suspend -> Suspended
+  inst->Suspend();
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kSuspended);
+
+  // Resume -> Idle
+  inst->Resume();
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kIdle);
+
+  // MarkError recoverable
+  inst->MarkError(false);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kRecoverable);
+
+  // Recover -> Idle
+  inst->Recover();
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kIdle);
+
+  // MarkError fatal
+  inst->MarkError(true);
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kFatal);
+
+  // Destroy from Fatal
+  inst->Destroy();
+  REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kDestroying);
+  REQUIRE(std::strcmp(inst->DetailedStateName(), "Destroying") == 0);
+}

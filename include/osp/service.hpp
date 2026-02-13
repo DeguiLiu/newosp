@@ -55,9 +55,15 @@ enum class ServiceError : uint8_t {
 // Request frame: { magic(4B) 0x4F535052, req_size(4B), request_data }
 // Response frame: { magic(4B) 0x4F535041, resp_size(4B), response_data }
 
-static constexpr uint32_t kServiceRequestMagic = 0x4F535052;   // "OSPR"
-static constexpr uint32_t kServiceResponseMagic = 0x4F535041;  // "OSPA"
-static constexpr uint32_t kServiceFrameHeaderSize = 8;
+inline constexpr uint32_t kServiceRequestMagic = 0x4F535052;   // "OSPR"
+inline constexpr uint32_t kServiceResponseMagic = 0x4F535041;  // "OSPA"
+inline constexpr uint32_t kServiceFrameHeaderSize = 8;
+
+// Socket option values
+inline constexpr int32_t kSocketOptEnable = 1;
+
+// Async client polling interval
+inline constexpr int32_t kAsyncPollIntervalMs = 10;
 
 // ============================================================================
 // Service - Server-side request handler
@@ -80,7 +86,7 @@ class Service {
 
   struct Config {
     uint16_t port = 0;
-    int backlog = 8;
+    int32_t backlog = 8;
     uint32_t max_concurrent = 4;
   };
 
@@ -123,13 +129,13 @@ class Service {
     }
 
     // Create TCP socket
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    int32_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
       return expected<void, ServiceError>::error(ServiceError::kBindFailed);
     }
 
     // Set SO_REUSEADDR
-    int opt = 1;
+    int32_t opt = kSocketOptEnable;
     ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt,
                  static_cast<socklen_t>(sizeof(opt)));
 
@@ -168,7 +174,7 @@ class Service {
 
     running_.store(false, std::memory_order_release);
 
-    int fd = sockfd_.load(std::memory_order_acquire);
+    int32_t fd = sockfd_.load(std::memory_order_acquire);
     if (fd >= 0) {
       sockfd_.store(-1, std::memory_order_release);
       ::shutdown(fd, SHUT_RDWR);
@@ -196,7 +202,7 @@ class Service {
 
   /** @brief Get the bound port (useful when using port 0 for OS-assigned). */
   uint16_t GetPort() const noexcept {
-    int fd = sockfd_.load(std::memory_order_acquire);
+    int32_t fd = sockfd_.load(std::memory_order_acquire);
     if (fd < 0) return 0;
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
@@ -210,10 +216,10 @@ class Service {
       sockaddr_in client_addr{};
       socklen_t addr_len = sizeof(client_addr);
 
-      int fd = sockfd_.load(std::memory_order_acquire);
+      int32_t fd = sockfd_.load(std::memory_order_acquire);
       if (fd < 0) break;
 
-      int client_fd = ::accept(fd, reinterpret_cast<sockaddr*>(&client_addr),
+      int32_t client_fd = ::accept(fd, reinterpret_cast<sockaddr*>(&client_addr),
                                &addr_len);
       if (client_fd < 0) {
         if (!running_.load(std::memory_order_acquire)) break;
@@ -228,7 +234,7 @@ class Service {
     }
   }
 
-  void HandleConnection(int client_fd) noexcept {
+  void HandleConnection(int32_t client_fd) noexcept {
     while (running_.load(std::memory_order_acquire)) {
       // Receive request frame header
       uint8_t header[kServiceFrameHeaderSize];
@@ -271,32 +277,32 @@ class Service {
     ::close(client_fd);
   }
 
-  static bool RecvAll(int fd, void* buf, size_t len) noexcept {
+  static bool RecvAll(int32_t fd, void* buf, uint64_t len) noexcept {
     uint8_t* ptr = static_cast<uint8_t*>(buf);
-    size_t remaining = len;
+    uint64_t remaining = len;
     while (remaining > 0) {
-      ssize_t n = ::recv(fd, ptr, remaining, 0);
+      int64_t n = ::recv(fd, ptr, remaining, 0);
       if (n <= 0) return false;
       ptr += n;
-      remaining -= static_cast<size_t>(n);
+      remaining -= static_cast<uint64_t>(n);
     }
     return true;
   }
 
-  static bool SendAll(int fd, const void* buf, size_t len) noexcept {
+  static bool SendAll(int32_t fd, const void* buf, uint64_t len) noexcept {
     const uint8_t* ptr = static_cast<const uint8_t*>(buf);
-    size_t remaining = len;
+    uint64_t remaining = len;
     while (remaining > 0) {
-      ssize_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
+      int64_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
       if (n <= 0) return false;
       ptr += n;
-      remaining -= static_cast<size_t>(n);
+      remaining -= static_cast<uint64_t>(n);
     }
     return true;
   }
 
   Config config_;
-  std::atomic<int> sockfd_;
+  std::atomic<int32_t> sockfd_;
   std::atomic<bool> running_;
   std::thread accept_thread_;
   std::vector<std::thread> worker_threads_;
@@ -360,7 +366,7 @@ class Client {
    * @return Client instance on success, ServiceError on failure.
    */
   static expected<Client, ServiceError> Connect(const char* host, uint16_t port,
-                                                 int timeout_ms = 5000) noexcept {
+                                                 int32_t timeout_ms = 5000) noexcept {
     Client client;
 
     // Create socket
@@ -370,7 +376,7 @@ class Client {
     }
 
     // Set socket to non-blocking for timeout support
-    int flags = ::fcntl(client.sockfd_, F_GETFL, 0);
+    int32_t flags = ::fcntl(client.sockfd_, F_GETFL, 0);
     ::fcntl(client.sockfd_, F_SETFL, flags | O_NONBLOCK);
 
     // Connect
@@ -383,7 +389,7 @@ class Client {
       return expected<Client, ServiceError>::error(ServiceError::kConnectFailed);
     }
 
-    int ret = ::connect(client.sockfd_, reinterpret_cast<sockaddr*>(&server_addr),
+    int32_t ret = ::connect(client.sockfd_, reinterpret_cast<sockaddr*>(&server_addr),
                         sizeof(server_addr));
     if (ret < 0 && errno != EINPROGRESS) {
       ::close(client.sockfd_);
@@ -398,8 +404,8 @@ class Client {
       FD_SET(client.sockfd_, &write_fds);
 
       timeval tv;
-      tv.tv_sec = timeout_ms / 1000;
-      tv.tv_usec = (timeout_ms % 1000) * 1000;
+      tv.tv_sec = static_cast<time_t>(timeout_ms / 1000);
+      tv.tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000);
 
       ret = ::select(client.sockfd_ + 1, nullptr, &write_fds, nullptr, &tv);
       if (ret <= 0) {
@@ -409,7 +415,7 @@ class Client {
       }
 
       // Check for connection error
-      int error = 0;
+      int32_t error = 0;
       socklen_t len = sizeof(error);
       ::getsockopt(client.sockfd_, SOL_SOCKET, SO_ERROR, &error, &len);
       if (error != 0) {
@@ -423,7 +429,7 @@ class Client {
     ::fcntl(client.sockfd_, F_SETFL, flags);
 
     // Disable Nagle's algorithm
-    int nodelay = 1;
+    int32_t nodelay = kSocketOptEnable;
     ::setsockopt(client.sockfd_, IPPROTO_TCP, TCP_NODELAY, &nodelay,
                  static_cast<socklen_t>(sizeof(nodelay)));
 
@@ -438,7 +444,7 @@ class Client {
    * @return Response on success, ServiceError on failure.
    */
   expected<Response, ServiceError> Call(const Request& req,
-                                         int timeout_ms = 2000) noexcept {
+                                         int32_t timeout_ms = 2000) noexcept {
     if (!connected_) {
       return expected<Response, ServiceError>::error(ServiceError::kNotRunning);
     }
@@ -462,8 +468,8 @@ class Client {
 
     // Set receive timeout
     timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    tv.tv_sec = static_cast<time_t>(timeout_ms / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000);
     ::setsockopt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &tv,
                  static_cast<socklen_t>(sizeof(tv)));
 
@@ -515,31 +521,31 @@ class Client {
   bool IsConnected() const noexcept { return connected_; }
 
  private:
-  static bool RecvAll(int fd, void* buf, size_t len) noexcept {
+  static bool RecvAll(int32_t fd, void* buf, uint64_t len) noexcept {
     uint8_t* ptr = static_cast<uint8_t*>(buf);
-    size_t remaining = len;
+    uint64_t remaining = len;
     while (remaining > 0) {
-      ssize_t n = ::recv(fd, ptr, remaining, 0);
+      int64_t n = ::recv(fd, ptr, remaining, 0);
       if (n <= 0) return false;
       ptr += n;
-      remaining -= static_cast<size_t>(n);
+      remaining -= static_cast<uint64_t>(n);
     }
     return true;
   }
 
-  static bool SendAll(int fd, const void* buf, size_t len) noexcept {
+  static bool SendAll(int32_t fd, const void* buf, uint64_t len) noexcept {
     const uint8_t* ptr = static_cast<const uint8_t*>(buf);
-    size_t remaining = len;
+    uint64_t remaining = len;
     while (remaining > 0) {
-      ssize_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
+      int64_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
       if (n <= 0) return false;
       ptr += n;
-      remaining -= static_cast<size_t>(n);
+      remaining -= static_cast<uint64_t>(n);
     }
     return true;
   }
 
-  int sockfd_;
+  int32_t sockfd_;
   bool connected_;
 };
 
@@ -571,20 +577,12 @@ template <uint32_t MaxServices = 32>
 class ServiceRegistry {
  public:
   struct Entry {
-    char name[64];
-    char host[64];
+    FixedString<63> name;
+    FixedString<63> host;
     uint16_t port;
-    bool active;
   };
 
-  ServiceRegistry() noexcept {
-    for (uint32_t i = 0; i < MaxServices; ++i) {
-      entries_[i].active = false;
-      entries_[i].name[0] = '\0';
-      entries_[i].host[0] = '\0';
-      entries_[i].port = 0;
-    }
-  }
+  ServiceRegistry() noexcept = default;
 
   /**
    * @brief Register a service endpoint.
@@ -598,27 +596,22 @@ class ServiceRegistry {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Check for duplicate name
-    for (uint32_t i = 0; i < MaxServices; ++i) {
-      if (entries_[i].active && std::strcmp(entries_[i].name, name) == 0) {
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+      if (std::strcmp(entries_[i].name.c_str(), name) == 0) {
         return expected<void, ServiceError>::error(ServiceError::kBindFailed);
       }
     }
 
-    // Find empty slot
-    for (uint32_t i = 0; i < MaxServices; ++i) {
-      if (!entries_[i].active) {
-        std::strncpy(entries_[i].name, name, sizeof(entries_[i].name) - 1);
-        entries_[i].name[sizeof(entries_[i].name) - 1] = '\0';
-        std::strncpy(entries_[i].host, host, sizeof(entries_[i].host) - 1);
-        entries_[i].host[sizeof(entries_[i].host) - 1] = '\0';
-        entries_[i].port = port;
-        entries_[i].active = true;
-        return expected<void, ServiceError>::success();
-      }
+    if (entries_.full()) {
+      return expected<void, ServiceError>::error(ServiceError::kBindFailed);
     }
 
-    // No space available
-    return expected<void, ServiceError>::error(ServiceError::kBindFailed);
+    Entry entry;
+    entry.name.assign(TruncateToCapacity, name);
+    entry.host.assign(TruncateToCapacity, host);
+    entry.port = port;
+    static_cast<void>(entries_.push_back(entry));
+    return expected<void, ServiceError>::success();
   }
 
   /**
@@ -629,12 +622,9 @@ class ServiceRegistry {
   bool Unregister(const char* name) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    for (uint32_t i = 0; i < MaxServices; ++i) {
-      if (entries_[i].active && std::strcmp(entries_[i].name, name) == 0) {
-        entries_[i].active = false;
-        entries_[i].name[0] = '\0';
-        entries_[i].host[0] = '\0';
-        entries_[i].port = 0;
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+      if (std::strcmp(entries_[i].name.c_str(), name) == 0) {
+        static_cast<void>(entries_.erase_unordered(i));
         return true;
       }
     }
@@ -649,8 +639,8 @@ class ServiceRegistry {
   const Entry* Lookup(const char* name) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    for (uint32_t i = 0; i < MaxServices; ++i) {
-      if (entries_[i].active && std::strcmp(entries_[i].name, name) == 0) {
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+      if (std::strcmp(entries_[i].name.c_str(), name) == 0) {
         return &entries_[i];
       }
     }
@@ -663,14 +653,7 @@ class ServiceRegistry {
    */
   uint32_t Count() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < MaxServices; ++i) {
-      if (entries_[i].active) {
-        ++count;
-      }
-    }
-    return count;
+    return entries_.size();
   }
 
   /**
@@ -678,17 +661,11 @@ class ServiceRegistry {
    */
   void Reset() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    for (uint32_t i = 0; i < MaxServices; ++i) {
-      entries_[i].active = false;
-      entries_[i].name[0] = '\0';
-      entries_[i].host[0] = '\0';
-      entries_[i].port = 0;
-    }
+    entries_.clear();
   }
 
  private:
-  Entry entries_[MaxServices];
+  FixedVector<Entry, MaxServices> entries_;
   mutable std::mutex mutex_;
 };
 
@@ -763,7 +740,7 @@ class AsyncClient {
    * @return AsyncClient instance on success, ServiceError on failure.
    */
   static expected<AsyncClient, ServiceError> Connect(
-      const char* host, uint16_t port, int timeout_ms = 5000) noexcept {
+      const char* host, uint16_t port, int32_t timeout_ms = 5000) noexcept {
     AsyncClient async_client;
 
     auto client_r = Client<Request, Response>::Connect(host, port, timeout_ms);
@@ -784,7 +761,7 @@ class AsyncClient {
    * @param timeout_ms Timeout in milliseconds.
    * @return true if call was initiated, false if already in progress.
    */
-  bool CallAsync(const Request& req, int timeout_ms = 2000) noexcept {
+  bool CallAsync(const Request& req, int32_t timeout_ms = 2000) noexcept {
     if (!connected_) return false;
 
     bool expected_false = false;
@@ -836,16 +813,15 @@ class AsyncClient {
    * @param timeout_ms Timeout in milliseconds.
    * @return Response on success, ServiceError on failure.
    */
-  expected<Response, ServiceError> GetResult(int timeout_ms = 5000) noexcept {
-    auto start = std::chrono::steady_clock::now();
+  expected<Response, ServiceError> GetResult(int32_t timeout_ms = 5000) noexcept {
+    const uint64_t start_us = SteadyNowUs();
+    const uint64_t timeout_us = static_cast<uint64_t>(timeout_ms) * 1000U;
 
     while (!result_ready_.load(std::memory_order_acquire)) {
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now() - start);
-      if (elapsed.count() >= timeout_ms) {
+      if (SteadyNowUs() - start_us >= timeout_us) {
         return expected<Response, ServiceError>::error(ServiceError::kTimeout);
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      std::this_thread::sleep_for(std::chrono::milliseconds(kAsyncPollIntervalMs));
     }
 
     std::lock_guard<std::mutex> lock(result_mutex_);

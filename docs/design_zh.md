@@ -25,7 +25,7 @@
 
 ### 1.1 定位
 
-newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头文件基础设施库。提供嵌入式系统开发所需的核心基础能力: 配置管理、日志、定时调度、远程调试、内存池、消息总线、节点通信、工作线程池、共享内存 IPC、网络传输、串口通信。
+newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头文件基础设施库。提供嵌入式系统开发所需的核心基础能力: 配置管理、日志、定时调度、远程调试、内存池、消息总线、节点通信、工作线程池、共享内存 IPC、网络传输、串口通信、层次状态机、行为树、QoS 服务质量、生命周期节点、代码生成。
 
 ### 1.2 适用场景
 
@@ -43,7 +43,8 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 - **构建**: CMake >= 3.14, FetchContent 自动管理依赖
 - **测试**: Catch2 v3.5.2
 - **代码规范**: Google C++ Style (clang-format), cpplint
-- **CI**: GitHub Actions (GCC/Clang x Debug/Release, Sanitizers)
+- **CI**: GitHub Actions (Ubuntu, GCC x Debug/Release, Sanitizers)
+- **代码生成**: Python3 + PyYAML + Jinja2 (YAML → C++ 头文件)
 
 ---
 
@@ -499,7 +500,14 @@ vocabulary.hpp  ────────────────  (依赖 platfo
     |
     ├── bus.hpp        (依赖 platform: kCacheLineSize)
     ├── node.hpp       (依赖 vocabulary + bus.hpp)
-    └── worker_pool.hpp (依赖 vocabulary + bus.hpp)
+    ├── worker_pool.hpp (依赖 vocabulary + bus.hpp)
+    ├── hsm.hpp        (依赖 platform)
+    ├── bt.hpp         (依赖 platform)
+    ├── net.hpp        (依赖 vocabulary + sockpp)
+    ├── transport_factory.hpp (依赖 platform + vocabulary)
+    ├── node_manager_hsm.hpp  (依赖 hsm + platform + vocabulary)
+    ├── service_hsm.hpp       (依赖 hsm + platform)
+    └── discovery_hsm.hpp     (依赖 hsm + platform)
 ```
 
 ### 3.3 数据流
@@ -1032,7 +1040,7 @@ expected<V, E> 返回
 
 ---
 
-## 6. 扩展模块规划
+## 6. 扩展模块设计
 
 ### 6.1 Socket 抽象层 (P0, socket.hpp)
 
@@ -1237,7 +1245,7 @@ controller.SpinOnce();  // 本地 + 远程消息统一处理
 - Phase 5 (Phase O): 节点自动发现 (multicast) + Service/Client RPC
 - Phase 6 (未来): 可选 protobuf/flatbuffers 序列化后端
 
-### 6.5 层次状态机 (P1, hsm.hpp)
+### 6.5 层次状态机 (P0, hsm.hpp) -- 已实现
 
 **目标**: 集成 hsm-cpp，事件驱动状态管理。
 
@@ -1258,7 +1266,7 @@ controller.SpinOnce();  // 本地 + 远程消息统一处理
 
 **与消息总线集成**: 总线消息 -> Event(id) -> StateMachine::Dispatch()
 
-### 6.6 行为树 (P2, bt.hpp)
+### 6.6 行为树 (P1, bt.hpp) -- 已实现
 
 **目标**: 集成 bt-cpp，异步任务编排。
 
@@ -1343,7 +1351,7 @@ class RealtimeExecutor {
 - 优先级队列: 高优先级节点优先执行，借鉴 CyberRT ClassicContext 多级队列
 - 周期调度: Executor 内部集成 Timer，支持固定周期触发节点 SpinOnce
 
-### 6.8 数据融合 (P2, data_fusion.hpp)
+### 6.8 数据融合 (P1, data_fusion.hpp) -- 已实现
 
 **目标**: 借鉴 CyberRT DataFusion，多消息对齐触发。
 
@@ -1573,7 +1581,7 @@ Node::Publish(msg)
 | 零拷贝 | 无 | LoanedMessage (SHM) + inproc 指针传递 |
 | 传输选择 | 手动配置 | 自动路由 (TransportFactory) |
 
-### 6.10 节点发现与服务 (P2, discovery.hpp / service.hpp)
+### 6.10 节点发现与服务 (P2, discovery.hpp / service.hpp) -- 已实现
 
 **目标**: 借鉴 ROS2 Service/Client 和 CyberRT 拓扑发现。
 
@@ -2126,6 +2134,134 @@ motor.Configure();
 motor.Activate();
 ```
 
+### 6.17 HSM 驱动节点管理 (P0, node_manager_hsm.hpp) -- 已实现
+
+**目标**: 为每个 TCP/SHM 连接提供独立的 HSM 状态机，管理 Connected → Suspect → Disconnected 生命周期。
+
+**状态机**:
+
+Connected ──(心跳超时)──> Suspect ──(超时次数达阈值)──> Disconnected
+    ^                       |
+    └───(心跳恢复)──────────┘
+
+**事件枚举**: `kEvtHeartbeatReceived`, `kEvtHeartbeatTimeout`, `kEvtDisconnect`, `kEvtReconnect`
+
+**关键特性**:
+- 每连接独立 HSM 实例 (最多 64 个)
+- Suspect 状态支持可配置超时次数
+- 断开/恢复回调通知
+- 15 test cases, ASan/TSan/UBSan clean
+
+### 6.18 HSM 驱动服务生命周期 (P1, service_hsm.hpp) -- 已实现
+
+**目标**: 管理 Service 服务端连接生命周期: Idle → Listening → Active → Error/ShuttingDown。
+
+**状态机**:
+
+Idle ──(Start)──> Listening ──(ClientConnected)──> Active
+                                                     |
+                                              (Error) |  (Stop)
+                                                     v      v
+                                                   Error  ShuttingDown
+                                                     |
+                                              (Recover)
+                                                     v
+                                                   Idle
+
+**事件枚举**: `kSvcEvtStart`, `kSvcEvtClientConnected`, `kSvcEvtClientDisconnected`, `kSvcEvtError`, `kSvcEvtStop`, `kSvcEvtRecover`
+
+**关键特性**:
+- 直接持有 `StateMachine<ServiceHsmContext, 8>` 成员
+- 错误回调 + 关停回调 (函数指针 + context)
+- mutex 保护状态转换
+- 10 test cases
+
+### 6.19 HSM 驱动节点发现 (P1, discovery_hsm.hpp) -- 已实现
+
+**目标**: 管理节点发现流程: Idle → Announcing → Discovering → Stable/Degraded。
+
+**状态机**:
+
+Idle ──(Start)──> Announcing ──(NodeFound)──> Discovering
+                                                  |
+                                    (达到阈值)     |  (节点丢失)
+                                                  v      v
+                                               Stable  Degraded
+                                                  |      |
+                                           (NodeLost)  (恢复)
+                                                  v      v
+                                              Degraded  Stable
+
+**事件枚举**: `kDiscEvtStart`, `kDiscEvtNodeFound`, `kDiscEvtNodeLost`, `kDiscEvtNetworkStable`, `kDiscEvtNetworkDegraded`, `kDiscEvtStop`
+
+**关键特性**:
+- 直接持有 `StateMachine<DiscoveryHsmContext, 8>` 成员
+- 可配置稳定阈值 (`stable_threshold`)
+- 稳定/降级回调通知
+- 10 test cases
+
+### 6.20 网络层封装 (P0, net.hpp) -- 已实现
+
+**目标**: sockpp 集成层，提供 `osp::expected` 错误处理的网络接口。
+
+**核心类型**:
+
+| 类型 | 说明 |
+|------|------|
+| `TcpClient` | TCP 客户端连接 (sockpp::tcp_connector 封装) |
+| `TcpServer` | TCP 服务端监听 (sockpp::tcp_acceptor 封装) |
+| `UdpPeer` | UDP 收发 (sockpp::udp_socket 封装) |
+| `NetError` | 网络错误枚举 (ConnectFailed/BindFailed/SendFailed 等) |
+
+**条件编译**: 仅在 `OSP_HAS_SOCKPP` 定义时可用。11 test cases。
+
+### 6.21 传输工厂 (P0, transport_factory.hpp) -- 已实现
+
+**目标**: 自动传输选择策略 (借鉴 CyberRT)，根据配置自动选择 inproc/shm/tcp。
+
+**核心接口**:
+
+```cpp
+enum class TransportType : uint8_t { kInproc, kShm, kTcp, kAuto };
+
+struct TransportConfig {
+  TransportType type = TransportType::kAuto;
+  char remote_host[64] = "127.0.0.1";
+  uint16_t remote_port = 0;
+  char shm_channel_name[64] = "";
+};
+
+class TransportFactory {
+ public:
+  static TransportType Detect(const TransportConfig& cfg);
+  static bool IsLocalHost(const char* host);
+};
+```
+
+**选择策略**: Auto 模式下: 有 SHM channel name → kShm; localhost → kShm; 远程地址 → kTcp。10 test cases。
+
+### 6.22 代码生成工具 (ospgen)
+
+**目标**: YAML 驱动的编译期代码生成，零运行时开销。
+
+**工具链**: Python3 + PyYAML + Jinja2 → C++ 头文件
+
+**生成目标**:
+
+| 类型 | YAML 定义 | 生成内容 |
+|------|----------|---------|
+| 消息/事件 | `defs/*.yaml` (events + messages) | 事件枚举、POD 结构体、`std::variant` 类型、`static_assert` |
+| 节点拓扑 | `defs/topology.yaml` (nodes) | `constexpr` 节点 ID/名称常量 |
+
+**CMake 集成**: `OSP_CODEGEN=ON` 时通过 `add_custom_command` + `DEPENDS` 增量生成。
+
+**使用示例**:
+
+```bash
+python3 tools/ospgen.py --input defs/protocol_messages.yaml \
+  --output include/generated/ --templates tools/templates/
+```
+
 ---
 
 | 模块 | 静态内存 | 堆内存 | 线程数 |
@@ -2167,6 +2303,11 @@ motor.Activate();
 | QosProfile (per topic) | ~16 B | 0 | 0 |
 | LifecycleNode (per node) | ~1 KB | 0 | 0 |
 | RealtimeExecutor | <1 KB | 0 | 1 |
+| NodeManagerHsm (64 nodes) | ~8 KB | 0 | 1 |
+| HsmService (per service) | ~1 KB | 0 | 0 |
+| HsmDiscovery | ~1 KB | 0 | 0 |
+| TcpClient/TcpServer (net.hpp) | ~256 B | 0 | 0 |
+| TransportFactory | 0 (无状态) | 0 | 0 |
 
 ---
 
@@ -2194,6 +2335,7 @@ motor.Activate();
 | 成员变量 | snake_case_ | `running_`, `config_` |
 | 常量 | kPascalCase | `kCacheLineSize`, `kMaxBlocks` |
 | 枚举值 | kPascalCase | `kSuccess`, `kQueueFull` |
+| HSM 事件枚举 | k\<Module\>Evt\<Name\> | `kSvcEvtStart`, `kDiscEvtNodeFound`, `kEvtHeartbeatReceived` |
 | 宏 | OSP_UPPER_CASE | `OSP_LOG_INFO`, `OSP_ASSERT` |
 | 模板参数 | PascalCase | `PayloadVariant`, `BlockSize` |
 
@@ -2201,7 +2343,7 @@ motor.Activate();
 
 | 阶段 | 内容 |
 |------|------|
-| **build-and-test** | Ubuntu + macOS, Debug + Release |
+| **build-and-test** | Ubuntu, Debug + Release |
 | **build-with-options** | `-fno-exceptions -fno-rtti` 兼容性 |
 | **sanitizers** | ASan, TSan, UBSan |
 | **code-quality** | clang-format + cpplint |
@@ -2344,7 +2486,8 @@ motor.Activate();
 ### Phase L: 集成验证 (已完成)
 
 92. **全模块集成测试**: 7 个跨模块场景 (Node+WorkerPool+Bus, HSM+Bus, BT+Node, FusedSubscription+Node, Executor+Node, ConnectionPool+Timer, Node+Timer+Bus)
-93. **Sanitizer 全量验证**: ASan + UBSan + TSan 全部通过 (255 tests, 1003 assertions)
+93. **Sanitizer 全量验证**: ASan + UBSan + TSan 全部通过
+    - **527 测试用例**: 34 个头文件全覆盖，含 18 个测试文件 + 1 个集成测试
 94. **原始 OSP 代码分析**: osp_legacy_analysis.md -- 从 demo/test 入手的完整功能文档
 
 ### Phase M: 共享内存 IPC -- 进程间通信 (已完成, 269 tests, d2f5450)
@@ -2436,6 +2579,26 @@ motor.Activate();
 143. **test_discovery.cpp**: 多播发现、节点上下线通知
 144. **test_service.cpp**: 请求-响应、超时处理、并发调用
 
+### Phase R: HSM 驱动模块 + 代码生成 (已实现, 527 tests)
+
+> HSM 驱动的高级状态管理模块，为 service、discovery、node_manager 提供独立的
+> 状态机生命周期管理。同时引入 YAML 驱动的编译期代码生成工具 ospgen。
+
+145. **node_manager_hsm.hpp**: HSM 驱动节点心跳状态机 (Connected/Suspect/Disconnected)
+146. **service_hsm.hpp**: HSM 驱动服务生命周期 (Idle/Listening/Active/Error/ShuttingDown)
+147. **discovery_hsm.hpp**: HSM 驱动节点发现流程 (Idle/Announcing/Discovering/Stable/Degraded)
+148. **net.hpp**: sockpp 集成层 (TcpClient/TcpServer/UdpPeer + osp::expected)
+149. **transport_factory.hpp**: 自动传输选择 (inproc/shm/tcp)
+150. **tools/ospgen.py**: YAML → C++ 代码生成器 (PyYAML + Jinja2)
+151. **tools/templates/**: Jinja2 模板 (messages.hpp.j2, topology.hpp.j2)
+152. **defs/**: YAML 定义文件 (protocol_messages, sensor_messages, topology)
+153. **examples/codegen_demo.cpp**: 代码生成 3 部分演示
+154. **test_node_manager_hsm.cpp**: 15 test cases
+155. **test_service_hsm.cpp**: 10 test cases
+156. **test_discovery_hsm.cpp**: 10 test cases
+157. **test_net.cpp**: 11 test cases
+158. **test_transport_factory.cpp**: 10 test cases
+
 ---
 
 ### 原始 OSP 功能覆盖对照表
@@ -2477,6 +2640,9 @@ motor.Activate();
 | **自动传输选择** | transport_factory.hpp | 已完成 | inproc/shm/tcp 自动路由 |
 | **节点发现** | discovery.hpp (Phase Q) | 已完成 | UDP 多播 + 静态配置 |
 | **字节序转换** | Serializer<T> (transport.hpp) | 已完成 | POD memcpy，可扩展 protobuf |
+| **HSM 驱动服务生命周期** | service_hsm.hpp (Phase R) | 已完成 | Idle/Listening/Active/Error 四状态 |
+| **HSM 驱动节点发现** | discovery_hsm.hpp (Phase R) | 已完成 | Idle/Announcing/Stable/Degraded 四状态 |
+| **YAML 代码生成** | ospgen.py (tools/) | 已完成 | 消息/事件/拓扑编译期生成 |
 
 ---
 
@@ -2516,6 +2682,9 @@ motor.Activate();
 | sockpp RAII Socket | sockpp | socket.hpp/transport.hpp 网络层 |
 | NATIVE_SYNC 串口 | CSerialPort | serial_transport.hpp 串口传输 |
 | 帧同步状态机 + CRC16 | 工业通信协议 | serial_transport.hpp 可靠传输 |
+| HSM 驱动生命周期 | ROS2 Lifecycle + hsm-cpp | service_hsm/discovery_hsm/node_manager_hsm |
+| 每连接独立状态机 | 工业协议栈 | node_manager_hsm 连接管理 |
+| YAML 编译期代码生成 | ROS2 msg/srv codegen | ospgen.py 消息/拓扑生成 |
 
 ### 10.2 编译期配置汇总
 
@@ -2575,10 +2744,15 @@ motor.Activate();
 | executor | 内部线程安全; Stop 可跨线程调用 |
 | data_fusion | FusedSubscription 继承 Bus 订阅线程安全性 |
 | semaphore | LightSemaphore/PosixSemaphore 全线程安全 |
-| shm_transport (规划) | ShmRingBuffer 无锁 CAS; ShmChannel 单写多读 |
-| serial_transport (规划) | NATIVE_SYNC 单线程; IoPoller 事件循环线程安全 |
-| discovery (规划) | 内部线程安全; 回调在发现线程执行 |
-| service (规划) | Service handler 在服务线程执行; Client::Call 可跨线程 |
-| app (规划) | Application::Post 线程安全; Instance::OnMessage 单线程 |
-| post (规划) | OspPost 线程安全; OspSendAndWait 阻塞调用线程 |
-| node_manager (规划) | 内部 mutex 保护; 回调在心跳线程执行 |
+| shm_transport | ShmRingBuffer 无锁 CAS; ShmChannel 单写多读 |
+| serial_transport | NATIVE_SYNC 单线程; IoPoller 事件循环线程安全 |
+| discovery | 内部线程安全; 回调在发现线程执行 |
+| service | Service handler 在服务线程执行; Client::Call 可跨线程 |
+| app | Application::Post 线程安全; Instance::OnMessage 单线程 |
+| post | OspPost 线程安全; OspSendAndWait 阻塞调用线程 |
+| node_manager | 内部 mutex 保护; 回调在心跳线程执行 |
+| node_manager_hsm | mutex 保护; 每连接独立 HSM 单线程 Dispatch |
+| service_hsm | mutex 保护; HSM 单线程 Dispatch |
+| discovery_hsm | mutex 保护; HSM 单线程 Dispatch |
+| net | 单线程使用 (同 sockpp); fd 不可共享 |
+| transport_factory | 无状态静态方法; 线程安全 |

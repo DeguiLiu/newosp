@@ -137,8 +137,7 @@ TEST_CASE("serial - Open and close", "[serial]") {
   }
 
   osp::SerialConfig cfg;
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
-  cfg.port_name[sizeof(cfg.port_name) - 1] = '\0';
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
 
   // Close the slave fd so SerialTransport can open it
   ::close(pty.slave);
@@ -188,8 +187,7 @@ TEST_CASE("serial - Send and receive single frame", "[serial]") {
 
   // Sender uses slave_name
   osp::SerialConfig tx_cfg;
-  std::strncpy(tx_cfg.port_name, pty.slave_name, sizeof(tx_cfg.port_name) - 1);
-  tx_cfg.port_name[sizeof(tx_cfg.port_name) - 1] = '\0';
+  tx_cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave);
   pty.slave = -1;
 
@@ -220,8 +218,7 @@ TEST_CASE("serial - Send and receive single frame", "[serial]") {
   }
 
   osp::SerialConfig rx_cfg;
-  std::strncpy(rx_cfg.port_name, pty2.slave_name, sizeof(rx_cfg.port_name) - 1);
-  rx_cfg.port_name[sizeof(rx_cfg.port_name) - 1] = '\0';
+  rx_cfg.port_name.assign(osp::TruncateToCapacity, pty2.slave_name);
   ::close(pty2.slave);
   pty2.slave = -1;
 
@@ -259,11 +256,11 @@ TEST_CASE("serial - Send and receive multiple frames", "[serial]") {
   if (!pty_tx.valid || !pty_rx.valid) SKIP("PTY not available");
 
   osp::SerialConfig tx_cfg;
-  std::strncpy(tx_cfg.port_name, pty_tx.slave_name, sizeof(tx_cfg.port_name) - 1);
+  tx_cfg.port_name.assign(osp::TruncateToCapacity, pty_tx.slave_name);
   ::close(pty_tx.slave); pty_tx.slave = -1;
 
   osp::SerialConfig rx_cfg;
-  std::strncpy(rx_cfg.port_name, pty_rx.slave_name, sizeof(rx_cfg.port_name) - 1);
+  rx_cfg.port_name.assign(osp::TruncateToCapacity, pty_rx.slave_name);
   ::close(pty_rx.slave); pty_rx.slave = -1;
 
   osp::SerialTransport sender(tx_cfg);
@@ -311,12 +308,12 @@ TEST_CASE("serial - Sequence number tracking", "[serial]") {
   if (!pty_tx.valid || !pty_rx.valid) SKIP("PTY not available");
 
   osp::SerialConfig tx_cfg;
-  std::strncpy(tx_cfg.port_name, pty_tx.slave_name, sizeof(tx_cfg.port_name) - 1);
+  tx_cfg.port_name.assign(osp::TruncateToCapacity, pty_tx.slave_name);
   ::close(pty_tx.slave); pty_tx.slave = -1;
 
   osp::SerialConfig rx_cfg;
   rx_cfg.reliability.enable_seq_check = true;
-  std::strncpy(rx_cfg.port_name, pty_rx.slave_name, sizeof(rx_cfg.port_name) - 1);
+  rx_cfg.port_name.assign(osp::TruncateToCapacity, pty_rx.slave_name);
   ::close(pty_rx.slave); pty_rx.slave = -1;
 
   osp::SerialTransport sender(tx_cfg);
@@ -360,7 +357,7 @@ TEST_CASE("serial - CRC error detection", "[serial]") {
   if (!pty.valid) SKIP("PTY not available");
 
   osp::SerialConfig cfg;
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
@@ -402,7 +399,7 @@ TEST_CASE("serial - Oversize frame rejection", "[serial]") {
 
   osp::SerialConfig cfg;
   cfg.frame_max_size = 32;  // Very small limit
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
@@ -440,7 +437,7 @@ TEST_CASE("serial - Statistics tracking", "[serial]") {
   if (!pty_tx.valid) SKIP("PTY not available");
 
   osp::SerialConfig cfg;
-  std::strncpy(cfg.port_name, pty_tx.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty_tx.slave_name);
   ::close(pty_tx.slave); pty_tx.slave = -1;
 
   osp::SerialTransport tx(cfg);
@@ -472,7 +469,7 @@ TEST_CASE("serial - Frame sync recovery", "[serial]") {
   if (!pty.valid) SKIP("PTY not available");
 
   osp::SerialConfig cfg;
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
@@ -513,7 +510,7 @@ TEST_CASE("serial - Health monitoring healthy state", "[serial]") {
 
   osp::SerialConfig cfg;
   cfg.watchdog_timeout_ms = 1000;
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport transport(cfg);
@@ -541,7 +538,7 @@ TEST_CASE("serial - Health monitoring degraded state", "[serial]") {
   osp::SerialConfig cfg;
   cfg.degraded_error_threshold = 2;
   cfg.failed_error_threshold = 10;
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
@@ -583,7 +580,7 @@ TEST_CASE("serial - Rate limiting", "[serial]") {
 
   osp::SerialConfig cfg;
   cfg.max_frames_per_second = 5;  // Very low limit for testing
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport tx(cfg);
@@ -624,12 +621,12 @@ TEST_CASE("serial - Sequence number wraparound", "[serial]") {
   if (!pty_tx.valid || !pty_rx.valid) SKIP("PTY not available");
 
   osp::SerialConfig tx_cfg;
-  std::strncpy(tx_cfg.port_name, pty_tx.slave_name, sizeof(tx_cfg.port_name) - 1);
+  tx_cfg.port_name.assign(osp::TruncateToCapacity, pty_tx.slave_name);
   ::close(pty_tx.slave); pty_tx.slave = -1;
 
   osp::SerialConfig rx_cfg;
   rx_cfg.reliability.enable_seq_check = true;
-  std::strncpy(rx_cfg.port_name, pty_rx.slave_name, sizeof(rx_cfg.port_name) - 1);
+  rx_cfg.port_name.assign(osp::TruncateToCapacity, pty_rx.slave_name);
   ::close(pty_rx.slave); pty_rx.slave = -1;
 
   osp::SerialTransport sender(tx_cfg);
@@ -674,7 +671,7 @@ TEST_CASE("serial - Write retry tracking", "[serial]") {
   osp::SerialConfig cfg;
   cfg.write_retry_count = 5;
   cfg.write_retry_delay_us = 100;
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport tx(cfg);
@@ -704,7 +701,7 @@ TEST_CASE("serial - Rx callback invocation", "[serial]") {
   if (!pty.valid) SKIP("PTY not available");
 
   osp::SerialConfig cfg;
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
@@ -747,7 +744,7 @@ TEST_CASE("serial - Partial frame timeout", "[serial]") {
 
   osp::SerialConfig cfg;
   cfg.inter_byte_timeout_ms = 1;  // Very short timeout for testing
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
@@ -805,7 +802,7 @@ TEST_CASE("serial - Zero-payload frame", "[serial]") {
   if (!pty.valid) SKIP("PTY not available");
 
   osp::SerialConfig cfg;
-  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
   ::close(pty.slave); pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);

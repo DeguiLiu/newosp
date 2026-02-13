@@ -58,8 +58,8 @@ enum class NodeManagerError : uint8_t {
  * +--------+----------+------------+
  * Total: 14 bytes
  */
-static constexpr uint32_t kHeartbeatMagic = 0x4F534842;  // "OSHB"
-static constexpr uint32_t kHeartbeatFrameSize = 14;
+inline constexpr uint32_t kHeartbeatMagic = 0x4F534842;  // "OSHB"
+inline constexpr uint32_t kHeartbeatFrameSize = 14;
 
 // ============================================================================
 // NodeManagerConfig
@@ -85,14 +85,14 @@ struct NodeEntry {
   uint16_t node_id;
   TcpSocket socket;
   TcpListener listener;
-  char remote_host[64];
+  FixedString<63> remote_host;
   uint16_t remote_port;
   uint64_t last_heartbeat_us;  // Microsecond timestamp
   bool active;
   bool is_listener;  // true = we accepted this connection
 
   NodeEntry() noexcept
-      : node_id(0), socket(), listener(), remote_host{}, remote_port(0),
+      : node_id(0), socket(), listener(), remote_host(), remote_port(0),
         last_heartbeat_us(0), active(false), is_listener(false) {}
 };
 
@@ -162,10 +162,9 @@ class NodeManager {
     // Store listener in the node entry
     slot->node_id = AllocNodeId();
     slot->listener = static_cast<TcpListener&&>(listener_r.value());
-    std::memset(slot->remote_host, 0, sizeof(slot->remote_host));
-    std::memcpy(slot->remote_host, "0.0.0.0", 7);
+    slot->remote_host = "0.0.0.0";
     slot->remote_port = port;
-    slot->last_heartbeat_us = GetTimestampUs();
+    slot->last_heartbeat_us = SteadyNowUs();
     slot->active = true;
     slot->is_listener = true;
     ++node_count_;
@@ -209,20 +208,13 @@ class NodeManager {
     }
 
     // Disable Nagle's algorithm for low-latency heartbeats
-    (void)sock.SetNoDelay(true);
+    static_cast<void>(sock.SetNoDelay(true));
 
     slot->node_id = AllocNodeId();
     slot->socket = static_cast<TcpSocket&&>(sock);
-    std::memset(slot->remote_host, 0, sizeof(slot->remote_host));
-    if (host != nullptr) {
-      uint32_t i = 0;
-      for (; i < 63 && host[i] != '\0'; ++i) {
-        slot->remote_host[i] = host[i];
-      }
-      slot->remote_host[i] = '\0';
-    }
+    slot->remote_host.assign(TruncateToCapacity, host);
     slot->remote_port = port;
-    slot->last_heartbeat_us = GetTimestampUs();
+    slot->last_heartbeat_us = SteadyNowUs();
     slot->active = true;
     slot->is_listener = false;
     ++node_count_;
@@ -384,7 +376,7 @@ class NodeManager {
 
   void HeartbeatLoop() noexcept {
     while (running_.load()) {
-      auto start = std::chrono::steady_clock::now();
+      const uint64_t start_us = SteadyNowUs();
 
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -401,19 +393,17 @@ class NodeManager {
       }
 
       // Sleep for the configured interval
-      auto end = std::chrono::steady_clock::now();
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-          end - start);
-      auto sleep_time = std::chrono::milliseconds(config_.heartbeat_interval_ms) - elapsed;
-      if (sleep_time.count() > 0) {
-        std::this_thread::sleep_for(sleep_time);
+      const uint64_t elapsed_us = SteadyNowUs() - start_us;
+      const uint64_t interval_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) * 1000U;
+      if (elapsed_us < interval_us) {
+        std::this_thread::sleep_for(std::chrono::microseconds(interval_us - elapsed_us));
       }
     }
   }
 
   void SendHeartbeat(NodeEntry& node) noexcept {
     uint8_t frame[kHeartbeatFrameSize];
-    uint64_t timestamp = GetTimestampUs();
+    uint64_t timestamp = SteadyNowUs();
 
     // Encode: magic(4B) + node_id(2B) + timestamp(8B)
     std::memcpy(frame + 0, &kHeartbeatMagic, 4);
@@ -429,7 +419,7 @@ class NodeManager {
   }
 
   void CheckTimeouts() noexcept {
-    uint64_t now = GetTimestampUs();
+    uint64_t now = SteadyNowUs();
     uint64_t timeout_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) *
                           config_.heartbeat_timeout_count * 1000;
 
@@ -454,13 +444,6 @@ class NodeManager {
   // ==========================================================================
   // Utilities
   // ==========================================================================
-
-  static uint64_t GetTimestampUs() noexcept {
-    auto now = std::chrono::steady_clock::now();
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            now.time_since_epoch()).count());
-  }
 
   uint16_t AllocNodeId() noexcept { return next_node_id_++; }
 

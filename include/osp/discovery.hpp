@@ -49,14 +49,14 @@ enum class DiscoveryError : uint8_t {
 // ============================================================================
 
 struct DiscoveredNode {
-  char name[64];           // Node name
-  char address[64];        // IP address
+  FixedString<63> name;           // Node name
+  FixedString<63> address;        // IP address
   uint16_t port;           // Service port
   uint64_t last_seen_us;   // Last heartbeat time (microseconds)
   bool alive;              // Is alive
 
   DiscoveredNode() noexcept
-      : name{}, address{}, port(0), last_seen_us(0), alive(false) {}
+      : name(), address(), port(0), last_seen_us(0), alive(false) {}
 };
 
 // ============================================================================
@@ -64,13 +64,13 @@ struct DiscoveredNode {
 // ============================================================================
 
 struct TopicInfo {
-  char name[64];        // Topic name
-  char type_name[64];   // Type name (e.g. "SensorData")
+  FixedString<63> name;        // Topic name
+  FixedString<63> type_name;   // Type name (e.g. "SensorData")
   uint16_t publisher_port;
   bool is_publisher;    // true=publisher, false=subscriber
 
   TopicInfo() noexcept
-      : name{}, type_name{}, publisher_port(0), is_publisher(false) {}
+      : name(), type_name(), publisher_port(0), is_publisher(false) {}
 };
 
 // ============================================================================
@@ -78,13 +78,13 @@ struct TopicInfo {
 // ============================================================================
 
 struct ServiceInfo {
-  char name[64];        // Service name
-  char request_type[64];
-  char response_type[64];
+  FixedString<63> name;        // Service name
+  FixedString<63> request_type;
+  FixedString<63> response_type;
   uint16_t port;
 
   ServiceInfo() noexcept
-      : name{}, request_type{}, response_type{}, port(0) {}
+      : name(), request_type(), response_type(), port(0) {}
 };
 
 // ============================================================================
@@ -111,10 +111,10 @@ class StaticDiscovery {
     }
 
     DiscoveredNode& node = nodes_[count_];
-    CopyString(node.name, name, 63);
-    CopyString(node.address, address, 63);
+    node.name.assign(TruncateToCapacity, name);
+    node.address.assign(TruncateToCapacity, address);
     node.port = port;
-    node.last_seen_us = GetTimestampUs();
+    node.last_seen_us = SteadyNowUs();
     node.alive = true;
     ++count_;
 
@@ -128,7 +128,7 @@ class StaticDiscovery {
    */
   bool RemoveNode(const char* name) noexcept {
     for (uint32_t i = 0; i < count_; ++i) {
-      if (std::strcmp(nodes_[i].name, name) == 0) {
+      if (std::strcmp(nodes_[i].name.c_str(), name) == 0) {
         // Shift remaining nodes down
         for (uint32_t j = i; j < count_ - 1; ++j) {
           nodes_[j] = nodes_[j + 1];
@@ -147,7 +147,7 @@ class StaticDiscovery {
    */
   const DiscoveredNode* FindNode(const char* name) const noexcept {
     for (uint32_t i = 0; i < count_; ++i) {
-      if (std::strcmp(nodes_[i].name, name) == 0) {
+      if (std::strcmp(nodes_[i].name.c_str(), name) == 0) {
         return &nodes_[i];
       }
     }
@@ -170,25 +170,6 @@ class StaticDiscovery {
   uint32_t NodeCount() const noexcept { return count_; }
 
  private:
-  static void CopyString(char* dst, const char* src, uint32_t max_len) noexcept {
-    if (src == nullptr) {
-      dst[0] = '\0';
-      return;
-    }
-    uint32_t i = 0;
-    for (; i < max_len && src[i] != '\0'; ++i) {
-      dst[i] = src[i];
-    }
-    dst[i] = '\0';
-  }
-
-  static uint64_t GetTimestampUs() noexcept {
-    auto now = std::chrono::steady_clock::now();
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-        now.time_since_epoch());
-    return static_cast<uint64_t>(us.count());
-  }
-
   DiscoveredNode nodes_[MaxNodes];
   uint32_t count_;
 };
@@ -232,7 +213,6 @@ class MulticastDiscovery {
         join_ctx_(nullptr),
         leave_ctx_(nullptr),
         node_count_(0) {
-    local_name_[0] = '\0';
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       nodes_[i].alive = false;
     }
@@ -251,7 +231,7 @@ class MulticastDiscovery {
    * @param service_port Local service port.
    */
   void SetLocalNode(const char* name, uint16_t service_port) noexcept {
-    CopyString(local_name_, name, 63);
+    local_name_.assign(TruncateToCapacity, name);
     local_port_ = service_port;
   }
 
@@ -293,7 +273,8 @@ class MulticastDiscovery {
     }
 
     // Set SO_REUSEADDR
-    int opt = 1;
+    constexpr int32_t kSoReuseAddrValue = 1;
+    int32_t opt = kSoReuseAddrValue;
     ::setsockopt(sockfd_, SOL_SOCKET, SO_REUSEADDR, &opt,
                  static_cast<socklen_t>(sizeof(opt)));
 
@@ -330,7 +311,7 @@ class MulticastDiscovery {
     }
 
     // Set socket to non-blocking for receive thread
-    int flags = ::fcntl(sockfd_, F_GETFL, 0);
+    int32_t flags = ::fcntl(sockfd_, F_GETFL, 0);
     ::fcntl(sockfd_, F_SETFL, flags | O_NONBLOCK);
 
     running_.store(true, std::memory_order_release);
@@ -378,7 +359,7 @@ class MulticastDiscovery {
   const DiscoveredNode* FindNode(const char* name) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     for (uint32_t i = 0; i < MaxNodes; ++i) {
-      if (nodes_[i].alive && std::strcmp(nodes_[i].name, name) == 0) {
+      if (nodes_[i].alive && std::strcmp(nodes_[i].name.c_str(), name) == 0) {
         return &nodes_[i];
       }
     }
@@ -420,7 +401,9 @@ class MulticastDiscovery {
       // Build announce packet
       uint8_t packet[kAnnounceSize];
       std::memcpy(packet, &kAnnounceMagic, 4);
-      std::memcpy(packet + 4, local_name_, 64);
+      // Copy local_name_ into packet (64 bytes, zero-padded)
+      std::memset(packet + 4, 0, 64);
+      std::memcpy(packet + 4, local_name_.c_str(), local_name_.size());
       std::memcpy(packet + 68, &local_port_, 2);
 
       ::sendto(sockfd_, packet, kAnnounceSize, 0,
@@ -434,6 +417,7 @@ class MulticastDiscovery {
 
   void ReceiveLoop() noexcept {
     uint8_t packet[kAnnounceSize];
+    constexpr uint32_t kSleepIntervalMs = 100;
 
     while (running_.load(std::memory_order_acquire)) {
       sockaddr_in sender_addr{};
@@ -451,7 +435,7 @@ class MulticastDiscovery {
       CheckTimeouts();
 
       // Sleep briefly to avoid busy-wait
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      std::this_thread::sleep_for(std::chrono::milliseconds(kSleepIntervalMs));
     }
   }
 
@@ -462,25 +446,25 @@ class MulticastDiscovery {
     if (magic != kAnnounceMagic) return;
 
     // Extract name and port
-    char name[64];
-    std::memcpy(name, packet + 4, 64);
-    name[63] = '\0';  // Ensure null-terminated
+    char name_buf[64];
+    std::memcpy(name_buf, packet + 4, 64);
+    name_buf[63] = '\0';  // Ensure null-terminated
 
     uint16_t port;
     std::memcpy(&port, packet + 68, 2);
 
     // Get sender IP
-    char address[64];
-    ::inet_ntop(AF_INET, &sender.sin_addr, address, sizeof(address));
+    char address_buf[64];
+    ::inet_ntop(AF_INET, &sender.sin_addr, address_buf, sizeof(address_buf));
 
-    uint64_t now = GetTimestampUs();
+    uint64_t now = SteadyNowUs();
 
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Find or create node entry
     uint32_t slot = MaxNodes;
     for (uint32_t i = 0; i < MaxNodes; ++i) {
-      if (nodes_[i].alive && std::strcmp(nodes_[i].name, name) == 0) {
+      if (nodes_[i].alive && std::strcmp(nodes_[i].name.c_str(), name_buf) == 0) {
         slot = i;
         break;
       }
@@ -500,8 +484,8 @@ class MulticastDiscovery {
 
     bool is_new = !nodes_[slot].alive;
 
-    CopyString(nodes_[slot].name, name, 63);
-    CopyString(nodes_[slot].address, address, 63);
+    nodes_[slot].name.assign(TruncateToCapacity, name_buf);
+    nodes_[slot].address.assign(TruncateToCapacity, address_buf);
     nodes_[slot].port = port;
     nodes_[slot].last_seen_us = now;
     nodes_[slot].alive = true;
@@ -515,7 +499,7 @@ class MulticastDiscovery {
   }
 
   void CheckTimeouts() noexcept {
-    uint64_t now = GetTimestampUs();
+    uint64_t now = SteadyNowUs();
     uint64_t timeout_us = static_cast<uint64_t>(config_.timeout_ms) * 1000;
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -533,32 +517,13 @@ class MulticastDiscovery {
     }
   }
 
-  static void CopyString(char* dst, const char* src, uint32_t max_len) noexcept {
-    if (src == nullptr) {
-      dst[0] = '\0';
-      return;
-    }
-    uint32_t i = 0;
-    for (; i < max_len && src[i] != '\0'; ++i) {
-      dst[i] = src[i];
-    }
-    dst[i] = '\0';
-  }
-
-  static uint64_t GetTimestampUs() noexcept {
-    auto now = std::chrono::steady_clock::now();
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-        now.time_since_epoch());
-    return static_cast<uint64_t>(us.count());
-  }
-
   Config config_;
   int sockfd_;
   std::atomic<bool> running_;
   std::thread announce_thread_;
   std::thread receive_thread_;
 
-  char local_name_[64];
+  FixedString<63> local_name_;
   uint16_t local_port_;
 
   NodeCallback on_node_join_;
@@ -637,7 +602,7 @@ class TopicAwareDiscovery {
     uint32_t count = 0;
     for (uint32_t i = 0; i < local_topic_count_ && count < max_results; ++i) {
       if (local_topics_[i].is_publisher &&
-          std::strcmp(local_topics_[i].name, topic_name) == 0) {
+          std::strcmp(local_topics_[i].name.c_str(), topic_name) == 0) {
         out[count++] = local_topics_[i];
       }
     }
@@ -657,7 +622,7 @@ class TopicAwareDiscovery {
     uint32_t count = 0;
     for (uint32_t i = 0; i < local_topic_count_ && count < max_results; ++i) {
       if (!local_topics_[i].is_publisher &&
-          std::strcmp(local_topics_[i].name, topic_name) == 0) {
+          std::strcmp(local_topics_[i].name.c_str(), topic_name) == 0) {
         out[count++] = local_topics_[i];
       }
     }
@@ -672,7 +637,7 @@ class TopicAwareDiscovery {
   const ServiceInfo* FindService(const char* service_name) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     for (uint32_t i = 0; i < local_service_count_; ++i) {
-      if (std::strcmp(local_services_[i].name, service_name) == 0) {
+      if (std::strcmp(local_services_[i].name.c_str(), service_name) == 0) {
         return &local_services_[i];
       }
     }

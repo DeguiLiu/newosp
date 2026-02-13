@@ -8,6 +8,7 @@
 #ifndef OSP_PLATFORM_HPP_
 #define OSP_PLATFORM_HPP_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -81,6 +82,28 @@ inline void AssertFail(const char* cond, const char* file, int line) {
 #define OSP_ASSERT(cond)                                                    \
   ((cond) ? ((void)0) : ::osp::detail::AssertFail(#cond, __FILE__, __LINE__))
 #endif
+
+// ============================================================================
+// Monotonic Clock Utilities
+// ============================================================================
+
+/**
+ * @brief Return current monotonic time in nanoseconds (steady_clock).
+ */
+inline uint64_t SteadyNowNs() noexcept {
+  const auto dur = std::chrono::steady_clock::now().time_since_epoch();
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count());
+}
+
+/**
+ * @brief Return current monotonic time in microseconds (steady_clock).
+ */
+inline uint64_t SteadyNowUs() noexcept {
+  const auto dur = std::chrono::steady_clock::now().time_since_epoch();
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(dur).count());
+}
 
 // ============================================================================
 // Macro Helpers

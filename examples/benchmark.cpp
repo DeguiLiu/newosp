@@ -343,7 +343,7 @@ static void TimerCallback(void* /*ctx*/) {
 }
 static void BenchTimer() {
   printf("\n=== Timer Scheduling Overhead (schedule + cancel cycle) ===\n");
-  osp::TimerScheduler sched(16);
+  osp::TimerScheduler<16> sched;
   auto start_r = sched.Start();
   if (!start_r.has_value()) {
     printf("  [ERROR] Failed to start timer scheduler\n");

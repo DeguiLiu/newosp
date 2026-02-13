@@ -395,16 +395,14 @@ TEST_CASE("service - ServiceRegistry register and lookup", "[service][registry]"
   // Lookup existing service
   const auto* entry1 = registry.Lookup("add_service");
   REQUIRE(entry1 != nullptr);
-  REQUIRE(entry1->active);
-  REQUIRE(std::strcmp(entry1->name, "add_service") == 0);
-  REQUIRE(std::strcmp(entry1->host, "127.0.0.1") == 0);
+  REQUIRE(entry1->name == "add_service");
+  REQUIRE(entry1->host == "127.0.0.1");
   REQUIRE(entry1->port == 8080);
 
   const auto* entry2 = registry.Lookup("echo_service");
   REQUIRE(entry2 != nullptr);
-  REQUIRE(entry2->active);
-  REQUIRE(std::strcmp(entry2->name, "echo_service") == 0);
-  REQUIRE(std::strcmp(entry2->host, "192.168.1.100") == 0);
+  REQUIRE(entry2->name == "echo_service");
+  REQUIRE(entry2->host == "192.168.1.100");
   REQUIRE(entry2->port == 9090);
 
   // Lookup non-existent service

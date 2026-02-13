@@ -64,7 +64,7 @@ class TcpClient {
    * @return TcpClient on success, NetError on failure
    */
   static expected<TcpClient, NetError> Connect(const char* host, uint16_t port,
-                                                int timeout_ms = 5000) noexcept {
+                                                int32_t timeout_ms = 5000) noexcept {
     // Create address
     auto addr_res = sockpp::inet_address::create(host, port);
     if (!addr_res) {
@@ -183,7 +183,7 @@ class TcpServer {
    * @return TcpServer on success, NetError on failure
    */
   static expected<TcpServer, NetError> Listen(uint16_t port,
-                                               int backlog = 16) noexcept {
+                                               int32_t backlog = 16) noexcept {
     TcpServer server;
 
     // Create address (bind to all interfaces)

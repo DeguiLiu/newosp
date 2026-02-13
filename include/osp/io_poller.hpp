@@ -51,7 +51,7 @@ inline constexpr uint8_t operator|(IoEvent a, IoEvent b) {
 }
 
 struct PollResult {
-  int fd;
+  int32_t fd;
   uint8_t events;  // bitmask of IoEvent
 };
 

@@ -211,7 +211,7 @@ class FusedSubscription {
 
  protected:
   void TryFire() noexcept {
-    for (size_t i = 0; i < kNumTypes; ++i) {
+    for (uint32_t i = 0; i < kNumTypes; ++i) {
       if (!received_[i]) return;
     }
 
@@ -222,13 +222,13 @@ class FusedSubscription {
     fire_count_.fetch_add(1, std::memory_order_relaxed);
 
     // Auto-reset for next cycle
-    for (size_t i = 0; i < kNumTypes; ++i) {
+    for (uint32_t i = 0; i < kNumTypes; ++i) {
       received_[i] = false;
     }
   }
 
   /** @brief Store timestamp from envelope header for the given type index. */
-  void StoreTimestamp(size_t idx,
+  void StoreTimestamp(uint32_t idx,
                       const MessageEnvelope<PayloadVariant>& env) noexcept {
     timestamps_[idx] = env.header.timestamp_us;
   }

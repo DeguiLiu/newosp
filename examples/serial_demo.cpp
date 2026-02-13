@@ -330,13 +330,13 @@ int main() {
 
   // Configure serial transports
   osp::SerialConfig cfg_a;
-  std::strncpy(cfg_a.port_name, pty.slave_a_name, sizeof(cfg_a.port_name) - 1);
+  cfg_a.port_name.assign(osp::TruncateToCapacity, pty.slave_a_name);
   cfg_a.baud_rate = 115200;
   cfg_a.reliability.enable_ack = true;
   cfg_a.reliability.max_retries = 3;
 
   osp::SerialConfig cfg_b;
-  std::strncpy(cfg_b.port_name, pty.slave_b_name, sizeof(cfg_b.port_name) - 1);
+  cfg_b.port_name.assign(osp::TruncateToCapacity, pty.slave_b_name);
   cfg_b.baud_rate = 115200;
   cfg_b.reliability.enable_ack = true;
   cfg_b.reliability.max_retries = 3;
@@ -414,7 +414,7 @@ int main() {
   transport_b.SetRxCallback(ControllerRxCallback, &ctrl_ctx);
 
   // Setup Timer for periodic sensor publishing
-  osp::TimerScheduler timer(4);
+  osp::TimerScheduler<4> timer;
   timer.Start();
   timer.Add(500, SensorPublishCallback, &sensor_ctx); // 500ms period
 

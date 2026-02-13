@@ -26,7 +26,7 @@ namespace osp {
 // HSM Events
 // ============================================================================
 
-enum NodeConnectionEvent : uint32_t {
+enum class NodeConnectionEvent : uint32_t {
   kEvtHeartbeatReceived = 1,
   kEvtHeartbeatTimeout = 2,
   kEvtDisconnect = 3,
@@ -71,18 +71,18 @@ namespace detail {
 // Connected state: normal operation
 inline TransitionResult StateConnected(NodeConnectionContext& ctx,
                                        const Event& event) {
-  if (event.id == kEvtHeartbeatReceived) {
+  if (event.id == static_cast<uint32_t>(NodeConnectionEvent::kEvtHeartbeatReceived)) {
     ctx.missed_heartbeats = 0;
     if (event.data != nullptr) {
       ctx.last_heartbeat_us = *static_cast<const uint64_t*>(event.data);
     }
     return TransitionResult::kHandled;
   }
-  if (event.id == kEvtHeartbeatTimeout) {
+  if (event.id == static_cast<uint32_t>(NodeConnectionEvent::kEvtHeartbeatTimeout)) {
     ++ctx.missed_heartbeats;
     return ctx.sm->RequestTransition(ctx.idx_suspect);
   }
-  if (event.id == kEvtDisconnect) {
+  if (event.id == static_cast<uint32_t>(NodeConnectionEvent::kEvtDisconnect)) {
     ctx.disconnect_requested = true;
     return ctx.sm->RequestTransition(ctx.idx_disconnected);
   }
@@ -92,21 +92,21 @@ inline TransitionResult StateConnected(NodeConnectionContext& ctx,
 // Suspect state: missed some heartbeats
 inline TransitionResult StateSuspect(NodeConnectionContext& ctx,
                                      const Event& event) {
-  if (event.id == kEvtHeartbeatReceived) {
+  if (event.id == static_cast<uint32_t>(NodeConnectionEvent::kEvtHeartbeatReceived)) {
     ctx.missed_heartbeats = 0;
     if (event.data != nullptr) {
       ctx.last_heartbeat_us = *static_cast<const uint64_t*>(event.data);
     }
     return ctx.sm->RequestTransition(ctx.idx_connected);
   }
-  if (event.id == kEvtHeartbeatTimeout) {
+  if (event.id == static_cast<uint32_t>(NodeConnectionEvent::kEvtHeartbeatTimeout)) {
     ++ctx.missed_heartbeats;
     if (ctx.missed_heartbeats >= ctx.max_missed) {
       return ctx.sm->RequestTransition(ctx.idx_disconnected);
     }
     return TransitionResult::kHandled;
   }
-  if (event.id == kEvtDisconnect) {
+  if (event.id == static_cast<uint32_t>(NodeConnectionEvent::kEvtDisconnect)) {
     ctx.disconnect_requested = true;
     return ctx.sm->RequestTransition(ctx.idx_disconnected);
   }
@@ -116,7 +116,7 @@ inline TransitionResult StateSuspect(NodeConnectionContext& ctx,
 // Disconnected state: connection lost
 inline TransitionResult StateDisconnected(NodeConnectionContext& ctx,
                                           const Event& event) {
-  if (event.id == kEvtReconnect) {
+  if (event.id == static_cast<uint32_t>(NodeConnectionEvent::kEvtReconnect)) {
     ctx.missed_heartbeats = 0;
     ctx.disconnect_requested = false;
     return ctx.sm->RequestTransition(ctx.idx_connected);
@@ -181,7 +181,7 @@ class HsmNodeManager {
     slot->context.node_id = node_id;
     slot->context.missed_heartbeats = 0;
     slot->context.max_missed = max_missed;
-    slot->context.last_heartbeat_us = GetTimestampUs();
+    slot->context.last_heartbeat_us = SteadyNowUs();
     slot->context.disconnect_requested = false;
     slot->context.on_disconnect = global_disconnect_fn_;
     slot->context.disconnect_ctx = global_disconnect_ctx_;
@@ -253,15 +253,15 @@ class HsmNodeManager {
     NodeEntry* node = FindNode(node_id);
     if (node == nullptr || !node->active) return;
 
-    uint64_t timestamp = GetTimestampUs();
-    Event evt{kEvtHeartbeatReceived, &timestamp};
+    uint64_t timestamp = SteadyNowUs();
+    Event evt{static_cast<uint32_t>(NodeConnectionEvent::kEvtHeartbeatReceived), &timestamp};
     node->GetHsm()->Dispatch(evt);
   }
 
   void CheckTimeouts() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    uint64_t now = GetTimestampUs();
+    uint64_t now = SteadyNowUs();
     uint64_t timeout_us = static_cast<uint64_t>(heartbeat_interval_ms_) * 1000;
 
     for (uint32_t i = 0; i < MaxNodes; ++i) {
@@ -269,7 +269,7 @@ class HsmNodeManager {
 
       NodeEntry& entry = entries_[i];
       if ((now - entry.context.last_heartbeat_us) > timeout_us) {
-        Event evt{kEvtHeartbeatTimeout, nullptr};
+        Event evt{static_cast<uint32_t>(NodeConnectionEvent::kEvtHeartbeatTimeout), nullptr};
         entry.GetHsm()->Dispatch(evt);
       }
     }
@@ -281,7 +281,7 @@ class HsmNodeManager {
     NodeEntry* node = FindNode(node_id);
     if (node == nullptr || !node->active) return;
 
-    Event evt{kEvtDisconnect, nullptr};
+    Event evt{static_cast<uint32_t>(NodeConnectionEvent::kEvtDisconnect), nullptr};
     node->GetHsm()->Dispatch(evt);
   }
 
@@ -291,7 +291,7 @@ class HsmNodeManager {
     NodeEntry* node = FindNode(node_id);
     if (node == nullptr || !node->active) return;
 
-    Event evt{kEvtReconnect, nullptr};
+    Event evt{static_cast<uint32_t>(NodeConnectionEvent::kEvtReconnect), nullptr};
     node->GetHsm()->Dispatch(evt);
   }
 
@@ -416,25 +416,14 @@ class HsmNodeManager {
 
   void MonitorLoop() noexcept {
     while (running_.load()) {
-      auto start = std::chrono::steady_clock::now();
+      const uint64_t start_us = SteadyNowUs();
       CheckTimeouts();
-      auto end = std::chrono::steady_clock::now();
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-          end - start);
-      auto sleep_time =
-          std::chrono::milliseconds(heartbeat_interval_ms_) - elapsed;
-      if (sleep_time.count() > 0) {
-        std::this_thread::sleep_for(sleep_time);
+      const uint64_t elapsed_us = SteadyNowUs() - start_us;
+      const uint64_t interval_us = static_cast<uint64_t>(heartbeat_interval_ms_) * 1000U;
+      if (elapsed_us < interval_us) {
+        std::this_thread::sleep_for(std::chrono::microseconds(interval_us - elapsed_us));
       }
     }
-  }
-
-  static uint64_t GetTimestampUs() noexcept {
-    auto now = std::chrono::steady_clock::now();
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            now.time_since_epoch())
-            .count());
   }
 
   NodeEntry* FindSlot() noexcept {
