@@ -17,6 +17,7 @@ add_osp_example(osp_protocol_demo   protocol_demo.cpp)
 add_osp_example(osp_client_demo     client_demo.cpp)
 add_osp_example(osp_priority_demo   priority_demo.cpp)
 add_osp_example(osp_benchmark       benchmark.cpp)
+add_osp_example(serial_demo         serial_demo.cpp)
 
 # Benchmark builds with -O3 regardless of the global build type
 target_compile_options(osp_benchmark PRIVATE -O3)

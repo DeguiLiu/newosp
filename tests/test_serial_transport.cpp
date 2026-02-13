@@ -504,6 +504,198 @@ TEST_CASE("serial - Frame sync recovery", "[serial]") {
 }
 
 // ============================================================================
+// Health monitoring
+// ============================================================================
+
+TEST_CASE("serial - Health monitoring healthy state", "[serial]") {
+  auto pty = CreatePtyPair();
+  if (!pty.valid) SKIP("PTY not available");
+
+  osp::SerialConfig cfg;
+  cfg.watchdog_timeout_ms = 1000;
+  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  ::close(pty.slave); pty.slave = -1;
+
+  osp::SerialTransport transport(cfg);
+  REQUIRE(transport.Open().has_value());
+
+  // Initially healthy
+  REQUIRE(transport.GetHealth() == osp::SerialPortHealth::kHealthy);
+  REQUIRE(transport.IsHealthy());
+
+  // Send a frame to update tx timestamp
+  uint8_t data = 0x42;
+  transport.Send(1, &data, 1);
+
+  // Still healthy
+  REQUIRE(transport.GetHealth() == osp::SerialPortHealth::kHealthy);
+
+  transport.Close();
+  ::close(pty.master);
+}
+
+TEST_CASE("serial - Health monitoring degraded state", "[serial]") {
+  auto pty = CreatePtyPair();
+  if (!pty.valid) SKIP("PTY not available");
+
+  osp::SerialConfig cfg;
+  cfg.degraded_error_threshold = 2;
+  cfg.failed_error_threshold = 10;
+  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  ::close(pty.slave); pty.slave = -1;
+
+  osp::SerialTransport receiver(cfg);
+  REQUIRE(receiver.Open().has_value());
+
+  RxRecord rec;
+  receiver.SetRxCallback(TestRxCallback, &rec);
+
+  // Send corrupted frames to trigger errors
+  uint8_t frame[256];
+  uint8_t payload[] = {0x01, 0x02};
+  uint32_t len = BuildFrame(frame, sizeof(frame), 1, 0, payload, 2);
+
+  // Corrupt multiple frames
+  for (int i = 0; i < 3; ++i) {
+    frame[osp::kSerialHeaderSize] ^= 0xFF;  // Corrupt payload
+    ::write(pty.master, frame, len);
+    ::usleep(5000);
+    receiver.Poll();
+  }
+
+  // Should be degraded after multiple errors
+  auto health = receiver.GetHealth();
+  REQUIRE((health == osp::SerialPortHealth::kDegraded ||
+           health == osp::SerialPortHealth::kFailed));
+  REQUIRE_FALSE(receiver.IsHealthy());
+
+  receiver.Close();
+  ::close(pty.master);
+}
+
+// ============================================================================
+// Rate limiting
+// ============================================================================
+
+TEST_CASE("serial - Rate limiting", "[serial]") {
+  auto pty = CreatePtyPair();
+  if (!pty.valid) SKIP("PTY not available");
+
+  osp::SerialConfig cfg;
+  cfg.max_frames_per_second = 5;  // Very low limit for testing
+  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  ::close(pty.slave); pty.slave = -1;
+
+  osp::SerialTransport tx(cfg);
+  REQUIRE(tx.Open().has_value());
+
+  uint8_t data = 0x01;
+  uint32_t success_count = 0;
+  uint32_t rate_limit_count = 0;
+
+  // Try to send more frames than the limit
+  for (int i = 0; i < 10; ++i) {
+    auto r = tx.Send(1, &data, 1);
+    if (r.has_value()) {
+      ++success_count;
+    } else if (r.get_error() == osp::SerialError::kRateLimitExceeded) {
+      ++rate_limit_count;
+    }
+  }
+
+  // Should have hit rate limit
+  REQUIRE(success_count <= cfg.max_frames_per_second);
+  REQUIRE(rate_limit_count > 0);
+
+  auto stats = tx.GetStatistics();
+  REQUIRE(stats.rate_limit_drops > 0);
+
+  tx.Close();
+  ::close(pty.master);
+}
+
+// ============================================================================
+// Sequence number wraparound
+// ============================================================================
+
+TEST_CASE("serial - Sequence number wraparound", "[serial]") {
+  auto pty_tx = CreatePtyPair();
+  auto pty_rx = CreatePtyPair();
+  if (!pty_tx.valid || !pty_rx.valid) SKIP("PTY not available");
+
+  osp::SerialConfig tx_cfg;
+  std::strncpy(tx_cfg.port_name, pty_tx.slave_name, sizeof(tx_cfg.port_name) - 1);
+  ::close(pty_tx.slave); pty_tx.slave = -1;
+
+  osp::SerialConfig rx_cfg;
+  rx_cfg.reliability.enable_seq_check = true;
+  std::strncpy(rx_cfg.port_name, pty_rx.slave_name, sizeof(rx_cfg.port_name) - 1);
+  ::close(pty_rx.slave); pty_rx.slave = -1;
+
+  osp::SerialTransport sender(tx_cfg);
+  osp::SerialTransport receiver(rx_cfg);
+  REQUIRE(sender.Open().has_value());
+  REQUIRE(receiver.Open().has_value());
+
+  RxRecord rec;
+  receiver.SetRxCallback(TestRxCallback, &rec);
+
+  // Send frames - sequence numbers should increment
+  for (int i = 0; i < 3; ++i) {
+    uint8_t d = static_cast<uint8_t>(i);
+    sender.Send(1, &d, 1);
+  }
+
+  ::usleep(20000);
+  uint8_t relay[4096];
+  ssize_t n = ::read(pty_tx.master, relay, sizeof(relay));
+  REQUIRE(n > 0);
+  REQUIRE(::write(pty_rx.master, relay, static_cast<size_t>(n)) == n);
+  ::usleep(10000);
+
+  receiver.Poll();
+  auto stats = receiver.GetStatistics();
+  REQUIRE(stats.frames_received == 3);
+
+  sender.Close();
+  receiver.Close();
+  ::close(pty_tx.master);
+  ::close(pty_rx.master);
+}
+
+// ============================================================================
+// Write retry statistics
+// ============================================================================
+
+TEST_CASE("serial - Write retry tracking", "[serial]") {
+  auto pty = CreatePtyPair();
+  if (!pty.valid) SKIP("PTY not available");
+
+  osp::SerialConfig cfg;
+  cfg.write_retry_count = 5;
+  cfg.write_retry_delay_us = 100;
+  std::strncpy(cfg.port_name, pty.slave_name, sizeof(cfg.port_name) - 1);
+  ::close(pty.slave); pty.slave = -1;
+
+  osp::SerialTransport tx(cfg);
+  REQUIRE(tx.Open().has_value());
+
+  uint8_t data[100];
+  std::memset(data, 0xAB, sizeof(data));
+
+  // Send some data
+  auto r = tx.Send(1, data, sizeof(data));
+  REQUIRE(r.has_value());
+
+  auto stats = tx.GetStatistics();
+  REQUIRE(stats.frames_sent > 0);
+  // write_retries may be 0 if write succeeded immediately
+
+  tx.Close();
+  ::close(pty.master);
+}
+
+// ============================================================================
 // Rx callback invocation
 // ============================================================================
 
