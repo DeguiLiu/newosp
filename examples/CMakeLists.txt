@@ -36,3 +36,6 @@ endif()
 
 # --- SHM IPC demo (subdirectory) -------------------------------------------
 add_subdirectory(shm_ipc)
+
+# --- Net stress demo (subdirectory) ----------------------------------------
+add_subdirectory(net_stress)
