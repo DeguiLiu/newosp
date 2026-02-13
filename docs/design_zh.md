@@ -2445,17 +2445,17 @@ motor.Activate();
 | **ospvos -- 线程管理** | std::thread + worker_pool.hpp | 已完成 | C++17 标准线程 |
 | **ospvos -- 信号量** | semaphore.hpp | 已完成 | LightSemaphore/PosixSemaphore |
 | **ospvos -- 消息队列** | bus.hpp (AsyncBus) | 已完成 | 无锁 MPSC 替代 VOS 消息队列 |
-| **ospvos -- Socket** | socket.hpp + sockpp (Phase N) | 已完成/重构中 | RAII 封装 |
-| **ospvos -- 串口** | serial_transport.hpp (CSerialPort) | 已实现 | NATIVE_SYNC 模式，IoPoller 集成 |
+| **ospvos -- Socket** | socket.hpp + sockpp (Phase N) | 已完成 | RAII 封装 |
+| **ospvos -- 串口** | serial_transport.hpp (CSerialPort) | 已完成 | NATIVE_SYNC 模式，IoPoller 集成 |
 | **osppost -- 本地投递** | bus.hpp Publish() | 已完成 | 类型路由替代 ID 路由 |
 | **osppost -- 远程投递** | transport.hpp NetworkNode | 已完成 | TCP/UDP 透明传输 |
 | **osppost -- 广播投递** | bus.hpp (所有订阅者) | 已完成 | 类型订阅天然广播 |
 | **osppost -- 别名投递** | -- | 不实现 | 类型路由更安全，应用层可维护名称映射 |
-| **osppost -- 同步消息** | post.hpp OspSendAndWait + service.hpp | 已实现 | ResponseChannel 阻塞等待回复，支持超时 |
+| **osppost -- 同步消息** | post.hpp OspSendAndWait + service.hpp | 已完成 | ResponseChannel 阻塞等待回复，支持超时 |
 | **ospnodeman -- TCP 连接** | connection.hpp + transport.hpp | 已完成 | ConnectionPool 管理 |
-| **ospnodeman -- 心跳检测** | node_manager.hpp + node_manager_hsm.hpp | 已实现 | P0，TCP 心跳 + HSM 状态机驱动 |
-| **ospnodeman -- 断开通知** | node_manager.hpp + node_manager_hsm.hpp | 已实现 | P0，回调通知 + HSM Connected/Suspect/Disconnected |
-| **ospnodeman -- HSM 状态机** | node_manager_hsm.hpp (Phase O) | 已实现 | 每连接独立 HSM，三状态生命周期管理 |
+| **ospnodeman -- 心跳检测** | node_manager.hpp + node_manager_hsm.hpp | 已完成 | TCP 心跳 + HSM 状态机驱动 |
+| **ospnodeman -- 断开通知** | node_manager.hpp + node_manager_hsm.hpp | 已完成 | 回调通知 + HSM Connected/Suspect/Disconnected |
+| **ospnodeman -- HSM 状态机** | node_manager_hsm.hpp (Phase O) | 已完成 | 每连接独立 HSM，三状态生命周期管理 |
 | **ospsch -- 调度器** | executor.hpp | 已完成 | Single/Static/Pinned 三种模式 |
 | **ospsch -- 内存池** | mem_pool.hpp | 已完成 | FixedPool + ObjectPool |
 | **osptimer -- 定时器** | timer.hpp | 已完成 | TimerScheduler 后台线程 |
@@ -2464,18 +2464,18 @@ motor.Activate();
 | **osplog -- 文件轮转** | -- | 未来扩展 | 可集成 zlog |
 | **ospteleserver -- Telnet** | shell.hpp (DebugShell) | 已完成 | TCP Telnet + 命令注册 |
 | **osptest -- 测试框架** | Catch2 v3.5.2 | 已完成 | 现代测试框架替代 |
-| **CApp -- 应用** | app.hpp Application (Phase P) | 已实现 | 消息队列 + 实例池 |
-| **CInstance -- 实例** | app.hpp Instance (Phase P) | 已实现 | 状态机驱动 |
-| **-- QoS 服务质量** | qos.hpp (Phase O) | 已实现 | P0，简化版 QoS，5 个核心参数 |
-| **-- 生命周期节点** | lifecycle_node.hpp (Phase O) | 已实现 | P0，借鉴 ROS2 Lifecycle Node |
-| **-- 实时调度** | executor.hpp RealtimeExecutor (Phase O) | 已实现 | P0，SCHED_FIFO + mlockall + 优先级队列 |
+| **CApp -- 应用** | app.hpp Application (Phase P) | 已完成 | 消息队列 + 实例池 + ResponseChannel |
+| **CInstance -- 实例** | app.hpp Instance (Phase P) | 已完成 | 状态机驱动 + Reply() 同步回复 |
+| **-- QoS 服务质量** | qos.hpp (Phase O) | 已完成 | 简化版 QoS，5 个核心参数 |
+| **-- 生命周期节点** | lifecycle_node.hpp (Phase O) | 已完成 | 借鉴 ROS2 Lifecycle Node |
+| **-- 实时调度** | executor.hpp RealtimeExecutor (Phase O) | 已完成 | SCHED_FIFO + mlockall + 优先级队列 |
 | **CMessage -- 消息** | MessageEnvelope (bus.hpp) | 已完成 | header + variant payload |
 | **COspStack -- 栈内存** | mem_pool.hpp FixedPool | 已完成 | 固定块分配 |
 | **进程内通信** | AsyncBus (inproc, 零拷贝) | 已完成 | 无锁 MPSC |
 | **进程间通信 (同机)** | ShmTransport (Phase M) | 已完成 | 共享内存无锁队列 |
 | **网络间通信 (跨机)** | TcpTransport/UdpTransport | 已完成 | sockpp 重构 (Phase N) |
-| **自动传输选择** | TransportFactory (Phase M) | 已实现 | inproc/shm/tcp 自动路由 |
-| **节点发现** | discovery.hpp (Phase Q) | 已实现 | P2，UDP 多播 + 静态配置 |
+| **自动传输选择** | transport_factory.hpp | 已完成 | inproc/shm/tcp 自动路由 |
+| **节点发现** | discovery.hpp (Phase Q) | 已完成 | UDP 多播 + 静态配置 |
 | **字节序转换** | Serializer<T> (transport.hpp) | 已完成 | POD memcpy，可扩展 protobuf |
 
 ---
