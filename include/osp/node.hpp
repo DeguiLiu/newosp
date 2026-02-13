@@ -115,10 +115,10 @@ class Publisher {
  * Each node has a unique name and sender ID. Subscriptions are automatically
  * cleaned up when the node is destroyed (RAII).
  *
- * The bus is a global singleton per PayloadVariant type. All nodes sharing the
- * same PayloadVariant communicate through the same bus. Message routing is
- * type-based (not topic-based): all subscribers of type T receive all messages
- * of type T, regardless of which node published them.
+ * The bus can be injected via constructor, or defaults to the global singleton
+ * per PayloadVariant type. All nodes sharing the same bus communicate through
+ * it. Message routing is type-based by default, or topic-based when topics are
+ * specified.
  *
  * @tparam PayloadVariant A std::variant<...> of user-defined message types.
  */
@@ -129,21 +129,24 @@ class Node {
   using EnvelopeType = MessageEnvelope<PayloadVariant>;
 
   /**
-   * @brief Construct a named node.
+   * @brief Construct a named node with global singleton bus.
    * @param name Node name (truncated to kNodeNameMaxLen chars).
    * @param id Unique sender ID for message tracing.
    */
   explicit Node(const char* name, uint32_t id = 0) noexcept
-      : id_(id), handle_count_(0), started_(false) {
-    if (name != nullptr) {
-      uint32_t i = 0;
-      for (; i < kNodeNameMaxLen && name[i] != '\0'; ++i) {
-        name_[i] = name[i];
-      }
-      name_[i] = '\0';
-    } else {
-      name_[0] = '\0';
-    }
+      : bus_ptr_(&BusType::Instance()), id_(id), handle_count_(0), started_(false) {
+    InitName(name);
+  }
+
+  /**
+   * @brief Construct a named node with injected bus.
+   * @param name Node name (truncated to kNodeNameMaxLen chars).
+   * @param id Unique sender ID for message tracing.
+   * @param bus Reference to the bus instance to use.
+   */
+  Node(const char* name, uint32_t id, BusType& bus) noexcept
+      : bus_ptr_(&bus), id_(id), handle_count_(0), started_(false) {
+    InitName(name);
   }
 
   /** @brief Destructor - unsubscribes all registered callbacks. */
@@ -189,7 +192,7 @@ class Node {
     if (!started_ && handle_count_ == 0) return;
 
     for (uint32_t i = 0; i < handle_count_; ++i) {
-      BusType::Instance().Unsubscribe(handles_[i]);
+      bus_ptr_->Unsubscribe(handles_[i]);
     }
     handle_count_ = 0;
     started_ = false;
@@ -209,7 +212,7 @@ class Node {
    */
   template <typename T>
   bool Publish(T&& msg) noexcept {
-    return BusType::Instance().Publish(
+    return bus_ptr_->Publish(
         PayloadVariant(std::forward<T>(msg)), id_);
   }
 
@@ -218,8 +221,35 @@ class Node {
    */
   template <typename T>
   bool PublishWithPriority(T&& msg, MessagePriority priority) noexcept {
-    return BusType::Instance().PublishWithPriority(
+    return bus_ptr_->PublishWithPriority(
         PayloadVariant(std::forward<T>(msg)), id_, priority);
+  }
+
+  /**
+   * @brief Publish a typed message with topic.
+   *
+   * The message is published with the node's sender ID, topic, and default
+   * (MEDIUM) priority. Only subscribers that subscribed to the same topic
+   * will receive this message.
+   *
+   * @tparam T The message type (must be one of the PayloadVariant alternatives).
+   * @param msg The message to publish.
+   * @param topic Topic string (null-terminated).
+   * @return true if published successfully, false if dropped.
+   */
+  template <typename T>
+  bool Publish(T&& msg, const char* topic) noexcept {
+    return bus_ptr_->PublishTopic(
+        PayloadVariant(std::forward<T>(msg)), id_, topic);
+  }
+
+  /**
+   * @brief Publish with topic and explicit priority.
+   */
+  template <typename T>
+  bool PublishWithPriority(T&& msg, const char* topic, MessagePriority priority) noexcept {
+    return bus_ptr_->PublishTopicWithPriority(
+        PayloadVariant(std::forward<T>(msg)), id_, topic, priority);
   }
 
   // ======================== Subscribe ========================
@@ -244,9 +274,50 @@ class Node {
     }
 
     SubscriptionHandle handle =
-        BusType::Instance().template Subscribe<T>(
+        bus_ptr_->template Subscribe<T>(
             [cb = std::forward<Func>(callback)](
                 const EnvelopeType& env) noexcept {
+              const T* data = std::get_if<T>(&env.payload);
+              if (data != nullptr) {
+                cb(*data, env.header);
+              }
+            });
+
+    if (!handle.IsValid()) {
+      return expected<void, NodeError>::error(NodeError::kSubscriptionFull);
+    }
+
+    handles_[handle_count_++] = handle;
+    return expected<void, NodeError>::success();
+  }
+
+  /**
+   * @brief Subscribe to messages of type T with topic filter.
+   *
+   * The callback receives the typed message data and the message header.
+   * Only messages published with the matching topic will be delivered.
+   *
+   * @tparam T The message type to subscribe to.
+   * @tparam Func Callable with signature void(const T&, const MessageHeader&).
+   * @param topic Topic string (null-terminated).
+   * @return Success or kSubscriptionFull error.
+   */
+  template <typename T, typename Func>
+  expected<void, NodeError> Subscribe(const char* topic, Func&& callback) noexcept {
+    if (handle_count_ >= OSP_MAX_NODE_SUBSCRIPTIONS) {
+      return expected<void, NodeError>::error(NodeError::kSubscriptionFull);
+    }
+
+    uint32_t topic_hash = Fnv1a32(topic);
+
+    SubscriptionHandle handle =
+        bus_ptr_->template Subscribe<T>(
+            [cb = std::forward<Func>(callback), topic_hash](
+                const EnvelopeType& env) noexcept {
+              // Topic filter: only deliver if topic_hash matches
+              if (env.header.topic_hash != topic_hash) {
+                return;
+              }
               const T* data = std::get_if<T>(&env.payload);
               if (data != nullptr) {
                 cb(*data, env.header);
@@ -273,7 +344,7 @@ class Node {
     }
 
     SubscriptionHandle handle =
-        BusType::Instance().template Subscribe<T>(
+        bus_ptr_->template Subscribe<T>(
             [cb = std::forward<Func>(callback)](
                 const EnvelopeType& env) noexcept {
               const T* data = std::get_if<T>(&env.payload);
@@ -305,7 +376,7 @@ class Node {
    * @return Number of messages processed.
    */
   uint32_t SpinOnce() noexcept {
-    return BusType::Instance().ProcessBatch();
+    return bus_ptr_->ProcessBatch();
   }
 
   // ======================== Publisher Factory ========================
@@ -321,10 +392,23 @@ class Node {
    */
   template <typename T>
   Publisher<T, PayloadVariant> CreatePublisher() noexcept {
-    return Publisher<T, PayloadVariant>(BusType::Instance(), id_);
+    return Publisher<T, PayloadVariant>(*bus_ptr_, id_);
   }
 
  private:
+  void InitName(const char* name) noexcept {
+    if (name != nullptr) {
+      uint32_t i = 0;
+      for (; i < kNodeNameMaxLen && name[i] != '\0'; ++i) {
+        name_[i] = name[i];
+      }
+      name_[i] = '\0';
+    } else {
+      name_[0] = '\0';
+    }
+  }
+
+  BusType* bus_ptr_;
   char name_[kNodeNameMaxLen + 1];
   uint32_t id_;
   SubscriptionHandle handles_[OSP_MAX_NODE_SUBSCRIPTIONS];

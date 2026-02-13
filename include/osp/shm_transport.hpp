@@ -357,7 +357,13 @@ class ShmRingBuffer final {
     target->size = size;
     std::memcpy(target->data, data, size);
 
-    // Publish (make visible to consumer)
+    // ARM memory ordering: ensure memcpy completes before sequence store.
+    // The release fence guarantees all prior writes (memcpy) are visible
+    // to other threads that perform an acquire load of the sequence.
+    std::atomic_thread_fence(std::memory_order_release);
+
+    // Publish (make visible to consumer).
+    // Release semantics ensure the data writes above are visible on ARM.
     target->sequence.store(prod_pos + 1, std::memory_order_release);
 
     return true;
@@ -380,6 +386,11 @@ class ShmRingBuffer final {
       // No data available
       return false;
     }
+
+    // ARM memory ordering: ensure producer's writes are visible.
+    // Acquire fence guarantees we see all writes that happened-before
+    // the producer's release store to sequence.
+    std::atomic_thread_fence(std::memory_order_acquire);
 
     // Copy data out
     size = slot.size;
@@ -409,8 +420,13 @@ class ShmRingBuffer final {
     char data[SlotSize];
   };
 
-  std::atomic<uint32_t> producer_pos_;
-  std::atomic<uint32_t> consumer_pos_;
+  static_assert(std::is_standard_layout<Slot>::value,
+                "Slot must be standard layout for shared memory");
+
+  // Cache line aligned to prevent false sharing between producer and consumer
+  alignas(64) std::atomic<uint32_t> producer_pos_;
+  char pad_[64 - sizeof(std::atomic<uint32_t>)];
+  alignas(64) std::atomic<uint32_t> consumer_pos_;
   Slot slots_[SlotCount];
 
   // Private constructor - use InitAt/AttachAt

@@ -81,6 +81,368 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 | CSerialPort | v4.3.1 | 串口通信 | `OSP_WITH_SERIAL=ON` |
 | Catch2 | v3.5.2 | 单元测试 | `OSP_BUILD_TESTS=ON` |
 
+### 2.4 开发分级与优先级原则
+
+所有模块和任务按 P0 -> P1 -> P2 三级优先级开发和测试，严格按优先级顺序推进:
+
+| 优先级 | 含义 | 开发原则 | 对应 Phase |
+|--------|------|---------|-----------|
+| P0 | 架构基础，必须先行 | 不完成 P0 不启动 P1；设计文档同步更新 | Phase A-N (已完成), Phase O (规划中) |
+| P1 | 功能扩展，核心可用 | P0 全部完成后启动；兼容性和功能覆盖优先 | Phase P (规划中) |
+| P2 | 高级特性，锦上添花 | P1 基本完成后启动；可按需裁剪 | Phase Q (规划中) |
+
+关键约束:
+- 设计文档 (design_zh.md) 的及时更新永远是 P0 级别，任何架构调整必须先更新文档再编码
+- 每个 Phase 完成后必须通过全量 Sanitizer 验证 (ASan + TSan + UBSan)
+- P0 模块的接口变更需要评估对已完成模块的影响
+
+### 2.5 P0 架构调整
+
+本节列出当前架构设计中已识别的 7 项 P0 优先级调整项，这些调整针对工业级嵌入式场景的关键需求，将在后续实施阶段逐步落地。
+
+#### P0-1: AsyncBus 单消费者瓶颈 + variant 内存膨胀
+
+**优先级**: P0 | **状态**: 设计中
+
+**问题描述**:
+- 当前 AsyncBus 采用 MPSC (多生产者单消费者) 架构，单消费者 `ProcessBatch()` 串行处理所有消息类型，在高频消息场景下成为吞吐瓶颈
+- `std::variant` 按最大类型分配内存，当 variant 中类型大小差异悬殊时 (如 4B 心跳 vs 1KB 帧头)，小消息浪费严重
+
+**解决方案**:
+- 模板参数化 Bus 容量和消息类型，支持不同场景定制化配置
+- 大消息/小消息分离通道: 不同大小的消息使用不同 AsyncBus 实例，避免内存浪费
+- 支持多消费者 (MPMC) 可选模式: 按消息类型分片到多个消费者线程，突破单消费者瓶颈
+
+**设计要点**:
+```cpp
+// 模板参数化容量和批量大小
+template <typename PayloadVariant,
+          uint32_t QueueDepth = 4096,
+          uint32_t BatchSize = 256>
+class AsyncBus { /* ... */ };
+
+// 嵌入式低内存场景
+using LightBus = AsyncBus<SmallPayload, 256, 64>;
+
+// 高吞吐场景
+using HighBus = AsyncBus<LargePayload, 4096, 256>;
+
+// 多消费者模式 (可选)
+template <typename PayloadVariant, uint32_t ConsumerCount = 1>
+class MpmcBus { /* 按类型哈希分片到多个消费者 */ };
+```
+
+**影响模块**: bus.hpp, node.hpp, worker_pool.hpp
+
+---
+
+#### P0-2: Node 全局单例 Bus + 纯类型路由局限
+
+**优先级**: P0 | **状态**: 设计中
+
+**问题描述**:
+- 当前 Node 使用全局单例 Bus，不同 Node 无法隔离，子系统间耦合严重
+- 纯类型路由无法区分同类型不同语义的消息 (如 IMU 温度 vs 环境温度，均为 `SensorData` 类型)
+
+**解决方案**:
+- Bus 依赖注入而非全局单例: 构造时传入 Bus 引用，支持多总线实例隔离子系统
+- 混合 topic+type 路由: 结合 topic 字符串哈希 + 类型索引，运行时按 topic 过滤
+
+**设计要点**:
+```cpp
+// 方式 1: 使用默认全局总线 (向后兼容)
+osp::Node<Payload> sensor("sensor", 1);
+
+// 方式 2: 依赖注入总线实例 (推荐)
+osp::AsyncBus<Payload, 1024> my_bus;
+osp::Node<Payload> sensor("sensor", 1, my_bus);
+
+// 纯类型路由 (默认)
+sensor.Subscribe<SensorData>(on_sensor);
+
+// 混合路由: 类型 + 主题名
+sensor.Subscribe<SensorData>("imu/temperature", on_imu_temp);
+sensor.Subscribe<SensorData>("env/temperature", on_env_temp);
+sensor.Publish(SensorData{25.0f}, "imu/temperature");
+```
+
+**影响模块**: node.hpp, bus.hpp
+
+---
+
+#### P0-3: Executor 缺少实时调度支持
+
+**优先级**: P0 | **状态**: 设计中
+
+**问题描述**:
+- 当前 Executor 使用普通线程 (`SCHED_OTHER`)，无法满足工业实时性要求
+- 缺少内存锁定、CPU 亲和性、优先级调度等实时特性
+
+**解决方案**:
+- 增加 `RealtimeConfig` 结构体，支持 `SCHED_FIFO` / `SCHED_DEADLINE` 调度策略
+- `mlockall()` 锁定内存，避免页面交换导致的不确定延迟
+- CPU 亲和性绑定，关键节点绑定到隔离核心 (配合 `isolcpus` 内核参数)
+
+**设计要点**:
+```cpp
+namespace osp {
+
+// 实时调度配置 (借鉴 CyberRT Processor)
+struct RealtimeConfig {
+  int sched_policy = SCHED_OTHER;   // SCHED_OTHER / SCHED_FIFO / SCHED_RR
+  int sched_priority = 0;           // SCHED_FIFO: 1-99, 越大越高
+  bool lock_memory = false;         // mlockall(MCL_CURRENT | MCL_FUTURE)
+  uint32_t stack_size = 0;          // 0=系统默认, 非零=预分配栈
+  int cpu_affinity = -1;            // -1=不绑定, >=0=绑定到指定 CPU 核心
+};
+
+// 实时调度器
+template <typename PayloadVariant>
+class RealtimeExecutor {
+ public:
+  explicit RealtimeExecutor(const RealtimeConfig& cfg);
+  void AddNode(Node<PayloadVariant>& node, int priority = 0);
+  void AddPeriodicNode(Node<PayloadVariant>& node,
+                       uint32_t period_ms, int priority = 0);
+  void Spin();
+  void Stop();
+};
+
+}  // namespace osp
+```
+
+**影响模块**: executor.hpp
+
+---
+
+#### P0-4: Transport 帧缺少 seq_num 和 timestamp
+
+**优先级**: P0 | **状态**: 设计中
+
+**问题描述**:
+- 网络传输帧头缺少序列号和时间戳，无法检测丢帧和测量延迟
+- UDP 和串口场景下无法检测乱序/重复/丢包
+- 数据融合场景 (DataFusion) 依赖时间戳对齐多源消息
+
+**解决方案**:
+- 扩展帧头增加 `seq_num (4B)` + `timestamp (8B)`
+- 保持向后兼容: 通过 magic 版本号区分新旧帧格式
+
+**设计要点**:
+```
+新帧格式 (26 字节帧头):
+┌─────────────┬─────────────┬──────────┬───────────┬───────────┬──────────────┬──────────┐
+│ magic (4B)  │ msg_len (4B)│ type (2B)│ sender(4B)│ seq_num(4B)│ timestamp(8B)│ payload  │
+│ 0x4F535001  │ total bytes │ variant  │ node id   │ 单调递增   │ steady_clock │ N bytes  │
+│ (版本 v1)   │             │ index    │           │            │ 纳秒         │          │
+└─────────────┴─────────────┴──────────┴───────────┴───────────┴──────────────┴──────────┘
+
+旧帧格式 (14 字节帧头, 向后兼容):
+┌─────────────┬─────────────┬──────────┬───────────┬──────────┐
+│ magic (4B)  │ msg_len (4B)│ type (2B)│ sender(4B)│ payload  │
+│ 0x4F535000  │ total bytes │ variant  │ node id   │ N bytes  │
+│ (版本 v0)   │             │ index    │           │          │
+└─────────────┴─────────────┴──────────┴───────────┴──────────┘
+```
+
+**新增字段说明**:
+- `seq_num (4B)`: 每个发送端单调递增，用于检测丢包/乱序/重复 (UDP 和串口场景必需)
+- `timestamp (8B)`: `steady_clock` 纳秒时间戳，用于端到端延迟分析和 DataFusion 时间对齐
+
+**影响模块**: transport.hpp, serial_transport.hpp
+
+---
+
+#### P0-5: ShmRingBuffer ARM 弱内存序
+
+**优先级**: P0 | **状态**: 设计中
+
+**问题描述**:
+- ARM 是弱内存序 (weakly-ordered) 架构，与 x86 的 TSO (Total Store Order) 不同
+- 当前共享内存实现可能存在可见性问题: 生产者写入的数据在消费者侧不可见
+- 默认 `memory_order_seq_cst` 在 ARM 上开销是 `acquire/release` 的 3-5 倍
+
+**解决方案**:
+- 显式标注 memory_order: 生产者 `release`，消费者 `acquire`
+- `uint64_t` 序列号避免 ABA 问题 (64 位序列号在 4GHz 频率下需 ~146 年才会回绕)
+- LoanedMessage 引用计数使用原子操作 (`acq_rel` 递减，`relaxed` 递增)
+
+**设计要点**:
+```cpp
+// 生产者: 写入数据后 release 推进位置
+void TryPush(const void* data, uint32_t size) {
+    auto pos = prod_pos_.load(std::memory_order_relaxed);
+    // ... CAS 竞争 slot ...
+    memcpy(&slots_[pos % SlotCount], data, size);
+    prod_pos_.store(pos + 1, std::memory_order_release);  // release: 数据可见
+}
+
+// 消费者: acquire 读取位置后读数据
+bool TryPop(void* data, uint32_t& size) {
+    auto prod = prod_pos_.load(std::memory_order_acquire);  // acquire: 配对 release
+    auto cons = cons_pos_.load(std::memory_order_relaxed);
+    if (cons >= prod) return false;
+    memcpy(data, &slots_[cons % SlotCount], size);
+    cons_pos_.store(cons + 1, std::memory_order_release);
+    return true;
+}
+
+// LoanedMessage::Release: 最后一个订阅者释放 slot
+void Release() noexcept {
+    if (header_->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        // 最后一个订阅者，回收 slot
+    }
+}
+```
+
+**性能对比 (ARM Cortex-A72)**:
+
+| memory_order | 指令 | 开销 (相对 relaxed) |
+|-------------|------|-------------------|
+| `relaxed` | 普通 load/store | 1x |
+| `acquire` | `ldar` (load-acquire) | ~1.2x |
+| `release` | `stlr` (store-release) | ~1.2x |
+| `seq_cst` | `ldar` + `stlr` + barrier | ~3-5x |
+
+**影响模块**: shm_transport.hpp
+
+---
+
+#### P0-6: 缺少 QoS 配置层
+
+**优先级**: P0 | **状态**: 设计中
+
+**问题描述**:
+- 无法配置消息传输的可靠性、历史深度、截止时间等质量属性
+- 不同场景对消息传输的需求差异大 (如控制指令需要可靠传输，传感器数据可容忍丢失)
+
+**解决方案**:
+- 增加 `QosProfile` 结构体，借鉴 ROS2 QoS 策略
+- 支持可靠性 (BestEffort/Reliable)、历史深度 (KeepLast/KeepAll)、截止时间 (Deadline)、生命周期 (Lifespan)
+
+**设计要点**:
+```cpp
+namespace osp {
+
+// QoS 可靠性策略
+enum class ReliabilityPolicy : uint8_t {
+  kBestEffort,  // 尽力而为，允许丢失 (UDP 语义)
+  kReliable     // 可靠传输，保证送达 (TCP 语义 + 重传)
+};
+
+// QoS 历史深度策略
+enum class HistoryPolicy : uint8_t {
+  kKeepLast,    // 保留最近 N 条消息
+  kKeepAll      // 保留所有消息 (直到队列满)
+};
+
+// QoS 配置
+struct QosProfile {
+  ReliabilityPolicy reliability = ReliabilityPolicy::kBestEffort;
+  HistoryPolicy history = HistoryPolicy::kKeepLast;
+  uint32_t history_depth = 10;      // KeepLast 模式下保留的消息数
+  uint32_t deadline_ms = 0;         // 0=无截止时间，>0=消息超时丢弃
+  uint32_t lifespan_ms = 0;         // 0=无生命周期，>0=消息过期丢弃
+};
+
+// 预定义 QoS 配置
+constexpr QosProfile QosSensorData{
+  .reliability = ReliabilityPolicy::kBestEffort,
+  .history = HistoryPolicy::kKeepLast,
+  .history_depth = 1  // 只保留最新值
+};
+
+constexpr QosProfile QosControlCommand{
+  .reliability = ReliabilityPolicy::kReliable,
+  .history = HistoryPolicy::kKeepAll,
+  .deadline_ms = 100  // 100ms 内必须送达
+};
+
+// Node 订阅时指定 QoS
+template <typename T>
+void Subscribe(const char* topic, Callback<T> cb, const QosProfile& qos);
+
+}  // namespace osp
+```
+
+**影响模块**: node.hpp, transport.hpp, bus.hpp
+
+---
+
+#### P0-7: 缺少 Lifecycle Node
+
+**优先级**: P0 | **状态**: 设计中
+
+**问题描述**:
+- 节点缺少标准化的生命周期管理 (类似 ROS2 Lifecycle Node)
+- 无法统一管理节点的配置、激活、停用、清理等阶段
+- 复杂系统中节点启动顺序和依赖关系难以管理
+
+**解决方案**:
+- 增加 `LifecycleNode` 状态机: Unconfigured → Inactive → Active → Finalized
+- 支持 `configure` / `activate` / `deactivate` / `cleanup` 回调
+- 借鉴 ROS2 Lifecycle Node 的状态转换模型
+
+**设计要点**:
+```cpp
+namespace osp {
+
+// 生命周期状态
+enum class LifecycleState : uint8_t {
+  kUnconfigured,  // 未配置 (初始状态)
+  kInactive,      // 已配置但未激活
+  kActive,        // 激活运行中
+  kFinalized      // 已终止 (终态)
+};
+
+// 生命周期转换
+enum class LifecycleTransition : uint8_t {
+  kConfigure,     // Unconfigured → Inactive
+  kActivate,      // Inactive → Active
+  kDeactivate,    // Active → Inactive
+  kCleanup,       // Inactive → Unconfigured
+  kShutdown       // Any → Finalized
+};
+
+// 生命周期节点
+template <typename PayloadVariant>
+class LifecycleNode : public Node<PayloadVariant> {
+ public:
+  // 状态转换回调 (返回 true 表示成功)
+  virtual bool OnConfigure() { return true; }
+  virtual bool OnActivate() { return true; }
+  virtual bool OnDeactivate() { return true; }
+  virtual bool OnCleanup() { return true; }
+  virtual void OnShutdown() {}
+
+  // 触发状态转换
+  expected<void, LifecycleError> Trigger(LifecycleTransition transition);
+
+  LifecycleState GetState() const noexcept;
+};
+
+}  // namespace osp
+```
+
+**状态转换图**:
+```
+    Unconfigured
+         |
+         | configure()
+         v
+      Inactive  ←──────┐
+         |             |
+         | activate()  | deactivate()
+         v             |
+       Active  ────────┘
+         |
+         | shutdown()
+         v
+      Finalized
+```
+
+**影响模块**: node.hpp
+
 ---
 
 ## 3. 系统架构
@@ -419,13 +781,17 @@ SIGINT/SIGTERM ──> 信号处理器 (写 pipe, async-signal-safe)
 
 **职责**: 核心消息传递基础设施，支持多生产者单消费者无锁发布。
 
+**P0 架构调整参考**: 本模块涉及以下 P0 调整项:
+- [P0-1: AsyncBus 单消费者瓶颈 + variant 内存膨胀](#p0-1-asyncbus-单消费者瓶颈--variant-内存膨胀) -- 模板参数化容量、大小消息分离、多消费者模式
+- [P0-2: Node 全局单例 Bus + 纯类型路由局限](#p0-2-node-全局单例-bus--纯类型路由局限) -- Bus 依赖注入、混合 topic+type 路由
+
 **架构**:
 
 ```
 Producer 0 ─┐
 Producer 1 ──┼── CAS Publish ──> ┌────────────────┐
 Producer 2 ─┘                    │ Ring Buffer    │
-                                 │ (4096 slots)   │
+                                 │ (模板参数化)    │
                                  │ sequence-based  │
                                  └───────┬────────┘
                                          │ ProcessBatch()
@@ -434,24 +800,61 @@ Producer 2 ─┘                    │ Ring Buffer    │
                                  (std::variant + VariantIndex<T>)
 ```
 
+**模板参数化** (P0 调整):
+
+```cpp
+// 队列深度和批量大小作为模板参数，适配不同场景
+template <typename PayloadVariant,
+          uint32_t QueueDepth = 4096,
+          uint32_t BatchSize = 256>
+class AsyncBus {
+    static_assert((QueueDepth & (QueueDepth - 1)) == 0, "QueueDepth must be power of 2");
+    // ...
+};
+
+// 嵌入式低内存场景
+using LightBus = AsyncBus<Payload, 256, 64>;    // ~20KB
+
+// 高吞吐场景
+using HighBus = AsyncBus<Payload, 4096, 256>;   // ~320KB
+```
+
+**variant 内存优化说明**:
+
+每个 slot 占用 `sizeof(PayloadVariant)` 字节 (最大类型 size + 对齐)。当 variant 中类型大小差异悬殊时 (如 4B 心跳 vs 1KB 帧头)，小消息浪费严重。应对策略:
+
+| 策略 | 说明 | 适用场景 |
+|------|------|---------|
+| 控制 variant 类型大小 | 大消息用指针/ID 间接引用，variant 只存元数据 | 推荐，零改动 |
+| 分离总线 | 不同大小的消息使用不同 AsyncBus 实例 | 子系统隔离 |
+| MemPool 间接 | 大消息存入 ObjectPool，variant 存 `PoolHandle<T>` | 混合大小消息 |
+
 **关键特性**:
 
 | 特性 | 说明 |
 |------|------|
 | 无锁发布 | CAS 循环抢占生产者位置 |
 | 优先级准入控制 | LOW 60% / MEDIUM 80% / HIGH 99% 阈值 |
-| 批量处理 | `ProcessBatch()` 每轮最多 256 条消息 |
+| 批量处理 | `ProcessBatch()` 每轮最多 BatchSize 条消息 |
 | 背压感知 | Normal/Warning/Critical/Full 四级 |
 | 缓存行分离 | 生产者/消费者计数器分属不同缓存行 |
 
 **编译期配置**:
 
 ```cpp
-#define OSP_BUS_QUEUE_DEPTH            4096   // 环形缓冲区大小 (2^N)
+#define OSP_BUS_QUEUE_DEPTH            4096   // 环形缓冲区默认大小 (2^N, 模板可覆盖)
 #define OSP_BUS_MAX_MESSAGE_TYPES      8      // std::variant 最大类型数
 #define OSP_BUS_MAX_CALLBACKS_PER_TYPE 16     // 每类型最大订阅数
-#define OSP_BUS_BATCH_SIZE             256    // 单次处理批量上限
+#define OSP_BUS_BATCH_SIZE             256    // 单次处理批量默认上限 (模板可覆盖)
 ```
+
+**单消费者设计取舍**:
+
+单消费者 `ProcessBatch()` 是有意的设计选择，而非疏忽:
+- 优势: 消费侧无锁、无竞争，延迟确定性好
+- 局限: 所有消息类型串行分发，高频消息可能阻塞低频消息
+- 适用边界: 消息处理回调应轻量 (<10us)，重计算应转发到 WorkerPool
+- 扩展方案: 如需多消费者，可按消息类型分片到多个 AsyncBus 实例
 
 **设计模式** (借鉴 eventpp):
 - 序列号环形缓冲区 (类似 Disruptor)
@@ -464,6 +867,11 @@ Producer 2 ─┘                    │ Ring Buffer    │
 
 **职责**: 受 ROS2/CyberRT 启发的轻量节点通信抽象。
 
+**P0 架构调整参考**: 本模块涉及以下 P0 调整项:
+- [P0-2: Node 全局单例 Bus + 纯类型路由局限](#p0-2-node-全局单例-bus--纯类型路由局限) -- Bus 依赖注入、混合 topic+type 路由
+- [P0-6: 缺少 QoS 配置层](#p0-6-缺少-qos-配置层) -- QosProfile 配置可靠性、历史深度、截止时间
+- [P0-7: 缺少 Lifecycle Node](#p0-7-缺少-lifecycle-node) -- LifecycleNode 状态机管理
+
 **接口**:
 
 ```cpp
@@ -471,18 +879,37 @@ struct SensorData { float temp; };
 struct MotorCmd { int speed; };
 using Payload = std::variant<SensorData, MotorCmd>;
 
+// 方式 1: 使用默认全局总线 (简单场景，向后兼容)
 osp::Node<Payload> sensor("sensor", 1);
+
+// 方式 2: 依赖注入总线实例 (P0 调整，推荐)
+osp::AsyncBus<Payload, 1024> my_bus;
+osp::Node<Payload> sensor("sensor", 1, my_bus);
+
+// 纯类型路由 (默认，编译期确定)
 sensor.Subscribe<SensorData>([](const SensorData& d, const osp::MessageHeader& h) {
     OSP_LOG_INFO("sensor", "temp=%.1f from sender %u", d.temp, h.sender_id);
 });
+
+// 混合路由: 类型 + 主题名 (P0 调整，区分同类型不同语义)
+sensor.Subscribe<SensorData>("imu/temperature", on_imu_temp);
+sensor.Subscribe<SensorData>("env/temperature", on_env_temp);
+
 sensor.Publish(SensorData{25.0f});
+sensor.Publish(SensorData{18.0f}, "env/temperature");  // 带主题名发布
 sensor.SpinOnce();  // 消费总线中的消息
 ```
 
 **设计决策**:
-- 基于类型路由 (非主题路由)，编译期确定分发
+- 类型路由为主，主题路由为辅 (类型安全 + 语义灵活)
+  - 纯类型路由: 编译期确定分发，零开销，适合单一语义消息
+  - 混合路由: `Subscribe<T>(topic, cb)`，运行时按 topic 过滤，适合同类型多源场景
+  - 借鉴: CyberRT 的 channel name + ROS2 的 topic name
 - RAII 自动退订 (析构时清理所有订阅)
-- 全局单例总线 (同一 `PayloadVariant` 共享)
+- 总线依赖注入 (P0 调整):
+  - 构造时可传入 Bus 引用，支持多总线实例隔离子系统
+  - 不传则使用全局单例总线 (向后兼容)
+  - 优势: 可独立测试、子系统隔离、多租户共存
 - `Publisher<T>` 轻量发布器 (无 RAII 清理)
 
 ---
@@ -664,6 +1091,10 @@ class ConnectionPool {
 
 **目标**: 使 Node 屏蔽本地进程和远程进程的差异，类似 ZeroMQ 的透明传输模型。应用层代码使用统一的 `Publish()` / `Subscribe()` 接口，无需关心消息目标是本地 AsyncBus 还是远程节点。
 
+**P0 架构调整参考**: 本模块涉及以下 P0 调整项:
+- [P0-4: Transport 帧缺少 seq_num 和 timestamp](#p0-4-transport-帧缺少-seq_num-和-timestamp) -- 扩展帧头增加序列号和时间戳
+- [P0-6: 缺少 QoS 配置层](#p0-6-缺少-qos-配置层) -- QosProfile 配置传输质量属性
+
 **设计理念** (借鉴 ZeroMQ / ROS2 / CyberRT / cpp-ipc):
 
 | 特性 | 说明 |
@@ -782,15 +1213,21 @@ controller.Subscribe<SensorData>(on_sensor);  // 统一回调，不区分来源
 controller.SpinOnce();  // 本地 + 远程消息统一处理
 ```
 
-**消息帧格式** (网络传输):
+**消息帧格式** (P0 调整: 增加序列号和时间戳):
 
 ```
-┌─────────────┬─────────────┬──────────┬───────────┬──────────┐
-│ magic (4B)  │ msg_len (4B)│ type (2B)│ sender(4B)│ payload  │
-│ 0x4F535000  │ total bytes │ variant  │ node id   │ N bytes  │
-│             │             │ index    │           │          │
-└─────────────┴─────────────┴──────────┴───────────┴──────────┘
+┌─────────────┬─────────────┬──────────┬───────────┬───────────┬──────────────┬──────────┐
+│ magic (4B)  │ msg_len (4B)│ type (2B)│ sender(4B)│ seq_num(4B)│ timestamp(8B)│ payload  │
+│ 0x4F535000  │ total bytes │ variant  │ node id   │ 单调递增   │ steady_clock │ N bytes  │
+│             │             │ index    │           │            │ 纳秒         │          │
+└─────────────┴─────────────┴──────────┴───────────┴───────────┴──────────────┴──────────┘
+帧头总计: 26 字节 (旧 14 字节)
 ```
+
+新增字段说明:
+- `seq_num (4B)`: 每个发送端单调递增，用于检测丢包/乱序/重复 (UDP 和串口场景必需)
+- `timestamp (8B)`: `steady_clock` 纳秒时间戳，用于端到端延迟分析和 DataFusion 时间对齐 (借鉴 ROS2 message_filters 和 CyberRT DataFusion 的时间戳依赖)
+- TCP 长连接可在握手后省略 magic (通过连接协商标志位控制，减少 4B/帧开销)
 
 **实现策略**:
 - Phase 1 (已完成): `TcpTransport` + `Serializer<POD>` 基础实现
@@ -836,18 +1273,40 @@ controller.SpinOnce();  // 本地 + 远程消息统一处理
 
 **与工作线程池集成**: BT 叶节点通过 WorkerPool 提交异步任务。
 
-### 6.7 Executor 调度器 (P1, executor.hpp)
+### 6.7 Executor 调度器 (P0, executor.hpp)
 
-**目标**: 借鉴 ROS2 Executor 模型，统一节点调度。
+**目标**: 借鉴 ROS2 Executor 和 CyberRT Choreography Scheduler，统一节点调度，支持实时调度策略。
+
+**P0 架构调整参考**: 本模块涉及以下 P0 调整项:
+- [P0-3: Executor 缺少实时调度支持](#p0-3-executor-缺少实时调度支持) -- RealtimeConfig、SCHED_FIFO、mlockall、CPU 亲和性
+
+**实时调度配置** (P0 调整):
+
+```cpp
+namespace osp {
+
+// 实时调度配置 (借鉴 CyberRT Processor)
+struct RealtimeConfig {
+  int sched_policy = SCHED_OTHER;   // SCHED_OTHER / SCHED_FIFO / SCHED_RR
+  int sched_priority = 0;           // SCHED_FIFO: 1-99, 越大越高
+  bool lock_memory = false;         // mlockall(MCL_CURRENT | MCL_FUTURE)
+  uint32_t stack_size = 0;          // 0=系统默认, 非零=预分配栈 (避免缺页中断)
+  int cpu_affinity = -1;            // -1=不绑定, >=0=绑定到指定 CPU 核心
+};
+
+}  // namespace osp
+```
 
 | 模式 | 说明 |
 |------|------|
 | `SingleThreadExecutor` | 单线程轮询所有节点 |
 | `StaticExecutor` | 固定节点-线程映射 (确定性调度) |
-| `PinnedExecutor` | 每节点绑定 CPU 核心 |
+| `PinnedExecutor` | 每节点绑定 CPU 核心 + 实时优先级 |
+| `RealtimeExecutor` | SCHED_FIFO + mlockall + 优先级队列 (P0 新增) |
 
 ```cpp
 namespace osp {
+
 template <typename PayloadVariant>
 class StaticExecutor {
  public:
@@ -856,8 +1315,33 @@ class StaticExecutor {
   void SpinOnce();  // 单轮处理
   void Stop();
 };
+
+// P0 新增: 实时调度器 (借鉴 CyberRT Choreography)
+template <typename PayloadVariant>
+class RealtimeExecutor {
+ public:
+  explicit RealtimeExecutor(const RealtimeConfig& cfg);
+
+  // 添加节点，指定优先级 (高优先级节点优先执行)
+  void AddNode(Node<PayloadVariant>& node, int priority = 0);
+
+  // 添加周期节点 (与 timer.hpp 集成)
+  void AddPeriodicNode(Node<PayloadVariant>& node,
+                       uint32_t period_ms, int priority = 0);
+
+  void Spin();      // 阻塞运行 (SCHED_FIFO 线程)
+  void SpinOnce();  // 单轮处理 (按优先级顺序)
+  void Stop();
+};
+
 }  // namespace osp
 ```
+
+**实时调度要点**:
+- `SCHED_FIFO` + `mlockall`: 避免页面交换导致的不确定延迟
+- CPU 亲和性: 关键节点绑定到隔离核心 (通过 `isolcpus` 内核参数)
+- 优先级队列: 高优先级节点优先执行，借鉴 CyberRT ClassicContext 多级队列
+- 周期调度: Executor 内部集成 Timer，支持固定周期触发节点 SpinOnce
 
 ### 6.8 数据融合 (P2, data_fusion.hpp)
 
@@ -879,6 +1363,9 @@ class FusedSubscription {
 ### 6.9 共享内存 IPC (P0, shm_transport.hpp)
 
 **目标**: 借鉴 [cpp-ipc](https://github.com/mutouyun/cpp-ipc) 的共享内存无锁队列和 [ROS2 loaned messages](https://www.eprosima.com/r-d-projects/rosin-project-ros2-shared-memory) 的零拷贝设计，实现同机器进程间高性能通信。
+
+**P0 架构调整参考**: 本模块涉及以下 P0 调整项:
+- [P0-5: ShmRingBuffer ARM 弱内存序](#p0-5-shmringbuffer-arm-弱内存序) -- 显式 memory_order、uint64_t 序列号、LoanedMessage 原子引用计数
 
 **设计理念** (借鉴 cpp-ipc / ROS2 / CyberRT):
 
@@ -943,6 +1430,13 @@ class ShmRingBuffer {
   bool TryPush(const void* data, uint32_t size);
   bool TryPop(void* data, uint32_t& size);
   uint32_t Depth() const noexcept;
+
+ private:
+  // P0 调整: 使用 uint64_t 序列号防止 ABA 问题
+  // 64 位序列号在 4GHz 频率下需 ~146 年才会回绕
+  alignas(64) std::atomic<uint64_t> prod_pos_{0};  // 缓存行对齐
+  alignas(64) std::atomic<uint64_t> cons_pos_{0};
+  // slot 索引 = pos % SlotCount
 };
 
 // 命名通道 (生产者/消费者端点)
@@ -959,12 +1453,26 @@ class ShmChannel {
 };
 
 // 零拷贝 loaned message (仅限 POD 类型)
+// P0 调整: 增加原子引用计数，支持多订阅者安全共享
 template <typename T>
 class LoanedMessage {
  public:
   T* Get() noexcept;             // 直接写入共享内存
-  void Publish() noexcept;       // 提交 (标记 slot 可读)
+  void Publish() noexcept;       // 提交 (标记 slot 可读，初始化 ref_count)
+  void AddRef() noexcept;        // 订阅者获取时 +1 (memory_order_relaxed)
+  void Release() noexcept;       // 订阅者消费完 -1，最后一个释放 slot
+  uint32_t RefCount() const noexcept;
   // Non-copyable, movable
+
+ private:
+  // 引用计数位于 slot header，与数据共存于共享内存
+  // Publish 时设置 ref_count = 订阅者数量
+  // 每个订阅者消费完调用 Release()
+  // ref_count 降为 0 时 slot 回收 (cons_pos_ 推进)
+  struct SlotHeader {
+    std::atomic<uint32_t> ref_count{0};
+    uint32_t data_size;
+  };
 };
 
 // 共享内存传输 (实现 Transport 接口)
@@ -984,6 +1492,60 @@ class ShmTransport {
 
 }  // namespace osp
 ```
+
+**P0 调整: ARM 弱内存模型注意事项**:
+
+ARM 是弱内存序 (weakly-ordered) 架构，与 x86 的 TSO (Total Store Order) 不同，编译器和 CPU 可能重排内存访问。ShmRingBuffer 在共享内存中跨进程使用，必须显式标注 memory_order:
+
+| 操作 | memory_order | 说明 |
+|------|-------------|------|
+| 生产者写入 slot 数据 | 普通写 (非原子) | 数据填充阶段 |
+| 生产者推进 `prod_pos_` | `memory_order_release` | 确保 slot 数据对消费者可见 |
+| 消费者读取 `prod_pos_` | `memory_order_acquire` | 与生产者 release 配对，获取数据可见性 |
+| 消费者读取 slot 数据 | 普通读 (非原子) | acquire 之后保证可见 |
+| `ref_count` 递减 | `memory_order_acq_rel` | 最后一个 Release 需要看到所有订阅者的写入 |
+| `ref_count` 递增 | `memory_order_relaxed` | 仅需原子性，无顺序要求 |
+
+关键实现模式:
+
+```cpp
+// 生产者: 写入数据后 release 推进位置
+void TryPush(const void* data, uint32_t size) {
+    auto pos = prod_pos_.load(std::memory_order_relaxed);
+    // ... CAS 竞争 slot ...
+    memcpy(&slots_[pos % SlotCount], data, size);
+    prod_pos_.store(pos + 1, std::memory_order_release);  // release: 数据可见
+}
+
+// 消费者: acquire 读取位置后读数据
+bool TryPop(void* data, uint32_t& size) {
+    auto prod = prod_pos_.load(std::memory_order_acquire);  // acquire: 配对 release
+    auto cons = cons_pos_.load(std::memory_order_relaxed);
+    if (cons >= prod) return false;  // 空
+    memcpy(data, &slots_[cons % SlotCount], size);
+    cons_pos_.store(cons + 1, std::memory_order_release);
+    return true;
+}
+
+// LoanedMessage::Release: 最后一个订阅者释放 slot
+void Release() noexcept {
+    if (header_->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        // 最后一个订阅者，回收 slot
+        // acq_rel 确保所有订阅者的读取都已完成
+    }
+}
+```
+
+性能对比 (ARM Cortex-A72):
+
+| memory_order | 指令 | 开销 (相对 relaxed) |
+|-------------|------|-------------------|
+| `relaxed` | 普通 load/store | 1x |
+| `acquire` | `ldar` (load-acquire) | ~1.2x |
+| `release` | `stlr` (store-release) | ~1.2x |
+| `seq_cst` | `ldar` + `stlr` + barrier | ~3-5x |
+
+结论: 避免默认 `seq_cst`，显式使用 `acquire/release` 配对，在 ARM 上可获得 3-5 倍性能提升。
 
 **自动传输选择** (借鉴 CyberRT):
 
@@ -1183,6 +1745,9 @@ class NodeManager {
 
 **目标**: 集成 [CSerialPort](https://github.com/itas109/CSerialPort) 实现工业级串口通信，作为 Transport 层的可插拔传输实现。适用于板间低速控制、传感器采集、备用通信通道等嵌入式场景。
 
+**P0 架构调整参考**: 本模块涉及以下 P0 调整项:
+- [P0-4: Transport 帧缺少 seq_num 和 timestamp](#p0-4-transport-帧缺少-seq_num-和-timestamp) -- 串口帧同样需要序列号和时间戳
+
 **设计理念**:
 - NATIVE_SYNC 模式: 无堆分配、无线程、兼容 `-fno-exceptions -fno-rtti`
 - 串口 fd 直接加入 IoPoller (epoll) 统一事件循环
@@ -1305,6 +1870,262 @@ while (running) {
 | 921600 | 92 KB/s | ~80 KB/s | <4 KB |
 | 4000000 | 400 KB/s | ~350 KB/s | <16 KB |
 
+### 6.15 QoS 服务质量 (P0, qos.hpp)
+
+**目标**: 借鉴 ROS2 QoS 策略和 CyberRT QoS 配置，提供简化但实用的服务质量控制。在嵌入式场景中，不同消息有不同的可靠性和实时性要求 (传感器数据可丢 vs 控制指令必达)，缺少 QoS 会导致系统无法区分关键消息和普通消息。
+
+**设计理念**:
+
+| 对比 | ROS2 DDS QoS | CyberRT QoS | newosp QoS |
+|------|-------------|-------------|------------|
+| 复杂度 | 22+ 策略参数 | 简化 (channel 级) | 精简 (5 个核心参数) |
+| 可靠性 | Reliable / BestEffort | 依赖 SHM/TCP 选择 | Reliable / BestEffort |
+| 历史 | KeepLast / KeepAll + depth | 固定 depth | KeepLast + depth |
+| Deadline | 支持 | 不支持 | 支持 (超时回调) |
+| Liveliness | 支持 (复杂) | 不支持 | 不支持 (由心跳层处理) |
+
+**核心接口**:
+
+```cpp
+namespace osp {
+
+// QoS 可靠性策略
+enum class Reliability : uint8_t {
+  kBestEffort,  // 尽力投递，允许丢失 (适合传感器数据、视频帧)
+  kReliable     // 可靠投递，确保送达 (适合控制指令、状态变更)
+};
+
+// QoS 历史策略
+enum class HistoryPolicy : uint8_t {
+  kKeepLast,    // 仅保留最近 depth 条 (默认)
+  kKeepAll      // 保留所有 (受限于队列容量)
+};
+
+// QoS 配置 (POD，可静态初始化)
+struct QosProfile {
+  Reliability reliability = Reliability::kBestEffort;
+  HistoryPolicy history = HistoryPolicy::kKeepLast;
+  uint16_t depth = 10;           // 历史深度 (KeepLast 模式)
+  uint32_t deadline_ms = 0;      // 消息到达截止时间 (0=不检测)
+  uint32_t lifespan_ms = 0;      // 消息有效期 (0=永不过期)
+};
+
+// 预定义 QoS 配置 (constexpr，零开销)
+inline constexpr QosProfile kQosSensorData{
+    Reliability::kBestEffort, HistoryPolicy::kKeepLast, 5, 0, 100
+};
+inline constexpr QosProfile kQosControlCommand{
+    Reliability::kReliable, HistoryPolicy::kKeepLast, 20, 50, 0
+};
+inline constexpr QosProfile kQosSystemStatus{
+    Reliability::kReliable, HistoryPolicy::kKeepLast, 1, 1000, 0
+};
+inline constexpr QosProfile kQosDefault{};
+
+// Deadline 超时回调
+using DeadlineMissedCallback = void(*)(const char* topic_name, uint32_t elapsed_ms);
+
+}  // namespace osp
+```
+
+**与 Node/Transport 集成**:
+
+```cpp
+// 发布者指定 QoS
+node.Advertise<SensorData>("lidar", kQosSensorData);
+node.Advertise<ControlCmd>("motor_cmd", kQosControlCommand);
+
+// 订阅者指定 QoS (与发布者 QoS 兼容性检查)
+node.Subscribe<SensorData>("lidar", on_lidar, kQosSensorData);
+node.Subscribe<ControlCmd>("motor_cmd", on_cmd, kQosControlCommand);
+
+// Deadline 超时检测
+node.SetDeadlineMissedCallback([](const char* topic, uint32_t elapsed_ms) {
+    LOG_WARN("deadline missed: topic=%s elapsed=%u ms", topic, elapsed_ms);
+});
+```
+
+**QoS 对 Transport 选择的影响**:
+
+```
+TransportFactory::Route(sender, receiver, qos)
+       |
+       ├── Reliable + 跨机器? ──> TCP (保证有序可靠)
+       ├── BestEffort + 跨机器? ──> UDP (低延迟，允许丢包)
+       ├── Reliable + 串口? ──> Serial + ACK/重传
+       └── BestEffort + 串口? ──> Serial (仅 CRC 校验)
+```
+
+**QoS 兼容性矩阵** (发布者 vs 订阅者):
+
+| 发布者 \ 订阅者 | BestEffort | Reliable |
+|----------------|-----------|----------|
+| BestEffort | 兼容 | 不兼容 (订阅者要求更高) |
+| Reliable | 兼容 (降级) | 兼容 |
+
+不兼容时 `Subscribe` 返回错误，避免运行时静默丢消息。
+
+### 6.16 生命周期节点 (P0, lifecycle_node.hpp)
+
+**目标**: 借鉴 ROS2 Lifecycle Node (managed node) 状态机，提供确定性的资源分配和释放。嵌入式系统需要精确控制模块的启停顺序、资源分配时机、故障恢复策略。
+
+**设计理念**:
+
+| 对比 | ROS2 Lifecycle | newosp Lifecycle |
+|------|---------------|-----------------|
+| 状态数 | 4 主状态 + 6 过渡状态 | 4 主状态 + 4 过渡回调 |
+| 过渡触发 | Service 调用 (DDS) | 直接方法调用 (本地) |
+| 错误处理 | 过渡状态 + ErrorProcessing | 回调返回值 + on_error |
+| 复杂度 | 高 (DDS 依赖) | 低 (纯本地状态机) |
+
+**状态机**:
+
+```
+                    ┌──────────────────────────────────────────┐
+                    │                                          │
+                    v                                          │
+  [Unconfigured] ──configure──> [Inactive] ──activate──> [Active]
+        ^                           |                       |
+        │                           │                       │
+        └────────cleanup────────────┘                       │
+        │                                                   │
+        └──────────────────shutdown──────────────────────────┘
+        │                                                   │
+        v                                                   v
+  [Finalized] <─────────────────────────────────────────────┘
+```
+
+状态说明:
+
+| 状态 | 说明 | 资源状态 |
+|------|------|---------|
+| Unconfigured | 初始状态，节点已创建但未配置 | 无资源分配 |
+| Inactive | 已配置，资源已分配，但不处理消息 | Publisher/Subscriber 已创建 |
+| Active | 正常工作，处理消息 | 全部活跃 |
+| Finalized | 终态，节点即将销毁 | 全部释放 |
+
+**核心接口**:
+
+```cpp
+namespace osp {
+
+enum class LifecycleState : uint8_t {
+  kUnconfigured,
+  kInactive,
+  kActive,
+  kFinalized
+};
+
+// 过渡回调返回值
+enum class CallbackReturn : uint8_t {
+  kSuccess,   // 过渡成功
+  kFailure,   // 过渡失败，回退到前一状态
+  kError      // 严重错误，进入 on_error 处理
+};
+
+// 生命周期节点 (继承自 Node)
+template <typename PayloadVariant>
+class LifecycleNode : public Node<PayloadVariant> {
+ public:
+  using Node<PayloadVariant>::Node;  // 继承构造函数
+
+  // 状态过渡触发
+  CallbackReturn Configure();    // Unconfigured -> Inactive
+  CallbackReturn Activate();     // Inactive -> Active
+  CallbackReturn Deactivate();   // Active -> Inactive
+  CallbackReturn Cleanup();      // Inactive -> Unconfigured
+  CallbackReturn Shutdown();     // Any -> Finalized
+
+  // 当前状态查询
+  LifecycleState CurrentState() const noexcept;
+
+ protected:
+  // 子类重写: 过渡回调 (确定性资源管理)
+  virtual CallbackReturn on_configure()  { return CallbackReturn::kSuccess; }
+  virtual CallbackReturn on_activate()   { return CallbackReturn::kSuccess; }
+  virtual CallbackReturn on_deactivate() { return CallbackReturn::kSuccess; }
+  virtual CallbackReturn on_cleanup()    { return CallbackReturn::kSuccess; }
+  virtual CallbackReturn on_shutdown()   { return CallbackReturn::kSuccess; }
+  virtual CallbackReturn on_error(LifecycleState previous_state) {
+    return CallbackReturn::kSuccess;
+  }
+
+ private:
+  LifecycleState state_{LifecycleState::kUnconfigured};
+};
+
+}  // namespace osp
+```
+
+**使用示例**:
+
+```cpp
+class LidarNode : public LifecycleNode<SensorPayload> {
+ protected:
+  CallbackReturn on_configure() override {
+    // 分配资源: 创建 publisher, 打开设备
+    Advertise<PointCloud>("lidar_points", kQosSensorData);
+    fd_ = open("/dev/lidar0", O_RDONLY);
+    return fd_ >= 0 ? CallbackReturn::kSuccess : CallbackReturn::kFailure;
+  }
+
+  CallbackReturn on_activate() override {
+    // 开始工作: 启动数据采集
+    active_ = true;
+    return CallbackReturn::kSuccess;
+  }
+
+  CallbackReturn on_deactivate() override {
+    // 暂停工作: 停止采集，但保留资源
+    active_ = false;
+    return CallbackReturn::kSuccess;
+  }
+
+  CallbackReturn on_cleanup() override {
+    // 释放资源: 关闭设备
+    if (fd_ >= 0) { close(fd_); fd_ = -1; }
+    return CallbackReturn::kSuccess;
+  }
+
+ private:
+  int fd_ = -1;
+  bool active_ = false;
+};
+
+// 系统启动: 逐步初始化
+LidarNode lidar(bus, "lidar", 1);
+lidar.Configure();   // 分配资源
+lidar.Activate();    // 开始工作
+
+// 运行时降级 (如省电模式)
+lidar.Deactivate();  // 暂停，保留资源
+lidar.Activate();    // 恢复工作
+
+// 系统关闭
+lidar.Shutdown();    // 释放所有资源
+```
+
+**与 Executor 集成**:
+
+```cpp
+// RealtimeExecutor 管理 LifecycleNode 的批量启停
+RealtimeExecutor executor(rt_cfg);
+executor.AddNode(lidar);
+executor.AddNode(camera);
+executor.AddNode(motor);
+
+// 按依赖顺序启动
+executor.ConfigureAll();  // 所有节点 Configure
+executor.ActivateAll();   // 所有节点 Activate
+executor.Spin();          // 运行
+
+// 故障恢复: 单个节点重启
+motor.Deactivate();
+motor.Cleanup();
+motor.Configure();
+motor.Activate();
+```
+
 ---
 
 | 模块 | 静态内存 | 堆内存 | 线程数 |
@@ -1343,6 +2164,9 @@ while (running) {
 | Application<256> | ~8 KB | 0 | 1 |
 | Instance (per instance) | ~128 B | 0 | 0 |
 | NodeManager (64 nodes) | ~4 KB | ~2 KB | 2 |
+| QosProfile (per topic) | ~16 B | 0 | 0 |
+| LifecycleNode (per node) | ~1 KB | 0 | 0 |
+| RealtimeExecutor | <1 KB | 0 | 1 |
 
 ---
 
@@ -1560,36 +2384,57 @@ while (running) {
 110. **shell.hpp 统一**: DebugShell 的 TCP 监听切换为 sockpp (与 socket.hpp 共享依赖)
 111. **test_sockpp_integration.cpp**: sockpp 集成回归测试
 
-### Phase O: 节点发现与服务 (规划中)
+### Phase O: P0 架构加固 -- QoS / Lifecycle / 实时调度 / 节点管理 (规划中)
 
-> 借鉴 ROS2 的 Service/Client 模式和 CyberRT 的拓扑自动发现。
+> P0 优先级。基于 ROS2 rclcpp、CyberRT、iceoryx、eCAL 等中间件的最佳实践，
+> 针对嵌入式 ARM-Linux 实时场景，补齐 P0 级别的架构缺陷。
+> 同时实现 P0 级别的节点管理器 (原始 OSP ospnodeman 核心功能)。
 
-112. **discovery.hpp -- MulticastDiscovery**: UDP 多播节点自动发现、心跳保活
-113. **discovery.hpp -- StaticDiscovery**: 配置文件驱动的静态端点表
-114. **service.hpp -- Service/Client**: 请求-响应模式 (借鉴 ROS2 Service)
-115. **test_discovery.cpp**: 多播发现、节点上下线通知
-116. **性能基准回归**: 全传输路径 (inproc/shm/tcp) 吞吐量/延迟基线
-
-### Phase P: 原始 OSP 功能兼容 (规划中)
-
-> 确保 newosp 覆盖原始 OSP (osp_legacy_analysis.md) 的绝大部分功能。
-> 表现形式不同，但功能等价。进程内/进程间/网络间通信做到兼容。
-> 仅支持 Linux 平台 (含 ARM-Linux)。
-
-117. **app.hpp -- Application 应用抽象**: 对应原始 OSP 的 CApp，拥有消息队列和实例池
-118. **app.hpp -- Instance 实例抽象**: 对应原始 OSP 的 CInstance，状态机驱动的逻辑实体
-119. **app.hpp -- InstanceEntry 消息分发**: 事件+状态 二维分发表，替代 switch-case
-120. **app.hpp -- MAKEIID/GETAPP/GETINS**: 全局实例 ID 编解码，兼容原始 OSP 寻址模型
-121. **post.hpp -- OspPost 统一投递**: 本地/远程/广播三种投递方式，自动路由
-122. **post.hpp -- 同步消息 (SendAndWait)**: 借鉴 ROS2 Service，替代原始 OspSend()
-123. **node_manager.hpp -- NodeManager**: TCP/SHM 连接管理、心跳检测、断开通知回调
-124. **node_manager.hpp -- 心跳机制**: 可配置间隔和超时次数，断开时广播 OSP_DISCONNECT
-125. **test_app.cpp**: Application/Instance 生命周期、消息分发、状态转换
-126. **test_post.cpp**: 本地投递、远程投递、广播投递、同步消息
+112. **qos.hpp -- QosProfile**: Reliability/HistoryPolicy/depth/deadline_ms/lifespan_ms 配置
+113. **qos.hpp -- 预定义 QoS**: kQosSensorData/kQosControlCommand/kQosSystemStatus constexpr 配置
+114. **qos.hpp -- QoS 兼容性检查**: 发布者/订阅者 QoS 匹配验证，不兼容时返回错误
+115. **qos.hpp -- Deadline 检测**: 基于 TimerScheduler 的超时回调
+116. **lifecycle_node.hpp -- LifecycleState**: Unconfigured/Inactive/Active/Finalized 状态枚举
+117. **lifecycle_node.hpp -- LifecycleNode**: 继承 Node，on_configure/on_activate/on_deactivate/on_cleanup/on_shutdown 虚函数
+118. **lifecycle_node.hpp -- 状态过渡验证**: 非法过渡返回错误 (如 Unconfigured -> Active)
+119. **executor.hpp -- RealtimeConfig**: sched_policy/sched_priority/lock_memory/stack_size/cpu_affinity
+120. **executor.hpp -- RealtimeExecutor**: SCHED_FIFO + mlockall + 优先级队列 + 周期调度
+121. **executor.hpp -- Executor + LifecycleNode 集成**: ConfigureAll/ActivateAll 批量生命周期管理
+122. **node_manager.hpp -- NodeManager**: TCP/SHM 连接管理、心跳检测、断开通知回调
+123. **node_manager.hpp -- 心跳机制**: 可配置间隔和超时次数，断开时广播 OSP_DISCONNECT
+124. **test_qos.cpp**: QoS 兼容性矩阵、Deadline 超时、Transport 选择影响
+125. **test_lifecycle_node.cpp**: 状态过渡、非法过渡拒绝、资源分配/释放验证
+126. **test_realtime_executor.cpp**: 优先级调度、周期精度、CPU 亲和性
 127. **test_node_manager.cpp**: 连接建立、心跳超时、断开通知
-128. **serial_transport.hpp -- SerialTransport**: CSerialPort NATIVE_SYNC 集成、帧同步状态机、CRC16 校验
-129. **serial_transport.hpp -- IoPoller 集成**: 串口 fd 加入 epoll 统一事件循环
-130. **test_serial_transport.cpp**: 串口回环测试、帧解析、CRC 校验
+128. **性能基准回归**: 全传输路径 (inproc/shm/tcp) 吞吐量/延迟基线
+
+### Phase P: P1 功能扩展 -- OSP 兼容 / 串口 / 统一投递 (规划中)
+
+> P1 优先级。确保 newosp 覆盖原始 OSP (osp_legacy_analysis.md) 的核心功能。
+> 表现形式不同，但功能等价。仅支持 Linux 平台 (含 ARM-Linux)。
+
+129. **app.hpp -- Application 应用抽象**: 对应原始 OSP 的 CApp，拥有消息队列和实例池
+130. **app.hpp -- Instance 实例抽象**: 对应原始 OSP 的 CInstance，状态机驱动的逻辑实体
+131. **app.hpp -- InstanceEntry 消息分发**: 事件+状态 二维分发表，替代 switch-case
+132. **app.hpp -- MAKEIID/GETAPP/GETINS**: 全局实例 ID 编解码，兼容原始 OSP 寻址模型
+133. **post.hpp -- OspPost 统一投递**: 本地/远程/广播三种投递方式，自动路由
+134. **post.hpp -- 同步消息 (SendAndWait)**: 借鉴 ROS2 Service，替代原始 OspSend()
+135. **serial_transport.hpp -- SerialTransport**: CSerialPort NATIVE_SYNC 集成、帧同步状态机、CRC16 校验
+136. **serial_transport.hpp -- IoPoller 集成**: 串口 fd 加入 epoll 统一事件循环
+137. **test_app.cpp**: Application/Instance 生命周期、消息分发、状态转换
+138. **test_post.cpp**: 本地投递、远程投递、广播投递、同步消息
+139. **test_serial_transport.cpp**: 串口回环测试、帧解析、CRC 校验
+
+### Phase Q: P2 高级特性 -- 节点发现 / 服务 (规划中)
+
+> P2 优先级。借鉴 ROS2 的 Service/Client 模式和 CyberRT 的拓扑自动发现。
+> 这些特性对核心功能非必需，但对完整的分布式系统至关重要。
+
+140. **discovery.hpp -- MulticastDiscovery**: UDP 多播节点自动发现、心跳保活
+141. **discovery.hpp -- StaticDiscovery**: 配置文件驱动的静态端点表
+142. **service.hpp -- Service/Client**: 请求-响应模式 (借鉴 ROS2 Service)
+143. **test_discovery.cpp**: 多播发现、节点上下线通知
+144. **test_service.cpp**: 请求-响应、超时处理、并发调用
 
 ---
 
@@ -1606,10 +2451,10 @@ while (running) {
 | **osppost -- 远程投递** | transport.hpp NetworkNode | 已完成 | TCP/UDP 透明传输 |
 | **osppost -- 广播投递** | bus.hpp (所有订阅者) | 已完成 | 类型订阅天然广播 |
 | **osppost -- 别名投递** | -- | 不实现 | 类型路由更安全，应用层可维护名称映射 |
-| **osppost -- 同步消息** | service.hpp (Phase O) | 规划中 | Service/Client 请求-响应 |
+| **osppost -- 同步消息** | service.hpp (Phase Q) | 规划中 | Service/Client 请求-响应 |
 | **ospnodeman -- TCP 连接** | connection.hpp + transport.hpp | 已完成 | ConnectionPool 管理 |
-| **ospnodeman -- 心跳检测** | node_manager.hpp (Phase P) | 规划中 | 可配置心跳 + 超时断开 |
-| **ospnodeman -- 断开通知** | node_manager.hpp (Phase P) | 规划中 | 回调通知 |
+| **ospnodeman -- 心跳检测** | node_manager.hpp (Phase O) | 规划中 | P0，可配置心跳 + 超时断开 |
+| **ospnodeman -- 断开通知** | node_manager.hpp (Phase O) | 规划中 | P0，回调通知 |
 | **ospsch -- 调度器** | executor.hpp | 已完成 | Single/Static/Pinned 三种模式 |
 | **ospsch -- 内存池** | mem_pool.hpp | 已完成 | FixedPool + ObjectPool |
 | **osptimer -- 定时器** | timer.hpp | 已完成 | TimerScheduler 后台线程 |
@@ -1620,13 +2465,16 @@ while (running) {
 | **osptest -- 测试框架** | Catch2 v3.5.2 | 已完成 | 现代测试框架替代 |
 | **CApp -- 应用** | app.hpp Application (Phase P) | 规划中 | 消息队列 + 实例池 |
 | **CInstance -- 实例** | app.hpp Instance (Phase P) | 规划中 | 状态机驱动 |
+| **-- QoS 服务质量** | qos.hpp (Phase O) | 规划中 | P0，简化版 QoS，5 个核心参数 |
+| **-- 生命周期节点** | lifecycle_node.hpp (Phase O) | 规划中 | P0，借鉴 ROS2 Lifecycle Node |
+| **-- 实时调度** | executor.hpp RealtimeExecutor (Phase O) | 规划中 | P0，SCHED_FIFO + mlockall + 优先级队列 |
 | **CMessage -- 消息** | MessageEnvelope (bus.hpp) | 已完成 | header + variant payload |
 | **COspStack -- 栈内存** | mem_pool.hpp FixedPool | 已完成 | 固定块分配 |
 | **进程内通信** | AsyncBus (inproc, 零拷贝) | 已完成 | 无锁 MPSC |
 | **进程间通信 (同机)** | ShmTransport (Phase M) | 已完成 | 共享内存无锁队列 |
 | **网络间通信 (跨机)** | TcpTransport/UdpTransport | 已完成 | sockpp 重构 (Phase N) |
 | **自动传输选择** | TransportFactory (Phase M) | 规划中 | inproc/shm/tcp 自动路由 |
-| **节点发现** | discovery.hpp (Phase O) | 规划中 | UDP 多播 + 静态配置 |
+| **节点发现** | discovery.hpp (Phase Q) | 规划中 | P2，UDP 多播 + 静态配置 |
 | **字节序转换** | Serializer<T> (transport.hpp) | 已完成 | POD memcpy，可扩展 protobuf |
 
 ---

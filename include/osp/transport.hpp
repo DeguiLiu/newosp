@@ -85,18 +85,24 @@ enum class TransportType : uint8_t {
 // ============================================================================
 
 /**
- * Frame wire format:
+ * Frame wire format v0 (14-byte header):
  * +--------+--------+----------+----------+------------------+
  * | magic  | length | type_idx | sender   | payload          |
  * | 4 byte | 4 byte | 2 byte   | 4 byte   | variable         |
  * +--------+--------+----------+----------+------------------+
  *
- * magic = 0x4F535000 ("OSP\0")
+ * Frame wire format v1 (26-byte header):
+ * +--------+--------+----------+----------+----------+-----------+----------+
+ * | magic  | length | type_idx | sender   | seq_num  | timestamp | payload  |
+ * | 4 byte | 4 byte | 2 byte   | 4 byte   | 4 byte   | 8 byte    | variable |
+ * +--------+--------+----------+----------+----------+-----------+----------+
  */
-static constexpr uint32_t kFrameMagic = 0x4F535000;
+static constexpr uint32_t kFrameMagicV0 = 0x4F535000;  ///< v0 magic ("OSP\0")
+static constexpr uint32_t kFrameMagicV1 = 0x4F535001;  ///< v1 magic ("OSP\1")
+static constexpr uint32_t kFrameMagic = kFrameMagicV0; ///< Default (backward compat)
 
 /**
- * @brief Frame header for the wire protocol.
+ * @brief Frame header for the wire protocol (v0).
  *
  * Not packed as a struct due to platform padding differences.
  * Use FrameCodec for manual serialization to/from wire format.
@@ -106,6 +112,20 @@ struct FrameHeader {
   uint32_t length;       ///< Payload length in bytes.
   uint16_t type_index;   ///< Variant index of the payload type.
   uint32_t sender_id;    ///< Sender node identifier.
+};
+
+/**
+ * @brief Extended frame header for the wire protocol (v1).
+ *
+ * Adds sequence number and timestamp fields for loss/reorder detection.
+ */
+struct FrameHeaderV1 {
+  uint32_t magic;        ///< 0x4F535001
+  uint32_t length;       ///< Payload length in bytes.
+  uint16_t type_index;   ///< Variant index of the payload type.
+  uint32_t sender_id;    ///< Sender node identifier.
+  uint32_t seq_num;      ///< Monotonically increasing sequence number.
+  uint64_t timestamp_ns; ///< steady_clock nanoseconds.
 };
 
 // ============================================================================
@@ -154,6 +174,104 @@ struct Serializer {
 };
 
 // ============================================================================
+// Timestamp Utility
+// ============================================================================
+
+#include <chrono>
+
+/**
+ * @brief Get current timestamp in nanoseconds from steady_clock.
+ * @return Nanoseconds since steady_clock epoch.
+ */
+inline uint64_t SteadyClockNs() noexcept {
+  auto now = std::chrono::steady_clock::now();
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          now.time_since_epoch()).count());
+}
+
+// ============================================================================
+// SequenceTracker - Sequence Number Tracking
+// ============================================================================
+
+/**
+ * @brief Tracks sequence numbers for loss/reorder detection.
+ *
+ * Monitors incoming sequence numbers to detect packet loss, reordering,
+ * and duplicates. Assumes monotonically increasing sequence numbers.
+ */
+class SequenceTracker {
+ public:
+  SequenceTracker() noexcept
+      : expected_seq_(0),
+        total_received_(0),
+        lost_count_(0),
+        reordered_count_(0),
+        duplicate_count_(0) {}
+
+  /**
+   * @brief Process a received sequence number.
+   * @param seq_num The sequence number to track.
+   * @return true if in-order, false if reordered or duplicate.
+   */
+  bool Track(uint32_t seq_num) noexcept {
+    ++total_received_;
+
+    if (seq_num == expected_seq_) {
+      // In-order
+      ++expected_seq_;
+      return true;
+    } else if (seq_num > expected_seq_) {
+      // Gap detected (packet loss)
+      lost_count_ += (seq_num - expected_seq_);
+      expected_seq_ = seq_num + 1;
+      return true;
+    } else {
+      // seq_num < expected_seq_: reorder or duplicate
+      uint32_t gap = expected_seq_ - seq_num;
+      if (gap <= 1000) {
+        // Within reorder window
+        ++reordered_count_;
+      } else {
+        // Too old, likely duplicate
+        ++duplicate_count_;
+      }
+      return false;
+    }
+  }
+
+  /**
+   * @brief Reset all tracking counters.
+   */
+  void Reset() noexcept {
+    expected_seq_ = 0;
+    total_received_ = 0;
+    lost_count_ = 0;
+    reordered_count_ = 0;
+    duplicate_count_ = 0;
+  }
+
+  /** @brief Get total number of packets received. */
+  uint64_t TotalReceived() const noexcept { return total_received_; }
+
+  /** @brief Get number of lost packets detected. */
+  uint64_t LostCount() const noexcept { return lost_count_; }
+
+  /** @brief Get number of reordered packets detected. */
+  uint64_t ReorderedCount() const noexcept { return reordered_count_; }
+
+  /** @brief Get number of duplicate packets detected. */
+  uint64_t DuplicateCount() const noexcept { return duplicate_count_; }
+
+ private:
+  uint32_t expected_seq_;
+  uint64_t total_received_;
+  uint64_t lost_count_;
+  uint64_t reordered_count_;
+  uint64_t duplicate_count_;
+};
+
+// ============================================================================
 // FrameCodec - Manual Header Serialization
 // ============================================================================
 
@@ -169,10 +287,11 @@ struct Serializer {
  */
 class FrameCodec {
  public:
-  static constexpr uint32_t kHeaderSize = 14;  // 4+4+2+4
+  static constexpr uint32_t kHeaderSize = 14;    // v0: 4+4+2+4
+  static constexpr uint32_t kHeaderSizeV1 = 26;  // v1: 14 + 4 + 8
 
   /**
-   * @brief Encode a FrameHeader into a byte buffer.
+   * @brief Encode a FrameHeader (v0) into a byte buffer.
    * @param hdr The header to encode.
    * @param buf Output buffer (must be at least kHeaderSize bytes).
    * @param buf_size Size of the output buffer.
@@ -189,7 +308,7 @@ class FrameCodec {
   }
 
   /**
-   * @brief Decode a FrameHeader from a byte buffer.
+   * @brief Decode a FrameHeader (v0) from a byte buffer.
    * @param buf Input buffer (must be at least kHeaderSize bytes).
    * @param buf_size Size of the input buffer.
    * @param hdr Output header.
@@ -203,6 +322,59 @@ class FrameCodec {
     std::memcpy(&hdr.type_index, buf + 8, 2);
     std::memcpy(&hdr.sender_id, buf + 10, 4);
     return true;
+  }
+
+  /**
+   * @brief Encode a FrameHeaderV1 into a byte buffer.
+   * @param hdr The v1 header to encode.
+   * @param buf Output buffer (must be at least kHeaderSizeV1 bytes).
+   * @param buf_size Size of the output buffer.
+   * @return Number of bytes written (kHeaderSizeV1), or 0 on failure.
+   */
+  static uint32_t EncodeHeaderV1(const FrameHeaderV1& hdr, uint8_t* buf,
+                                  uint32_t buf_size) noexcept {
+    if (buf_size < kHeaderSizeV1) return 0;
+    std::memcpy(buf + 0, &hdr.magic, 4);
+    std::memcpy(buf + 4, &hdr.length, 4);
+    std::memcpy(buf + 8, &hdr.type_index, 2);
+    std::memcpy(buf + 10, &hdr.sender_id, 4);
+    std::memcpy(buf + 14, &hdr.seq_num, 4);
+    std::memcpy(buf + 18, &hdr.timestamp_ns, 8);
+    return kHeaderSizeV1;
+  }
+
+  /**
+   * @brief Decode a FrameHeaderV1 from a byte buffer.
+   * @param buf Input buffer (must be at least kHeaderSizeV1 bytes).
+   * @param buf_size Size of the input buffer.
+   * @param hdr Output v1 header.
+   * @return true on success, false if the buffer is too small.
+   */
+  static bool DecodeHeaderV1(const uint8_t* buf, uint32_t buf_size,
+                              FrameHeaderV1& hdr) noexcept {
+    if (buf_size < kHeaderSizeV1) return false;
+    std::memcpy(&hdr.magic, buf + 0, 4);
+    std::memcpy(&hdr.length, buf + 4, 4);
+    std::memcpy(&hdr.type_index, buf + 8, 2);
+    std::memcpy(&hdr.sender_id, buf + 10, 4);
+    std::memcpy(&hdr.seq_num, buf + 14, 4);
+    std::memcpy(&hdr.timestamp_ns, buf + 18, 8);
+    return true;
+  }
+
+  /**
+   * @brief Detect frame version from magic field.
+   * @param buf Input buffer (must be at least 4 bytes).
+   * @param buf_size Size of the input buffer.
+   * @return 0 for v0, 1 for v1, UINT8_MAX for unknown/invalid.
+   */
+  static uint8_t DetectVersion(const uint8_t* buf, uint32_t buf_size) noexcept {
+    if (buf_size < 4) return UINT8_MAX;
+    uint32_t magic;
+    std::memcpy(&magic, buf, 4);
+    if (magic == kFrameMagicV0) return 0;
+    if (magic == kFrameMagicV1) return 1;
+    return UINT8_MAX;
   }
 };
 
@@ -380,6 +552,163 @@ class TcpTransport {
     }
 
     return expected<uint32_t, TransportError>::success(hdr.length);
+  }
+
+  /**
+   * @brief Send a framed message with v1 header (includes seq_num and timestamp).
+   * @param type_index Variant type index of the payload.
+   * @param sender_id Sender node identifier.
+   * @param seq_num Sequence number.
+   * @param timestamp_ns Timestamp in nanoseconds.
+   * @param payload Pointer to the serialized payload data.
+   * @param payload_len Length of the payload in bytes.
+   * @return Success or TransportError.
+   */
+  expected<void, TransportError> SendFrameV1(uint16_t type_index,
+                                              uint32_t sender_id,
+                                              uint32_t seq_num,
+                                              uint64_t timestamp_ns,
+                                              const void* payload,
+                                              uint32_t payload_len) noexcept {
+    if (!connected_) {
+      return expected<void, TransportError>::error(
+          TransportError::kNotConnected);
+    }
+
+    if (payload_len > OSP_TRANSPORT_MAX_FRAME_SIZE) {
+      return expected<void, TransportError>::error(
+          TransportError::kBufferFull);
+    }
+
+    // Encode v1 header
+    FrameHeaderV1 hdr;
+    hdr.magic = kFrameMagicV1;
+    hdr.length = payload_len;
+    hdr.type_index = type_index;
+    hdr.sender_id = sender_id;
+    hdr.seq_num = seq_num;
+    hdr.timestamp_ns = timestamp_ns;
+
+    uint8_t hdr_buf[FrameCodec::kHeaderSizeV1];
+    FrameCodec::EncodeHeaderV1(hdr, hdr_buf, sizeof(hdr_buf));
+
+    // Send header
+    auto r = SendAll(hdr_buf, FrameCodec::kHeaderSizeV1);
+    if (!r.has_value()) return r;
+
+    // Send payload
+    if (payload_len > 0 && payload != nullptr) {
+      r = SendAll(payload, payload_len);
+      if (!r.has_value()) return r;
+    }
+
+    return expected<void, TransportError>::success();
+  }
+
+  /**
+   * @brief Receive a framed message with auto-detection (handles both v0 and v1).
+   * @param hdr_v1 Output v1 header (seq_num and timestamp_ns are 0 for v0 frames).
+   * @param payload_buf Buffer to receive the payload into.
+   * @param buf_size Size of the payload buffer.
+   * @return Number of payload bytes received, or TransportError.
+   */
+  expected<uint32_t, TransportError> RecvFrameAuto(
+      FrameHeaderV1& hdr_v1, void* payload_buf, uint32_t buf_size) noexcept {
+    if (!connected_) {
+      return expected<uint32_t, TransportError>::error(
+          TransportError::kNotConnected);
+    }
+
+    // Peek at first 4 bytes to detect version
+    uint8_t magic_buf[4];
+    auto r = RecvAll(magic_buf, 4);
+    if (!r.has_value()) return expected<uint32_t, TransportError>::error(
+        r.get_error());
+
+    uint8_t version = FrameCodec::DetectVersion(magic_buf, 4);
+
+    if (version == 0) {
+      // v0 frame: read remaining 10 bytes of header
+      uint8_t hdr_buf[FrameCodec::kHeaderSize];
+      std::memcpy(hdr_buf, magic_buf, 4);
+      auto r2 = RecvAll(hdr_buf + 4, FrameCodec::kHeaderSize - 4);
+      if (!r2.has_value()) return expected<uint32_t, TransportError>::error(
+          r2.get_error());
+
+      FrameHeader hdr;
+      if (!FrameCodec::DecodeHeader(hdr_buf, FrameCodec::kHeaderSize, hdr)) {
+        return expected<uint32_t, TransportError>::error(
+            TransportError::kInvalidFrame);
+      }
+
+      // Validate magic
+      if (hdr.magic != kFrameMagicV0) {
+        return expected<uint32_t, TransportError>::error(
+            TransportError::kInvalidFrame);
+      }
+
+      // Validate payload size
+      if (hdr.length > buf_size) {
+        return expected<uint32_t, TransportError>::error(
+            TransportError::kBufferFull);
+      }
+
+      // Receive payload
+      if (hdr.length > 0) {
+        auto pr = RecvAll(payload_buf, hdr.length);
+        if (!pr.has_value()) return expected<uint32_t, TransportError>::error(
+            pr.get_error());
+      }
+
+      // Convert to v1 header (seq_num and timestamp_ns are 0)
+      hdr_v1.magic = hdr.magic;
+      hdr_v1.length = hdr.length;
+      hdr_v1.type_index = hdr.type_index;
+      hdr_v1.sender_id = hdr.sender_id;
+      hdr_v1.seq_num = 0;
+      hdr_v1.timestamp_ns = 0;
+
+      return expected<uint32_t, TransportError>::success(hdr.length);
+
+    } else if (version == 1) {
+      // v1 frame: read remaining 22 bytes of header
+      uint8_t hdr_buf[FrameCodec::kHeaderSizeV1];
+      std::memcpy(hdr_buf, magic_buf, 4);
+      auto r2 = RecvAll(hdr_buf + 4, FrameCodec::kHeaderSizeV1 - 4);
+      if (!r2.has_value()) return expected<uint32_t, TransportError>::error(
+          r2.get_error());
+
+      if (!FrameCodec::DecodeHeaderV1(hdr_buf, FrameCodec::kHeaderSizeV1, hdr_v1)) {
+        return expected<uint32_t, TransportError>::error(
+            TransportError::kInvalidFrame);
+      }
+
+      // Validate magic
+      if (hdr_v1.magic != kFrameMagicV1) {
+        return expected<uint32_t, TransportError>::error(
+            TransportError::kInvalidFrame);
+      }
+
+      // Validate payload size
+      if (hdr_v1.length > buf_size) {
+        return expected<uint32_t, TransportError>::error(
+            TransportError::kBufferFull);
+      }
+
+      // Receive payload
+      if (hdr_v1.length > 0) {
+        auto pr = RecvAll(payload_buf, hdr_v1.length);
+        if (!pr.has_value()) return expected<uint32_t, TransportError>::error(
+            pr.get_error());
+      }
+
+      return expected<uint32_t, TransportError>::success(hdr_v1.length);
+
+    } else {
+      // Unknown version
+      return expected<uint32_t, TransportError>::error(
+          TransportError::kInvalidFrame);
+    }
   }
 
   /** @brief Check if the transport is connected. */

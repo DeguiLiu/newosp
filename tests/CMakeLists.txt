@@ -22,6 +22,7 @@ add_executable(osp_tests
     test_shutdown.cpp
     test_bus.cpp
     test_node.cpp
+    test_lifecycle_node.cpp
     test_worker_pool.cpp
     test_executor.cpp
     test_hsm.cpp
@@ -33,9 +34,16 @@ add_executable(osp_tests
     test_semaphore.cpp
     test_shm_transport.cpp
     test_data_fusion.cpp
+    test_discovery.cpp
+    test_service.cpp
+    test_node_manager.cpp
     test_integration.cpp
+    test_serial_transport.cpp
+    test_qos.cpp
+    test_app.cpp
+    test_post.cpp
 )
-target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads)
+target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
 
 if(OSP_WITH_SOCKPP)
     target_sources(osp_tests PRIVATE test_net.cpp)
