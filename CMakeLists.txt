@@ -16,6 +16,7 @@ option(OSP_BUILD_EXAMPLES "Build examples"                             OFF)
 option(OSP_CONFIG_INI     "Enable INI config support (inih)"           ON)
 option(OSP_CONFIG_JSON    "Enable JSON config support (nlohmann/json)" OFF)
 option(OSP_CONFIG_YAML    "Enable YAML config support (fkYAML)"        OFF)
+option(OSP_WITH_SOCKPP    "Use sockpp for network transport"           ON)
 
 # --- inih (INI parser, used by config.hpp) ---
 if(OSP_CONFIG_INI)
@@ -69,6 +70,23 @@ if(OSP_CONFIG_YAML)
     target_link_libraries(osp INTERFACE fkYAML::fkYAML)
 endif()
 
+# --- sockpp (Network library, used by net.hpp) ---
+if(OSP_WITH_SOCKPP)
+    FetchContent_Declare(
+        sockpp
+        URL https://ghfast.top/https://github.com/DeguiLiu/sockpp/archive/refs/heads/master.zip
+        DOWNLOAD_EXTRACT_TIMESTAMP ON
+    )
+    set(SOCKPP_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(SOCKPP_BUILD_STATIC ON CACHE BOOL "" FORCE)
+    set(SOCKPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SOCKPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(sockpp)
+
+    target_compile_definitions(osp INTERFACE OSP_HAS_SOCKPP=1)
+    # Note: sockpp-static needs to be linked by consumers (tests, examples)
+endif()
+
 # --- Examples ---
 if(OSP_BUILD_EXAMPLES)
     add_subdirectory(examples)
@@ -91,6 +109,9 @@ if(TARGET nlohmann_json)
 endif()
 if(TARGET fkYAML)
     install(TARGETS fkYAML EXPORT ospTargets)
+endif()
+if(TARGET sockpp-static)
+    install(TARGETS sockpp-static EXPORT ospTargets)
 endif()
 install(DIRECTORY include/osp DESTINATION include)
 install(EXPORT ospTargets
