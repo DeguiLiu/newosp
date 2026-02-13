@@ -228,9 +228,10 @@ TEST_CASE("service - Multiple concurrent clients", "[service][client]") {
   // Spawn multiple client threads
   constexpr uint32_t kNumClients = 4;
   std::thread clients[kNumClients];
+  std::atomic<uint32_t> success_count{0};
 
   for (uint32_t i = 0; i < kNumClients; ++i) {
-    clients[i] = std::thread([i, port]() {
+    clients[i] = std::thread([i, port, &success_count]() {
       auto client_r = osp::Client<AddRequest, AddResponse>::Connect("127.0.0.1", port);
       if (!client_r.has_value()) return;
 
@@ -239,8 +240,9 @@ TEST_CASE("service - Multiple concurrent clients", "[service][client]") {
       for (int j = 0; j < 5; ++j) {
         AddRequest req{static_cast<int32_t>(i), static_cast<int32_t>(j)};
         auto resp_r = client.Call(req);
-        if (resp_r.has_value()) {
-          REQUIRE(resp_r.value().sum == static_cast<int32_t>(i + j));
+        if (resp_r.has_value() &&
+            resp_r.value().sum == static_cast<int32_t>(i + j)) {
+          success_count.fetch_add(1, std::memory_order_relaxed);
         }
       }
 
@@ -252,8 +254,8 @@ TEST_CASE("service - Multiple concurrent clients", "[service][client]") {
     clients[i].join();
   }
 
-  // Verify all requests were processed
-  REQUIRE(request_count.load(std::memory_order_relaxed) == kNumClients * 5);
+  // Verify all requests were processed correctly
+  REQUIRE(success_count.load(std::memory_order_relaxed) == kNumClients * 5);
 
   service.Stop();
 }

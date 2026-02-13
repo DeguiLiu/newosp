@@ -319,26 +319,28 @@ class Application {
   bool Post(uint16_t ins_id, uint16_t event, const void* data,
             uint32_t len,
             ResponseChannel* response_ch = nullptr) noexcept {
-    uint32_t next_tail = (queue_tail_ + 1) % OSP_APP_QUEUE_DEPTH;
-    if (next_tail == queue_head_) {
+    uint32_t tail = queue_tail_.load(std::memory_order_relaxed);
+    uint32_t next_tail = (tail + 1) % OSP_APP_QUEUE_DEPTH;
+    if (next_tail == queue_head_.load(std::memory_order_acquire)) {
       return false;  // Queue full
     }
-    AppMessage& msg = queue_[queue_tail_];
+    AppMessage& msg = queue_[tail];
     msg.ins_id = ins_id;
     msg.event = event;
     msg.flags_and_len = 0;
     msg.response_channel = response_ch;
     msg.Store(data, len);
-    queue_tail_ = next_tail;
+    queue_tail_.store(next_tail, std::memory_order_release);
     return true;
   }
 
   bool ProcessOne() noexcept {
-    if (queue_head_ == queue_tail_) {
+    uint32_t head = queue_head_.load(std::memory_order_relaxed);
+    if (head == queue_tail_.load(std::memory_order_acquire)) {
       return false;  // Empty
     }
-    const AppMessage& msg = queue_[queue_head_];
-    queue_head_ = (queue_head_ + 1) % OSP_APP_QUEUE_DEPTH;
+    const AppMessage& msg = queue_[head];
+    uint32_t next_head = (head + 1) % OSP_APP_QUEUE_DEPTH;
 
     const void* data = msg.Data();
     uint32_t data_len = msg.DataLen();
@@ -360,6 +362,7 @@ class Application {
         inst->SetResponseChannel(nullptr);
       }
     }
+    queue_head_.store(next_head, std::memory_order_release);
     return true;
   }
 
@@ -383,10 +386,12 @@ class Application {
   }
 
   uint32_t PendingMessages() const noexcept {
-    if (queue_tail_ >= queue_head_) {
-      return queue_tail_ - queue_head_;
+    uint32_t tail = queue_tail_.load(std::memory_order_acquire);
+    uint32_t head = queue_head_.load(std::memory_order_acquire);
+    if (tail >= head) {
+      return tail - head;
     }
-    return OSP_APP_QUEUE_DEPTH - queue_head_ + queue_tail_;
+    return OSP_APP_QUEUE_DEPTH - head + tail;
   }
 
  private:
@@ -396,8 +401,8 @@ class Application {
   Instance* instances_[MaxInstances];
   uint32_t instance_count_;
   AppMessage queue_[OSP_APP_QUEUE_DEPTH];
-  uint32_t queue_head_;
-  uint32_t queue_tail_;
+  std::atomic<uint32_t> queue_head_;
+  std::atomic<uint32_t> queue_tail_;
 };
 
 }  // namespace osp

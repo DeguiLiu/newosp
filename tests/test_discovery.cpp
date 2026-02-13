@@ -197,7 +197,7 @@ TEST_CASE("discovery - MulticastDiscovery node join callback", "[discovery][mult
       [](const osp::DiscoveredNode& node, void* user_ctx) {
         Context* c = static_cast<Context*>(user_ctx);
         std::strcpy(c->joined_name, node.name);
-        c->join_count.fetch_add(1, std::memory_order_relaxed);
+        c->join_count.fetch_add(1, std::memory_order_release);
       },
       &ctx);
 
@@ -209,7 +209,7 @@ TEST_CASE("discovery - MulticastDiscovery node join callback", "[discovery][mult
   // Wait for self-announcement
   std::this_thread::sleep_for(std::chrono::milliseconds(1500));
 
-  REQUIRE(ctx.join_count.load(std::memory_order_relaxed) >= 1);
+  REQUIRE(ctx.join_count.load(std::memory_order_acquire) >= 1);
   REQUIRE(std::strcmp(ctx.joined_name, "join_test_node") == 0);
 
   discovery.Stop();
@@ -236,7 +236,7 @@ TEST_CASE("discovery - MulticastDiscovery node timeout", "[discovery][multicast]
       [](const osp::DiscoveredNode& node, void* user_ctx) {
         Context* c = static_cast<Context*>(user_ctx);
         std::strcpy(c->left_name, node.name);
-        c->leave_count.fetch_add(1, std::memory_order_relaxed);
+        c->leave_count.fetch_add(1, std::memory_order_release);
       },
       &ctx);
 
@@ -259,7 +259,7 @@ TEST_CASE("discovery - MulticastDiscovery node timeout", "[discovery][multicast]
       [](const osp::DiscoveredNode& node, void* user_ctx) {
         Context* c = static_cast<Context*>(user_ctx);
         std::strcpy(c->left_name, node.name);
-        c->leave_count.fetch_add(1, std::memory_order_relaxed);
+        c->leave_count.fetch_add(1, std::memory_order_release);
       },
       &ctx);
 
