@@ -37,6 +37,7 @@ add_executable(osp_tests
     test_discovery.cpp
     test_service.cpp
     test_node_manager.cpp
+    test_node_manager_hsm.cpp
     test_integration.cpp
     test_serial_transport.cpp
     test_qos.cpp
