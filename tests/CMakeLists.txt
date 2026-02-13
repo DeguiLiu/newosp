@@ -33,6 +33,8 @@ set(OSP_TEST_CORE_SOURCES
     test_shm_transport.cpp
     test_data_fusion.cpp
     test_node_manager_hsm.cpp
+    test_service_hsm.cpp
+    test_discovery_hsm.cpp
     test_serial_transport.cpp
     test_qos.cpp
     test_app.cpp
