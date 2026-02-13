@@ -12,3 +12,5 @@ cmake-build-*/
 *.a
 *.so
 *.dylib
+examples/basic_demo
+docs/osp_analysis_summary.txt

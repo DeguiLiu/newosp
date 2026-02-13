@@ -31,7 +31,15 @@ add_executable(osp_tests
     test_io_poller.cpp
     test_transport.cpp
     test_semaphore.cpp
+    test_shm_transport.cpp
     test_data_fusion.cpp
+    test_integration.cpp
 )
 target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads)
+
+if(OSP_WITH_SOCKPP)
+    target_sources(osp_tests PRIVATE test_net.cpp)
+    target_link_libraries(osp_tests sockpp-static)
+endif()
+
 catch_discover_tests(osp_tests)
