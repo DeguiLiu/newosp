@@ -12,7 +12,8 @@ include(Catch)
 find_package(Threads REQUIRED)
 
 add_executable(osp_tests
-    test_stub.cpp
+    test_platform.cpp
+    test_vocabulary.cpp
 )
 target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads)
 catch_discover_tests(osp_tests)
