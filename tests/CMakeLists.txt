@@ -37,8 +37,9 @@ add_executable(osp_tests
     test_service.cpp
     test_node_manager.cpp
     test_integration.cpp
+    test_serial_transport.cpp
 )
-target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads)
+target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
 
 if(OSP_WITH_SOCKPP)
     target_sources(osp_tests PRIVATE test_net.cpp)

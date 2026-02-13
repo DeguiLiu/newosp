@@ -425,7 +425,7 @@ SIGINT/SIGTERM ──> 信号处理器 (写 pipe, async-signal-safe)
 Producer 0 ─┐
 Producer 1 ──┼── CAS Publish ──> ┌────────────────┐
 Producer 2 ─┘                    │ Ring Buffer    │
-                                 │ (4096 slots)   │
+                                 │ (模板参数化)    │
                                  │ sequence-based  │
                                  └───────┬────────┘
                                          │ ProcessBatch()
@@ -434,24 +434,61 @@ Producer 2 ─┘                    │ Ring Buffer    │
                                  (std::variant + VariantIndex<T>)
 ```
 
+**模板参数化** (P0 调整):
+
+```cpp
+// 队列深度和批量大小作为模板参数，适配不同场景
+template <typename PayloadVariant,
+          uint32_t QueueDepth = 4096,
+          uint32_t BatchSize = 256>
+class AsyncBus {
+    static_assert((QueueDepth & (QueueDepth - 1)) == 0, "QueueDepth must be power of 2");
+    // ...
+};
+
+// 嵌入式低内存场景
+using LightBus = AsyncBus<Payload, 256, 64>;    // ~20KB
+
+// 高吞吐场景
+using HighBus = AsyncBus<Payload, 4096, 256>;   // ~320KB
+```
+
+**variant 内存优化说明**:
+
+每个 slot 占用 `sizeof(PayloadVariant)` 字节 (最大类型 size + 对齐)。当 variant 中类型大小差异悬殊时 (如 4B 心跳 vs 1KB 帧头)，小消息浪费严重。应对策略:
+
+| 策略 | 说明 | 适用场景 |
+|------|------|---------|
+| 控制 variant 类型大小 | 大消息用指针/ID 间接引用，variant 只存元数据 | 推荐，零改动 |
+| 分离总线 | 不同大小的消息使用不同 AsyncBus 实例 | 子系统隔离 |
+| MemPool 间接 | 大消息存入 ObjectPool，variant 存 `PoolHandle<T>` | 混合大小消息 |
+
 **关键特性**:
 
 | 特性 | 说明 |
 |------|------|
 | 无锁发布 | CAS 循环抢占生产者位置 |
 | 优先级准入控制 | LOW 60% / MEDIUM 80% / HIGH 99% 阈值 |
-| 批量处理 | `ProcessBatch()` 每轮最多 256 条消息 |
+| 批量处理 | `ProcessBatch()` 每轮最多 BatchSize 条消息 |
 | 背压感知 | Normal/Warning/Critical/Full 四级 |
 | 缓存行分离 | 生产者/消费者计数器分属不同缓存行 |
 
 **编译期配置**:
 
 ```cpp
-#define OSP_BUS_QUEUE_DEPTH            4096   // 环形缓冲区大小 (2^N)
+#define OSP_BUS_QUEUE_DEPTH            4096   // 环形缓冲区默认大小 (2^N, 模板可覆盖)
 #define OSP_BUS_MAX_MESSAGE_TYPES      8      // std::variant 最大类型数
 #define OSP_BUS_MAX_CALLBACKS_PER_TYPE 16     // 每类型最大订阅数
-#define OSP_BUS_BATCH_SIZE             256    // 单次处理批量上限
+#define OSP_BUS_BATCH_SIZE             256    // 单次处理批量默认上限 (模板可覆盖)
 ```
+
+**单消费者设计取舍**:
+
+单消费者 `ProcessBatch()` 是有意的设计选择，而非疏忽:
+- 优势: 消费侧无锁、无竞争，延迟确定性好
+- 局限: 所有消息类型串行分发，高频消息可能阻塞低频消息
+- 适用边界: 消息处理回调应轻量 (<10us)，重计算应转发到 WorkerPool
+- 扩展方案: 如需多消费者，可按消息类型分片到多个 AsyncBus 实例
 
 **设计模式** (借鉴 eventpp):
 - 序列号环形缓冲区 (类似 Disruptor)
@@ -471,18 +508,37 @@ struct SensorData { float temp; };
 struct MotorCmd { int speed; };
 using Payload = std::variant<SensorData, MotorCmd>;
 
+// 方式 1: 使用默认全局总线 (简单场景，向后兼容)
 osp::Node<Payload> sensor("sensor", 1);
+
+// 方式 2: 依赖注入总线实例 (P0 调整，推荐)
+osp::AsyncBus<Payload, 1024> my_bus;
+osp::Node<Payload> sensor("sensor", 1, my_bus);
+
+// 纯类型路由 (默认，编译期确定)
 sensor.Subscribe<SensorData>([](const SensorData& d, const osp::MessageHeader& h) {
     OSP_LOG_INFO("sensor", "temp=%.1f from sender %u", d.temp, h.sender_id);
 });
+
+// 混合路由: 类型 + 主题名 (P0 调整，区分同类型不同语义)
+sensor.Subscribe<SensorData>("imu/temperature", on_imu_temp);
+sensor.Subscribe<SensorData>("env/temperature", on_env_temp);
+
 sensor.Publish(SensorData{25.0f});
+sensor.Publish(SensorData{18.0f}, "env/temperature");  // 带主题名发布
 sensor.SpinOnce();  // 消费总线中的消息
 ```
 
 **设计决策**:
-- 基于类型路由 (非主题路由)，编译期确定分发
+- 类型路由为主，主题路由为辅 (类型安全 + 语义灵活)
+  - 纯类型路由: 编译期确定分发，零开销，适合单一语义消息
+  - 混合路由: `Subscribe<T>(topic, cb)`，运行时按 topic 过滤，适合同类型多源场景
+  - 借鉴: CyberRT 的 channel name + ROS2 的 topic name
 - RAII 自动退订 (析构时清理所有订阅)
-- 全局单例总线 (同一 `PayloadVariant` 共享)
+- 总线依赖注入 (P0 调整):
+  - 构造时可传入 Bus 引用，支持多总线实例隔离子系统
+  - 不传则使用全局单例总线 (向后兼容)
+  - 优势: 可独立测试、子系统隔离、多租户共存
 - `Publisher<T>` 轻量发布器 (无 RAII 清理)
 
 ---
@@ -782,15 +838,21 @@ controller.Subscribe<SensorData>(on_sensor);  // 统一回调，不区分来源
 controller.SpinOnce();  // 本地 + 远程消息统一处理
 ```
 
-**消息帧格式** (网络传输):
+**消息帧格式** (P0 调整: 增加序列号和时间戳):
 
 ```
-┌─────────────┬─────────────┬──────────┬───────────┬──────────┐
-│ magic (4B)  │ msg_len (4B)│ type (2B)│ sender(4B)│ payload  │
-│ 0x4F535000  │ total bytes │ variant  │ node id   │ N bytes  │
-│             │             │ index    │           │          │
-└─────────────┴─────────────┴──────────┴───────────┴──────────┘
+┌─────────────┬─────────────┬──────────┬───────────┬───────────┬──────────────┬──────────┐
+│ magic (4B)  │ msg_len (4B)│ type (2B)│ sender(4B)│ seq_num(4B)│ timestamp(8B)│ payload  │
+│ 0x4F535000  │ total bytes │ variant  │ node id   │ 单调递增   │ steady_clock │ N bytes  │
+│             │             │ index    │           │            │ 纳秒         │          │
+└─────────────┴─────────────┴──────────┴───────────┴───────────┴──────────────┴──────────┘
+帧头总计: 26 字节 (旧 14 字节)
 ```
+
+新增字段说明:
+- `seq_num (4B)`: 每个发送端单调递增，用于检测丢包/乱序/重复 (UDP 和串口场景必需)
+- `timestamp (8B)`: `steady_clock` 纳秒时间戳，用于端到端延迟分析和 DataFusion 时间对齐 (借鉴 ROS2 message_filters 和 CyberRT DataFusion 的时间戳依赖)
+- TCP 长连接可在握手后省略 magic (通过连接协商标志位控制，减少 4B/帧开销)
 
 **实现策略**:
 - Phase 1 (已完成): `TcpTransport` + `Serializer<POD>` 基础实现
@@ -836,18 +898,37 @@ controller.SpinOnce();  // 本地 + 远程消息统一处理
 
 **与工作线程池集成**: BT 叶节点通过 WorkerPool 提交异步任务。
 
-### 6.7 Executor 调度器 (P1, executor.hpp)
+### 6.7 Executor 调度器 (P0, executor.hpp)
 
-**目标**: 借鉴 ROS2 Executor 模型，统一节点调度。
+**目标**: 借鉴 ROS2 Executor 和 CyberRT Choreography Scheduler，统一节点调度，支持实时调度策略。
+
+**实时调度配置** (P0 调整):
+
+```cpp
+namespace osp {
+
+// 实时调度配置 (借鉴 CyberRT Processor)
+struct RealtimeConfig {
+  int sched_policy = SCHED_OTHER;   // SCHED_OTHER / SCHED_FIFO / SCHED_RR
+  int sched_priority = 0;           // SCHED_FIFO: 1-99, 越大越高
+  bool lock_memory = false;         // mlockall(MCL_CURRENT | MCL_FUTURE)
+  uint32_t stack_size = 0;          // 0=系统默认, 非零=预分配栈 (避免缺页中断)
+  int cpu_affinity = -1;            // -1=不绑定, >=0=绑定到指定 CPU 核心
+};
+
+}  // namespace osp
+```
 
 | 模式 | 说明 |
 |------|------|
 | `SingleThreadExecutor` | 单线程轮询所有节点 |
 | `StaticExecutor` | 固定节点-线程映射 (确定性调度) |
-| `PinnedExecutor` | 每节点绑定 CPU 核心 |
+| `PinnedExecutor` | 每节点绑定 CPU 核心 + 实时优先级 |
+| `RealtimeExecutor` | SCHED_FIFO + mlockall + 优先级队列 (P0 新增) |
 
 ```cpp
 namespace osp {
+
 template <typename PayloadVariant>
 class StaticExecutor {
  public:
@@ -856,8 +937,33 @@ class StaticExecutor {
   void SpinOnce();  // 单轮处理
   void Stop();
 };
+
+// P0 新增: 实时调度器 (借鉴 CyberRT Choreography)
+template <typename PayloadVariant>
+class RealtimeExecutor {
+ public:
+  explicit RealtimeExecutor(const RealtimeConfig& cfg);
+
+  // 添加节点，指定优先级 (高优先级节点优先执行)
+  void AddNode(Node<PayloadVariant>& node, int priority = 0);
+
+  // 添加周期节点 (与 timer.hpp 集成)
+  void AddPeriodicNode(Node<PayloadVariant>& node,
+                       uint32_t period_ms, int priority = 0);
+
+  void Spin();      // 阻塞运行 (SCHED_FIFO 线程)
+  void SpinOnce();  // 单轮处理 (按优先级顺序)
+  void Stop();
+};
+
 }  // namespace osp
 ```
+
+**实时调度要点**:
+- `SCHED_FIFO` + `mlockall`: 避免页面交换导致的不确定延迟
+- CPU 亲和性: 关键节点绑定到隔离核心 (通过 `isolcpus` 内核参数)
+- 优先级队列: 高优先级节点优先执行，借鉴 CyberRT ClassicContext 多级队列
+- 周期调度: Executor 内部集成 Timer，支持固定周期触发节点 SpinOnce
 
 ### 6.8 数据融合 (P2, data_fusion.hpp)
 
@@ -943,6 +1049,13 @@ class ShmRingBuffer {
   bool TryPush(const void* data, uint32_t size);
   bool TryPop(void* data, uint32_t& size);
   uint32_t Depth() const noexcept;
+
+ private:
+  // P0 调整: 使用 uint64_t 序列号防止 ABA 问题
+  // 64 位序列号在 4GHz 频率下需 ~146 年才会回绕
+  alignas(64) std::atomic<uint64_t> prod_pos_{0};  // 缓存行对齐
+  alignas(64) std::atomic<uint64_t> cons_pos_{0};
+  // slot 索引 = pos % SlotCount
 };
 
 // 命名通道 (生产者/消费者端点)
@@ -959,12 +1072,26 @@ class ShmChannel {
 };
 
 // 零拷贝 loaned message (仅限 POD 类型)
+// P0 调整: 增加原子引用计数，支持多订阅者安全共享
 template <typename T>
 class LoanedMessage {
  public:
   T* Get() noexcept;             // 直接写入共享内存
-  void Publish() noexcept;       // 提交 (标记 slot 可读)
+  void Publish() noexcept;       // 提交 (标记 slot 可读，初始化 ref_count)
+  void AddRef() noexcept;        // 订阅者获取时 +1 (memory_order_relaxed)
+  void Release() noexcept;       // 订阅者消费完 -1，最后一个释放 slot
+  uint32_t RefCount() const noexcept;
   // Non-copyable, movable
+
+ private:
+  // 引用计数位于 slot header，与数据共存于共享内存
+  // Publish 时设置 ref_count = 订阅者数量
+  // 每个订阅者消费完调用 Release()
+  // ref_count 降为 0 时 slot 回收 (cons_pos_ 推进)
+  struct SlotHeader {
+    std::atomic<uint32_t> ref_count{0};
+    uint32_t data_size;
+  };
 };
 
 // 共享内存传输 (实现 Transport 接口)
@@ -984,6 +1111,60 @@ class ShmTransport {
 
 }  // namespace osp
 ```
+
+**P0 调整: ARM 弱内存模型注意事项**:
+
+ARM 是弱内存序 (weakly-ordered) 架构，与 x86 的 TSO (Total Store Order) 不同，编译器和 CPU 可能重排内存访问。ShmRingBuffer 在共享内存中跨进程使用，必须显式标注 memory_order:
+
+| 操作 | memory_order | 说明 |
+|------|-------------|------|
+| 生产者写入 slot 数据 | 普通写 (非原子) | 数据填充阶段 |
+| 生产者推进 `prod_pos_` | `memory_order_release` | 确保 slot 数据对消费者可见 |
+| 消费者读取 `prod_pos_` | `memory_order_acquire` | 与生产者 release 配对，获取数据可见性 |
+| 消费者读取 slot 数据 | 普通读 (非原子) | acquire 之后保证可见 |
+| `ref_count` 递减 | `memory_order_acq_rel` | 最后一个 Release 需要看到所有订阅者的写入 |
+| `ref_count` 递增 | `memory_order_relaxed` | 仅需原子性，无顺序要求 |
+
+关键实现模式:
+
+```cpp
+// 生产者: 写入数据后 release 推进位置
+void TryPush(const void* data, uint32_t size) {
+    auto pos = prod_pos_.load(std::memory_order_relaxed);
+    // ... CAS 竞争 slot ...
+    memcpy(&slots_[pos % SlotCount], data, size);
+    prod_pos_.store(pos + 1, std::memory_order_release);  // release: 数据可见
+}
+
+// 消费者: acquire 读取位置后读数据
+bool TryPop(void* data, uint32_t& size) {
+    auto prod = prod_pos_.load(std::memory_order_acquire);  // acquire: 配对 release
+    auto cons = cons_pos_.load(std::memory_order_relaxed);
+    if (cons >= prod) return false;  // 空
+    memcpy(data, &slots_[cons % SlotCount], size);
+    cons_pos_.store(cons + 1, std::memory_order_release);
+    return true;
+}
+
+// LoanedMessage::Release: 最后一个订阅者释放 slot
+void Release() noexcept {
+    if (header_->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        // 最后一个订阅者，回收 slot
+        // acq_rel 确保所有订阅者的读取都已完成
+    }
+}
+```
+
+性能对比 (ARM Cortex-A72):
+
+| memory_order | 指令 | 开销 (相对 relaxed) |
+|-------------|------|-------------------|
+| `relaxed` | 普通 load/store | 1x |
+| `acquire` | `ldar` (load-acquire) | ~1.2x |
+| `release` | `stlr` (store-release) | ~1.2x |
+| `seq_cst` | `ldar` + `stlr` + barrier | ~3-5x |
+
+结论: 避免默认 `seq_cst`，显式使用 `acquire/release` 配对，在 ARM 上可获得 3-5 倍性能提升。
 
 **自动传输选择** (借鉴 CyberRT):
 
