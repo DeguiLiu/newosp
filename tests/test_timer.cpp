@@ -593,3 +593,156 @@ TEST_CASE("TimerScheduler Start after Stop can restart", "[timer]") {
   sched.Stop();
   REQUIRE(counter.load() > count1);
 }
+
+// ============================================================================
+// Phase 3: One-shot Timer Tests
+// ============================================================================
+
+TEST_CASE("TimerScheduler AddOneShot fires once", "[timer][oneshot]") {
+  std::atomic<int> counter{0};
+  osp::TimerScheduler<4> sched;
+
+  auto r = sched.AddOneShot(10, [](void* ctx) {
+    auto* c = static_cast<std::atomic<int>*>(ctx);
+    c->fetch_add(1);
+  }, &counter);
+  REQUIRE(r.has_value());
+  REQUIRE(sched.TaskCount() == 1);
+
+  sched.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  sched.Stop();
+
+  // Should have fired exactly once
+  REQUIRE(counter.load() == 1);
+  // Slot should be auto-deactivated
+  REQUIRE(sched.TaskCount() == 0);
+}
+
+TEST_CASE("TimerScheduler AddOneShot invalid delay", "[timer][oneshot]") {
+  osp::TimerScheduler<4> sched;
+  auto r = sched.AddOneShot(0, [](void*) {});
+  REQUIRE(!r.has_value());
+  REQUIRE(r.get_error() == osp::TimerError::kInvalidPeriod);
+}
+
+TEST_CASE("TimerScheduler AddOneShot slots full", "[timer][oneshot]") {
+  osp::TimerScheduler<2> sched;
+  auto r1 = sched.AddOneShot(100, [](void*) {});
+  REQUIRE(r1.has_value());
+  auto r2 = sched.AddOneShot(100, [](void*) {});
+  REQUIRE(r2.has_value());
+  auto r3 = sched.AddOneShot(100, [](void*) {});
+  REQUIRE(!r3.has_value());
+  REQUIRE(r3.get_error() == osp::TimerError::kSlotsFull);
+}
+
+TEST_CASE("TimerScheduler AddOneShot Remove before fire", "[timer][oneshot]") {
+  std::atomic<int> counter{0};
+  osp::TimerScheduler<4> sched;
+
+  auto r = sched.AddOneShot(500, [](void* ctx) {
+    auto* c = static_cast<std::atomic<int>*>(ctx);
+    c->fetch_add(1);
+  }, &counter);
+  REQUIRE(r.has_value());
+
+  // Remove before it fires
+  auto rm = sched.Remove(r.value());
+  REQUIRE(rm.has_value());
+  REQUIRE(sched.TaskCount() == 0);
+
+  sched.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  sched.Stop();
+
+  // Should not have fired
+  REQUIRE(counter.load() == 0);
+}
+
+TEST_CASE("TimerScheduler AddOneShot Remove after fire returns kNotRunning", "[timer][oneshot]") {
+  std::atomic<int> counter{0};
+  osp::TimerScheduler<4> sched;
+
+  auto r = sched.AddOneShot(10, [](void* ctx) {
+    auto* c = static_cast<std::atomic<int>*>(ctx);
+    c->fetch_add(1);
+  }, &counter);
+  REQUIRE(r.has_value());
+  osp::TimerTaskId task_id = r.value();
+
+  sched.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  sched.Stop();
+
+  REQUIRE(counter.load() == 1);
+
+  // Remove after fire — should return kNotRunning (already deactivated)
+  auto rm = sched.Remove(task_id);
+  REQUIRE(!rm.has_value());
+  REQUIRE(rm.get_error() == osp::TimerError::kNotRunning);
+}
+
+TEST_CASE("TimerScheduler AddOneShot slot reuse after fire", "[timer][oneshot]") {
+  osp::TimerScheduler<1> sched;
+
+  auto r1 = sched.AddOneShot(10, [](void*) {});
+  REQUIRE(r1.has_value());
+  REQUIRE(sched.TaskCount() == 1);
+
+  sched.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  sched.Stop();
+
+  // Slot should be free now
+  REQUIRE(sched.TaskCount() == 0);
+
+  // Can add a new task in the freed slot
+  auto r2 = sched.Add(100, [](void*) {});
+  REQUIRE(r2.has_value());
+  REQUIRE(sched.TaskCount() == 1);
+}
+
+TEST_CASE("TimerScheduler mixed periodic and one-shot", "[timer][oneshot]") {
+  std::atomic<int> periodic_count{0};
+  std::atomic<int> oneshot_count{0};
+  osp::TimerScheduler<4> sched;
+
+  sched.Add(10, [](void* ctx) {
+    auto* c = static_cast<std::atomic<int>*>(ctx);
+    c->fetch_add(1);
+  }, &periodic_count);
+
+  sched.AddOneShot(20, [](void* ctx) {
+    auto* c = static_cast<std::atomic<int>*>(ctx);
+    c->fetch_add(1);
+  }, &oneshot_count);
+
+  sched.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  sched.Stop();
+
+  // Periodic should have fired multiple times
+  REQUIRE(periodic_count.load() > 1);
+  // One-shot should have fired exactly once
+  REQUIRE(oneshot_count.load() == 1);
+  // Only periodic task remains active
+  REQUIRE(sched.TaskCount() == 1);
+}
+
+TEST_CASE("TimerScheduler AddOneShot unique IDs", "[timer][oneshot]") {
+  osp::TimerScheduler<4> sched;
+
+  auto r1 = sched.AddOneShot(100, [](void*) {});
+  auto r2 = sched.Add(100, [](void*) {});
+  auto r3 = sched.AddOneShot(100, [](void*) {});
+
+  REQUIRE(r1.has_value());
+  REQUIRE(r2.has_value());
+  REQUIRE(r3.has_value());
+
+  // All IDs should be unique
+  REQUIRE(r1.value().value() != r2.value().value());
+  REQUIRE(r2.value().value() != r3.value().value());
+  REQUIRE(r1.value().value() != r3.value().value());
+}

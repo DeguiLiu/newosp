@@ -38,16 +38,18 @@ struct NodeContext {
   uint32_t missed_heartbeats;
   uint32_t total_heartbeats;
   bool connected;
+  osp::StateMachine<NodeContext, 8>* sm;
 
   NodeContext() noexcept
-      : node_id(0), missed_heartbeats(0), total_heartbeats(0), connected(false) {}
+      : node_id(0), missed_heartbeats(0), total_heartbeats(0),
+        connected(false), sm(nullptr) {}
 };
 
 // ============================================================================
 // State Handlers
 // ============================================================================
 
-// Forward declarations for state indices
+// Forward declarations for state indices and SM pointer
 static int32_t g_state_connected = -1;
 static int32_t g_state_suspect = -1;
 static int32_t g_state_disconnected = -1;
@@ -79,13 +81,13 @@ static osp::TransitionResult HandleConnected(NodeContext& ctx, const osp::Event&
       if (ctx.missed_heartbeats >= 2) {
         std::printf("[Node %u] Connected: too many misses, transitioning to Suspect\n",
                     ctx.node_id);
-        return osp::TransitionResult::kTransition;
+        return ctx.sm->RequestTransition(g_state_suspect);
       }
       return osp::TransitionResult::kHandled;
 
     case kDisconnect:
       std::printf("[Node %u] Connected: disconnect event\n", ctx.node_id);
-      return osp::TransitionResult::kTransition;
+      return ctx.sm->RequestTransition(g_state_disconnected);
 
     default:
       return osp::TransitionResult::kUnhandled;
@@ -109,7 +111,7 @@ static osp::TransitionResult HandleSuspect(NodeContext& ctx, const osp::Event& e
       ctx.missed_heartbeats = 0;
       std::printf("[Node %u] Suspect: heartbeat OK, recovering to Connected\n",
                   ctx.node_id);
-      return osp::TransitionResult::kTransition;
+      return ctx.sm->RequestTransition(g_state_connected);
 
     case kHeartbeatMiss:
       ctx.missed_heartbeats++;
@@ -118,13 +120,13 @@ static osp::TransitionResult HandleSuspect(NodeContext& ctx, const osp::Event& e
       if (ctx.missed_heartbeats >= 5) {
         std::printf("[Node %u] Suspect: timeout, transitioning to Disconnected\n",
                     ctx.node_id);
-        return osp::TransitionResult::kTransition;
+        return ctx.sm->RequestTransition(g_state_disconnected);
       }
       return osp::TransitionResult::kHandled;
 
     case kDisconnect:
       std::printf("[Node %u] Suspect: disconnect event\n", ctx.node_id);
-      return osp::TransitionResult::kTransition;
+      return ctx.sm->RequestTransition(g_state_disconnected);
 
     default:
       return osp::TransitionResult::kUnhandled;
@@ -147,7 +149,7 @@ static osp::TransitionResult HandleDisconnected(NodeContext& ctx, const osp::Eve
     case kReconnect:
       std::printf("[Node %u] Disconnected: reconnect event\n", ctx.node_id);
       ctx.missed_heartbeats = 0;
-      return osp::TransitionResult::kTransition;
+      return ctx.sm->RequestTransition(g_state_connected);
 
     case kHeartbeatOk:
     case kHeartbeatMiss:
@@ -198,34 +200,6 @@ static void BuildNodeHSM(NodeHSM& sm) {
 }
 
 // ============================================================================
-// Transition Logic
-// ============================================================================
-
-static void ProcessTransition(NodeHSM& sm, NodeContext& ctx, const osp::Event& event) {
-  int32_t current = sm.CurrentState();
-
-  if (current == g_state_connected) {
-    if (event.id == kHeartbeatMiss && ctx.missed_heartbeats >= 2) {
-      sm.RequestTransition(g_state_suspect);
-    } else if (event.id == kDisconnect) {
-      sm.RequestTransition(g_state_disconnected);
-    }
-  } else if (current == g_state_suspect) {
-    if (event.id == kHeartbeatOk) {
-      sm.RequestTransition(g_state_connected);
-    } else if (event.id == kHeartbeatMiss && ctx.missed_heartbeats >= 5) {
-      sm.RequestTransition(g_state_disconnected);
-    } else if (event.id == kDisconnect) {
-      sm.RequestTransition(g_state_disconnected);
-    }
-  } else if (current == g_state_disconnected) {
-    if (event.id == kReconnect) {
-      sm.RequestTransition(g_state_connected);
-    }
-  }
-}
-
-// ============================================================================
 // Demo Scenario
 // ============================================================================
 
@@ -240,9 +214,6 @@ static void SimulateHeartbeats(NodeHSM& sm, NodeContext& ctx,
 
     // Dispatch event
     sm.Dispatch(evt);
-
-    // Check if transition is needed
-    ProcessTransition(sm, ctx, evt);
 
     std::printf("  State: %s, Missed: %u, Total: %u\n",
                 sm.CurrentStateName(), ctx.missed_heartbeats, ctx.total_heartbeats);
@@ -264,6 +235,7 @@ int main() {
   NodeContext ctx1;
   ctx1.node_id = 101;
   NodeHSM sm1(ctx1);
+  ctx1.sm = &sm1;
   BuildNodeHSM(sm1);
   sm1.Start();
 
@@ -280,6 +252,7 @@ int main() {
   NodeContext ctx2;
   ctx2.node_id = 102;
   NodeHSM sm2(ctx2);
+  ctx2.sm = &sm2;
   BuildNodeHSM(sm2);
   sm2.Start();
 
@@ -301,6 +274,7 @@ int main() {
   NodeContext ctx3;
   ctx3.node_id = 103;
   NodeHSM sm3(ctx3);
+  ctx3.sm = &sm3;
   BuildNodeHSM(sm3);
   sm3.Start();
 
@@ -325,6 +299,7 @@ int main() {
   NodeContext ctx4;
   ctx4.node_id = 104;
   NodeHSM sm4(ctx4);
+  ctx4.sm = &sm4;
   BuildNodeHSM(sm4);
   sm4.Start();
 

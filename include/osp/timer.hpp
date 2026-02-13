@@ -1,13 +1,20 @@
 /**
  * @file timer.hpp
- * @brief Header-only periodic timer task scheduler for OSP-CPP.
+ * @brief Header-only periodic and one-shot timer task scheduler for OSP-CPP.
  *
  * Provides a thread-based scheduler that fires registered callbacks at
- * configurable periodic intervals.  Uses std::chrono::steady_clock for
- * monotonic timing and std::thread for the scheduler loop.
+ * configurable periodic intervals or after a single delay (one-shot).
+ * Uses std::chrono::steady_clock for monotonic timing and std::thread
+ * for the scheduler loop.
  *
  * Callbacks are executed outside the internal mutex to prevent deadlocks
  * when callbacks acquire external locks (collect-release-execute pattern).
+ *
+ * Callback constraints:
+ * - Callbacks run sequentially on the scheduler thread.
+ * - A slow callback delays all other tasks.  Keep callbacks < 1ms.
+ * - Blocking I/O or long computation should be offloaded to a worker thread.
+ * - It is safe to call Add()/Remove() from within a callback.
  *
  * All public methods are thread-safe (guarded by internal mutex).
  * Compatible with -fno-exceptions -fno-rtti.
@@ -48,7 +55,8 @@ using TimerTaskFn = void (*)(void* ctx);
 // ============================================================================
 
 /**
- * @brief Fixed-capacity periodic timer scheduler driven by a background thread.
+ * @brief Fixed-capacity periodic and one-shot timer scheduler driven by a
+ *        background thread.
  *
  * Tasks are stored in an embedded array whose size is fixed at compile time
  * via the MaxTasks template parameter.  Zero heap allocation.
@@ -59,7 +67,8 @@ using TimerTaskFn = void (*)(void* ctx);
  * Typical usage:
  *
  *   osp::TimerScheduler<8> sched;
- *   sched.Add(1000, my_callback);
+ *   sched.Add(1000, my_periodic_callback);
+ *   sched.AddOneShot(500, my_oneshot_callback);
  *   sched.Start();
  *   // ... do other work ...
  *   sched.Stop();
@@ -138,6 +147,51 @@ class TimerScheduler final {
         slots_[i].next_fire_ns = SteadyNowNs() + period_ns;
         slots_[i].id = next_id_++;
         slots_[i].active = true;
+        slots_[i].one_shot = false;
+        return expected<TimerTaskId, TimerError>::success(
+            TimerTaskId(slots_[i].id));
+      }
+    }
+
+    return expected<TimerTaskId, TimerError>::error(TimerError::kSlotsFull);
+  }
+
+  /**
+   * @brief Register a one-shot timer task that fires once after delay_ms.
+   *
+   * After the callback fires, the slot is automatically deactivated.
+   * Calling Remove() on an already-fired one-shot returns kNotRunning
+   * (same as removing a non-existent task).
+   *
+   * @param delay_ms  Delay before firing in milliseconds (must be > 0).
+   * @param fn        Callback invoked once after delay_ms milliseconds.
+   * @param ctx       Opaque context pointer forwarded to fn (default nullptr).
+   *
+   * @return TimerTaskId on success, or TimerError on failure:
+   *         - kInvalidPeriod if delay_ms == 0.
+   *         - kSlotsFull     if all task slots are occupied.
+   */
+  expected<TimerTaskId, TimerError> AddOneShot(uint32_t delay_ms,
+                                                TimerTaskFn fn,
+                                                void* ctx = nullptr) {
+    if (delay_ms == 0U) {
+      return expected<TimerTaskId, TimerError>::error(
+          TimerError::kInvalidPeriod);
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (uint32_t i = 0U; i < MaxTasks; ++i) {
+      if (!slots_[i].active) {
+        const uint64_t delay_ns =
+            static_cast<uint64_t>(delay_ms) * kNsPerMs;
+        slots_[i].fn = fn;
+        slots_[i].ctx = ctx;
+        slots_[i].period_ns = delay_ns;
+        slots_[i].next_fire_ns = SteadyNowNs() + delay_ns;
+        slots_[i].id = next_id_++;
+        slots_[i].active = true;
+        slots_[i].one_shot = true;
         return expected<TimerTaskId, TimerError>::success(
             TimerTaskId(slots_[i].id));
       }
@@ -239,6 +293,7 @@ class TimerScheduler final {
     uint64_t next_fire_ns = 0;  ///< Next absolute fire time (monotonic ns).
     uint32_t id = 0;            ///< Unique task identifier.
     bool active = false;        ///< Whether this slot is in use.
+    bool one_shot = false;      ///< If true, auto-deactivate after first fire.
   };
 
   /**
@@ -304,12 +359,17 @@ class TimerScheduler final {
             pending[pending_count].ctx = slots_[i].ctx;
             ++pending_count;
 
-            // Advance next fire time
-            slots_[i].next_fire_ns += slots_[i].period_ns;
-
-            // Handle multiple missed periods: advance until ahead of now.
-            while (slots_[i].next_fire_ns <= now) {
+            if (slots_[i].one_shot) {
+              // One-shot: deactivate immediately, no reschedule
+              slots_[i].active = false;
+            } else {
+              // Periodic: advance next fire time
               slots_[i].next_fire_ns += slots_[i].period_ns;
+
+              // Handle multiple missed periods: advance until ahead of now.
+              while (slots_[i].next_fire_ns <= now) {
+                slots_[i].next_fire_ns += slots_[i].period_ns;
+              }
             }
           }
 

@@ -410,4 +410,4 @@ expected<TimerTaskId, TimerError> AddOneShot(uint32_t delay_ms,
 | Phase 1.5a | 持锁回调修复 (收集-释放-执行) | P0 | 已完成 |
 | Phase 1.5b | 模板参数化 (消除裸 new/delete) | P0 | 已完成 |
 | Phase 2 | 周期性任务迁移到 TimerScheduler | P1 | 已完成 |
-| Phase 3 | One-shot timer / 回调约束文档化 | P2 | 待 Phase 2 完成 |
+| Phase 3 | One-shot timer / 回调约束文档化 | P2 | 已完成 |
