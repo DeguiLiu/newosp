@@ -233,3 +233,114 @@ TEST_CASE("app - GetInstance returns correct pointer", "[app]") {
   REQUIRE(app.GetInstance(0) == nullptr);
   REQUIRE(app.GetInstance(100) == nullptr);
 }
+
+// ============================================================================
+// AppMessage hybrid storage tests
+// ============================================================================
+
+struct DataCapture : public osp::Instance {
+  uint8_t captured[512];
+  uint32_t captured_len = 0;
+
+  void OnMessage(uint16_t event, const void* data, uint32_t len) override {
+    (void)event;
+    captured_len = len;
+    if (data != nullptr && len > 0 && len <= sizeof(captured)) {
+      std::memcpy(captured, data, len);
+    }
+  }
+};
+
+static osp::Instance* DataCaptureFactory() { return new DataCapture(); }
+
+TEST_CASE("app - AppMessage inline small data", "[app]") {
+  osp::AppMessage msg{};
+  uint32_t val = 0xDEADBEEF;
+  msg.Store(&val, sizeof(val));
+
+  REQUIRE(!msg.IsExternal());
+  REQUIRE(msg.DataLen() == sizeof(val));
+
+  uint32_t out = 0;
+  std::memcpy(&out, msg.Data(), sizeof(out));
+  REQUIRE(out == 0xDEADBEEF);
+}
+
+TEST_CASE("app - AppMessage inline at threshold", "[app]") {
+  uint8_t buf[OSP_APP_MSG_INLINE_SIZE];
+  std::memset(buf, 0xAB, sizeof(buf));
+
+  osp::AppMessage msg{};
+  msg.Store(buf, sizeof(buf));
+
+  REQUIRE(!msg.IsExternal());
+  REQUIRE(msg.DataLen() == OSP_APP_MSG_INLINE_SIZE);
+  REQUIRE(std::memcmp(msg.Data(), buf, sizeof(buf)) == 0);
+}
+
+TEST_CASE("app - AppMessage external large data", "[app]") {
+  uint8_t large[256];
+  std::memset(large, 0xCD, sizeof(large));
+
+  osp::AppMessage msg{};
+  msg.Store(large, sizeof(large));
+
+  REQUIRE(msg.IsExternal());
+  REQUIRE(msg.DataLen() == sizeof(large));
+  REQUIRE(msg.Data() == large);  // pointer, not copy
+}
+
+TEST_CASE("app - AppMessage null data", "[app]") {
+  osp::AppMessage msg{};
+  msg.Store(nullptr, 0);
+
+  REQUIRE(!msg.IsExternal());
+  REQUIRE(msg.DataLen() == 0);
+}
+
+TEST_CASE("app - AppMessage size fits cache line", "[app]") {
+  // Inline mode: 8 (header) + 8 (response_ch) + 48 (inline) = 64 bytes
+  REQUIRE(sizeof(osp::AppMessage) == 64);
+}
+
+TEST_CASE("app - Post and process large message via pointer", "[app]") {
+  osp::Application<4> app(50, "large_msg");
+  app.SetFactory(DataCaptureFactory);
+
+  auto r = app.CreateInstance();
+  REQUIRE(r.has_value());
+
+  // Large payload > inline threshold
+  uint8_t large[128];
+  for (uint32_t i = 0; i < sizeof(large); ++i) {
+    large[i] = static_cast<uint8_t>(i & 0xFF);
+  }
+
+  REQUIRE(app.Post(r.value(), 99, large, sizeof(large)));
+  REQUIRE(app.ProcessOne());
+
+  auto* inst = static_cast<DataCapture*>(app.GetInstance(r.value()));
+  REQUIRE(inst != nullptr);
+  REQUIRE(inst->captured_len == sizeof(large));
+  REQUIRE(std::memcmp(inst->captured, large, sizeof(large)) == 0);
+}
+
+TEST_CASE("app - Post and process small message inline", "[app]") {
+  osp::Application<4> app(51, "small_msg");
+  app.SetFactory(DataCaptureFactory);
+
+  auto r = app.CreateInstance();
+  REQUIRE(r.has_value());
+
+  uint64_t val = 0x1234567890ABCDEF;
+  REQUIRE(app.Post(r.value(), 77, &val, sizeof(val)));
+  REQUIRE(app.ProcessOne());
+
+  auto* inst = static_cast<DataCapture*>(app.GetInstance(r.value()));
+  REQUIRE(inst != nullptr);
+  REQUIRE(inst->captured_len == sizeof(val));
+
+  uint64_t out = 0;
+  std::memcpy(&out, inst->captured, sizeof(out));
+  REQUIRE(out == 0x1234567890ABCDEF);
+}

@@ -130,19 +130,84 @@ class Instance {
 using InstanceFactory = Instance* (*)();
 
 // ============================================================================
-// Application message
+// Application message - hybrid inline/pointer storage with bit-field packing
 // ============================================================================
 
-#ifndef OSP_APP_MSG_DATA_SIZE
-#define OSP_APP_MSG_DATA_SIZE 256U
+// Inline buffer threshold: messages <= this size are stored inline,
+// larger messages use an external pointer. Must be a multiple of 8
+// for alignment.
+#ifndef OSP_APP_MSG_INLINE_SIZE
+#define OSP_APP_MSG_INLINE_SIZE 48U
 #endif
 
-struct AppMessage {
+static_assert((OSP_APP_MSG_INLINE_SIZE % 8) == 0,
+              "OSP_APP_MSG_INLINE_SIZE must be 8-byte aligned");
+
+/**
+ * AppMessage layout (bit-field packed, 8-byte aligned):
+ *
+ * +--------+--------+--------+--------+
+ * | ins_id | event  | flags  | length |  (8 bytes: header word)
+ * | 16-bit | 16-bit | 8-bit  | 24-bit |
+ * +--------+--------+--------+--------+
+ * | response_channel (pointer)        |  (8 bytes)
+ * +-----------------------------------+
+ * | inline data / external pointer    |  (48 bytes or 8 bytes)
+ * +-----------------------------------+
+ *
+ * flags layout (8 bits):
+ *   bit 0: is_external (1 = data via pointer, 0 = inline)
+ *   bit 1-7: reserved
+ *
+ * Total size: 64 bytes (inline mode) -- fits in one cache line
+ */
+struct alignas(8) AppMessage {
+  // -- Header word 1: packed control fields (8 bytes) --
   uint16_t ins_id;
   uint16_t event;
-  uint32_t data_len;
-  uint8_t data[OSP_APP_MSG_DATA_SIZE];
-  ResponseChannel* response_channel;  // non-null for sync messages
+  uint8_t  flags;       // bit 0: is_external
+  uint8_t  reserved_[1];
+  uint16_t data_len;    // max 65535 bytes (enough for any message)
+
+  // -- Header word 2: response channel pointer (8 bytes) --
+  ResponseChannel* response_channel;
+
+  // -- Payload: inline buffer or external pointer (union) --
+  union alignas(8) {
+    uint8_t  inline_data[OSP_APP_MSG_INLINE_SIZE];
+    const void* ext_ptr;
+  } payload;
+
+  // -- Accessors --
+
+  bool IsExternal() const noexcept { return (flags & 0x01) != 0; }
+
+  const void* Data() const noexcept {
+    return IsExternal() ? payload.ext_ptr : payload.inline_data;
+  }
+
+  uint32_t DataLen() const noexcept {
+    return static_cast<uint32_t>(data_len);
+  }
+
+  // Store data: inline copy for small, pointer for large
+  void Store(const void* data, uint32_t len) noexcept {
+    data_len = static_cast<uint16_t>(len > 0xFFFF ? 0xFFFF : len);
+    if (data == nullptr || len == 0) {
+      flags &= ~0x01;
+      data_len = 0;
+      return;
+    }
+    if (len <= OSP_APP_MSG_INLINE_SIZE) {
+      // Inline: copy into buffer
+      flags &= ~0x01;
+      std::memcpy(payload.inline_data, data, len);
+    } else {
+      // External: store pointer (caller must keep data alive until processed)
+      flags |= 0x01;
+      payload.ext_ptr = data;
+    }
+  }
 };
 
 // ============================================================================
@@ -252,11 +317,10 @@ class Application {
     AppMessage& msg = queue_[queue_tail_];
     msg.ins_id = ins_id;
     msg.event = event;
-    msg.data_len = (len <= OSP_APP_MSG_DATA_SIZE) ? len : OSP_APP_MSG_DATA_SIZE;
-    if (data != nullptr && msg.data_len > 0) {
-      std::memcpy(msg.data, data, msg.data_len);
-    }
+    msg.flags = 0;
+    msg.reserved_[0] = 0;
     msg.response_channel = response_ch;
+    msg.Store(data, len);
     queue_tail_ = next_tail;
     return true;
   }
@@ -268,12 +332,15 @@ class Application {
     const AppMessage& msg = queue_[queue_head_];
     queue_head_ = (queue_head_ + 1) % OSP_APP_QUEUE_DEPTH;
 
+    const void* data = msg.Data();
+    uint32_t data_len = msg.DataLen();
+
     if (msg.ins_id == kInsEach) {
       // Broadcast to all instances
       for (uint16_t i = 0; i < MaxInstances; ++i) {
         if (instances_[i] != nullptr) {
           instances_[i]->SetResponseChannel(msg.response_channel);
-          instances_[i]->OnMessage(msg.event, msg.data, msg.data_len);
+          instances_[i]->OnMessage(msg.event, data, data_len);
           instances_[i]->SetResponseChannel(nullptr);
         }
       }
@@ -281,7 +348,7 @@ class Application {
       Instance* inst = GetInstance(msg.ins_id);
       if (inst != nullptr) {
         inst->SetResponseChannel(msg.response_channel);
-        inst->OnMessage(msg.event, msg.data, msg.data_len);
+        inst->OnMessage(msg.event, data, data_len);
         inst->SetResponseChannel(nullptr);
       }
     }
