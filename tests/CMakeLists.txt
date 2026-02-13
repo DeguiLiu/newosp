@@ -33,6 +33,9 @@ add_executable(osp_tests
     test_semaphore.cpp
     test_shm_transport.cpp
     test_data_fusion.cpp
+    test_discovery.cpp
+    test_service.cpp
+    test_node_manager.cpp
     test_integration.cpp
 )
 target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads)
