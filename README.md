@@ -4,6 +4,8 @@
 
 Modern C++14/17 header-only embedded infrastructure library for ARM-Linux, extracted and modernized from the OSP (Open Streaming Platform) codebase (~140k LOC).
 
+**[中文文档](README_zh.md)**
+
 ## Features
 
 - **Zero global state**: All state encapsulated in objects (RAII)
