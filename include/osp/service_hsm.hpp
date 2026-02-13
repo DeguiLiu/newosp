@@ -22,7 +22,7 @@ namespace osp {
 // HSM Events
 // ============================================================================
 
-enum ServiceHsmEvent : uint32_t {
+enum class ServiceHsmEvent : uint32_t {
   kSvcEvtStart = 1,
   kSvcEvtClientConnected = 2,
   kSvcEvtClientDisconnected = 3,
@@ -68,10 +68,10 @@ namespace detail {
 
 // Idle state: service not started
 inline TransitionResult StateIdle(ServiceHsmContext& ctx, const Event& event) {
-  if (event.id == kSvcEvtStart) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtStart)) {
     return ctx.sm->RequestTransition(ctx.idx_listening);
   }
-  if (event.id == kSvcEvtError) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtError)) {
     if (event.data != nullptr) {
       ctx.error_code = *static_cast<const int32_t*>(event.data);
     }
@@ -83,17 +83,17 @@ inline TransitionResult StateIdle(ServiceHsmContext& ctx, const Event& event) {
 // Listening state: bound to port, waiting for connections
 inline TransitionResult StateListening(ServiceHsmContext& ctx,
                                        const Event& event) {
-  if (event.id == kSvcEvtClientConnected) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtClientConnected)) {
     ++ctx.active_clients;
     return ctx.sm->RequestTransition(ctx.idx_active);
   }
-  if (event.id == kSvcEvtError) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtError)) {
     if (event.data != nullptr) {
       ctx.error_code = *static_cast<const int32_t*>(event.data);
     }
     return ctx.sm->RequestTransition(ctx.idx_error);
   }
-  if (event.id == kSvcEvtStop) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtStop)) {
     return ctx.sm->RequestTransition(ctx.idx_shutting_down);
   }
   return TransitionResult::kUnhandled;
@@ -102,11 +102,11 @@ inline TransitionResult StateListening(ServiceHsmContext& ctx,
 // Active state: has active client connections
 inline TransitionResult StateActive(ServiceHsmContext& ctx,
                                     const Event& event) {
-  if (event.id == kSvcEvtClientConnected) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtClientConnected)) {
     ++ctx.active_clients;
     return TransitionResult::kHandled;
   }
-  if (event.id == kSvcEvtClientDisconnected) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtClientDisconnected)) {
     if (ctx.active_clients > 0) {
       --ctx.active_clients;
     }
@@ -115,13 +115,13 @@ inline TransitionResult StateActive(ServiceHsmContext& ctx,
     }
     return TransitionResult::kHandled;
   }
-  if (event.id == kSvcEvtError) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtError)) {
     if (event.data != nullptr) {
       ctx.error_code = *static_cast<const int32_t*>(event.data);
     }
     return ctx.sm->RequestTransition(ctx.idx_error);
   }
-  if (event.id == kSvcEvtStop) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtStop)) {
     return ctx.sm->RequestTransition(ctx.idx_shutting_down);
   }
   return TransitionResult::kUnhandled;
@@ -129,23 +129,21 @@ inline TransitionResult StateActive(ServiceHsmContext& ctx,
 
 // Error state: error occurred
 inline TransitionResult StateError(ServiceHsmContext& ctx, const Event& event) {
-  if (event.id == kSvcEvtRecover) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtRecover)) {
     ctx.error_code = 0;
     ctx.active_clients = 0;
     return ctx.sm->RequestTransition(ctx.idx_idle);
   }
-  if (event.id == kSvcEvtStop) {
+  if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtStop)) {
     return ctx.sm->RequestTransition(ctx.idx_shutting_down);
   }
   return TransitionResult::kUnhandled;
 }
 
 // ShuttingDown state: service is shutting down
-inline TransitionResult StateShuttingDown(ServiceHsmContext& ctx,
-                                          const Event& event) {
+inline TransitionResult StateShuttingDown(ServiceHsmContext& /*ctx*/,
+                                          const Event& /*event*/) {
   // Terminal state, no transitions out
-  (void)ctx;
-  (void)event;
   return TransitionResult::kHandled;
 }
 
@@ -238,7 +236,7 @@ class HsmService {
       hsm_.Start();
       started_ = true;
     }
-    Event evt{kSvcEvtStart, nullptr};
+    Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtStart), nullptr};
     hsm_.Dispatch(evt);
   }
 
@@ -248,7 +246,7 @@ class HsmService {
   void Stop() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kSvcEvtStop, nullptr};
+    Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtStop), nullptr};
     hsm_.Dispatch(evt);
   }
 
@@ -258,7 +256,7 @@ class HsmService {
   void Recover() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kSvcEvtRecover, nullptr};
+    Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtRecover), nullptr};
     hsm_.Dispatch(evt);
   }
 
@@ -272,7 +270,7 @@ class HsmService {
   void OnClientConnect() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kSvcEvtClientConnected, nullptr};
+    Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtClientConnected), nullptr};
     hsm_.Dispatch(evt);
   }
 
@@ -282,7 +280,7 @@ class HsmService {
   void OnClientDisconnect() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kSvcEvtClientDisconnected, nullptr};
+    Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtClientDisconnected), nullptr};
     hsm_.Dispatch(evt);
   }
 
@@ -293,7 +291,7 @@ class HsmService {
   void OnError(int32_t error_code) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_) return;
-    Event evt{kSvcEvtError, &error_code};
+    Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtError), &error_code};
     hsm_.Dispatch(evt);
   }
 

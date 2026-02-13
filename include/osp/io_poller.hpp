@@ -51,7 +51,7 @@ inline constexpr uint8_t operator|(IoEvent a, IoEvent b) {
 }
 
 struct PollResult {
-  int fd;
+  int32_t fd;
   uint8_t events;  // bitmask of IoEvent
 };
 
@@ -77,16 +77,16 @@ class IoPoller {
   IoPoller& operator=(IoPoller&& other) noexcept;
 
   bool IsValid() const noexcept { return poller_fd_ >= 0; }
-  int Fd() const noexcept { return poller_fd_; }
+  int32_t Fd() const noexcept { return poller_fd_; }
 
   /** @brief Add an fd to monitor with given events (kReadable, kWritable). */
-  expected<void, PollerError> Add(int fd, uint8_t events);
+  expected<void, PollerError> Add(int32_t fd, uint8_t events);
 
   /** @brief Modify monitored events for an fd. */
-  expected<void, PollerError> Modify(int fd, uint8_t events);
+  expected<void, PollerError> Modify(int32_t fd, uint8_t events);
 
   /** @brief Remove an fd from monitoring. */
-  expected<void, PollerError> Remove(int fd);
+  expected<void, PollerError> Remove(int32_t fd);
 
   /**
    * @brief Wait for events.
@@ -97,16 +97,16 @@ class IoPoller {
    */
   expected<uint32_t, PollerError> Wait(PollResult* results,
                                        uint32_t max_results,
-                                       int timeout_ms = -1);
+                                       int32_t timeout_ms = -1);
 
   /** @brief Wait with internal buffer. */
-  expected<uint32_t, PollerError> Wait(int timeout_ms = -1);
+  expected<uint32_t, PollerError> Wait(int32_t timeout_ms = -1);
 
   /** @brief Access results from the last Wait() call with internal buffer. */
   const PollResult* Results() const noexcept { return results_; }
 
  private:
-  int poller_fd_;
+  int32_t poller_fd_;
   PollResult results_[OSP_IO_POLLER_MAX_EVENTS];
   uint32_t result_count_;
 };
@@ -203,7 +203,7 @@ inline expected<void, PollerError> IoPoller::Modify(int fd, uint8_t events) {
   return expected<void, PollerError>::success();
 }
 
-inline expected<void, PollerError> IoPoller::Remove(int fd) {
+inline expected<void, PollerError> IoPoller::Remove(int32_t fd) {
   if (::epoll_ctl(poller_fd_, EPOLL_CTL_DEL, fd, nullptr) != 0) {
     return expected<void, PollerError>::error(PollerError::kRemoveFailed);
   }
@@ -212,13 +212,13 @@ inline expected<void, PollerError> IoPoller::Remove(int fd) {
 
 inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results,
                                                       uint32_t max_results,
-                                                      int timeout_ms) {
+                                                      int32_t timeout_ms) {
   struct epoll_event raw_events[OSP_IO_POLLER_MAX_EVENTS];
-  const int max_ev = static_cast<int>(
+  const int32_t max_ev = static_cast<int32_t>(
       max_results < OSP_IO_POLLER_MAX_EVENTS ? max_results
                                              : OSP_IO_POLLER_MAX_EVENTS);
 
-  int n = ::epoll_wait(poller_fd_, raw_events, max_ev, timeout_ms);
+  int32_t n = ::epoll_wait(poller_fd_, raw_events, max_ev, timeout_ms);
   if (n < 0) {
     return expected<uint32_t, PollerError>::error(PollerError::kWaitFailed);
   }
@@ -275,7 +275,7 @@ inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
 
 inline expected<void, PollerError> IoPoller::Add(int fd, uint8_t events) {
   struct kevent changes[2];
-  int nchanges = 0;
+  int32_t nchanges = 0;
   if (events & static_cast<uint8_t>(IoEvent::kReadable)) {
     EV_SET(&changes[nchanges], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0,
            nullptr);
@@ -299,7 +299,7 @@ inline expected<void, PollerError> IoPoller::Add(int fd, uint8_t events) {
 inline expected<void, PollerError> IoPoller::Modify(int fd, uint8_t events) {
   // kqueue: re-add with new filters (idempotent) and delete unwanted
   struct kevent changes[4];
-  int nchanges = 0;
+  int32_t nchanges = 0;
 
   if (events & static_cast<uint8_t>(IoEvent::kReadable)) {
     EV_SET(&changes[nchanges], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0,
@@ -323,7 +323,7 @@ inline expected<void, PollerError> IoPoller::Modify(int fd, uint8_t events) {
   return expected<void, PollerError>::success();
 }
 
-inline expected<void, PollerError> IoPoller::Remove(int fd) {
+inline expected<void, PollerError> IoPoller::Remove(int32_t fd) {
   struct kevent changes[2];
   // Attempt to remove both filters; ignore errors from filters not registered
   EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
@@ -335,9 +335,9 @@ inline expected<void, PollerError> IoPoller::Remove(int fd) {
 
 inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results,
                                                       uint32_t max_results,
-                                                      int timeout_ms) {
+                                                      int32_t timeout_ms) {
   struct kevent raw_events[OSP_IO_POLLER_MAX_EVENTS];
-  const int max_ev = static_cast<int>(
+  const int32_t max_ev = static_cast<int32_t>(
       max_results < OSP_IO_POLLER_MAX_EVENTS ? max_results
                                              : OSP_IO_POLLER_MAX_EVENTS);
 
@@ -349,15 +349,15 @@ inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results,
     ts_ptr = &ts;
   }
 
-  int n = ::kevent(poller_fd_, nullptr, 0, raw_events, max_ev, ts_ptr);
+  int32_t n = ::kevent(poller_fd_, nullptr, 0, raw_events, max_ev, ts_ptr);
   if (n < 0) {
     return expected<uint32_t, PollerError>::error(PollerError::kWaitFailed);
   }
 
   // Merge multiple filter events for the same fd into a single PollResult
   uint32_t count = 0;
-  for (int i = 0; i < n; ++i) {
-    int fd = static_cast<int>(raw_events[i].ident);
+  for (int32_t i = 0; i < n; ++i) {
+    int32_t fd = static_cast<int32_t>(raw_events[i].ident);
     uint8_t ev = 0;
     if (raw_events[i].filter == EVFILT_READ) {
       ev |= static_cast<uint8_t>(IoEvent::kReadable);

@@ -69,6 +69,10 @@ class FixedPool {
       StoreIndex(i, i + 1);
     }
     StoreIndex(MaxBlocks - 1, detail::kInvalidIndex);
+    // Initialize allocated tracking array
+    for (uint32_t i = 0; i < MaxBlocks; ++i) {
+      allocated_[i] = false;
+    }
   }
 
   ~FixedPool() = default;
@@ -92,6 +96,7 @@ class FixedPool {
     uint32_t idx = free_head_;
     free_head_ = LoadIndex(idx);
     ++used_count_;
+    allocated_[idx] = true;
     return BlockPtr(idx);
   }
 
@@ -107,6 +112,7 @@ class FixedPool {
     uint32_t idx = free_head_;
     free_head_ = LoadIndex(idx);
     ++used_count_;
+    allocated_[idx] = true;
     return expected<void*, MemPoolError>::success(BlockPtr(idx));
   }
 
@@ -123,9 +129,11 @@ class FixedPool {
     OSP_ASSERT(ptr != nullptr);
     OSP_ASSERT(OwnsPointerUnlocked(ptr));
     uint32_t idx = PtrToIndex(ptr);
+    OSP_ASSERT(IsAllocatedUnlocked(idx));
     StoreIndex(idx, free_head_);
     free_head_ = idx;
     --used_count_;
+    allocated_[idx] = false;
   }
 
   // --------------------------------------------------------------------------
@@ -160,6 +168,28 @@ class FixedPool {
   /// @brief Actual stride between blocks (aligned).
   static constexpr size_t AlignedBlockSize() { return kAlignedBlockSize; }
 
+  /// @brief Get pointer to block at given index.
+  void* BlockPtr(uint32_t idx) {
+    return &storage_[idx * kAlignedBlockSize];
+  }
+
+  /// @brief Convert a pointer back to a block index.
+  uint32_t PtrToIndex(const void* ptr) const {
+    auto offset = static_cast<size_t>(
+        static_cast<const uint8_t*>(ptr) - storage_);
+    return static_cast<uint32_t>(offset / kAlignedBlockSize);
+  }
+
+  /// @brief Check if a block index is currently allocated.
+  bool IsAllocated(const void* ptr) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!OwnsPointerUnlocked(ptr)) {
+      return false;
+    }
+    uint32_t idx = PtrToIndex(ptr);
+    return IsAllocatedUnlocked(idx);
+  }
+
   // --------------------------------------------------------------------------
   // Debug
   // --------------------------------------------------------------------------
@@ -185,17 +215,11 @@ class FixedPool {
   mutable std::mutex mutex_;
   uint32_t free_head_;
   uint32_t used_count_;
+  bool allocated_[MaxBlocks];
 
-  /// @brief Get pointer to block at given index.
-  void* BlockPtr(uint32_t idx) {
-    return &storage_[idx * kAlignedBlockSize];
-  }
-
-  /// @brief Convert a pointer back to a block index.
-  uint32_t PtrToIndex(const void* ptr) const {
-    auto offset = static_cast<size_t>(
-        static_cast<const uint8_t*>(ptr) - storage_);
-    return static_cast<uint32_t>(offset / kAlignedBlockSize);
+  /// @brief Check if a block index is currently allocated (unlocked version).
+  bool IsAllocatedUnlocked(uint32_t idx) const {
+    return allocated_[idx];
   }
 
   /// @brief Store next-free index into a block (strict aliasing safe).
@@ -241,7 +265,23 @@ class ObjectPool {
       sizeof(T) > sizeof(uint32_t) ? sizeof(T) : sizeof(uint32_t));
 
  public:
-  ObjectPool() = default;
+  ObjectPool() {
+    for (uint32_t i = 0; i < MaxObjects; ++i) {
+      alive_[i] = false;
+    }
+  }
+
+  ~ObjectPool() {
+    // Destroy all alive objects
+    for (uint32_t i = 0; i < MaxObjects; ++i) {
+      if (alive_[i]) {
+        void* ptr = pool_.BlockPtr(i);
+        T* obj = static_cast<T*>(ptr);
+        obj->~T();
+        alive_[i] = false;
+      }
+    }
+  }
 
   ObjectPool(const ObjectPool&) = delete;
   ObjectPool& operator=(const ObjectPool&) = delete;
@@ -258,7 +298,10 @@ class ObjectPool {
     if (!mem) {
       return nullptr;
     }
-    return ::new (mem) T(std::forward<Args>(args)...);
+    uint32_t idx = pool_.PtrToIndex(mem);
+    T* obj = ::new (mem) T(std::forward<Args>(args)...);
+    alive_[idx] = true;
+    return obj;
   }
 
   /// @brief Construct an object in the pool (checked version).
@@ -270,7 +313,9 @@ class ObjectPool {
     if (!result.has_value()) {
       return expected<T*, MemPoolError>::error(result.get_error());
     }
+    uint32_t idx = pool_.PtrToIndex(result.value());
     T* obj = ::new (result.value()) T(std::forward<Args>(args)...);
+    alive_[idx] = true;
     return expected<T*, MemPoolError>::success(obj);
   }
 
@@ -281,7 +326,10 @@ class ObjectPool {
     if (!obj) {
       return;
     }
+    uint32_t idx = pool_.PtrToIndex(obj);
+    OSP_ASSERT(alive_[idx]);
     obj->~T();
+    alive_[idx] = false;
     pool_.Free(obj);
   }
 
@@ -314,6 +362,7 @@ class ObjectPool {
 
  private:
   FixedPool<kBlockSize, MaxObjects> pool_;
+  bool alive_[MaxObjects];
 };
 
 }  // namespace osp

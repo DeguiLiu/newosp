@@ -47,35 +47,28 @@ enum class TransportError : uint8_t {
  * @brief Network endpoint descriptor (host + port).
  */
 struct Endpoint {
-  char host[64];
+  FixedString<63> host;
   uint16_t port;
 
   /**
    * @brief Create an Endpoint from a host string and port number.
    * @param addr Host address string (e.g. "127.0.0.1")
-   * @param port Port number in host byte order
+   * @param p Port number in host byte order
    * @return Endpoint with the host and port populated.
    */
-  static Endpoint FromString(const char* addr, uint16_t port) noexcept {
+  static Endpoint FromString(const char* addr, uint16_t p) noexcept {
     Endpoint ep;
-    std::memset(ep.host, 0, sizeof(ep.host));
-    if (addr != nullptr) {
-      uint32_t i = 0;
-      for (; i < 63 && addr[i] != '\0'; ++i) {
-        ep.host[i] = addr[i];
-      }
-      ep.host[i] = '\0';
-    }
-    ep.port = port;
+    ep.host.assign(TruncateToCapacity, addr);
+    ep.port = p;
     return ep;
   }
 };
 
 // ============================================================================
-// Transport Type
+// Socket Transport Type
 // ============================================================================
 
-enum class TransportType : uint8_t {
+enum class SocketTransportType : uint8_t {
   kTcp = 0,
   kUdp = 1
 };
@@ -97,9 +90,9 @@ enum class TransportType : uint8_t {
  * | 4 byte | 4 byte | 2 byte   | 4 byte   | 4 byte   | 8 byte    | variable |
  * +--------+--------+----------+----------+----------+-----------+----------+
  */
-static constexpr uint32_t kFrameMagicV0 = 0x4F535000;  ///< v0 magic ("OSP\0")
-static constexpr uint32_t kFrameMagicV1 = 0x4F535001;  ///< v1 magic ("OSP\1")
-static constexpr uint32_t kFrameMagic = kFrameMagicV0; ///< Default (backward compat)
+inline constexpr uint32_t kFrameMagicV0 = 0x4F535000;  ///< v0 magic ("OSP\0")
+inline constexpr uint32_t kFrameMagicV1 = 0x4F535001;  ///< v1 magic ("OSP\1")
+inline constexpr uint32_t kFrameMagic = kFrameMagicV0; ///< Default (backward compat)
 
 /**
  * @brief Frame header for the wire protocol (v0).
@@ -176,19 +169,7 @@ struct Serializer {
 // ============================================================================
 // Timestamp Utility
 // ============================================================================
-
-#include <chrono>
-
-/**
- * @brief Get current timestamp in nanoseconds from steady_clock.
- * @return Nanoseconds since steady_clock epoch.
- */
-inline uint64_t SteadyClockNs() noexcept {
-  auto now = std::chrono::steady_clock::now();
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          now.time_since_epoch()).count());
-}
+// Note: SteadyNowNs() is provided by platform.hpp
 
 // ============================================================================
 // SequenceTracker - Sequence Number Tracking
@@ -429,7 +410,7 @@ class TcpTransport {
     }
     socket_ = static_cast<TcpSocket&&>(sock_r.value());
 
-    auto addr_r = SocketAddress::FromIpv4(ep.host, ep.port);
+    auto addr_r = SocketAddress::FromIpv4(ep.host.c_str(), ep.port);
     if (!addr_r.has_value()) {
       socket_.Close();
       return expected<void, TransportError>::error(
@@ -444,7 +425,7 @@ class TcpTransport {
     }
 
     // Disable Nagle's algorithm for low-latency framing
-    (void)socket_.SetNoDelay(true);
+    static_cast<void>(socket_.SetNoDelay(true));
     connected_ = true;
     return expected<void, TransportError>::success();
   }
@@ -457,7 +438,7 @@ class TcpTransport {
     Close();
     socket_ = static_cast<TcpSocket&&>(sock);
     if (socket_.IsValid()) {
-      (void)socket_.SetNoDelay(true);
+      static_cast<void>(socket_.SetNoDelay(true));
       connected_ = true;
     }
   }
@@ -892,8 +873,8 @@ class NetworkNode : public Node<PayloadVariant> {
               data, payload_buf, sizeof(payload_buf));
           if (len == 0) return;
 
-          (void)pub_ptr->transport.SendFrame(
-              pub_ptr->type_index, sender_id, payload_buf, len);
+          static_cast<void>(pub_ptr->transport.SendFrame(
+              pub_ptr->type_index, sender_id, payload_buf, len));
         });
 
     if (!sub_r.has_value()) {
@@ -1003,7 +984,7 @@ class NetworkNode : public Node<PayloadVariant> {
     listener_ = static_cast<TcpListener&&>(listener_r.value());
 
     // Set SO_REUSEADDR
-    int opt = 1;
+    int32_t opt = 1;
     ::setsockopt(listener_.Fd(), SOL_SOCKET, SO_REUSEADDR, &opt,
                  static_cast<socklen_t>(sizeof(opt)));
 

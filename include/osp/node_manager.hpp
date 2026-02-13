@@ -13,6 +13,7 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 #include "osp/socket.hpp"
+#include "osp/timer.hpp"
 
 #if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
 
@@ -58,8 +59,8 @@ enum class NodeManagerError : uint8_t {
  * +--------+----------+------------+
  * Total: 14 bytes
  */
-static constexpr uint32_t kHeartbeatMagic = 0x4F534842;  // "OSHB"
-static constexpr uint32_t kHeartbeatFrameSize = 14;
+inline constexpr uint32_t kHeartbeatMagic = 0x4F534842;  // "OSHB"
+inline constexpr uint32_t kHeartbeatFrameSize = 14;
 
 // ============================================================================
 // NodeManagerConfig
@@ -85,14 +86,14 @@ struct NodeEntry {
   uint16_t node_id;
   TcpSocket socket;
   TcpListener listener;
-  char remote_host[64];
+  FixedString<63> remote_host;
   uint16_t remote_port;
   uint64_t last_heartbeat_us;  // Microsecond timestamp
   bool active;
   bool is_listener;  // true = we accepted this connection
 
   NodeEntry() noexcept
-      : node_id(0), socket(), listener(), remote_host{}, remote_port(0),
+      : node_id(0), socket(), listener(), remote_host(), remote_port(0),
         last_heartbeat_us(0), active(false), is_listener(false) {}
 };
 
@@ -103,9 +104,11 @@ struct NodeEntry {
 template <uint32_t MaxNodes = OSP_NODE_MANAGER_MAX_NODES>
 class NodeManager {
  public:
-  explicit NodeManager(const NodeManagerConfig& cfg = {}) noexcept
+  explicit NodeManager(const NodeManagerConfig& cfg = {},
+                       TimerScheduler<>* scheduler = nullptr) noexcept
       : config_(cfg), running_(false), next_node_id_(1),
-        node_count_(0), disconnect_fn_(nullptr), disconnect_ctx_(nullptr) {}
+        node_count_(0), disconnect_fn_(nullptr), disconnect_ctx_(nullptr),
+        scheduler_(scheduler), timer_task_id_(0) {}
 
   ~NodeManager() { Stop(); }
 
@@ -137,7 +140,7 @@ class NodeManager {
     }
 
     // Set SO_REUSEADDR
-    int opt = 1;
+    int32_t opt = 1;
     ::setsockopt(listener_r.value().Fd(), SOL_SOCKET, SO_REUSEADDR, &opt,
                  static_cast<socklen_t>(sizeof(opt)));
 
@@ -162,10 +165,9 @@ class NodeManager {
     // Store listener in the node entry
     slot->node_id = AllocNodeId();
     slot->listener = static_cast<TcpListener&&>(listener_r.value());
-    std::memset(slot->remote_host, 0, sizeof(slot->remote_host));
-    std::memcpy(slot->remote_host, "0.0.0.0", 7);
+    slot->remote_host = "0.0.0.0";
     slot->remote_port = port;
-    slot->last_heartbeat_us = GetTimestampUs();
+    slot->last_heartbeat_us = SteadyNowUs();
     slot->active = true;
     slot->is_listener = true;
     ++node_count_;
@@ -209,20 +211,13 @@ class NodeManager {
     }
 
     // Disable Nagle's algorithm for low-latency heartbeats
-    (void)sock.SetNoDelay(true);
+    static_cast<void>(sock.SetNoDelay(true));
 
     slot->node_id = AllocNodeId();
     slot->socket = static_cast<TcpSocket&&>(sock);
-    std::memset(slot->remote_host, 0, sizeof(slot->remote_host));
-    if (host != nullptr) {
-      uint32_t i = 0;
-      for (; i < 63 && host[i] != '\0'; ++i) {
-        slot->remote_host[i] = host[i];
-      }
-      slot->remote_host[i] = '\0';
-    }
+    slot->remote_host.assign(TruncateToCapacity, host);
     slot->remote_port = port;
-    slot->last_heartbeat_us = GetTimestampUs();
+    slot->last_heartbeat_us = SteadyNowUs();
     slot->active = true;
     slot->is_listener = false;
     ++node_count_;
@@ -311,7 +306,19 @@ class NodeManager {
     }
 
     running_.store(true);
-    heartbeat_thread_ = std::thread([this]() { HeartbeatLoop(); });
+
+    if (scheduler_ != nullptr) {
+      auto r = scheduler_->Add(config_.heartbeat_interval_ms, HeartbeatTick, this);
+      if (r.has_value()) {
+        timer_task_id_ = r.value();
+      } else {
+        running_.store(false);
+        return expected<void, NodeManagerError>::error(
+            NodeManagerError::kNotRunning);
+      }
+    } else {
+      heartbeat_thread_ = std::thread([this]() { HeartbeatLoop(); });
+    }
 
     return expected<void, NodeManagerError>::success();
   }
@@ -321,8 +328,13 @@ class NodeManager {
    */
   void Stop() noexcept {
     running_.store(false);
-    if (heartbeat_thread_.joinable()) {
-      heartbeat_thread_.join();
+
+    if (scheduler_ != nullptr) {
+      static_cast<void>(scheduler_->Remove(timer_task_id_));
+    } else {
+      if (heartbeat_thread_.joinable()) {
+        heartbeat_thread_.join();
+      }
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -375,6 +387,9 @@ class NodeManager {
   mutable std::mutex mutex_;
   std::thread heartbeat_thread_;
 
+  TimerScheduler<>* scheduler_;
+  TimerTaskId timer_task_id_{0};
+
   NodeDisconnectFn disconnect_fn_;
   void* disconnect_ctx_;
 
@@ -382,9 +397,20 @@ class NodeManager {
   // Heartbeat Implementation
   // ==========================================================================
 
+  static void HeartbeatTick(void* ctx) noexcept {
+    auto* self = static_cast<NodeManager*>(ctx);
+    std::lock_guard<std::mutex> lock(self->mutex_);
+    for (uint32_t i = 0; i < MaxNodes; ++i) {
+      if (self->nodes_[i].active && !self->nodes_[i].is_listener) {
+        self->SendHeartbeat(self->nodes_[i]);
+      }
+    }
+    self->CheckTimeouts();
+  }
+
   void HeartbeatLoop() noexcept {
     while (running_.load()) {
-      auto start = std::chrono::steady_clock::now();
+      const uint64_t start_us = SteadyNowUs();
 
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -401,19 +427,17 @@ class NodeManager {
       }
 
       // Sleep for the configured interval
-      auto end = std::chrono::steady_clock::now();
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-          end - start);
-      auto sleep_time = std::chrono::milliseconds(config_.heartbeat_interval_ms) - elapsed;
-      if (sleep_time.count() > 0) {
-        std::this_thread::sleep_for(sleep_time);
+      const uint64_t elapsed_us = SteadyNowUs() - start_us;
+      const uint64_t interval_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) * 1000U;
+      if (elapsed_us < interval_us) {
+        std::this_thread::sleep_for(std::chrono::microseconds(interval_us - elapsed_us));
       }
     }
   }
 
   void SendHeartbeat(NodeEntry& node) noexcept {
     uint8_t frame[kHeartbeatFrameSize];
-    uint64_t timestamp = GetTimestampUs();
+    uint64_t timestamp = SteadyNowUs();
 
     // Encode: magic(4B) + node_id(2B) + timestamp(8B)
     std::memcpy(frame + 0, &kHeartbeatMagic, 4);
@@ -429,7 +453,7 @@ class NodeManager {
   }
 
   void CheckTimeouts() noexcept {
-    uint64_t now = GetTimestampUs();
+    uint64_t now = SteadyNowUs();
     uint64_t timeout_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) *
                           config_.heartbeat_timeout_count * 1000;
 
@@ -454,13 +478,6 @@ class NodeManager {
   // ==========================================================================
   // Utilities
   // ==========================================================================
-
-  static uint64_t GetTimestampUs() noexcept {
-    auto now = std::chrono::steady_clock::now();
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            now.time_since_epoch()).count());
-  }
 
   uint16_t AllocNodeId() noexcept { return next_node_id_++; }
 

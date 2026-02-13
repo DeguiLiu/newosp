@@ -17,6 +17,7 @@
 #include "osp/vocabulary.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -63,7 +64,7 @@ struct ShellSession {
   std::thread thread;
   char line_buf[128] = {};
   uint32_t line_pos = 0;
-  bool active = false;
+  std::atomic<bool> active{false};
 };
 
 /// @brief Returns a reference to the thread-local current session pointer.
@@ -363,12 +364,11 @@ inline int ShellBuiltinHelp(int /*argc*/, char* /*argv*/[]) {
 
 /// @brief Auto-register the built-in help command.
 inline bool RegisterHelpOnce() noexcept {
-  static bool done = false;
-  if (!done) {
+  static const bool done = []() {
     GlobalCmdRegistry::Instance().Register("help", ShellBuiltinHelp,
                                            "List all commands");
-    done = true;
-  }
+    return true;
+  }();
   return done;
 }
 
@@ -599,14 +599,14 @@ inline void DebugShell::AcceptLoop() {
     // Find a free session slot.
     bool placed = false;
     for (uint32_t i = 0; i < cfg_.max_connections; ++i) {
-      if (!sessions_[i].active) {
+      if (!sessions_[i].active.load(std::memory_order_acquire)) {
         // Ensure any previous thread is joined before reuse.
         if (sessions_[i].thread.joinable()) {
           sessions_[i].thread.join();
         }
         sessions_[i].sock_fd = client_fd;
         sessions_[i].line_pos = 0;
-        sessions_[i].active = true;
+        sessions_[i].active.store(true, std::memory_order_release);
         sessions_[i].thread =
             std::thread([this, i]() { SessionLoop(sessions_[i]); });
         placed = true;
@@ -627,11 +627,15 @@ inline void DebugShell::SessionLoop(Session& s) {
   // Send initial prompt.
   SendStr(s.sock_fd, cfg_.prompt);
 
-  while (running_.load(std::memory_order_relaxed) && s.active) {
+  while (running_.load(std::memory_order_relaxed) &&
+         s.active.load(std::memory_order_acquire)) {
     char ch;
     ssize_t n = ::recv(s.sock_fd, &ch, 1, 0);
-    if (n <= 0) {
-      // Connection closed or error.
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (n == 0) {
       break;
     }
 
@@ -739,7 +743,7 @@ inline void DebugShell::SessionLoop(Session& s) {
     ::close(s.sock_fd);
     s.sock_fd = -1;
   }
-  s.active = false;
+  s.active.store(false, std::memory_order_release);
 }
 
 inline void DebugShell::ExecuteLine(Session& s) {

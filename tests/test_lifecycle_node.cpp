@@ -400,3 +400,340 @@ TEST_CASE("LifecycleNode - Trigger method with explicit transitions", "[lifecycl
   REQUIRE(node.GetState() == osp::LifecycleState::kActive);
   REQUIRE(g_activate_count == 1);
 }
+
+// ============================================================================
+// New tests for HSM-driven rich state hierarchy
+// ============================================================================
+
+using DS = osp::LifecycleDetailedState;
+
+TEST_CASE("LifecycleNode - Initial detailed state is WaitingConfig", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  REQUIRE(node.GetDetailedState() == DS::kWaitingConfig);
+  REQUIRE(node.IsInDetailedState(DS::kUnconfigured));
+  REQUIRE(node.IsInDetailedState(DS::kAlive));
+  REQUIRE_FALSE(node.IsInDetailedState(DS::kConfigured));
+}
+
+TEST_CASE("LifecycleNode - DetailedStateName returns HSM name", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  REQUIRE(std::strcmp(node.DetailedStateName(), "WaitingConfig") == 0);
+
+  node.Configure();
+  REQUIRE(std::strcmp(node.DetailedStateName(), "Standby") == 0);
+
+  node.Activate();
+  REQUIRE(std::strcmp(node.DetailedStateName(), "Running") == 0);
+}
+
+TEST_CASE("LifecycleNode - Hierarchical state queries after Configure", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.Configure();
+
+  // Standby is under Inactive -> Configured -> Alive
+  REQUIRE(node.GetDetailedState() == DS::kStandby);
+  REQUIRE(node.IsInDetailedState(DS::kStandby));
+  REQUIRE(node.IsInDetailedState(DS::kInactive));
+  REQUIRE(node.IsInDetailedState(DS::kConfigured));
+  REQUIRE(node.IsInDetailedState(DS::kAlive));
+  REQUIRE_FALSE(node.IsInDetailedState(DS::kActive));
+  REQUIRE_FALSE(node.IsInDetailedState(DS::kUnconfigured));
+}
+
+TEST_CASE("LifecycleNode - Hierarchical state queries after Activate", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.Configure();
+  node.Activate();
+
+  // Running is under Active -> Configured -> Alive
+  REQUIRE(node.GetDetailedState() == DS::kRunning);
+  REQUIRE(node.IsInDetailedState(DS::kRunning));
+  REQUIRE(node.IsInDetailedState(DS::kActive));
+  REQUIRE(node.IsInDetailedState(DS::kConfigured));
+  REQUIRE(node.IsInDetailedState(DS::kAlive));
+  REQUIRE_FALSE(node.IsInDetailedState(DS::kInactive));
+}
+
+TEST_CASE("LifecycleNode - Pause and Resume", "[lifecycle_node][hsm]") {
+  ResetCounters();
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.SetOnActivate(OnActivate);
+  node.SetOnDeactivate(OnDeactivate);
+
+  node.Configure();
+  node.Activate();
+  REQUIRE(node.GetDetailedState() == DS::kRunning);
+  REQUIRE(g_activate_count == 1);
+
+  // Pause: Running -> Paused (calls on_deactivate)
+  auto result = node.Pause();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kPaused);
+  REQUIRE(node.GetState() == osp::LifecycleState::kInactive);
+  REQUIRE(node.IsInDetailedState(DS::kInactive));
+  REQUIRE(g_deactivate_count == 1);
+
+  // Resume: Paused -> Running (calls on_activate)
+  result = node.Resume();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kRunning);
+  REQUIRE(node.GetState() == osp::LifecycleState::kActive);
+  REQUIRE(g_activate_count == 2);
+}
+
+TEST_CASE("LifecycleNode - Pause invalid from non-Active", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+
+  // Can't pause from Unconfigured
+  auto result = node.Pause();
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::LifecycleError::kInvalidTransition);
+
+  // Can't pause from Inactive
+  node.Configure();
+  result = node.Pause();
+  REQUIRE_FALSE(result.has_value());
+}
+
+TEST_CASE("LifecycleNode - Resume invalid from non-Paused", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.Configure();
+  node.Activate();
+
+  // Can't resume from Running (not Paused)
+  auto result = node.Resume();
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::LifecycleError::kInvalidTransition);
+}
+
+TEST_CASE("LifecycleNode - Degraded state", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.Configure();
+  node.Activate();
+  REQUIRE(node.GetDetailedState() == DS::kRunning);
+
+  // Mark degraded
+  auto result = node.MarkDegraded();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kDegraded);
+  REQUIRE(node.GetState() == osp::LifecycleState::kActive);  // Still active
+  REQUIRE(node.IsInDetailedState(DS::kActive));
+
+  // Clear degraded -> back to Running
+  result = node.ClearDegraded();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kRunning);
+}
+
+TEST_CASE("LifecycleNode - MarkDegraded invalid from non-Running", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.Configure();
+
+  auto result = node.MarkDegraded();
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::LifecycleError::kInvalidTransition);
+}
+
+TEST_CASE("LifecycleNode - Deactivate from Degraded", "[lifecycle_node][hsm]") {
+  ResetCounters();
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.SetOnDeactivate(OnDeactivate);
+
+  node.Configure();
+  node.Activate();
+  node.MarkDegraded();
+  REQUIRE(node.GetDetailedState() == DS::kDegraded);
+
+  // Deactivate from Degraded should work
+  auto result = node.Deactivate();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kStandby);
+  REQUIRE(node.GetState() == osp::LifecycleState::kInactive);
+  REQUIRE(g_deactivate_count == 1);
+}
+
+TEST_CASE("LifecycleNode - Recoverable error", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.Configure();
+  node.Activate();
+  REQUIRE(node.GetDetailedState() == DS::kRunning);
+
+  // Trigger recoverable error
+  auto result = node.TriggerError();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kRecoverable);
+  REQUIRE(node.IsInDetailedState(DS::kError));
+  REQUIRE(node.IsInDetailedState(DS::kAlive));
+
+  // Recover -> back to WaitingConfig
+  result = node.Recover();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kWaitingConfig);
+  REQUIRE(node.GetState() == osp::LifecycleState::kUnconfigured);
+}
+
+TEST_CASE("LifecycleNode - Fatal error only allows shutdown", "[lifecycle_node][hsm]") {
+  ResetCounters();
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.SetOnShutdown(OnShutdown);
+
+  node.Configure();
+  node.Activate();
+
+  // Trigger fatal error
+  auto result = node.TriggerFatalError();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kFatal);
+  REQUIRE(node.IsInDetailedState(DS::kError));
+
+  // Can't recover from fatal
+  result = node.Recover();
+  REQUIRE_FALSE(result.has_value());
+
+  // Can't configure from fatal
+  result = node.Configure();
+  REQUIRE_FALSE(result.has_value());
+
+  // Shutdown is allowed
+  result = node.Shutdown();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetState() == osp::LifecycleState::kFinalized);
+  REQUIRE(g_shutdown_count == 1);
+}
+
+TEST_CASE("LifecycleNode - Error from Unconfigured", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  REQUIRE(node.GetDetailedState() == DS::kWaitingConfig);
+
+  auto result = node.TriggerError();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kRecoverable);
+
+  result = node.Recover();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kWaitingConfig);
+}
+
+TEST_CASE("LifecycleNode - Cannot trigger error from Error state", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.TriggerError();
+  REQUIRE(node.IsInDetailedState(DS::kError));
+
+  // Double error should fail
+  auto result = node.TriggerError();
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::LifecycleError::kInvalidTransition);
+
+  result = node.TriggerFatalError();
+  REQUIRE_FALSE(result.has_value());
+}
+
+TEST_CASE("LifecycleNode - Pause from Degraded", "[lifecycle_node][hsm]") {
+  ResetCounters();
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.SetOnDeactivate(OnDeactivate);
+
+  node.Configure();
+  node.Activate();
+  node.MarkDegraded();
+  REQUIRE(node.GetDetailedState() == DS::kDegraded);
+
+  // Pause from Degraded
+  auto result = node.Pause();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kPaused);
+  REQUIRE(g_deactivate_count == 1);
+}
+
+TEST_CASE("LifecycleNode - Activate from Paused via Trigger", "[lifecycle_node][hsm]") {
+  ResetCounters();
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.SetOnActivate(OnActivate);
+  node.SetOnDeactivate(OnDeactivate);
+
+  node.Configure();
+  node.Activate();
+  node.Pause();
+  REQUIRE(node.GetDetailedState() == DS::kPaused);
+  REQUIRE(node.GetState() == osp::LifecycleState::kInactive);
+
+  // Activate() from Paused should work (backward compat)
+  auto result = node.Activate();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kRunning);
+  REQUIRE(node.GetState() == osp::LifecycleState::kActive);
+}
+
+TEST_CASE("LifecycleNode - Cleanup from Paused", "[lifecycle_node][hsm]") {
+  ResetCounters();
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.SetOnCleanup(OnCleanup);
+
+  node.Configure();
+  node.Activate();
+  node.Pause();
+  REQUIRE(node.GetDetailedState() == DS::kPaused);
+
+  // Cleanup from Paused (Inactive sub-state)
+  auto result = node.Cleanup();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetDetailedState() == DS::kWaitingConfig);
+  REQUIRE(node.GetState() == osp::LifecycleState::kUnconfigured);
+  REQUIRE(g_cleanup_count == 1);
+}
+
+TEST_CASE("LifecycleNode - Shutdown from Error state", "[lifecycle_node][hsm]") {
+  ResetCounters();
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.SetOnShutdown(OnShutdown);
+
+  node.TriggerError();
+  REQUIRE(node.IsInDetailedState(DS::kError));
+
+  auto result = node.Shutdown();
+  REQUIRE(result.has_value());
+  REQUIRE(node.GetState() == osp::LifecycleState::kFinalized);
+  REQUIRE(g_shutdown_count == 1);
+}
+
+TEST_CASE("LifecycleNode - Entry/exit actions on hierarchical transitions", "[lifecycle_node][hsm]") {
+  ResetCounters();
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.SetOnConfigure(OnConfigure);
+  node.SetOnActivate(OnActivate);
+  node.SetOnDeactivate(OnDeactivate);
+  node.SetOnCleanup(OnCleanup);
+  node.SetOnShutdown(OnShutdown);
+
+  // Full cycle through rich states
+  node.Configure();
+  REQUIRE(g_configure_count == 1);
+
+  node.Activate();
+  REQUIRE(g_activate_count == 1);
+
+  node.Pause();  // calls on_deactivate
+  REQUIRE(g_deactivate_count == 1);
+
+  node.Resume();  // calls on_activate
+  REQUIRE(g_activate_count == 2);
+
+  node.Deactivate();
+  REQUIRE(g_deactivate_count == 2);
+
+  node.Cleanup();
+  REQUIRE(g_cleanup_count == 1);
+
+  node.Shutdown();
+  REQUIRE(g_shutdown_count == 1);
+}
+
+TEST_CASE("LifecycleNode - Finalized state detailed query", "[lifecycle_node][hsm]") {
+  osp::LifecycleNode<TestPayload> node("test_node", 1);
+  node.Shutdown();
+
+  REQUIRE(node.GetDetailedState() == DS::kFinalized);
+  REQUIRE(node.IsInDetailedState(DS::kFinalized));
+  REQUIRE_FALSE(node.IsInDetailedState(DS::kAlive));
+  REQUIRE(std::strcmp(node.DetailedStateName(), "Finalized") == 0);
+}

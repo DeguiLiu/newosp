@@ -58,32 +58,23 @@ class AppRegistry {
   bool Register(uint16_t app_id, void* app_ptr, PostFn post_fn) noexcept {
     if (app_ptr == nullptr || post_fn == nullptr) return false;
     // Check duplicate
-    for (uint32_t i = 0; i < count_; ++i) {
-      if (entries_[i].active && entries_[i].app_id == app_id) {
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+      if (entries_[i].app_id == app_id) {
         return false;
       }
     }
-    // Find free slot
-    for (uint32_t i = 0; i < OSP_POST_MAX_APPS; ++i) {
-      if (!entries_[i].active) {
-        entries_[i].app_id = app_id;
-        entries_[i].app_ptr = app_ptr;
-        entries_[i].post_fn = post_fn;
-        entries_[i].active = true;
-        ++count_;
-        return true;
-      }
-    }
-    return false;
+    if (entries_.full()) return false;
+    AppEntry entry;
+    entry.app_ptr = app_ptr;
+    entry.post_fn = post_fn;
+    entry.app_id = app_id;
+    return entries_.push_back(entry);
   }
 
   bool Unregister(uint16_t app_id) noexcept {
-    for (uint32_t i = 0; i < OSP_POST_MAX_APPS; ++i) {
-      if (entries_[i].active && entries_[i].app_id == app_id) {
-        entries_[i].active = false;
-        entries_[i].app_ptr = nullptr;
-        entries_[i].post_fn = nullptr;
-        --count_;
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+      if (entries_[i].app_id == app_id) {
+        static_cast<void>(entries_.erase_unordered(i));
         return true;
       }
     }
@@ -95,8 +86,8 @@ class AppRegistry {
                  ResponseChannel* response_ch = nullptr) noexcept {
     uint16_t app_id = GetAppId(dst_iid);
     uint16_t ins_id = GetInsId(dst_iid);
-    for (uint32_t i = 0; i < OSP_POST_MAX_APPS; ++i) {
-      if (entries_[i].active && entries_[i].app_id == app_id) {
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+      if (entries_[i].app_id == app_id) {
         return entries_[i].post_fn(entries_[i].app_ptr, ins_id, event,
                                    data, len, response_ch);
       }
@@ -104,35 +95,20 @@ class AppRegistry {
     return false;
   }
 
-  uint32_t Count() const noexcept { return count_; }
+  uint32_t Count() const noexcept { return entries_.size(); }
 
-  void Reset() noexcept {
-    for (uint32_t i = 0; i < OSP_POST_MAX_APPS; ++i) {
-      entries_[i].active = false;
-      entries_[i].app_ptr = nullptr;
-      entries_[i].post_fn = nullptr;
-    }
-    count_ = 0;
-  }
+  void Reset() noexcept { entries_.clear(); }
 
  private:
-  AppRegistry() noexcept : count_(0) {
-    for (uint32_t i = 0; i < OSP_POST_MAX_APPS; ++i) {
-      entries_[i].active = false;
-      entries_[i].app_ptr = nullptr;
-      entries_[i].post_fn = nullptr;
-    }
-  }
+  AppRegistry() noexcept = default;
 
   struct AppEntry {
     void* app_ptr;
     PostFn post_fn;
     uint16_t app_id;
-    bool active;
   };
 
-  AppEntry entries_[OSP_POST_MAX_APPS];
-  uint32_t count_;
+  FixedVector<AppEntry, OSP_POST_MAX_APPS> entries_;
 };
 
 // ============================================================================

@@ -118,17 +118,20 @@ struct StateConfig {
 template <typename Context, uint32_t MaxStates = 16>
 class StateMachine final {
  public:
+  /// @brief Sentinel value indicating no state / root state (no parent).
+  static constexpr int32_t kNoState = -1;
+
   /**
    * @brief Construct a state machine bound to the given context.
    * @param ctx Reference to user context (must outlive the state machine).
    */
   explicit StateMachine(Context& ctx) noexcept
       : ctx_(ctx),
-        current_state_(-1),
-        initial_state_(-1),
+        current_state_(kNoState),
+        initial_state_(kNoState),
         state_count_(0),
         started_(false),
-        pending_target_(-1) {}
+        pending_target_(kNoState) {}
 
   // Non-copyable
   StateMachine(const StateMachine&) = delete;
@@ -139,12 +142,12 @@ class StateMachine final {
   /**
    * @brief Add a state to the machine.
    * @param config State configuration.
-   * @return Index of the newly added state, or -1 if full.
+   * @return Index of the newly added state, or kNoState if full.
    */
   int32_t AddState(const StateConfig<Context>& config) noexcept {
     OSP_ASSERT(!started_);
     if (state_count_ >= MaxStates) {
-      return -1;
+      return kNoState;
     }
     int32_t index = static_cast<int32_t>(state_count_);
     states_[state_count_] = config;
@@ -179,7 +182,7 @@ class StateMachine final {
     // Build entry path from root down to initial state
     int32_t path[OSP_HSM_MAX_DEPTH];
     uint32_t len = 0;
-    BuildEntryPath(-1, initial_state_, path, len);
+    BuildEntryPath(kNoState, initial_state_, path, len);
 
     // Execute entry actions top-down (path is stored bottom-up, so reverse)
     for (uint32_t i = len; i > 0; --i) {
@@ -225,7 +228,7 @@ class StateMachine final {
         if (result == TransitionResult::kTransition) {
           OSP_ASSERT(pending_target_ >= 0);
           int32_t target = pending_target_;
-          pending_target_ = -1;
+          pending_target_ = kNoState;
           TransitionTo(target);
           return;
         }

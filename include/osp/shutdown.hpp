@@ -94,17 +94,25 @@ class ShutdownManager final {
   explicit ShutdownManager(uint32_t max_callbacks = 16) noexcept
       : callback_count_(0),
         max_callbacks_((max_callbacks <= kMaxCallbacks) ? max_callbacks : kMaxCallbacks),
-        shutdown_flag_(false) {
+        shutdown_flag_(false),
+        valid_(false) {
     pipe_fd_[0] = -1;
     pipe_fd_[1] = -1;
 
-    OSP_ASSERT(detail::GetShutdownInstance() == nullptr);
+    // Enforce single-instance constraint at runtime (not just debug assert).
+    // If another instance already exists, do NOT overwrite the global pointer.
+    if (detail::GetShutdownInstance() != nullptr) {
+      // Mark as invalid -- pipe remains {-1, -1}, all operations return error.
+      return;
+    }
     detail::GetShutdownInstance() = this;
 
     if (::pipe(pipe_fd_) != 0) {
       pipe_fd_[0] = -1;
       pipe_fd_[1] = -1;
+      return;
     }
+    valid_ = true;
   }
 
   /**
@@ -119,7 +127,10 @@ class ShutdownManager final {
     if (pipe_fd_[1] >= 0) {
       ::close(pipe_fd_[1]);
     }
-    detail::GetShutdownInstance() = nullptr;
+    // Only clear global pointer if we are the registered instance
+    if (detail::GetShutdownInstance() == this) {
+      detail::GetShutdownInstance() = nullptr;
+    }
   }
 
   // Non-copyable, non-movable
@@ -133,11 +144,26 @@ class ShutdownManager final {
   // ==========================================================================
 
   /**
+   * @brief Check if this instance is the active (valid) shutdown manager.
+   *
+   * Returns false if another instance already existed at construction time
+   * or if pipe creation failed.  All API calls on an invalid instance
+   * return errors or are no-ops.
+   */
+  bool IsValid() const noexcept { return valid_; }
+
+  /**
    * @brief Register a cleanup callback to be invoked on shutdown (LIFO order).
    * @param fn Callback function pointer. Must not be nullptr.
-   * @return success on registration, or ShutdownError::kCallbacksFull.
+   * @return success on registration, or ShutdownError on failure:
+   *         - kAlreadyInstantiated if this instance is invalid (duplicate).
+   *         - kCallbacksFull if fn is nullptr or capacity reached.
    */
   expected<void, ShutdownError> Register(ShutdownFn fn) noexcept {
+    if (!valid_) {
+      return expected<void, ShutdownError>::error(
+          ShutdownError::kAlreadyInstantiated);
+    }
     if (fn == nullptr) {
       return expected<void, ShutdownError>::error(ShutdownError::kCallbacksFull);
     }
@@ -156,6 +182,10 @@ class ShutdownManager final {
    * Uses sigaction(2) (not signal(2)) with SA_RESTART flag.
    */
   expected<void, ShutdownError> InstallSignalHandlers() noexcept {
+    if (!valid_) {
+      return expected<void, ShutdownError>::error(
+          ShutdownError::kAlreadyInstantiated);
+    }
     if (pipe_fd_[1] < 0) {
       return expected<void, ShutdownError>::error(
           ShutdownError::kPipeCreationFailed);
@@ -187,7 +217,7 @@ class ShutdownManager final {
   void Quit(int signo = 0) noexcept {
     bool expected_val = false;
     if (shutdown_flag_.compare_exchange_strong(expected_val, true)) {
-      signo_ = signo;
+      signo_.store(signo, std::memory_order_relaxed);
       if (pipe_fd_[1] >= 0) {
         const uint8_t byte = 1;
         // write(2) is async-signal-safe; ignore return value intentionally
@@ -211,7 +241,7 @@ class ShutdownManager final {
     }
 
     // Execute callbacks in LIFO order
-    const int signo = signo_;
+    const int signo = signo_.load(std::memory_order_relaxed);
     for (uint32_t i = callback_count_; i > 0U; --i) {
       if (callbacks_[i - 1U] != nullptr) {
         callbacks_[i - 1U](signo);
@@ -248,7 +278,7 @@ class ShutdownManager final {
     ShutdownManager* self = detail::GetShutdownInstance();
     if (self != nullptr) {
       self->shutdown_flag_.store(true);
-      self->signo_ = signo;
+      self->signo_.store(signo, std::memory_order_relaxed);
       if (self->pipe_fd_[1] >= 0) {
         const uint8_t byte = 1;
         (void)::write(self->pipe_fd_[1], &byte, 1);
@@ -265,7 +295,8 @@ class ShutdownManager final {
   uint32_t max_callbacks_;
   std::atomic<bool> shutdown_flag_;
   int pipe_fd_[2];
-  volatile int signo_ = 0;  ///< Signal number, written from signal handler
+  std::atomic<int> signo_{0};  ///< Signal number, written from signal handler (lock-free)
+  bool valid_;                 ///< True if this is the active (valid) instance.
 };
 
 }  // namespace osp

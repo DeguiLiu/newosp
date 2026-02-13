@@ -122,7 +122,7 @@ TEST_CASE("integration - Node + Timer + Bus periodic publish", "[integration]") 
         recv_count.fetch_add(1, std::memory_order_relaxed);
       });
 
-  osp::TimerScheduler sched(4);
+  osp::TimerScheduler<4> sched;
   auto result = sched.Add(20, &TimerPublishCallback, &g_timer_pub_ctx);
   REQUIRE(result.has_value());
   sched.Start();
@@ -310,7 +310,7 @@ TEST_CASE("integration - ConnectionPool + Timer timeout cleanup", "[integration]
   cleanup_ctx.pool = &pool;
   cleanup_ctx.keep_alive = c1.value();
 
-  osp::TimerScheduler sched(4);
+  osp::TimerScheduler<4> sched;
   // Timer fires every 30ms, touches c1 to keep it alive, then cleans up
   // connections older than 80ms
   auto task = sched.Add(30, [](void* ctx) {

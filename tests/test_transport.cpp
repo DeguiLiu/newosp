@@ -65,7 +65,7 @@ static uint16_t SetupListener(osp::TcpListener& listener) {
 
 TEST_CASE("transport - Endpoint::FromString", "[transport][endpoint]") {
   auto ep = osp::Endpoint::FromString("192.168.1.100", 5555);
-  REQUIRE(std::strcmp(ep.host, "192.168.1.100") == 0);
+  REQUIRE(std::strcmp(ep.host.c_str(), "192.168.1.100") == 0);
   REQUIRE(ep.port == 5555);
 }
 
@@ -77,14 +77,14 @@ TEST_CASE("transport - Endpoint::FromString truncates long host",
   long_host[69] = '\0';
 
   auto ep = osp::Endpoint::FromString(long_host, 80);
-  REQUIRE(std::strlen(ep.host) == 63);
+  REQUIRE(ep.host.size() == 63);
   REQUIRE(ep.port == 80);
 }
 
 TEST_CASE("transport - Endpoint::FromString nullptr host",
           "[transport][endpoint]") {
   auto ep = osp::Endpoint::FromString(nullptr, 1234);
-  REQUIRE(ep.host[0] == '\0');
+  REQUIRE(ep.host.empty());
   REQUIRE(ep.port == 1234);
 }
 
@@ -578,12 +578,12 @@ TEST_CASE("transport - SequenceTracker reset",
 
 TEST_CASE("transport - SteadyClockNs returns nonzero",
           "[transport][timestamp][v1]") {
-  uint64_t ts1 = osp::SteadyClockNs();
+  uint64_t ts1 = osp::SteadyNowNs();
   REQUIRE(ts1 > 0);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-  uint64_t ts2 = osp::SteadyClockNs();
+  uint64_t ts2 = osp::SteadyNowNs();
   REQUIRE(ts2 > ts1);
 }
 
@@ -604,7 +604,7 @@ TEST_CASE("transport - TcpTransport SendFrameV1 RecvFrameAuto loopback",
         send_data, payload_buf, sizeof(payload_buf));
     if (len == 0) return;
 
-    uint64_t ts = osp::SteadyClockNs();
+    uint64_t ts = osp::SteadyNowNs();
     (void)client.SendFrameV1(0, 42, 100, ts, payload_buf, len);
   });
 

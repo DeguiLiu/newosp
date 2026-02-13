@@ -43,9 +43,9 @@ enum class TransportType : uint8_t {
  */
 struct TransportConfig {
   TransportType type = TransportType::kAuto;
-  char remote_host[64] = "127.0.0.1";
+  FixedString<63> remote_host{"127.0.0.1"};
   uint16_t remote_port = 0;
-  char shm_channel_name[64] = "";
+  FixedString<63> shm_channel_name;
   uint32_t shm_slot_size = 4096;
   uint32_t shm_slot_count = 256;
 };
@@ -77,11 +77,11 @@ class TransportFactory final {
    */
   static TransportType DetectBestTransport(const TransportConfig& cfg) noexcept {
     // Check if local host
-    const bool is_local = IsLocalHost(cfg.remote_host);
+    const bool is_local = IsLocalHost(cfg.remote_host.c_str());
 
     if (is_local) {
       // Check if shm_channel_name is non-empty
-      if (cfg.shm_channel_name[0] != '\0') {
+      if (!cfg.shm_channel_name.empty()) {
         return TransportType::kShm;
       }
       return TransportType::kInproc;

@@ -326,6 +326,7 @@ class WorkerPool {
     static_assert(sizeof(void*) >= sizeof(handler), "Function pointer must fit in void*");
     dispatch_funcs_[idx] = &TypedDispatch<T>;
     void* ptr = nullptr;
+    // MISRA Deviation: Rule 11.1 (function pointer to void*) - type erasure for generic dispatch
     std::memcpy(&ptr, &handler, sizeof(handler));
     handler_ptrs_[idx] = ptr;
   }
@@ -347,7 +348,7 @@ class WorkerPool {
 
     workers_.reserve(worker_num_);
     for (uint32_t i = 0U; i < worker_num_; ++i) {
-      workers_.push_back(std::unique_ptr<WorkerContext>(new WorkerContext(worker_queue_depth_)));
+      workers_.push_back(std::make_unique<WorkerContext>(worker_queue_depth_));
     }
 
     SubscribeAll(static_cast<PayloadVariant*>(nullptr));
@@ -460,7 +461,7 @@ class WorkerPool {
     if (dispatch_funcs_[idx] == nullptr) {
       return false;
     }
-    osp::MessageHeader header(0U, GetTimestampUs(), 0U, osp::MessagePriority::kHigh);
+    osp::MessageHeader header(0U, SteadyNowUs(), 0U, osp::MessagePriority::kHigh);
     PayloadVariant pv(std::forward<T>(payload));
     EnvelopeType env(header, std::move(pv));
     dispatch_funcs_[idx](env, handler_ptrs_[idx]);
@@ -493,6 +494,7 @@ class WorkerPool {
   static void TypedDispatch(const EnvelopeType& env, void* handler_ptr) noexcept {
     using FuncType = void (*)(const T&, const osp::MessageHeader&);
     FuncType fn = nullptr;
+    // MISRA Deviation: Rule 11.1 (void* to function pointer) - type erasure recovery for dispatch
     std::memcpy(&fn, &handler_ptr, sizeof(fn));
     const T* data = std::get_if<T>(&env.payload);
     if (data != nullptr) {
@@ -626,12 +628,6 @@ class WorkerPool {
 #else
     (void)prio;
 #endif
-  }
-
-  static uint64_t GetTimestampUs() noexcept {
-    auto now = std::chrono::steady_clock::now();
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
-    return static_cast<uint64_t>(us.count());
   }
 
   // ======================== Worker context ========================

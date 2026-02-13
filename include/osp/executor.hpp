@@ -337,7 +337,7 @@ class PinnedExecutor {
    * @brief Construct a pinned executor bound to the specified CPU core.
    * @param cpu_core The CPU core index to pin the dispatcher thread to.
    */
-  explicit PinnedExecutor(int cpu_core) noexcept
+  explicit PinnedExecutor(int32_t cpu_core) noexcept
       : node_count_(0), running_(false), cpu_core_(cpu_core) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
@@ -433,12 +433,12 @@ class PinnedExecutor {
    *
    * @param core CPU core index (0-based).
    */
-  static void PinThread(int core) noexcept {
+  static void PinThread(int32_t core) noexcept {
 #if defined(OSP_PLATFORM_LINUX)
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(core, &cpuset);
-    int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    int32_t rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     if (rc != 0) {
       (void)std::fprintf(stderr,
                          "PinnedExecutor: failed to pin thread to core %d "
@@ -460,7 +460,7 @@ class PinnedExecutor {
   uint32_t node_count_;
   std::atomic<bool> running_;
   std::thread dispatch_thread_;
-  int cpu_core_;
+  int32_t cpu_core_;
 };
 
 // ============================================================================
@@ -474,11 +474,11 @@ class PinnedExecutor {
  * and CPU affinity for realtime execution contexts.
  */
 struct RealtimeConfig {
-  int sched_policy = 0;       // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
-  int sched_priority = 0;     // SCHED_FIFO: 1-99, higher = more priority
+  int32_t sched_policy = 0;       // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
+  int32_t sched_priority = 0;     // SCHED_FIFO: 1-99, higher = more priority
   bool lock_memory = false;   // mlockall(MCL_CURRENT | MCL_FUTURE)
   uint32_t stack_size = 0;    // 0=system default, non-zero=preallocated stack
-  int cpu_affinity = -1;      // -1=no binding, >=0=bind to specific CPU core
+  int32_t cpu_affinity = -1;      // -1=no binding, >=0=bind to specific CPU core
 };
 
 // ============================================================================
@@ -565,7 +565,7 @@ class RealtimeExecutor {
       pthread_attr_setstacksize(&attr, config_.stack_size);
 
       pthread_t thread_handle;
-      int rc = pthread_create(&thread_handle, &attr, &RealtimeExecutor::ThreadEntry, this);
+      int32_t rc = pthread_create(&thread_handle, &attr, &RealtimeExecutor::ThreadEntry, this);
       pthread_attr_destroy(&attr);
 
       if (rc != 0) {
@@ -644,7 +644,7 @@ class RealtimeExecutor {
 #if defined(OSP_PLATFORM_LINUX)
     // 1. Lock memory if requested
     if (cfg.lock_memory) {
-      int rc = mlockall(MCL_CURRENT | MCL_FUTURE);
+      int32_t rc = mlockall(MCL_CURRENT | MCL_FUTURE);
       if (rc != 0) {
         (void)std::fprintf(stderr,
                            "RealtimeExecutor: mlockall failed (errno=%d)\n",
@@ -657,7 +657,7 @@ class RealtimeExecutor {
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
       CPU_SET(cfg.cpu_affinity, &cpuset);
-      int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+      int32_t rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
       if (rc != 0) {
         (void)std::fprintf(stderr,
                            "RealtimeExecutor: pthread_setaffinity_np failed "
@@ -670,7 +670,7 @@ class RealtimeExecutor {
     if (cfg.sched_policy != 0) {
       struct sched_param param;
       param.sched_priority = cfg.sched_priority;
-      int rc = pthread_setschedparam(pthread_self(), cfg.sched_policy, &param);
+      int32_t rc = pthread_setschedparam(pthread_self(), cfg.sched_policy, &param);
       if (rc != 0) {
         (void)std::fprintf(stderr,
                            "RealtimeExecutor: pthread_setschedparam failed "

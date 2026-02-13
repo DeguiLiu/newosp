@@ -28,6 +28,12 @@
 namespace osp {
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+constexpr int32_t kDefaultBacklog = 128;
+
+// ============================================================================
 // SocketError
 // ============================================================================
 
@@ -140,7 +146,7 @@ class TcpSocket {
    * @return TcpSocket on success, SocketError::kInvalidFd on failure.
    */
   static expected<TcpSocket, SocketError> Create() noexcept {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    int32_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
       return expected<TcpSocket, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -185,7 +191,7 @@ class TcpSocket {
     if (fd_ < 0) {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
     }
-    int flags = ::fcntl(fd_, F_GETFL, 0);
+    int32_t flags = ::fcntl(fd_, F_GETFL, 0);
     if (flags < 0) {
       return expected<void, SocketError>::error(SocketError::kSetOptFailed);
     }
@@ -204,7 +210,7 @@ class TcpSocket {
     if (fd_ < 0) {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
     }
-    int opt = enable ? 1 : 0;
+    int32_t opt = enable ? 1 : 0;
     if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt,
                      static_cast<socklen_t>(sizeof(opt))) < 0) {
       return expected<void, SocketError>::error(SocketError::kSetOptFailed);
@@ -216,7 +222,7 @@ class TcpSocket {
     if (fd_ < 0) {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
     }
-    int opt = enable ? 1 : 0;
+    int32_t opt = enable ? 1 : 0;
     if (::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &opt,
                      static_cast<socklen_t>(sizeof(opt))) < 0) {
       return expected<void, SocketError>::error(SocketError::kSetOptFailed);
@@ -233,7 +239,7 @@ class TcpSocket {
   }
 
   /** @brief Return the raw file descriptor. */
-  int Fd() const noexcept { return fd_; }
+  int32_t Fd() const noexcept { return fd_; }
 
   /** @brief Check whether the socket holds a valid file descriptor. */
   bool IsValid() const noexcept { return fd_ >= 0; }
@@ -242,9 +248,9 @@ class TcpSocket {
   friend class TcpListener;
 
   /** @brief Construct from an already-open file descriptor (used by Accept). */
-  explicit TcpSocket(int fd) noexcept : fd_(fd) {}
+  explicit TcpSocket(int32_t fd) noexcept : fd_(fd) {}
 
-  int fd_;
+  int32_t fd_;
 };
 
 // ============================================================================
@@ -286,7 +292,7 @@ class UdpSocket {
    * @return UdpSocket on success, SocketError::kInvalidFd on failure.
    */
   static expected<UdpSocket, SocketError> Create() noexcept {
-    int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    int32_t fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
       return expected<UdpSocket, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -339,15 +345,15 @@ class UdpSocket {
   }
 
   /** @brief Return the raw file descriptor. */
-  int Fd() const noexcept { return fd_; }
+  int32_t Fd() const noexcept { return fd_; }
 
   /** @brief Check whether the socket holds a valid file descriptor. */
   bool IsValid() const noexcept { return fd_ >= 0; }
 
  private:
-  explicit UdpSocket(int fd) noexcept : fd_(fd) {}
+  explicit UdpSocket(int32_t fd) noexcept : fd_(fd) {}
 
-  int fd_;
+  int32_t fd_;
 };
 
 // ============================================================================
@@ -390,7 +396,7 @@ class TcpListener {
    * @return TcpListener on success, SocketError::kInvalidFd on failure.
    */
   static expected<TcpListener, SocketError> Create() noexcept {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    int32_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
       return expected<TcpListener, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -409,7 +415,7 @@ class TcpListener {
     return expected<void, SocketError>::success();
   }
 
-  expected<void, SocketError> Listen(int backlog = 128) noexcept {
+  expected<void, SocketError> Listen(int32_t backlog = kDefaultBacklog) noexcept {
     if (fd_ < 0) {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -427,7 +433,7 @@ class TcpListener {
     if (fd_ < 0) {
       return expected<TcpSocket, SocketError>::error(SocketError::kInvalidFd);
     }
-    int client_fd = ::accept(fd_, nullptr, nullptr);
+    int32_t client_fd = ::accept(fd_, nullptr, nullptr);
     if (client_fd < 0) {
       return expected<TcpSocket, SocketError>::error(SocketError::kAcceptFailed);
     }
@@ -444,7 +450,7 @@ class TcpListener {
       return expected<TcpSocket, SocketError>::error(SocketError::kInvalidFd);
     }
     socklen_t addr_len = client_addr.Size();
-    int client_fd = ::accept(fd_, client_addr.RawMut(), &addr_len);
+    int32_t client_fd = ::accept(fd_, client_addr.RawMut(), &addr_len);
     if (client_fd < 0) {
       return expected<TcpSocket, SocketError>::error(SocketError::kAcceptFailed);
     }
@@ -460,15 +466,15 @@ class TcpListener {
   }
 
   /** @brief Return the raw file descriptor. */
-  int Fd() const noexcept { return fd_; }
+  int32_t Fd() const noexcept { return fd_; }
 
   /** @brief Check whether the socket holds a valid file descriptor. */
   bool IsValid() const noexcept { return fd_ >= 0; }
 
  private:
-  explicit TcpListener(int fd) noexcept : fd_(fd) {}
+  explicit TcpListener(int32_t fd) noexcept : fd_(fd) {}
 
-  int fd_;
+  int32_t fd_;
 };
 
 }  // namespace osp

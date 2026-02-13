@@ -15,6 +15,9 @@
 #include <thread>
 #include <vector>
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 #if defined(OSP_PLATFORM_LINUX)
 
 // ============================================================================
@@ -638,6 +641,302 @@ TEST_CASE("shm_transport - ShmChannel multi-threaded concurrent write and read",
 
   REQUIRE(total_written.load() == kWriterCount * kMessagesPerWriter);
   REQUIRE(total_read.load() == kWriterCount * kMessagesPerWriter);
+
+  writer.Unlink();
+}
+
+// ============================================================================
+// Cross-process fork tests
+// ============================================================================
+
+TEST_CASE("shm_transport - Cross-process SharedMemorySegment visibility",
+          "[shm_transport][fork]") {
+  const char* name = "xproc_seg";
+
+  auto seg_r = osp::SharedMemorySegment::Create(name, 4096);
+  REQUIRE(seg_r.has_value());
+  auto seg = static_cast<osp::SharedMemorySegment&&>(seg_r.value());
+
+  // Write a pattern
+  auto* data = static_cast<uint8_t*>(seg.Data());
+  for (uint32_t i = 0; i < 256; ++i) {
+    data[i] = static_cast<uint8_t>(i);
+  }
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    // Child: open same segment and verify
+    auto child_r = osp::SharedMemorySegment::Open(name);
+    if (!child_r.has_value()) _exit(1);
+    auto child_seg = static_cast<osp::SharedMemorySegment&&>(child_r.value());
+    auto* child_data = static_cast<uint8_t*>(child_seg.Data());
+    for (uint32_t i = 0; i < 256; ++i) {
+      if (child_data[i] != static_cast<uint8_t>(i)) _exit(2);
+    }
+    _exit(0);
+  }
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - Cross-process ShmRingBuffer write then read",
+          "[shm_transport][fork]") {
+  const char* name = "xproc_ring";
+  using Ring = osp::ShmRingBuffer<4096, 8>;
+
+  auto seg_r = osp::SharedMemorySegment::Create(name, Ring::Size());
+  REQUIRE(seg_r.has_value());
+  auto seg = static_cast<osp::SharedMemorySegment&&>(seg_r.value());
+  auto* ring = Ring::InitAt(seg.Data());
+
+  // Parent writes
+  char msg1[] = "hello_from_parent";
+  char msg2[] = "second_message";
+  REQUIRE(ring->TryPush(msg1, sizeof(msg1)));
+  REQUIRE(ring->TryPush(msg2, sizeof(msg2)));
+  REQUIRE(ring->Depth() == 2);
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    // Child: open and read
+    auto child_r = osp::SharedMemorySegment::Open(name);
+    if (!child_r.has_value()) _exit(1);
+    auto child_seg = static_cast<osp::SharedMemorySegment&&>(child_r.value());
+    auto* child_ring = Ring::AttachAt(child_seg.Data());
+
+    if (child_ring->Depth() != 2) _exit(2);
+
+    char buf[4096];
+    uint32_t sz = 4096;
+    if (!child_ring->TryPop(buf, sz)) _exit(3);
+    if (sz != sizeof(msg1) || std::memcmp(buf, msg1, sz) != 0) _exit(4);
+
+    sz = 4096;
+    if (!child_ring->TryPop(buf, sz)) _exit(5);
+    if (sz != sizeof(msg2) || std::memcmp(buf, msg2, sz) != 0) _exit(6);
+
+    if (child_ring->Depth() != 0) _exit(7);
+    _exit(0);
+  }
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - Cross-process ShmChannel producer-consumer",
+          "[shm_transport][fork]") {
+  const char* name = "xproc_chan";
+  using Channel = osp::ShmChannel<4096, 16>;
+
+  auto wr = Channel::CreateWriter(name);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<Channel&&>(wr.value());
+
+  // Write 10 messages
+  constexpr uint32_t kCount = 10;
+  for (uint32_t i = 0; i < kCount; ++i) {
+    uint32_t payload = i * 100 + 42;
+    auto w = writer.Write(&payload, sizeof(payload));
+    REQUIRE(w.has_value());
+  }
+  REQUIRE(writer.Depth() == kCount);
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    // Child: open reader and consume all messages
+    auto rd = Channel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<Channel&&>(rd.value());
+
+    if (reader.Depth() != kCount) _exit(2);
+
+    for (uint32_t i = 0; i < kCount; ++i) {
+      uint32_t val = 0;
+      uint32_t sz = sizeof(val);
+      auto r = reader.Read(&val, sz);
+      if (!r.has_value()) _exit(10 + i);
+      if (sz != sizeof(uint32_t)) _exit(20 + i);
+      if (val != i * 100 + 42) _exit(30 + i);
+    }
+
+    if (reader.Depth() != 0) _exit(3);
+    _exit(0);
+  }
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - Cross-process concurrent write and read",
+          "[shm_transport][fork]") {
+  const char* name = "xproc_conc";
+  using Channel = osp::ShmChannel<256, 32>;
+
+  auto wr = Channel::CreateWriter(name);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<Channel&&>(wr.value());
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    // Child: reader -- wait for data then consume
+    auto rd = Channel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<Channel&&>(rd.value());
+
+    uint32_t total_read = 0;
+    constexpr uint32_t kExpected = 20;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+    while (total_read < kExpected &&
+           std::chrono::steady_clock::now() < deadline) {
+      auto w = reader.WaitReadable(200);
+      if (!w) continue;
+
+      uint32_t val = 0;
+      uint32_t sz = sizeof(val);
+      auto r = reader.Read(&val, sz);
+      if (r.has_value() && sz == sizeof(uint32_t)) {
+        if (val != total_read) _exit(10);
+        ++total_read;
+      }
+    }
+
+    _exit(total_read == kExpected ? 0 : 2);
+  }
+
+  // Parent: writer -- write with small delays
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  constexpr uint32_t kCount = 20;
+  for (uint32_t i = 0; i < kCount; ++i) {
+    auto w = writer.Write(&i, sizeof(i));
+    REQUIRE(w.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - Cross-process large frame transfer",
+          "[shm_transport][fork]") {
+  const char* name = "xproc_large";
+  constexpr uint32_t kSlotSize = 81920;
+  constexpr uint32_t kSlotCount = 8;
+  using Channel = osp::ShmChannel<kSlotSize, kSlotCount>;
+
+  auto wr = Channel::CreateWriter(name);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<Channel&&>(wr.value());
+
+  // Write a large frame (76816 bytes, simulating video frame)
+  constexpr uint32_t kFrameSize = 76816;
+  std::vector<uint8_t> frame(kFrameSize);
+  for (uint32_t i = 0; i < kFrameSize; ++i) {
+    frame[i] = static_cast<uint8_t>((i * 7 + 13) & 0xFF);
+  }
+  auto w = writer.Write(frame.data(), kFrameSize);
+  REQUIRE(w.has_value());
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    auto rd = Channel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<Channel&&>(rd.value());
+
+    if (reader.Depth() != 1) _exit(2);
+
+    std::vector<uint8_t> buf(kSlotSize);
+    uint32_t sz = kSlotSize;
+    auto r = reader.Read(buf.data(), sz);
+    if (!r.has_value()) _exit(3);
+    if (sz != kFrameSize) _exit(4);
+
+    // Verify data integrity
+    for (uint32_t i = 0; i < kFrameSize; ++i) {
+      if (buf[i] != static_cast<uint8_t>((i * 7 + 13) & 0xFF)) _exit(5);
+    }
+    _exit(0);
+  }
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - Cross-process ShmChannel WaitReadable polling",
+          "[shm_transport][fork]") {
+  const char* name = "xproc_wait";
+  using Channel = osp::ShmChannel<256, 8>;
+
+  auto wr = Channel::CreateWriter(name);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<Channel&&>(wr.value());
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    // Child: reader -- WaitReadable should block then succeed
+    auto rd = Channel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<Channel&&>(rd.value());
+
+    // Should timeout initially (no data yet)
+    auto w1 = reader.WaitReadable(100);
+    if (w1.has_value()) _exit(2);  // should timeout
+
+    // Wait longer -- parent will write after 300ms
+    auto w2 = reader.WaitReadable(2000);
+    if (!w2.has_value()) _exit(3);  // should succeed
+
+    uint32_t val = 0;
+    uint32_t sz = sizeof(val);
+    auto r = reader.Read(&val, sz);
+    if (!r.has_value() || val != 0xDEAD) _exit(4);
+
+    _exit(0);
+  }
+
+  // Parent: write after delay
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  uint32_t val = 0xDEAD;
+  auto w = writer.Write(&val, sizeof(val));
+  REQUIRE(w.has_value());
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
 
   writer.Unlink();
 }
