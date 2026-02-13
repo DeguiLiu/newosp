@@ -27,6 +27,9 @@ add_executable(osp_tests
     test_hsm.cpp
     test_bt.cpp
     test_socket.cpp
+    test_connection.cpp
+    test_io_poller.cpp
+    test_transport.cpp
 )
 target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads)
 catch_discover_tests(osp_tests)
