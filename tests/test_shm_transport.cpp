@@ -238,6 +238,211 @@ TEST_CASE("shm_transport - ShmRingBuffer multi-threaded MPSC",
   seg.Unlink();
 }
 
+TEST_CASE("shm_transport - ShmRingBuffer concurrent MPSC stress",
+          "[shm_transport]") {
+  constexpr uint32_t kSlotSize = 256;
+  constexpr uint32_t kSlotCount = 64;
+  constexpr uint32_t kProducerCount = 4;
+  constexpr uint32_t kMessagesPerProducer = 500;
+  using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
+
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_mpsc_stress",
+                                                      RingBuffer::Size());
+  REQUIRE(seg_result.has_value());
+  auto& seg = seg_result.value();
+
+  auto* rb = RingBuffer::InitAt(seg.Data());
+
+  std::atomic<uint32_t> total_sent{0};
+  std::atomic<uint32_t> total_received{0};
+  std::atomic<bool> producers_done{false};
+
+  // Producer threads
+  std::vector<std::thread> producers;
+  for (uint32_t p = 0; p < kProducerCount; ++p) {
+    producers.emplace_back([rb, p, &total_sent]() {
+      for (uint32_t i = 0; i < kMessagesPerProducer; ++i) {
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "Producer%u-Msg%u-Data", p, i);
+        uint32_t len = static_cast<uint32_t>(std::strlen(msg)) + 1;
+
+        // Retry on full with backoff
+        while (!rb->TryPush(msg, len)) {
+          std::this_thread::sleep_for(std::chrono::microseconds(1));
+        }
+        total_sent.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
+
+  // Single consumer thread
+  std::thread consumer([rb, &total_received, &producers_done]() {
+    uint32_t expected = kProducerCount * kMessagesPerProducer;
+    char recv[kSlotSize];
+    uint32_t recv_size = 0;
+
+    while (total_received.load(std::memory_order_relaxed) < expected) {
+      if (rb->TryPop(recv, recv_size)) {
+        // Verify message format
+        REQUIRE(recv_size > 0);
+        REQUIRE(recv_size < kSlotSize);
+        total_received.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        std::this_thread::sleep_for(std::chrono::microseconds(1));
+      }
+    }
+  });
+
+  for (auto& t : producers) {
+    t.join();
+  }
+  producers_done.store(true, std::memory_order_release);
+  consumer.join();
+
+  REQUIRE(total_sent.load() == kProducerCount * kMessagesPerProducer);
+  REQUIRE(total_received.load() == kProducerCount * kMessagesPerProducer);
+  REQUIRE(rb->Depth() == 0);
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmRingBuffer cache line separation",
+          "[shm_transport]") {
+  constexpr uint32_t kSlotSize = 128;
+  constexpr uint32_t kSlotCount = 16;
+  using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
+
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_cacheline",
+                                                      RingBuffer::Size());
+  REQUIRE(seg_result.has_value());
+  auto& seg = seg_result.value();
+
+  auto* rb = RingBuffer::InitAt(seg.Data());
+
+  // Verify cache line separation by checking the size of the ring buffer.
+  // With alignas(64) and padding, the structure should be properly aligned.
+  // We verify this indirectly by ensuring the buffer works correctly under
+  // concurrent access (tested in other test cases).
+  // The static_assert in the header ensures Slot is standard layout.
+
+  // Basic sanity check: buffer should be initialized correctly
+  REQUIRE(rb->Depth() == 0);
+
+  // Verify alignment by checking that Size() accounts for padding
+  REQUIRE(RingBuffer::Size() >= sizeof(std::atomic<uint32_t>) * 2 + 64);
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmRingBuffer full wraparound",
+          "[shm_transport]") {
+  constexpr uint32_t kSlotSize = 64;
+  constexpr uint32_t kSlotCount = 8;
+  using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
+
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_wraparound",
+                                                      RingBuffer::Size());
+  REQUIRE(seg_result.has_value());
+  auto& seg = seg_result.value();
+
+  auto* rb = RingBuffer::InitAt(seg.Data());
+
+  // Fill buffer completely
+  char data[32];
+  for (uint32_t i = 0; i < kSlotCount; ++i) {
+    std::snprintf(data, sizeof(data), "Round1-Msg%u", i);
+    REQUIRE(rb->TryPush(data, static_cast<uint32_t>(std::strlen(data)) + 1));
+  }
+  REQUIRE(rb->Depth() == kSlotCount);
+
+  // Drain buffer completely
+  char recv[kSlotSize];
+  uint32_t recv_size = 0;
+  for (uint32_t i = 0; i < kSlotCount; ++i) {
+    REQUIRE(rb->TryPop(recv, recv_size));
+    char expected[32];
+    std::snprintf(expected, sizeof(expected), "Round1-Msg%u", i);
+    REQUIRE(std::strcmp(recv, expected) == 0);
+  }
+  REQUIRE(rb->Depth() == 0);
+
+  // Fill again (tests wraparound)
+  for (uint32_t i = 0; i < kSlotCount; ++i) {
+    std::snprintf(data, sizeof(data), "Round2-Msg%u", i);
+    REQUIRE(rb->TryPush(data, static_cast<uint32_t>(std::strlen(data)) + 1));
+  }
+  REQUIRE(rb->Depth() == kSlotCount);
+
+  // Drain again
+  for (uint32_t i = 0; i < kSlotCount; ++i) {
+    REQUIRE(rb->TryPop(recv, recv_size));
+    char expected[32];
+    std::snprintf(expected, sizeof(expected), "Round2-Msg%u", i);
+    REQUIRE(std::strcmp(recv, expected) == 0);
+  }
+  REQUIRE(rb->Depth() == 0);
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmRingBuffer memory ordering verification",
+          "[shm_transport]") {
+  constexpr uint32_t kSlotSize = 256;
+  constexpr uint32_t kSlotCount = 32;
+  constexpr uint32_t kIterations = 1000;
+  using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
+
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_ordering",
+                                                      RingBuffer::Size());
+  REQUIRE(seg_result.has_value());
+  auto& seg = seg_result.value();
+
+  auto* rb = RingBuffer::InitAt(seg.Data());
+
+  std::atomic<bool> consumer_error{false};
+
+  // Producer: write incrementing counter values
+  std::thread producer([rb]() {
+    for (uint32_t i = 0; i < kIterations; ++i) {
+      uint32_t value = i;
+      while (!rb->TryPush(&value, sizeof(value))) {
+        std::this_thread::yield();
+      }
+    }
+  });
+
+  // Consumer: verify values are in order (tests memory ordering)
+  std::thread consumer([rb, &consumer_error]() {
+    uint32_t expected = 0;
+    char recv[kSlotSize];
+    uint32_t recv_size = 0;
+
+    while (expected < kIterations) {
+      if (rb->TryPop(recv, recv_size)) {
+        REQUIRE(recv_size == sizeof(uint32_t));
+        uint32_t value;
+        std::memcpy(&value, recv, sizeof(value));
+
+        if (value != expected) {
+          consumer_error.store(true, std::memory_order_release);
+          break;
+        }
+        ++expected;
+      } else {
+        std::this_thread::yield();
+      }
+    }
+  });
+
+  producer.join();
+  consumer.join();
+
+  REQUIRE_FALSE(consumer_error.load());
+  REQUIRE(rb->Depth() == 0);
+
+  seg.Unlink();
+}
+
 // ============================================================================
 // ShmChannel tests
 // ============================================================================

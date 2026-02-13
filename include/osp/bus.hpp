@@ -34,6 +34,25 @@
 namespace osp {
 
 // ============================================================================
+// FNV-1a Hash Function
+// ============================================================================
+
+/**
+ * @brief Compute FNV-1a 32-bit hash of a null-terminated string.
+ *
+ * Used for topic-based routing. Returns 0 for nullptr input.
+ */
+constexpr uint32_t Fnv1a32(const char* str) noexcept {
+  if (str == nullptr) return 0;
+  uint32_t hash = 2166136261u;
+  while (*str) {
+    hash ^= static_cast<uint32_t>(*str++);
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+// ============================================================================
 // Overloaded visitor pattern (C++17)
 // ============================================================================
 
@@ -83,15 +102,21 @@ struct MessageHeader {
   uint64_t msg_id;
   uint64_t timestamp_us;
   uint32_t sender_id;
+  uint32_t topic_hash;  // 0 = no topic filter, non-zero = FNV-1a hash
   MessagePriority priority;
 
   MessageHeader() noexcept
-      : msg_id(0), timestamp_us(0), sender_id(0),
+      : msg_id(0), timestamp_us(0), sender_id(0), topic_hash(0),
         priority(MessagePriority::kMedium) {}
 
   MessageHeader(uint64_t id, uint64_t ts, uint32_t sender,
                 MessagePriority prio) noexcept
-      : msg_id(id), timestamp_us(ts), sender_id(sender), priority(prio) {}
+      : msg_id(id), timestamp_us(ts), sender_id(sender), topic_hash(0), priority(prio) {}
+
+  MessageHeader(uint64_t id, uint64_t ts, uint32_t sender,
+                uint32_t topic, MessagePriority prio) noexcept
+      : msg_id(id), timestamp_us(ts), sender_id(sender), topic_hash(topic),
+        priority(prio) {}
 };
 
 // ============================================================================
@@ -402,7 +427,7 @@ class AsyncBus {
    */
   bool Publish(PayloadVariant&& payload, uint32_t sender_id) noexcept {
     return PublishInternal(std::move(payload), sender_id,
-                           GetTimestampUs(), MessagePriority::kMedium);
+                           GetTimestampUs(), MessagePriority::kMedium, 0);
   }
 
   /**
@@ -411,7 +436,7 @@ class AsyncBus {
   bool PublishWithPriority(PayloadVariant&& payload, uint32_t sender_id,
                             MessagePriority priority) noexcept {
     return PublishInternal(std::move(payload), sender_id,
-                           GetTimestampUs(), priority);
+                           GetTimestampUs(), priority, 0);
   }
 
   /**
@@ -420,7 +445,31 @@ class AsyncBus {
   bool PublishFast(PayloadVariant&& payload, uint32_t sender_id,
                     uint64_t timestamp_us) noexcept {
     return PublishInternal(std::move(payload), sender_id,
-                           timestamp_us, MessagePriority::kMedium);
+                           timestamp_us, MessagePriority::kMedium, 0);
+  }
+
+  /**
+   * @brief Publish a message with topic.
+   * @param payload The message payload (moved).
+   * @param sender_id Sender identifier for tracing.
+   * @param topic Topic string (null-terminated).
+   * @return true if published, false if dropped.
+   */
+  bool PublishTopic(PayloadVariant&& payload, uint32_t sender_id,
+                     const char* topic) noexcept {
+    uint32_t topic_hash = Fnv1a32(topic);
+    return PublishInternal(std::move(payload), sender_id,
+                           GetTimestampUs(), MessagePriority::kMedium, topic_hash);
+  }
+
+  /**
+   * @brief Publish a message with topic and priority.
+   */
+  bool PublishTopicWithPriority(PayloadVariant&& payload, uint32_t sender_id,
+                                  const char* topic, MessagePriority priority) noexcept {
+    uint32_t topic_hash = Fnv1a32(topic);
+    return PublishInternal(std::move(payload), sender_id,
+                           GetTimestampUs(), priority, topic_hash);
   }
 
   // ======================== Subscribe API ========================
@@ -663,7 +712,7 @@ class AsyncBus {
 
   bool PublishInternal(PayloadVariant&& payload, uint32_t sender_id,
                         uint64_t timestamp_us,
-                        MessagePriority priority) noexcept {
+                        MessagePriority priority, uint32_t topic_hash) noexcept {
     // Message ID overflow check
     uint64_t current_id = next_msg_id_.load(std::memory_order_relaxed);
     if (OSP_UNLIKELY(current_id >= kMsgIdWrapThreshold)) {
@@ -715,7 +764,7 @@ class AsyncBus {
     uint64_t msg_id =
         next_msg_id_.fetch_add(1, std::memory_order_relaxed);
     target->envelope.header =
-        MessageHeader{msg_id, timestamp_us, sender_id, priority};
+        MessageHeader{msg_id, timestamp_us, sender_id, topic_hash, priority};
     target->envelope.payload = std::move(payload);
 
     // Publish (make visible to consumer)

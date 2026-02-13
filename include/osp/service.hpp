@@ -539,6 +539,346 @@ class Client {
   bool connected_;
 };
 
+// ============================================================================
+// AsyncCallResult - Result container for async calls
+// ============================================================================
+
+template <typename Response>
+struct AsyncCallResult {
+  Response response{};
+  ServiceError error{ServiceError::kNotRunning};
+  bool completed{false};
+  bool success{false};
+};
+
+// ============================================================================
+// ServiceRegistry - Local service name to endpoint mapping
+// ============================================================================
+
+/**
+ * @brief Local registry that maps service names to endpoints.
+ *
+ * Provides a simple in-memory registry for service discovery.
+ * Thread-safe for concurrent access.
+ *
+ * @tparam MaxServices Maximum number of services that can be registered.
+ */
+template <uint32_t MaxServices = 32>
+class ServiceRegistry {
+ public:
+  struct Entry {
+    char name[64];
+    char host[64];
+    uint16_t port;
+    bool active;
+  };
+
+  ServiceRegistry() noexcept {
+    for (uint32_t i = 0; i < MaxServices; ++i) {
+      entries_[i].active = false;
+      entries_[i].name[0] = '\0';
+      entries_[i].host[0] = '\0';
+      entries_[i].port = 0;
+    }
+  }
+
+  /**
+   * @brief Register a service endpoint.
+   * @param name Service name (must be unique).
+   * @param host Host address.
+   * @param port Port number.
+   * @return Success or ServiceError.
+   */
+  expected<void, ServiceError> Register(const char* name, const char* host,
+                                         uint16_t port) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Check for duplicate name
+    for (uint32_t i = 0; i < MaxServices; ++i) {
+      if (entries_[i].active && std::strcmp(entries_[i].name, name) == 0) {
+        return expected<void, ServiceError>::error(ServiceError::kBindFailed);
+      }
+    }
+
+    // Find empty slot
+    for (uint32_t i = 0; i < MaxServices; ++i) {
+      if (!entries_[i].active) {
+        std::strncpy(entries_[i].name, name, sizeof(entries_[i].name) - 1);
+        entries_[i].name[sizeof(entries_[i].name) - 1] = '\0';
+        std::strncpy(entries_[i].host, host, sizeof(entries_[i].host) - 1);
+        entries_[i].host[sizeof(entries_[i].host) - 1] = '\0';
+        entries_[i].port = port;
+        entries_[i].active = true;
+        return expected<void, ServiceError>::success();
+      }
+    }
+
+    // No space available
+    return expected<void, ServiceError>::error(ServiceError::kBindFailed);
+  }
+
+  /**
+   * @brief Unregister a service by name.
+   * @param name Service name.
+   * @return true if found and removed, false otherwise.
+   */
+  bool Unregister(const char* name) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (uint32_t i = 0; i < MaxServices; ++i) {
+      if (entries_[i].active && std::strcmp(entries_[i].name, name) == 0) {
+        entries_[i].active = false;
+        entries_[i].name[0] = '\0';
+        entries_[i].host[0] = '\0';
+        entries_[i].port = 0;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @brief Lookup a service by name.
+   * @param name Service name.
+   * @return Pointer to entry if found, nullptr otherwise.
+   */
+  const Entry* Lookup(const char* name) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (uint32_t i = 0; i < MaxServices; ++i) {
+      if (entries_[i].active && std::strcmp(entries_[i].name, name) == 0) {
+        return &entries_[i];
+      }
+    }
+    return nullptr;
+  }
+
+  /**
+   * @brief Count active entries.
+   * @return Number of registered services.
+   */
+  uint32_t Count() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < MaxServices; ++i) {
+      if (entries_[i].active) {
+        ++count;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * @brief Reset all entries.
+   */
+  void Reset() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (uint32_t i = 0; i < MaxServices; ++i) {
+      entries_[i].active = false;
+      entries_[i].name[0] = '\0';
+      entries_[i].host[0] = '\0';
+      entries_[i].port = 0;
+    }
+  }
+
+ private:
+  Entry entries_[MaxServices];
+  mutable std::mutex mutex_;
+};
+
+// ============================================================================
+// AsyncClient - Asynchronous client with background thread
+// ============================================================================
+
+/**
+ * @brief Asynchronous service client.
+ *
+ * Wraps Client with background thread for async calls. Allows non-blocking
+ * request-response pattern.
+ *
+ * @tparam Request The request message type (must be trivially copyable).
+ * @tparam Response The response message type (must be trivially copyable).
+ */
+template <typename Request, typename Response>
+class AsyncClient {
+ public:
+  AsyncClient() noexcept
+      : connected_(false),
+        call_in_progress_(false),
+        result_ready_(false) {
+    static_assert(std::is_trivially_copyable<Request>::value,
+                  "Request must be trivially copyable");
+    static_assert(std::is_trivially_copyable<Response>::value,
+                  "Response must be trivially copyable");
+    std::memset(&result_.response, 0, sizeof(Response));
+    result_.error = ServiceError::kNotRunning;
+    result_.completed = false;
+    result_.success = false;
+  }
+
+  ~AsyncClient() {
+    Close();
+  }
+
+  AsyncClient(const AsyncClient&) = delete;
+  AsyncClient& operator=(const AsyncClient&) = delete;
+
+  AsyncClient(AsyncClient&& other) noexcept
+      : client_(std::move(other.client_)),
+        connected_(other.connected_),
+        call_in_progress_(other.call_in_progress_.load()),
+        result_ready_(other.result_ready_.load()),
+        result_(other.result_) {
+    other.connected_ = false;
+    other.call_in_progress_.store(false);
+    other.result_ready_.store(false);
+  }
+
+  AsyncClient& operator=(AsyncClient&& other) noexcept {
+    if (this != &other) {
+      Close();
+      client_ = std::move(other.client_);
+      connected_ = other.connected_;
+      call_in_progress_.store(other.call_in_progress_.load());
+      result_ready_.store(other.result_ready_.load());
+      result_ = other.result_;
+      other.connected_ = false;
+      other.call_in_progress_.store(false);
+      other.result_ready_.store(false);
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Connect to a service endpoint.
+   * @param host Host address (e.g. "127.0.0.1").
+   * @param port Service port.
+   * @param timeout_ms Connection timeout in milliseconds.
+   * @return AsyncClient instance on success, ServiceError on failure.
+   */
+  static expected<AsyncClient, ServiceError> Connect(
+      const char* host, uint16_t port, int timeout_ms = 5000) noexcept {
+    AsyncClient async_client;
+
+    auto client_r = Client<Request, Response>::Connect(host, port, timeout_ms);
+    if (!client_r.has_value()) {
+      return expected<AsyncClient, ServiceError>::error(client_r.get_error());
+    }
+
+    async_client.client_ = std::move(client_r.value());
+    async_client.connected_ = true;
+
+    return expected<AsyncClient, ServiceError>::success(
+        std::move(async_client));
+  }
+
+  /**
+   * @brief Async call - spawns a thread, stores result.
+   * @param req The request message.
+   * @param timeout_ms Timeout in milliseconds.
+   * @return true if call was initiated, false if already in progress.
+   */
+  bool CallAsync(const Request& req, int timeout_ms = 2000) noexcept {
+    if (!connected_) return false;
+
+    bool expected_false = false;
+    if (!call_in_progress_.compare_exchange_strong(expected_false, true,
+                                                    std::memory_order_acquire)) {
+      return false;  // Call already in progress
+    }
+
+    result_ready_.store(false, std::memory_order_release);
+
+    // Join previous thread if exists
+    if (worker_thread_.joinable()) {
+      worker_thread_.join();
+    }
+
+    // Spawn worker thread
+    worker_thread_ = std::thread([this, req, timeout_ms]() {
+      auto resp_r = client_.Call(req, timeout_ms);
+
+      std::lock_guard<std::mutex> lock(result_mutex_);
+      if (resp_r.has_value()) {
+        result_.response = resp_r.value();
+        result_.error = ServiceError::kNotRunning;  // No error
+        result_.success = true;
+      } else {
+        std::memset(&result_.response, 0, sizeof(Response));
+        result_.error = resp_r.get_error();
+        result_.success = false;
+      }
+      result_.completed = true;
+
+      result_ready_.store(true, std::memory_order_release);
+      call_in_progress_.store(false, std::memory_order_release);
+    });
+
+    return true;
+  }
+
+  /**
+   * @brief Check if async result is ready.
+   * @return true if result is available.
+   */
+  bool IsReady() const noexcept {
+    return result_ready_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Get result (blocks if not ready, with timeout).
+   * @param timeout_ms Timeout in milliseconds.
+   * @return Response on success, ServiceError on failure.
+   */
+  expected<Response, ServiceError> GetResult(int timeout_ms = 5000) noexcept {
+    auto start = std::chrono::steady_clock::now();
+
+    while (!result_ready_.load(std::memory_order_acquire)) {
+      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start);
+      if (elapsed.count() >= timeout_ms) {
+        return expected<Response, ServiceError>::error(ServiceError::kTimeout);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::lock_guard<std::mutex> lock(result_mutex_);
+    if (result_.success) {
+      return expected<Response, ServiceError>::success(result_.response);
+    } else {
+      return expected<Response, ServiceError>::error(result_.error);
+    }
+  }
+
+  /**
+   * @brief Check if connected.
+   * @return true if connected.
+   */
+  bool IsConnected() const noexcept { return connected_; }
+
+  /**
+   * @brief Close the connection.
+   */
+  void Close() noexcept {
+    if (worker_thread_.joinable()) {
+      worker_thread_.join();
+    }
+    client_.Close();
+    connected_ = false;
+  }
+
+ private:
+  Client<Request, Response> client_;
+  bool connected_;
+  std::atomic<bool> call_in_progress_;
+  std::atomic<bool> result_ready_;
+  AsyncCallResult<Response> result_;
+  std::mutex result_mutex_;
+  std::thread worker_thread_;
+};
+
 #endif  // defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
 
 }  // namespace osp

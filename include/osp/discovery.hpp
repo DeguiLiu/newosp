@@ -60,6 +60,34 @@ struct DiscoveredNode {
 };
 
 // ============================================================================
+// TopicInfo - Topic advertisement information
+// ============================================================================
+
+struct TopicInfo {
+  char name[64];        // Topic name
+  char type_name[64];   // Type name (e.g. "SensorData")
+  uint16_t publisher_port;
+  bool is_publisher;    // true=publisher, false=subscriber
+
+  TopicInfo() noexcept
+      : name{}, type_name{}, publisher_port(0), is_publisher(false) {}
+};
+
+// ============================================================================
+// ServiceInfo - Service advertisement information
+// ============================================================================
+
+struct ServiceInfo {
+  char name[64];        // Service name
+  char request_type[64];
+  char response_type[64];
+  uint16_t port;
+
+  ServiceInfo() noexcept
+      : name{}, request_type{}, response_type{}, port(0) {}
+};
+
+// ============================================================================
 // StaticDiscovery - Configuration-driven static endpoint table
 // ============================================================================
 
@@ -541,6 +569,134 @@ class MulticastDiscovery {
   mutable std::mutex mutex_;
   DiscoveredNode nodes_[MaxNodes];
   uint32_t node_count_;
+};
+
+// ============================================================================
+// TopicAwareDiscovery - Topic and service aware discovery registry
+// ============================================================================
+
+template <uint32_t MaxNodes = 32, uint32_t MaxTopicsPerNode = 16>
+class TopicAwareDiscovery {
+ public:
+  static constexpr uint32_t kMaxServicesPerNode = 8;
+
+  struct DiscoveryEntry {
+    DiscoveredNode node;
+    TopicInfo topics[MaxTopicsPerNode];
+    uint32_t topic_count;
+    ServiceInfo services[kMaxServicesPerNode];
+    uint32_t service_count;
+
+    DiscoveryEntry() noexcept
+        : node(), topics{}, topic_count(0), services{}, service_count(0) {}
+  };
+
+  TopicAwareDiscovery() noexcept
+      : local_topic_count_(0), local_service_count_(0) {}
+
+  /**
+   * @brief Add a local topic advertisement.
+   * @param topic Topic information to advertise.
+   * @return Success or DiscoveryError.
+   */
+  expected<void, DiscoveryError> AddLocalTopic(const TopicInfo& topic) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (local_topic_count_ >= MaxTopicsPerNode) {
+      return expected<void, DiscoveryError>::error(
+          DiscoveryError::kSocketFailed);
+    }
+    local_topics_[local_topic_count_++] = topic;
+    return expected<void, DiscoveryError>::success();
+  }
+
+  /**
+   * @brief Add a local service advertisement.
+   * @param svc Service information to advertise.
+   * @return Success or DiscoveryError.
+   */
+  expected<void, DiscoveryError> AddLocalService(const ServiceInfo& svc) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (local_service_count_ >= kMaxServicesPerNode) {
+      return expected<void, DiscoveryError>::error(
+          DiscoveryError::kSocketFailed);
+    }
+    local_services_[local_service_count_++] = svc;
+    return expected<void, DiscoveryError>::success();
+  }
+
+  /**
+   * @brief Find publishers for a given topic.
+   * @param topic_name Topic name to search for.
+   * @param out Output array for matching topics.
+   * @param max_results Maximum number of results to return.
+   * @return Number of publishers found.
+   */
+  uint32_t FindPublishers(const char* topic_name, TopicInfo* out,
+                          uint32_t max_results) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < local_topic_count_ && count < max_results; ++i) {
+      if (local_topics_[i].is_publisher &&
+          std::strcmp(local_topics_[i].name, topic_name) == 0) {
+        out[count++] = local_topics_[i];
+      }
+    }
+    return count;
+  }
+
+  /**
+   * @brief Find subscribers for a given topic.
+   * @param topic_name Topic name to search for.
+   * @param out Output array for matching topics.
+   * @param max_results Maximum number of results to return.
+   * @return Number of subscribers found.
+   */
+  uint32_t FindSubscribers(const char* topic_name, TopicInfo* out,
+                           uint32_t max_results) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < local_topic_count_ && count < max_results; ++i) {
+      if (!local_topics_[i].is_publisher &&
+          std::strcmp(local_topics_[i].name, topic_name) == 0) {
+        out[count++] = local_topics_[i];
+      }
+    }
+    return count;
+  }
+
+  /**
+   * @brief Find a service by name.
+   * @param service_name Service name to search for.
+   * @return Pointer to the service if found, nullptr otherwise.
+   */
+  const ServiceInfo* FindService(const char* service_name) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (uint32_t i = 0; i < local_service_count_; ++i) {
+      if (std::strcmp(local_services_[i].name, service_name) == 0) {
+        return &local_services_[i];
+      }
+    }
+    return nullptr;
+  }
+
+  /** @brief Get the number of local topics. */
+  uint32_t TopicCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return local_topic_count_;
+  }
+
+  /** @brief Get the number of local services. */
+  uint32_t ServiceCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return local_service_count_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  TopicInfo local_topics_[MaxTopicsPerNode];
+  uint32_t local_topic_count_;
+  ServiceInfo local_services_[kMaxServicesPerNode];
+  uint32_t local_service_count_;
 };
 
 #endif  // defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)

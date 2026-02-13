@@ -303,3 +303,161 @@ TEST_CASE("Node default Publisher", "[node]") {
   osp::Publisher<Command, NodePayload> pub;
   REQUIRE(!pub.IsValid());
 }
+
+TEST_CASE("node - Topic publish and subscribe", "[node]") {
+  NodeBusFixture fix;
+
+  osp::Node<NodePayload> pub_node("publisher", 1);
+  osp::Node<NodePayload> sub_node("subscriber", 2);
+
+  int received_seq = -1;
+  uint32_t received_sender = 0;
+
+  auto r = sub_node.Subscribe<Heartbeat>(
+      "sensor/imu",
+      [&received_seq, &received_sender](
+          const Heartbeat& hb, const osp::MessageHeader& hdr) {
+        received_seq = static_cast<int>(hb.seq);
+        received_sender = hdr.sender_id;
+      });
+  REQUIRE(r.has_value());
+
+  // Publish with matching topic
+  REQUIRE(pub_node.Publish(Heartbeat{100}, "sensor/imu"));
+  pub_node.SpinOnce();
+
+  REQUIRE(received_seq == 100);
+  REQUIRE(received_sender == 1);
+}
+
+TEST_CASE("node - Topic filtering", "[node]") {
+  NodeBusFixture fix;
+
+  osp::Node<NodePayload> pub_node("publisher", 1);
+  osp::Node<NodePayload> sub_node("subscriber", 2);
+
+  int received_count = 0;
+
+  // Subscribe to "topicA"
+  auto r = sub_node.Subscribe<Heartbeat>(
+      "topicA",
+      [&received_count](const Heartbeat&, const osp::MessageHeader&) {
+        ++received_count;
+      });
+  REQUIRE(r.has_value());
+
+  // Publish to "topicB" - should NOT be received
+  REQUIRE(pub_node.Publish(Heartbeat{1}, "topicB"));
+  pub_node.SpinOnce();
+  REQUIRE(received_count == 0);
+
+  // Publish to "topicA" - should be received
+  REQUIRE(pub_node.Publish(Heartbeat{2}, "topicA"));
+  pub_node.SpinOnce();
+  REQUIRE(received_count == 1);
+}
+
+TEST_CASE("node - Topic and non-topic coexistence", "[node]") {
+  NodeBusFixture fix;
+
+  osp::Node<NodePayload> pub_node("publisher", 1);
+  osp::Node<NodePayload> sub_node("subscriber", 2);
+
+  int non_topic_count = 0;
+  int topic_count = 0;
+
+  // Non-topic subscriber (receives all)
+  sub_node.Subscribe<Heartbeat>(
+      [&non_topic_count](const Heartbeat&, const osp::MessageHeader&) {
+        ++non_topic_count;
+      });
+
+  // Topic subscriber (receives only matching topic)
+  sub_node.Subscribe<Heartbeat>(
+      "specific_topic",
+      [&topic_count](const Heartbeat&, const osp::MessageHeader&) {
+        ++topic_count;
+      });
+
+  // Publish without topic
+  REQUIRE(pub_node.Publish(Heartbeat{1}));
+  pub_node.SpinOnce();
+  REQUIRE(non_topic_count == 1);
+  REQUIRE(topic_count == 0);  // Topic subscriber should not receive
+
+  // Publish with matching topic
+  REQUIRE(pub_node.Publish(Heartbeat{2}, "specific_topic"));
+  pub_node.SpinOnce();
+  REQUIRE(non_topic_count == 2);  // Non-topic subscriber receives all
+  REQUIRE(topic_count == 1);      // Topic subscriber receives matching
+
+  // Publish with different topic
+  REQUIRE(pub_node.Publish(Heartbeat{3}, "other_topic"));
+  pub_node.SpinOnce();
+  REQUIRE(non_topic_count == 3);  // Non-topic subscriber receives all
+  REQUIRE(topic_count == 1);      // Topic subscriber does not receive
+}
+
+TEST_CASE("node - Multiple topics same type", "[node]") {
+  NodeBusFixture fix;
+
+  osp::Node<NodePayload> pub_node("publisher", 1);
+  osp::Node<NodePayload> sub_node("subscriber", 2);
+
+  int imu_count = 0;
+  int gps_count = 0;
+
+  // Subscribe to different topics of same type
+  sub_node.Subscribe<Heartbeat>(
+      "sensor/imu",
+      [&imu_count](const Heartbeat&, const osp::MessageHeader&) {
+        ++imu_count;
+      });
+
+  sub_node.Subscribe<Heartbeat>(
+      "sensor/gps",
+      [&gps_count](const Heartbeat&, const osp::MessageHeader&) {
+        ++gps_count;
+      });
+
+  // Publish to IMU topic
+  REQUIRE(pub_node.Publish(Heartbeat{1}, "sensor/imu"));
+  pub_node.SpinOnce();
+  REQUIRE(imu_count == 1);
+  REQUIRE(gps_count == 0);
+
+  // Publish to GPS topic
+  REQUIRE(pub_node.Publish(Heartbeat{2}, "sensor/gps"));
+  pub_node.SpinOnce();
+  REQUIRE(imu_count == 1);
+  REQUIRE(gps_count == 1);
+
+  // Publish to both
+  REQUIRE(pub_node.Publish(Heartbeat{3}, "sensor/imu"));
+  REQUIRE(pub_node.Publish(Heartbeat{4}, "sensor/gps"));
+  pub_node.SpinOnce();
+  REQUIRE(imu_count == 2);
+  REQUIRE(gps_count == 2);
+}
+
+TEST_CASE("node - Fnv1a32 hash consistency", "[node]") {
+  // Same string produces same hash
+  uint32_t hash1 = osp::Fnv1a32("test_topic");
+  uint32_t hash2 = osp::Fnv1a32("test_topic");
+  REQUIRE(hash1 == hash2);
+  REQUIRE(hash1 != 0);
+
+  // Different strings produce different hashes
+  uint32_t hash_a = osp::Fnv1a32("topicA");
+  uint32_t hash_b = osp::Fnv1a32("topicB");
+  REQUIRE(hash_a != hash_b);
+
+  // nullptr produces 0
+  uint32_t hash_null = osp::Fnv1a32(nullptr);
+  REQUIRE(hash_null == 0);
+
+  // Empty string produces non-zero hash
+  uint32_t hash_empty = osp::Fnv1a32("");
+  REQUIRE(hash_empty != 0);
+  REQUIRE(hash_empty == 2166136261u);  // FNV-1a offset basis
+}

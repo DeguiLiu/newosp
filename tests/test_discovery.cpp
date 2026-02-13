@@ -309,3 +309,206 @@ TEST_CASE("discovery - MulticastDiscovery ForEach iteration", "[discovery][multi
 
   discovery.Stop();
 }
+
+// ============================================================================
+// 9. TopicInfo - Construction
+// ============================================================================
+
+TEST_CASE("discovery - TopicInfo construction", "[discovery][topic]") {
+  osp::TopicInfo topic;
+  REQUIRE(topic.name[0] == '\0');
+  REQUIRE(topic.type_name[0] == '\0');
+  REQUIRE(topic.publisher_port == 0);
+  REQUIRE(topic.is_publisher == false);
+
+  // Manual initialization
+  std::strcpy(topic.name, "sensor_data");
+  std::strcpy(topic.type_name, "SensorData");
+  topic.publisher_port = 5000;
+  topic.is_publisher = true;
+
+  REQUIRE(std::strcmp(topic.name, "sensor_data") == 0);
+  REQUIRE(std::strcmp(topic.type_name, "SensorData") == 0);
+  REQUIRE(topic.publisher_port == 5000);
+  REQUIRE(topic.is_publisher == true);
+}
+
+// ============================================================================
+// 10. ServiceInfo - Construction
+// ============================================================================
+
+TEST_CASE("discovery - ServiceInfo construction", "[discovery][service]") {
+  osp::ServiceInfo svc;
+  REQUIRE(svc.name[0] == '\0');
+  REQUIRE(svc.request_type[0] == '\0');
+  REQUIRE(svc.response_type[0] == '\0');
+  REQUIRE(svc.port == 0);
+
+  // Manual initialization
+  std::strcpy(svc.name, "get_status");
+  std::strcpy(svc.request_type, "StatusRequest");
+  std::strcpy(svc.response_type, "StatusResponse");
+  svc.port = 6000;
+
+  REQUIRE(std::strcmp(svc.name, "get_status") == 0);
+  REQUIRE(std::strcmp(svc.request_type, "StatusRequest") == 0);
+  REQUIRE(std::strcmp(svc.response_type, "StatusResponse") == 0);
+  REQUIRE(svc.port == 6000);
+}
+
+// ============================================================================
+// 11. TopicAwareDiscovery - Add local topic
+// ============================================================================
+
+TEST_CASE("discovery - TopicAwareDiscovery add local topic", "[discovery][topic]") {
+  osp::TopicAwareDiscovery<32, 16> discovery;
+
+  osp::TopicInfo topic;
+  std::strcpy(topic.name, "sensor_data");
+  std::strcpy(topic.type_name, "SensorData");
+  topic.publisher_port = 5000;
+  topic.is_publisher = true;
+
+  auto r = discovery.AddLocalTopic(topic);
+  REQUIRE(r.has_value());
+  REQUIRE(discovery.TopicCount() == 1);
+}
+
+// ============================================================================
+// 12. TopicAwareDiscovery - Find publishers
+// ============================================================================
+
+TEST_CASE("discovery - TopicAwareDiscovery find publishers", "[discovery][topic]") {
+  osp::TopicAwareDiscovery<32, 16> discovery;
+
+  // Add a publisher
+  osp::TopicInfo pub_topic;
+  std::strcpy(pub_topic.name, "sensor_data");
+  std::strcpy(pub_topic.type_name, "SensorData");
+  pub_topic.publisher_port = 5000;
+  pub_topic.is_publisher = true;
+  discovery.AddLocalTopic(pub_topic);
+
+  // Add a subscriber (should not be found)
+  osp::TopicInfo sub_topic;
+  std::strcpy(sub_topic.name, "sensor_data");
+  std::strcpy(sub_topic.type_name, "SensorData");
+  sub_topic.publisher_port = 0;
+  sub_topic.is_publisher = false;
+  discovery.AddLocalTopic(sub_topic);
+
+  // Find publishers
+  osp::TopicInfo results[10];
+  uint32_t count = discovery.FindPublishers("sensor_data", results, 10);
+
+  REQUIRE(count == 1);
+  REQUIRE(std::strcmp(results[0].name, "sensor_data") == 0);
+  REQUIRE(results[0].is_publisher == true);
+  REQUIRE(results[0].publisher_port == 5000);
+}
+
+// ============================================================================
+// 13. TopicAwareDiscovery - Find subscribers
+// ============================================================================
+
+TEST_CASE("discovery - TopicAwareDiscovery find subscribers", "[discovery][topic]") {
+  osp::TopicAwareDiscovery<32, 16> discovery;
+
+  // Add a subscriber
+  osp::TopicInfo sub_topic;
+  std::strcpy(sub_topic.name, "sensor_data");
+  std::strcpy(sub_topic.type_name, "SensorData");
+  sub_topic.publisher_port = 0;
+  sub_topic.is_publisher = false;
+  discovery.AddLocalTopic(sub_topic);
+
+  // Add a publisher (should not be found)
+  osp::TopicInfo pub_topic;
+  std::strcpy(pub_topic.name, "sensor_data");
+  std::strcpy(pub_topic.type_name, "SensorData");
+  pub_topic.publisher_port = 5000;
+  pub_topic.is_publisher = true;
+  discovery.AddLocalTopic(pub_topic);
+
+  // Find subscribers
+  osp::TopicInfo results[10];
+  uint32_t count = discovery.FindSubscribers("sensor_data", results, 10);
+
+  REQUIRE(count == 1);
+  REQUIRE(std::strcmp(results[0].name, "sensor_data") == 0);
+  REQUIRE(results[0].is_publisher == false);
+}
+
+// ============================================================================
+// 14. TopicAwareDiscovery - Add local service
+// ============================================================================
+
+TEST_CASE("discovery - TopicAwareDiscovery add local service", "[discovery][service]") {
+  osp::TopicAwareDiscovery<32, 16> discovery;
+
+  osp::ServiceInfo svc;
+  std::strcpy(svc.name, "get_status");
+  std::strcpy(svc.request_type, "StatusRequest");
+  std::strcpy(svc.response_type, "StatusResponse");
+  svc.port = 6000;
+
+  auto r = discovery.AddLocalService(svc);
+  REQUIRE(r.has_value());
+  REQUIRE(discovery.ServiceCount() == 1);
+}
+
+// ============================================================================
+// 15. TopicAwareDiscovery - Find service
+// ============================================================================
+
+TEST_CASE("discovery - TopicAwareDiscovery find service", "[discovery][service]") {
+  osp::TopicAwareDiscovery<32, 16> discovery;
+
+  osp::ServiceInfo svc;
+  std::strcpy(svc.name, "get_status");
+  std::strcpy(svc.request_type, "StatusRequest");
+  std::strcpy(svc.response_type, "StatusResponse");
+  svc.port = 6000;
+  discovery.AddLocalService(svc);
+
+  const osp::ServiceInfo* found = discovery.FindService("get_status");
+  REQUIRE(found != nullptr);
+  REQUIRE(std::strcmp(found->name, "get_status") == 0);
+  REQUIRE(std::strcmp(found->request_type, "StatusRequest") == 0);
+  REQUIRE(std::strcmp(found->response_type, "StatusResponse") == 0);
+  REQUIRE(found->port == 6000);
+
+  // Find non-existent service
+  const osp::ServiceInfo* not_found = discovery.FindService("nonexistent");
+  REQUIRE(not_found == nullptr);
+}
+
+// ============================================================================
+// 16. TopicAwareDiscovery - Topic overflow
+// ============================================================================
+
+TEST_CASE("discovery - TopicAwareDiscovery topic overflow", "[discovery][topic]") {
+  osp::TopicAwareDiscovery<32, 4> discovery;  // MaxTopicsPerNode = 4
+
+  osp::TopicInfo topic;
+  std::strcpy(topic.type_name, "SensorData");
+  topic.publisher_port = 5000;
+  topic.is_publisher = true;
+
+  // Add 4 topics (should succeed)
+  for (uint32_t i = 0; i < 4; ++i) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "topic_%u", i);
+    std::strcpy(topic.name, name);
+    auto r = discovery.AddLocalTopic(topic);
+    REQUIRE(r.has_value());
+  }
+  REQUIRE(discovery.TopicCount() == 4);
+
+  // Add 5th topic (should fail - overflow)
+  std::strcpy(topic.name, "topic_overflow");
+  auto r = discovery.AddLocalTopic(topic);
+  REQUIRE(!r.has_value());
+  REQUIRE(r.get_error() == osp::DiscoveryError::kSocketFailed);
+  REQUIRE(discovery.TopicCount() == 4);
+}

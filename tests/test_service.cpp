@@ -374,3 +374,237 @@ TEST_CASE("service - Client move semantics", "[service][client]") {
   client2.Close();
   service.Stop();
 }
+
+// ============================================================================
+// 10. ServiceRegistry - Register and lookup
+// ============================================================================
+
+TEST_CASE("service - ServiceRegistry register and lookup", "[service][registry]") {
+  osp::ServiceRegistry<32> registry;
+
+  auto r1 = registry.Register("add_service", "127.0.0.1", 8080);
+  REQUIRE(r1.has_value());
+  REQUIRE(registry.Count() == 1);
+
+  auto r2 = registry.Register("echo_service", "192.168.1.100", 9090);
+  REQUIRE(r2.has_value());
+  REQUIRE(registry.Count() == 2);
+
+  // Lookup existing service
+  const auto* entry1 = registry.Lookup("add_service");
+  REQUIRE(entry1 != nullptr);
+  REQUIRE(entry1->active);
+  REQUIRE(std::strcmp(entry1->name, "add_service") == 0);
+  REQUIRE(std::strcmp(entry1->host, "127.0.0.1") == 0);
+  REQUIRE(entry1->port == 8080);
+
+  const auto* entry2 = registry.Lookup("echo_service");
+  REQUIRE(entry2 != nullptr);
+  REQUIRE(entry2->active);
+  REQUIRE(std::strcmp(entry2->name, "echo_service") == 0);
+  REQUIRE(std::strcmp(entry2->host, "192.168.1.100") == 0);
+  REQUIRE(entry2->port == 9090);
+
+  // Lookup non-existent service
+  const auto* entry3 = registry.Lookup("nonexistent");
+  REQUIRE(entry3 == nullptr);
+}
+
+// ============================================================================
+// 11. ServiceRegistry - Unregister
+// ============================================================================
+
+TEST_CASE("service - ServiceRegistry unregister", "[service][registry]") {
+  osp::ServiceRegistry<32> registry;
+
+  registry.Register("service1", "127.0.0.1", 8080);
+  registry.Register("service2", "127.0.0.1", 8081);
+  registry.Register("service3", "127.0.0.1", 8082);
+  REQUIRE(registry.Count() == 3);
+
+  // Unregister existing service
+  bool removed = registry.Unregister("service2");
+  REQUIRE(removed);
+  REQUIRE(registry.Count() == 2);
+
+  // Verify it's gone
+  const auto* entry = registry.Lookup("service2");
+  REQUIRE(entry == nullptr);
+
+  // Other services still exist
+  REQUIRE(registry.Lookup("service1") != nullptr);
+  REQUIRE(registry.Lookup("service3") != nullptr);
+
+  // Unregister non-existent service
+  bool removed2 = registry.Unregister("nonexistent");
+  REQUIRE(!removed2);
+  REQUIRE(registry.Count() == 2);
+}
+
+// ============================================================================
+// 12. ServiceRegistry - Duplicate name
+// ============================================================================
+
+TEST_CASE("service - ServiceRegistry duplicate name", "[service][registry]") {
+  osp::ServiceRegistry<32> registry;
+
+  auto r1 = registry.Register("my_service", "127.0.0.1", 8080);
+  REQUIRE(r1.has_value());
+
+  // Try to register with same name
+  auto r2 = registry.Register("my_service", "127.0.0.1", 9090);
+  REQUIRE(!r2.has_value());
+  REQUIRE(r2.get_error() == osp::ServiceError::kBindFailed);
+
+  // Original entry unchanged
+  const auto* entry = registry.Lookup("my_service");
+  REQUIRE(entry != nullptr);
+  REQUIRE(entry->port == 8080);
+}
+
+// ============================================================================
+// 13. ServiceRegistry - Overflow
+// ============================================================================
+
+TEST_CASE("service - ServiceRegistry overflow", "[service][registry]") {
+  osp::ServiceRegistry<4> registry;  // Small capacity
+
+  // Fill registry
+  REQUIRE(registry.Register("service1", "127.0.0.1", 8081).has_value());
+  REQUIRE(registry.Register("service2", "127.0.0.1", 8082).has_value());
+  REQUIRE(registry.Register("service3", "127.0.0.1", 8083).has_value());
+  REQUIRE(registry.Register("service4", "127.0.0.1", 8084).has_value());
+  REQUIRE(registry.Count() == 4);
+
+  // Try to add one more - should fail
+  auto r = registry.Register("service5", "127.0.0.1", 8085);
+  REQUIRE(!r.has_value());
+  REQUIRE(r.get_error() == osp::ServiceError::kBindFailed);
+  REQUIRE(registry.Count() == 4);
+
+  // After unregister, should be able to add again
+  registry.Unregister("service2");
+  REQUIRE(registry.Count() == 3);
+
+  auto r2 = registry.Register("service5", "127.0.0.1", 8085);
+  REQUIRE(r2.has_value());
+  REQUIRE(registry.Count() == 4);
+}
+
+// ============================================================================
+// 14. AsyncClient - Connect and call
+// ============================================================================
+
+TEST_CASE("service - AsyncClient connect and call", "[service][async]") {
+  // Start service
+  osp::Service<AddRequest, AddResponse>::Config cfg;
+  cfg.port = 0;  // OS-assigned
+  osp::Service<AddRequest, AddResponse> service(cfg);
+
+  service.SetHandler(
+      [](const AddRequest& req, void* /*ctx*/) -> AddResponse {
+        AddResponse resp;
+        resp.sum = req.a + req.b;
+        return resp;
+      });
+
+  auto start_r = service.Start();
+  REQUIRE(start_r.has_value());
+
+  uint16_t port = service.GetPort();
+  REQUIRE(port > 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // Connect async client
+  auto client_r = osp::AsyncClient<AddRequest, AddResponse>::Connect("127.0.0.1", port);
+  REQUIRE(client_r.has_value());
+
+  auto client = std::move(client_r.value());
+  REQUIRE(client.IsConnected());
+
+  // Send async request
+  AddRequest req{15, 25};
+  bool initiated = client.CallAsync(req);
+  REQUIRE(initiated);
+
+  // Wait for result
+  auto resp_r = client.GetResult(5000);
+  REQUIRE(resp_r.has_value());
+  REQUIRE(resp_r.value().sum == 40);
+
+  client.Close();
+  service.Stop();
+}
+
+// ============================================================================
+// 15. AsyncClient - IsReady check
+// ============================================================================
+
+TEST_CASE("service - AsyncClient IsReady check", "[service][async]") {
+  // Start service with slow handler
+  osp::Service<AddRequest, AddResponse>::Config cfg;
+  cfg.port = 0;  // OS-assigned
+  osp::Service<AddRequest, AddResponse> service(cfg);
+
+  service.SetHandler(
+      [](const AddRequest& req, void* /*ctx*/) -> AddResponse {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        AddResponse resp;
+        resp.sum = req.a + req.b;
+        return resp;
+      });
+
+  auto start_r = service.Start();
+  REQUIRE(start_r.has_value());
+
+  uint16_t port = service.GetPort();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  auto client_r = osp::AsyncClient<AddRequest, AddResponse>::Connect("127.0.0.1", port);
+  REQUIRE(client_r.has_value());
+  auto client = std::move(client_r.value());
+
+  // Send async request
+  AddRequest req{10, 20};
+  bool initiated = client.CallAsync(req);
+  REQUIRE(initiated);
+
+  // Check IsReady immediately - should be false
+  REQUIRE(!client.IsReady());
+
+  // Wait a bit and check again
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  REQUIRE(client.IsReady());
+
+  // Get result
+  auto resp_r = client.GetResult(100);
+  REQUIRE(resp_r.has_value());
+  REQUIRE(resp_r.value().sum == 30);
+
+  client.Close();
+  service.Stop();
+}
+
+// ============================================================================
+// 16. AsyncCallResult - Default state
+// ============================================================================
+
+TEST_CASE("service - AsyncCallResult default state", "[service][async]") {
+  osp::AsyncCallResult<AddResponse> result;
+
+  // Check default state
+  REQUIRE(result.completed == false);
+  REQUIRE(result.success == false);
+
+  // Manually set values
+  result.response.sum = 42;
+  result.error = osp::ServiceError::kTimeout;
+  result.completed = true;
+  result.success = false;
+
+  REQUIRE(result.response.sum == 42);
+  REQUIRE(result.error == osp::ServiceError::kTimeout);
+  REQUIRE(result.completed == true);
+  REQUIRE(result.success == false);
+}
