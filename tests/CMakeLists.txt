@@ -22,6 +22,7 @@ add_executable(osp_tests
     test_shutdown.cpp
     test_bus.cpp
     test_node.cpp
+    test_lifecycle_node.cpp
     test_worker_pool.cpp
     test_executor.cpp
     test_hsm.cpp
@@ -38,6 +39,7 @@ add_executable(osp_tests
     test_node_manager.cpp
     test_integration.cpp
     test_serial_transport.cpp
+    test_qos.cpp
 )
 target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
 

@@ -304,3 +304,139 @@ TEST_CASE("executor - NodeCount returns correct value", "[executor]") {
   exec.RemoveNode(node_c);
   REQUIRE(exec.NodeCount() == 0);
 }
+
+// ============================================================================
+// RealtimeExecutor tests
+// ============================================================================
+
+TEST_CASE("executor - RealtimeConfig default values", "[executor]") {
+  osp::RealtimeConfig cfg;
+  REQUIRE(cfg.sched_policy == 0);
+  REQUIRE(cfg.sched_priority == 0);
+  REQUIRE(cfg.lock_memory == false);
+  REQUIRE(cfg.stack_size == 0);
+  REQUIRE(cfg.cpu_affinity == -1);
+}
+
+TEST_CASE("executor - RealtimeExecutor Start/Stop lifecycle", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::Node<TestPayload> node("node", 1);
+
+  osp::RealtimeConfig cfg;
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+  exec.AddNode(node);
+
+  REQUIRE_FALSE(exec.IsRunning());
+
+  exec.Start();
+  REQUIRE(exec.IsRunning());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  exec.Stop();
+  REQUIRE_FALSE(exec.IsRunning());
+}
+
+TEST_CASE("executor - RealtimeExecutor processes messages", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::Node<TestPayload> sender("sender", 1);
+  osp::Node<TestPayload> receiver("receiver", 2);
+
+  std::atomic<int> received_count{0};
+  auto sub_result =
+      receiver.Subscribe<TestMsg>([&](const TestMsg&, const auto&) {
+        received_count.fetch_add(1, std::memory_order_relaxed);
+      });
+  REQUIRE(sub_result.has_value());
+
+  osp::RealtimeConfig cfg;
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+  exec.AddNode(sender);
+  exec.AddNode(receiver);
+
+  exec.Start();
+
+  // Publish several messages
+  for (int i = 0; i < 5; ++i) {
+    sender.Publish(TestMsg{i});
+  }
+
+  // Wait for dispatch thread to process
+  auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (received_count.load(std::memory_order_relaxed) < 5 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  exec.Stop();
+
+  REQUIRE(received_count.load(std::memory_order_relaxed) == 5);
+}
+
+TEST_CASE("executor - RealtimeExecutor AddNode", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::Node<TestPayload> node_a("node_a", 1);
+  osp::Node<TestPayload> node_b("node_b", 2);
+
+  osp::RealtimeConfig cfg;
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+
+  SECTION("add nodes successfully") {
+    REQUIRE(exec.AddNode(node_a));
+    REQUIRE(exec.AddNode(node_b));
+    REQUIRE(exec.NodeCount() == 2);
+  }
+
+  SECTION("duplicate node rejected") {
+    REQUIRE(exec.AddNode(node_a));
+    REQUIRE_FALSE(exec.AddNode(node_a));
+    REQUIRE(exec.NodeCount() == 1);
+  }
+}
+
+TEST_CASE("executor - RealtimeExecutor GetConfig returns configured values",
+          "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::RealtimeConfig cfg;
+  cfg.sched_policy = 1;
+  cfg.sched_priority = 50;
+  cfg.lock_memory = true;
+  cfg.stack_size = 1024 * 1024;
+  cfg.cpu_affinity = 2;
+
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+
+  const auto& retrieved_cfg = exec.GetConfig();
+  REQUIRE(retrieved_cfg.sched_policy == 1);
+  REQUIRE(retrieved_cfg.sched_priority == 50);
+  REQUIRE(retrieved_cfg.lock_memory == true);
+  REQUIRE(retrieved_cfg.stack_size == 1024 * 1024);
+  REQUIRE(retrieved_cfg.cpu_affinity == 2);
+}
+
+TEST_CASE("executor - RealtimeExecutor with CPU affinity", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::Node<TestPayload> node("node", 1);
+
+  osp::RealtimeConfig cfg;
+  cfg.cpu_affinity = 0;  // Bind to core 0
+
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+  exec.AddNode(node);
+
+  REQUIRE_FALSE(exec.IsRunning());
+
+  exec.Start();
+  REQUIRE(exec.IsRunning());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  exec.Stop();
+  REQUIRE_FALSE(exec.IsRunning());
+}

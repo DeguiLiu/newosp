@@ -452,3 +452,243 @@ TEST_CASE("transport - full roundtrip NetworkNode A to B via TCP",
   REQUIRE(received.temperature == outgoing.temperature);
   REQUIRE(received.sensor_id == outgoing.sensor_id);
 }
+
+// ============================================================================
+// 11. P0-4 Transport Frame Extension Tests (v1 format)
+// ============================================================================
+
+TEST_CASE("transport - FrameHeaderV1 encode decode roundtrip",
+          "[transport][codec][v1]") {
+  osp::FrameHeaderV1 original;
+  original.magic = osp::kFrameMagicV1;
+  original.length = 256;
+  original.type_index = 5;
+  original.sender_id = 99;
+  original.seq_num = 12345;
+  original.timestamp_ns = 9876543210ULL;
+
+  uint8_t buf[osp::FrameCodec::kHeaderSizeV1];
+  uint32_t written = osp::FrameCodec::EncodeHeaderV1(original, buf, sizeof(buf));
+  REQUIRE(written == osp::FrameCodec::kHeaderSizeV1);
+
+  osp::FrameHeaderV1 decoded;
+  bool ok = osp::FrameCodec::DecodeHeaderV1(buf, sizeof(buf), decoded);
+  REQUIRE(ok);
+  REQUIRE(decoded.magic == original.magic);
+  REQUIRE(decoded.length == original.length);
+  REQUIRE(decoded.type_index == original.type_index);
+  REQUIRE(decoded.sender_id == original.sender_id);
+  REQUIRE(decoded.seq_num == original.seq_num);
+  REQUIRE(decoded.timestamp_ns == original.timestamp_ns);
+}
+
+TEST_CASE("transport - FrameCodec DetectVersion v0",
+          "[transport][codec][v1]") {
+  uint8_t buf[14];
+  uint32_t magic = osp::kFrameMagicV0;
+  std::memcpy(buf, &magic, 4);
+
+  uint8_t version = osp::FrameCodec::DetectVersion(buf, sizeof(buf));
+  REQUIRE(version == 0);
+}
+
+TEST_CASE("transport - FrameCodec DetectVersion v1",
+          "[transport][codec][v1]") {
+  uint8_t buf[26];
+  uint32_t magic = osp::kFrameMagicV1;
+  std::memcpy(buf, &magic, 4);
+
+  uint8_t version = osp::FrameCodec::DetectVersion(buf, sizeof(buf));
+  REQUIRE(version == 1);
+}
+
+TEST_CASE("transport - FrameCodec DetectVersion unknown",
+          "[transport][codec][v1]") {
+  uint8_t buf[4];
+  uint32_t magic = 0xDEADBEEF;
+  std::memcpy(buf, &magic, 4);
+
+  uint8_t version = osp::FrameCodec::DetectVersion(buf, sizeof(buf));
+  REQUIRE(version == UINT8_MAX);
+}
+
+TEST_CASE("transport - SequenceTracker in-order",
+          "[transport][sequence][v1]") {
+  osp::SequenceTracker tracker;
+
+  REQUIRE(tracker.Track(0) == true);
+  REQUIRE(tracker.Track(1) == true);
+  REQUIRE(tracker.Track(2) == true);
+  REQUIRE(tracker.Track(3) == true);
+
+  REQUIRE(tracker.TotalReceived() == 4);
+  REQUIRE(tracker.LostCount() == 0);
+  REQUIRE(tracker.ReorderedCount() == 0);
+  REQUIRE(tracker.DuplicateCount() == 0);
+}
+
+TEST_CASE("transport - SequenceTracker gap detection",
+          "[transport][sequence][v1]") {
+  osp::SequenceTracker tracker;
+
+  REQUIRE(tracker.Track(0) == true);
+  REQUIRE(tracker.Track(1) == true);
+  // Skip 2, 3, 4
+  REQUIRE(tracker.Track(5) == true);
+
+  REQUIRE(tracker.TotalReceived() == 3);
+  REQUIRE(tracker.LostCount() == 3);  // Lost 2, 3, 4
+  REQUIRE(tracker.ReorderedCount() == 0);
+  REQUIRE(tracker.DuplicateCount() == 0);
+}
+
+TEST_CASE("transport - SequenceTracker reorder detection",
+          "[transport][sequence][v1]") {
+  osp::SequenceTracker tracker;
+
+  REQUIRE(tracker.Track(0) == true);
+  REQUIRE(tracker.Track(2) == true);  // Gap: lost 1
+  REQUIRE(tracker.Track(1) == false); // Reordered (within window)
+  REQUIRE(tracker.Track(3) == true);
+
+  REQUIRE(tracker.TotalReceived() == 4);
+  REQUIRE(tracker.LostCount() == 1);
+  REQUIRE(tracker.ReorderedCount() == 1);
+  REQUIRE(tracker.DuplicateCount() == 0);
+}
+
+TEST_CASE("transport - SequenceTracker reset",
+          "[transport][sequence][v1]") {
+  osp::SequenceTracker tracker;
+
+  tracker.Track(0);
+  tracker.Track(5);  // Gap
+  tracker.Track(3);  // Reorder
+
+  REQUIRE(tracker.TotalReceived() > 0);
+  REQUIRE(tracker.LostCount() > 0);
+
+  tracker.Reset();
+
+  REQUIRE(tracker.TotalReceived() == 0);
+  REQUIRE(tracker.LostCount() == 0);
+  REQUIRE(tracker.ReorderedCount() == 0);
+  REQUIRE(tracker.DuplicateCount() == 0);
+}
+
+TEST_CASE("transport - SteadyClockNs returns nonzero",
+          "[transport][timestamp][v1]") {
+  uint64_t ts1 = osp::SteadyClockNs();
+  REQUIRE(ts1 > 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+  uint64_t ts2 = osp::SteadyClockNs();
+  REQUIRE(ts2 > ts1);
+}
+
+TEST_CASE("transport - TcpTransport SendFrameV1 RecvFrameAuto loopback",
+          "[transport][tcp][v1][integration]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+
+  SensorData send_data{88.8f, 555};
+  std::thread client_thread([port, &send_data]() {
+    osp::TcpTransport client;
+    auto ep = osp::Endpoint::FromString("127.0.0.1", port);
+    auto r = client.Connect(ep);
+    if (!r.has_value()) return;
+
+    uint8_t payload_buf[64];
+    uint32_t len = osp::Serializer<SensorData>::Serialize(
+        send_data, payload_buf, sizeof(payload_buf));
+    if (len == 0) return;
+
+    uint64_t ts = osp::SteadyClockNs();
+    (void)client.SendFrameV1(0, 42, 100, ts, payload_buf, len);
+  });
+
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+  REQUIRE(server.IsConnected());
+
+  osp::FrameHeaderV1 hdr;
+  uint8_t recv_buf[256];
+  auto recv_r = server.RecvFrameAuto(hdr, recv_buf, sizeof(recv_buf));
+  REQUIRE(recv_r.has_value());
+  REQUIRE(hdr.magic == osp::kFrameMagicV1);
+  REQUIRE(hdr.type_index == 0);
+  REQUIRE(hdr.sender_id == 42);
+  REQUIRE(hdr.seq_num == 100);
+  REQUIRE(hdr.timestamp_ns > 0);
+  REQUIRE(recv_r.value() == sizeof(SensorData));
+
+  SensorData received;
+  bool ok = osp::Serializer<SensorData>::Deserialize(
+      recv_buf, recv_r.value(), received);
+  REQUIRE(ok);
+  REQUIRE(received.temperature == send_data.temperature);
+  REQUIRE(received.sensor_id == send_data.sensor_id);
+
+  client_thread.join();
+}
+
+TEST_CASE("transport - TcpTransport RecvFrameAuto handles v0 frames",
+          "[transport][tcp][v1][integration]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+
+  SensorData send_data{22.2f, 333};
+  std::thread client_thread([port, &send_data]() {
+    osp::TcpTransport client;
+    auto ep = osp::Endpoint::FromString("127.0.0.1", port);
+    auto r = client.Connect(ep);
+    if (!r.has_value()) return;
+
+    uint8_t payload_buf[64];
+    uint32_t len = osp::Serializer<SensorData>::Serialize(
+        send_data, payload_buf, sizeof(payload_buf));
+    if (len == 0) return;
+
+    // Send v0 frame
+    (void)client.SendFrame(1, 77, payload_buf, len);
+  });
+
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+  REQUIRE(server.IsConnected());
+
+  // Receive with auto-detect (should handle v0)
+  osp::FrameHeaderV1 hdr;
+  uint8_t recv_buf[256];
+  auto recv_r = server.RecvFrameAuto(hdr, recv_buf, sizeof(recv_buf));
+  REQUIRE(recv_r.has_value());
+  REQUIRE(hdr.magic == osp::kFrameMagicV0);
+  REQUIRE(hdr.type_index == 1);
+  REQUIRE(hdr.sender_id == 77);
+  REQUIRE(hdr.seq_num == 0);        // v0 doesn't have seq_num
+  REQUIRE(hdr.timestamp_ns == 0);   // v0 doesn't have timestamp
+  REQUIRE(recv_r.value() == sizeof(SensorData));
+
+  SensorData received;
+  bool ok = osp::Serializer<SensorData>::Deserialize(
+      recv_buf, recv_r.value(), received);
+  REQUIRE(ok);
+  REQUIRE(received.temperature == send_data.temperature);
+  REQUIRE(received.sensor_id == send_data.sensor_id);
+
+  client_thread.join();
+}
+
+TEST_CASE("transport - kFrameMagicV0 and kFrameMagicV1 constants",
+          "[transport][constants][v1]") {
+  REQUIRE(osp::kFrameMagicV0 == 0x4F535000);
+  REQUIRE(osp::kFrameMagicV1 == 0x4F535001);
+  REQUIRE(osp::kFrameMagic == osp::kFrameMagicV0);  // Backward compat
+}

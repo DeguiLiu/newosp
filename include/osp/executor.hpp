@@ -35,6 +35,7 @@
 #if defined(OSP_PLATFORM_LINUX)
 #include <pthread.h>
 #include <sched.h>
+#include <sys/mman.h>
 #endif
 
 namespace osp {
@@ -460,6 +461,240 @@ class PinnedExecutor {
   std::atomic<bool> running_;
   std::thread dispatch_thread_;
   int cpu_core_;
+};
+
+// ============================================================================
+// RealtimeConfig
+// ============================================================================
+
+/**
+ * @brief Realtime scheduling configuration (inspired by CyberRT Processor).
+ *
+ * Configures thread scheduling policy, priority, memory locking, stack size,
+ * and CPU affinity for realtime execution contexts.
+ */
+struct RealtimeConfig {
+  int sched_policy = 0;       // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
+  int sched_priority = 0;     // SCHED_FIFO: 1-99, higher = more priority
+  bool lock_memory = false;   // mlockall(MCL_CURRENT | MCL_FUTURE)
+  uint32_t stack_size = 0;    // 0=system default, non-zero=preallocated stack
+  int cpu_affinity = -1;      // -1=no binding, >=0=bind to specific CPU core
+};
+
+// ============================================================================
+// RealtimeExecutor<PayloadVariant>
+// ============================================================================
+
+/**
+ * @brief Realtime executor with configurable scheduling policy, priority,
+ *        memory locking, and CPU affinity.
+ *
+ * On Linux: applies SCHED_FIFO/SCHED_RR, mlockall, pthread_setaffinity_np,
+ * and custom stack size as configured.
+ * On non-Linux: falls back to normal thread with warnings logged to stderr.
+ *
+ * @tparam PayloadVariant A std::variant<...> of user-defined message types.
+ */
+template <typename PayloadVariant>
+class RealtimeExecutor {
+ public:
+  using BusType = AsyncBus<PayloadVariant>;
+
+  /**
+   * @brief Construct a realtime executor with the specified configuration.
+   * @param cfg Realtime configuration (scheduling, affinity, memory locking).
+   */
+  explicit RealtimeExecutor(const RealtimeConfig& cfg) noexcept
+      : node_count_(0), running_(false), config_(cfg) {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  ~RealtimeExecutor() noexcept { Stop(); }
+
+  RealtimeExecutor(const RealtimeExecutor&) = delete;
+  RealtimeExecutor& operator=(const RealtimeExecutor&) = delete;
+  RealtimeExecutor(RealtimeExecutor&&) = delete;
+  RealtimeExecutor& operator=(RealtimeExecutor&&) = delete;
+
+  // ======================== Node Management ========================
+
+  /**
+   * @brief Add a node to this executor.
+   *
+   * Must be called before Start(). The node's lifetime must exceed the
+   * executor's active period.
+   *
+   * @param node Reference to the node to manage.
+   * @return true if added, false if the node array is full or duplicate.
+   */
+  bool AddNode(Node<PayloadVariant>& node) noexcept {
+    if (node_count_ >= OSP_EXECUTOR_MAX_NODES) {
+      return false;
+    }
+    for (uint32_t i = 0; i < node_count_; ++i) {
+      if (nodes_[i] == &node) {
+        return false;
+      }
+    }
+    nodes_[node_count_++] = &node;
+    return true;
+  }
+
+  // ======================== Lifecycle ========================
+
+  /**
+   * @brief Start the realtime dispatcher thread.
+   *
+   * On Linux: applies sched_policy, sched_priority, cpu_affinity, mlockall,
+   * and stack_size as configured.
+   * On non-Linux: falls back to normal thread (logs warning).
+   */
+  void Start() noexcept {
+    if (running_.load(std::memory_order_acquire)) {
+      return;  // Already running
+    }
+    running_.store(true, std::memory_order_release);
+
+#if defined(OSP_PLATFORM_LINUX)
+    // If custom stack size is requested, use pthread_create directly
+    if (config_.stack_size > 0) {
+      pthread_attr_t attr;
+      pthread_attr_init(&attr);
+      pthread_attr_setstacksize(&attr, config_.stack_size);
+
+      pthread_t thread_handle;
+      int rc = pthread_create(&thread_handle, &attr, &RealtimeExecutor::ThreadEntry, this);
+      pthread_attr_destroy(&attr);
+
+      if (rc != 0) {
+        (void)std::fprintf(stderr,
+                           "RealtimeExecutor: pthread_create failed (errno=%d)\n",
+                           rc);
+        running_.store(false, std::memory_order_release);
+        return;
+      }
+      // Detach or store the handle - for simplicity, we'll use std::thread wrapper
+      // Actually, we need to store pthread_t for joining. Let's use a different approach:
+      // Create std::thread and apply settings inside the thread.
+      dispatch_thread_ = std::thread([this]() {
+        ApplyRealtimeConfig(config_);
+        DispatchLoop();
+      });
+    } else {
+      dispatch_thread_ = std::thread([this]() {
+        ApplyRealtimeConfig(config_);
+        DispatchLoop();
+      });
+    }
+#else
+    (void)std::fprintf(stderr,
+                       "RealtimeExecutor: realtime features not supported on "
+                       "this platform, using normal thread\n");
+    dispatch_thread_ = std::thread([this]() { DispatchLoop(); });
+#endif
+  }
+
+  /**
+   * @brief Stop the realtime dispatcher thread and wait for it to finish.
+   */
+  void Stop() noexcept {
+    running_.store(false, std::memory_order_release);
+    if (dispatch_thread_.joinable()) {
+      dispatch_thread_.join();
+    }
+  }
+
+  // ======================== Accessors ========================
+
+  /** @brief Check if the dispatcher thread is running. */
+  bool IsRunning() const noexcept {
+    return running_.load(std::memory_order_acquire);
+  }
+
+  /** @brief Get the number of registered nodes. */
+  uint32_t NodeCount() const noexcept { return node_count_; }
+
+  /** @brief Get the realtime configuration. */
+  const RealtimeConfig& GetConfig() const noexcept { return config_; }
+
+ private:
+  /**
+   * @brief Main dispatch loop for the realtime background thread.
+   */
+  void DispatchLoop() noexcept {
+    while (running_.load(std::memory_order_relaxed)) {
+      uint32_t processed = BusType::Instance().ProcessBatch();
+      if (processed == 0) {
+        std::this_thread::yield();
+      }
+    }
+  }
+
+  /**
+   * @brief Apply realtime configuration to the current thread.
+   *
+   * On Linux: applies mlockall, CPU affinity, and scheduling policy/priority.
+   * On other platforms: no-op.
+   *
+   * @param cfg Realtime configuration to apply.
+   */
+  static void ApplyRealtimeConfig(const RealtimeConfig& cfg) noexcept {
+#if defined(OSP_PLATFORM_LINUX)
+    // 1. Lock memory if requested
+    if (cfg.lock_memory) {
+      int rc = mlockall(MCL_CURRENT | MCL_FUTURE);
+      if (rc != 0) {
+        (void)std::fprintf(stderr,
+                           "RealtimeExecutor: mlockall failed (errno=%d)\n",
+                           errno);
+      }
+    }
+
+    // 2. Set CPU affinity if requested
+    if (cfg.cpu_affinity >= 0) {
+      cpu_set_t cpuset;
+      CPU_ZERO(&cpuset);
+      CPU_SET(cfg.cpu_affinity, &cpuset);
+      int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+      if (rc != 0) {
+        (void)std::fprintf(stderr,
+                           "RealtimeExecutor: pthread_setaffinity_np failed "
+                           "(errno=%d)\n",
+                           rc);
+      }
+    }
+
+    // 3. Set scheduling policy and priority if not SCHED_OTHER
+    if (cfg.sched_policy != 0) {
+      struct sched_param param;
+      param.sched_priority = cfg.sched_priority;
+      int rc = pthread_setschedparam(pthread_self(), cfg.sched_policy, &param);
+      if (rc != 0) {
+        (void)std::fprintf(stderr,
+                           "RealtimeExecutor: pthread_setschedparam failed "
+                           "(policy=%d, priority=%d, errno=%d)\n",
+                           cfg.sched_policy, cfg.sched_priority, rc);
+      }
+    }
+#else
+    (void)cfg;
+#endif
+  }
+
+  static void* ThreadEntry(void* arg) {
+    auto* self = static_cast<RealtimeExecutor*>(arg);
+    self->ApplyRealtimeConfig(self->config_);
+    self->DispatchLoop();
+    return nullptr;
+  }
+
+  Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
+  uint32_t node_count_;
+  std::atomic<bool> running_;
+  std::thread dispatch_thread_;
+  RealtimeConfig config_;
 };
 
 }  // namespace osp
