@@ -42,6 +42,7 @@ add_executable(osp_tests
     test_qos.cpp
     test_app.cpp
     test_post.cpp
+    test_transport_factory.cpp
 )
 target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
 
