@@ -1,0 +1,14 @@
+build/
+build-*/
+cmake-build-*/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Compiled binaries
+*.o
+*.a
+*.so
+*.dylib

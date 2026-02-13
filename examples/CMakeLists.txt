@@ -1,0 +1,22 @@
+# --------------------------------------------------------------------------
+# osp examples
+# --------------------------------------------------------------------------
+
+find_package(Threads REQUIRED)
+
+# Helper: add an example executable that links to osp + Threads::Threads
+function(add_osp_example target source)
+    add_executable(${target} ${source})
+    target_link_libraries(${target} PRIVATE osp Threads::Threads)
+    target_compile_features(${target} PRIVATE cxx_std_17)
+endfunction()
+
+# --- demo executables -----------------------------------------------------
+add_osp_example(osp_basic_demo      basic_demo.cpp)
+add_osp_example(osp_protocol_demo   protocol_demo.cpp)
+add_osp_example(osp_client_demo     client_demo.cpp)
+add_osp_example(osp_priority_demo   priority_demo.cpp)
+add_osp_example(osp_benchmark       benchmark.cpp)
+
+# Benchmark builds with -O3 regardless of the global build type
+target_compile_options(osp_benchmark PRIVATE -O3)

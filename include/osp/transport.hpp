@@ -1,0 +1,814 @@
+/**
+ * @file transport.hpp
+ * @brief Transparent network transport layer for local/remote node communication.
+ *
+ * Inspired by ZeroMQ patterns. Provides framed TCP transport with manual
+ * serialization, type-safe message forwarding, and NetworkNode integration.
+ *
+ * Header-only, C++17, compatible with -fno-exceptions -fno-rtti.
+ */
+
+#ifndef OSP_TRANSPORT_HPP_
+#define OSP_TRANSPORT_HPP_
+
+#include "osp/platform.hpp"
+#include "osp/vocabulary.hpp"
+#include "osp/socket.hpp"
+#include "osp/bus.hpp"
+#include "osp/node.hpp"
+
+#include <cstdint>
+#include <cstring>
+#include <type_traits>
+#include <variant>
+
+namespace osp {
+
+// ============================================================================
+// Transport Error
+// ============================================================================
+
+enum class TransportError : uint8_t {
+  kConnectionFailed,
+  kBindFailed,
+  kSendFailed,
+  kRecvFailed,
+  kSerializationError,
+  kInvalidFrame,
+  kBufferFull,
+  kNotConnected
+};
+
+// ============================================================================
+// Endpoint
+// ============================================================================
+
+/**
+ * @brief Network endpoint descriptor (host + port).
+ */
+struct Endpoint {
+  char host[64];
+  uint16_t port;
+
+  /**
+   * @brief Create an Endpoint from a host string and port number.
+   * @param addr Host address string (e.g. "127.0.0.1")
+   * @param port Port number in host byte order
+   * @return Endpoint with the host and port populated.
+   */
+  static Endpoint FromString(const char* addr, uint16_t port) noexcept {
+    Endpoint ep;
+    std::memset(ep.host, 0, sizeof(ep.host));
+    if (addr != nullptr) {
+      uint32_t i = 0;
+      for (; i < 63 && addr[i] != '\0'; ++i) {
+        ep.host[i] = addr[i];
+      }
+      ep.host[i] = '\0';
+    }
+    ep.port = port;
+    return ep;
+  }
+};
+
+// ============================================================================
+// Transport Type
+// ============================================================================
+
+enum class TransportType : uint8_t {
+  kTcp = 0,
+  kUdp = 1
+};
+
+// ============================================================================
+// Frame Protocol Constants
+// ============================================================================
+
+/**
+ * Frame wire format:
+ * +--------+--------+----------+----------+------------------+
+ * | magic  | length | type_idx | sender   | payload          |
+ * | 4 byte | 4 byte | 2 byte   | 4 byte   | variable         |
+ * +--------+--------+----------+----------+------------------+
+ *
+ * magic = 0x4F535000 ("OSP\0")
+ */
+static constexpr uint32_t kFrameMagic = 0x4F535000;
+
+/**
+ * @brief Frame header for the wire protocol.
+ *
+ * Not packed as a struct due to platform padding differences.
+ * Use FrameCodec for manual serialization to/from wire format.
+ */
+struct FrameHeader {
+  uint32_t magic;
+  uint32_t length;       ///< Payload length in bytes.
+  uint16_t type_index;   ///< Variant index of the payload type.
+  uint32_t sender_id;    ///< Sender node identifier.
+};
+
+// ============================================================================
+// Serializer<T> - Default POD serialization
+// ============================================================================
+
+/**
+ * @brief Default serializer for trivially copyable types (memcpy).
+ *
+ * Specialize this template for non-trivially-copyable types that need
+ * custom wire-format encoding.
+ *
+ * @tparam T The type to serialize/deserialize.
+ */
+template <typename T>
+struct Serializer {
+  static_assert(std::is_trivially_copyable<T>::value,
+                "Default Serializer requires trivially copyable type");
+
+  /**
+   * @brief Serialize an object into a buffer.
+   * @param obj The object to serialize.
+   * @param buf Output buffer.
+   * @param buf_size Size of the output buffer in bytes.
+   * @return Number of bytes written, or 0 on failure.
+   */
+  static uint32_t Serialize(const T& obj, void* buf,
+                             uint32_t buf_size) noexcept {
+    if (buf_size < sizeof(T)) return 0;
+    std::memcpy(buf, &obj, sizeof(T));
+    return static_cast<uint32_t>(sizeof(T));
+  }
+
+  /**
+   * @brief Deserialize an object from a buffer.
+   * @param buf Input buffer.
+   * @param size Size of the input data in bytes.
+   * @param out Output object.
+   * @return true on success, false if the buffer is too small.
+   */
+  static bool Deserialize(const void* buf, uint32_t size, T& out) noexcept {
+    if (size < sizeof(T)) return false;
+    std::memcpy(&out, buf, sizeof(T));
+    return true;
+  }
+};
+
+// ============================================================================
+// FrameCodec - Manual Header Serialization
+// ============================================================================
+
+#ifndef OSP_TRANSPORT_MAX_FRAME_SIZE
+#define OSP_TRANSPORT_MAX_FRAME_SIZE 4096U
+#endif
+
+/**
+ * @brief Encodes and decodes frame headers to/from wire format.
+ *
+ * Uses manual memcpy-based serialization to avoid struct packing issues.
+ * Little-endian byte order (native on ARM and x86).
+ */
+class FrameCodec {
+ public:
+  static constexpr uint32_t kHeaderSize = 14;  // 4+4+2+4
+
+  /**
+   * @brief Encode a FrameHeader into a byte buffer.
+   * @param hdr The header to encode.
+   * @param buf Output buffer (must be at least kHeaderSize bytes).
+   * @param buf_size Size of the output buffer.
+   * @return Number of bytes written (kHeaderSize), or 0 on failure.
+   */
+  static uint32_t EncodeHeader(const FrameHeader& hdr, uint8_t* buf,
+                                uint32_t buf_size) noexcept {
+    if (buf_size < kHeaderSize) return 0;
+    std::memcpy(buf + 0, &hdr.magic, 4);
+    std::memcpy(buf + 4, &hdr.length, 4);
+    std::memcpy(buf + 8, &hdr.type_index, 2);
+    std::memcpy(buf + 10, &hdr.sender_id, 4);
+    return kHeaderSize;
+  }
+
+  /**
+   * @brief Decode a FrameHeader from a byte buffer.
+   * @param buf Input buffer (must be at least kHeaderSize bytes).
+   * @param buf_size Size of the input buffer.
+   * @param hdr Output header.
+   * @return true on success, false if the buffer is too small.
+   */
+  static bool DecodeHeader(const uint8_t* buf, uint32_t buf_size,
+                            FrameHeader& hdr) noexcept {
+    if (buf_size < kHeaderSize) return false;
+    std::memcpy(&hdr.magic, buf + 0, 4);
+    std::memcpy(&hdr.length, buf + 4, 4);
+    std::memcpy(&hdr.type_index, buf + 8, 2);
+    std::memcpy(&hdr.sender_id, buf + 10, 4);
+    return true;
+  }
+};
+
+// ============================================================================
+// TcpTransport - Framed TCP Connection
+// ============================================================================
+
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+
+/**
+ * @brief Manages a single TCP connection for sending/receiving framed messages.
+ *
+ * Supports both client mode (Connect) and server mode (AcceptFrom).
+ * Provides reliable, ordered message framing over a TCP stream.
+ */
+class TcpTransport {
+ public:
+  TcpTransport() noexcept : connected_(false) {}
+
+  ~TcpTransport() { Close(); }
+
+  // Move-only
+  TcpTransport(TcpTransport&& other) noexcept
+      : socket_(static_cast<TcpSocket&&>(other.socket_)),
+        connected_(other.connected_) {
+    other.connected_ = false;
+  }
+
+  TcpTransport& operator=(TcpTransport&& other) noexcept {
+    if (this != &other) {
+      Close();
+      socket_ = static_cast<TcpSocket&&>(other.socket_);
+      connected_ = other.connected_;
+      other.connected_ = false;
+    }
+    return *this;
+  }
+
+  TcpTransport(const TcpTransport&) = delete;
+  TcpTransport& operator=(const TcpTransport&) = delete;
+
+  /**
+   * @brief Connect to a remote endpoint (client mode).
+   * @param ep The remote endpoint to connect to.
+   * @return Success or TransportError.
+   */
+  expected<void, TransportError> Connect(const Endpoint& ep) noexcept {
+    auto sock_r = TcpSocket::Create();
+    if (!sock_r.has_value()) {
+      return expected<void, TransportError>::error(
+          TransportError::kConnectionFailed);
+    }
+    socket_ = static_cast<TcpSocket&&>(sock_r.value());
+
+    auto addr_r = SocketAddress::FromIpv4(ep.host, ep.port);
+    if (!addr_r.has_value()) {
+      socket_.Close();
+      return expected<void, TransportError>::error(
+          TransportError::kConnectionFailed);
+    }
+
+    auto conn_r = socket_.Connect(addr_r.value());
+    if (!conn_r.has_value()) {
+      socket_.Close();
+      return expected<void, TransportError>::error(
+          TransportError::kConnectionFailed);
+    }
+
+    // Disable Nagle's algorithm for low-latency framing
+    (void)socket_.SetNoDelay(true);
+    connected_ = true;
+    return expected<void, TransportError>::success();
+  }
+
+  /**
+   * @brief Accept ownership of an already-connected socket (server mode).
+   * @param sock A connected TcpSocket (moved in).
+   */
+  void AcceptFrom(TcpSocket&& sock) noexcept {
+    Close();
+    socket_ = static_cast<TcpSocket&&>(sock);
+    if (socket_.IsValid()) {
+      (void)socket_.SetNoDelay(true);
+      connected_ = true;
+    }
+  }
+
+  /**
+   * @brief Send a framed message over the connection.
+   * @param type_index Variant type index of the payload.
+   * @param sender_id Sender node identifier.
+   * @param payload Pointer to the serialized payload data.
+   * @param payload_len Length of the payload in bytes.
+   * @return Success or TransportError.
+   */
+  expected<void, TransportError> SendFrame(uint16_t type_index,
+                                            uint32_t sender_id,
+                                            const void* payload,
+                                            uint32_t payload_len) noexcept {
+    if (!connected_) {
+      return expected<void, TransportError>::error(
+          TransportError::kNotConnected);
+    }
+
+    if (payload_len > OSP_TRANSPORT_MAX_FRAME_SIZE) {
+      return expected<void, TransportError>::error(
+          TransportError::kBufferFull);
+    }
+
+    // Encode header
+    FrameHeader hdr;
+    hdr.magic = kFrameMagic;
+    hdr.length = payload_len;
+    hdr.type_index = type_index;
+    hdr.sender_id = sender_id;
+
+    uint8_t hdr_buf[FrameCodec::kHeaderSize];
+    FrameCodec::EncodeHeader(hdr, hdr_buf, sizeof(hdr_buf));
+
+    // Send header
+    auto r = SendAll(hdr_buf, FrameCodec::kHeaderSize);
+    if (!r.has_value()) return r;
+
+    // Send payload
+    if (payload_len > 0 && payload != nullptr) {
+      r = SendAll(payload, payload_len);
+      if (!r.has_value()) return r;
+    }
+
+    return expected<void, TransportError>::success();
+  }
+
+  /**
+   * @brief Receive a framed message (blocking).
+   * @param hdr Output frame header.
+   * @param payload_buf Buffer to receive the payload into.
+   * @param buf_size Size of the payload buffer.
+   * @return Number of payload bytes received, or TransportError.
+   */
+  expected<uint32_t, TransportError> RecvFrame(
+      FrameHeader& hdr, void* payload_buf, uint32_t buf_size) noexcept {
+    if (!connected_) {
+      return expected<uint32_t, TransportError>::error(
+          TransportError::kNotConnected);
+    }
+
+    // Receive header
+    uint8_t hdr_buf[FrameCodec::kHeaderSize];
+    auto r = RecvAll(hdr_buf, FrameCodec::kHeaderSize);
+    if (!r.has_value()) return expected<uint32_t, TransportError>::error(
+        r.get_error());
+
+    if (!FrameCodec::DecodeHeader(hdr_buf, FrameCodec::kHeaderSize, hdr)) {
+      return expected<uint32_t, TransportError>::error(
+          TransportError::kInvalidFrame);
+    }
+
+    // Validate magic
+    if (hdr.magic != kFrameMagic) {
+      return expected<uint32_t, TransportError>::error(
+          TransportError::kInvalidFrame);
+    }
+
+    // Validate payload size
+    if (hdr.length > buf_size) {
+      return expected<uint32_t, TransportError>::error(
+          TransportError::kBufferFull);
+    }
+
+    // Receive payload
+    if (hdr.length > 0) {
+      auto pr = RecvAll(payload_buf, hdr.length);
+      if (!pr.has_value()) return expected<uint32_t, TransportError>::error(
+          pr.get_error());
+    }
+
+    return expected<uint32_t, TransportError>::success(hdr.length);
+  }
+
+  /** @brief Check if the transport is connected. */
+  bool IsConnected() const noexcept { return connected_; }
+
+  /** @brief Close the transport connection. */
+  void Close() noexcept {
+    socket_.Close();
+    connected_ = false;
+  }
+
+ private:
+  /**
+   * @brief Send exactly len bytes over the socket.
+   * @param data Pointer to the data to send.
+   * @param len Number of bytes to send.
+   * @return Success or TransportError::kSendFailed.
+   */
+  expected<void, TransportError> SendAll(const void* data,
+                                          uint32_t len) noexcept {
+    const uint8_t* ptr = static_cast<const uint8_t*>(data);
+    uint32_t remaining = len;
+    while (remaining > 0) {
+      auto r = socket_.Send(ptr, remaining);
+      if (!r.has_value()) {
+        connected_ = false;
+        return expected<void, TransportError>::error(
+            TransportError::kSendFailed);
+      }
+      if (r.value() == 0) {
+        connected_ = false;
+        return expected<void, TransportError>::error(
+            TransportError::kSendFailed);
+      }
+      uint32_t sent = static_cast<uint32_t>(r.value());
+      ptr += sent;
+      remaining -= sent;
+    }
+    return expected<void, TransportError>::success();
+  }
+
+  /**
+   * @brief Receive exactly len bytes from the socket.
+   * @param data Pointer to the receive buffer.
+   * @param len Number of bytes to receive.
+   * @return Success or TransportError::kRecvFailed.
+   */
+  expected<void, TransportError> RecvAll(void* data, uint32_t len) noexcept {
+    uint8_t* ptr = static_cast<uint8_t*>(data);
+    uint32_t remaining = len;
+    while (remaining > 0) {
+      auto r = socket_.Recv(ptr, remaining);
+      if (!r.has_value()) {
+        connected_ = false;
+        return expected<void, TransportError>::error(
+            TransportError::kRecvFailed);
+      }
+      if (r.value() == 0) {
+        // Connection closed by peer
+        connected_ = false;
+        return expected<void, TransportError>::error(
+            TransportError::kRecvFailed);
+      }
+      uint32_t received = static_cast<uint32_t>(r.value());
+      ptr += received;
+      remaining -= received;
+    }
+    return expected<void, TransportError>::success();
+  }
+
+  TcpSocket socket_;
+  bool connected_;
+};
+
+// ============================================================================
+// NetworkNode<PayloadVariant> - Node with Remote Pub/Sub
+// ============================================================================
+
+/**
+ * @brief Extends Node with transparent remote publish/subscribe over TCP.
+ *
+ * Allows nodes on different machines to exchange typed messages over the
+ * network. Uses TcpTransport for framing and Serializer<T> for wire encoding.
+ *
+ * @tparam PayloadVariant A std::variant<...> of user-defined message types.
+ */
+template <typename PayloadVariant>
+class NetworkNode : public Node<PayloadVariant> {
+ public:
+  using BusType = AsyncBus<PayloadVariant>;
+  using EnvelopeType = MessageEnvelope<PayloadVariant>;
+
+  /**
+   * @brief Construct a named network node.
+   * @param name Node name (truncated to kNodeNameMaxLen chars).
+   * @param id Unique sender ID for message tracing.
+   */
+  explicit NetworkNode(const char* name, uint32_t id = 0) noexcept
+      : Node<PayloadVariant>(name, id),
+        pub_count_(0),
+        sub_count_(0),
+        listening_(false) {
+    for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
+      publishers_[i].active = false;
+      publishers_[i].type_index = 0;
+      subscribers_[i].active = false;
+      subscribers_[i].type_index = 0;
+    }
+  }
+
+  ~NetworkNode() {
+    for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
+      if (publishers_[i].active) {
+        publishers_[i].transport.Close();
+        publishers_[i].active = false;
+      }
+      if (subscribers_[i].active) {
+        subscribers_[i].transport.Close();
+        subscribers_[i].active = false;
+      }
+    }
+    listener_.Close();
+  }
+
+  NetworkNode(const NetworkNode&) = delete;
+  NetworkNode& operator=(const NetworkNode&) = delete;
+  NetworkNode(NetworkNode&&) = delete;
+  NetworkNode& operator=(NetworkNode&&) = delete;
+
+  /**
+   * @brief Advertise messages of type T to a remote endpoint.
+   *
+   * Connects to the remote endpoint and registers a local subscription
+   * that forwards matching messages over the TCP transport.
+   *
+   * @tparam T The message type to forward remotely.
+   * @param ep The remote endpoint to connect to.
+   * @return Success or TransportError.
+   */
+  template <typename T>
+  expected<void, TransportError> AdvertiseTo(const Endpoint& ep) noexcept {
+    if (pub_count_ >= kMaxRemoteConnections) {
+      return expected<void, TransportError>::error(
+          TransportError::kBufferFull);
+    }
+
+    constexpr uint16_t type_idx = static_cast<uint16_t>(
+        VariantIndex<T, PayloadVariant>::value);
+
+    // Find a free slot
+    uint32_t slot = kMaxRemoteConnections;
+    for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
+      if (!publishers_[i].active) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot >= kMaxRemoteConnections) {
+      return expected<void, TransportError>::error(
+          TransportError::kBufferFull);
+    }
+
+    auto r = publishers_[slot].transport.Connect(ep);
+    if (!r.has_value()) return r;
+
+    publishers_[slot].type_index = type_idx;
+    publishers_[slot].active = true;
+    ++pub_count_;
+
+    // Subscribe locally to type T: forward matching messages over transport.
+    // We capture the slot index to send through the correct transport.
+    RemotePublisher* pub_ptr = &publishers_[slot];
+    uint32_t sender_id = this->Id();
+
+    auto sub_r = this->template Subscribe<T>(
+        [pub_ptr, sender_id](const T& data, const MessageHeader& /*hdr*/) {
+          if (!pub_ptr->active) return;
+
+          uint8_t payload_buf[OSP_TRANSPORT_MAX_FRAME_SIZE];
+          uint32_t len = Serializer<T>::Serialize(
+              data, payload_buf, sizeof(payload_buf));
+          if (len == 0) return;
+
+          (void)pub_ptr->transport.SendFrame(
+              pub_ptr->type_index, sender_id, payload_buf, len);
+        });
+
+    if (!sub_r.has_value()) {
+      publishers_[slot].transport.Close();
+      publishers_[slot].active = false;
+      --pub_count_;
+      return expected<void, TransportError>::error(
+          TransportError::kConnectionFailed);
+    }
+
+    return expected<void, TransportError>::success();
+  }
+
+  /**
+   * @brief Subscribe to messages of type T from a remote endpoint.
+   *
+   * Connects to the remote endpoint. Use ProcessRemote() to poll for
+   * incoming messages and inject them into the local bus.
+   *
+   * @tparam T The message type to receive remotely.
+   * @param ep The remote endpoint to connect to.
+   * @return Success or TransportError.
+   */
+  template <typename T>
+  expected<void, TransportError> SubscribeFrom(const Endpoint& ep) noexcept {
+    if (sub_count_ >= kMaxRemoteConnections) {
+      return expected<void, TransportError>::error(
+          TransportError::kBufferFull);
+    }
+
+    constexpr uint16_t type_idx = static_cast<uint16_t>(
+        VariantIndex<T, PayloadVariant>::value);
+
+    // Find a free slot
+    uint32_t slot = kMaxRemoteConnections;
+    for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
+      if (!subscribers_[i].active) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot >= kMaxRemoteConnections) {
+      return expected<void, TransportError>::error(
+          TransportError::kBufferFull);
+    }
+
+    auto r = subscribers_[slot].transport.Connect(ep);
+    if (!r.has_value()) return r;
+
+    subscribers_[slot].type_index = type_idx;
+    subscribers_[slot].active = true;
+    ++sub_count_;
+
+    return expected<void, TransportError>::success();
+  }
+
+  /**
+   * @brief Process remote subscriber connections (call periodically).
+   *
+   * For each active remote subscriber, attempts a blocking receive of one
+   * frame, deserializes the payload, and publishes it to the local bus.
+   *
+   * NOTE: For non-blocking behavior, set sockets to non-blocking mode
+   * before calling this method.
+   *
+   * @return Number of messages processed from remote sources.
+   */
+  uint32_t ProcessRemote() noexcept {
+    uint32_t processed = 0;
+
+    for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
+      if (!subscribers_[i].active) continue;
+      if (!subscribers_[i].transport.IsConnected()) {
+        subscribers_[i].active = false;
+        --sub_count_;
+        continue;
+      }
+
+      FrameHeader hdr;
+      uint8_t payload_buf[OSP_TRANSPORT_MAX_FRAME_SIZE];
+
+      auto r = subscribers_[i].transport.RecvFrame(
+          hdr, payload_buf, sizeof(payload_buf));
+      if (!r.has_value()) continue;
+
+      // Dispatch based on type_index by visiting variant alternatives
+      if (DeserializeAndPublish(hdr.type_index, hdr.sender_id,
+                                 payload_buf, r.value())) {
+        ++processed;
+      }
+    }
+
+    return processed;
+  }
+
+  /**
+   * @brief Start listening for incoming connections on the given port.
+   * @param port TCP port to listen on (0 for OS-assigned).
+   * @return Success or TransportError.
+   */
+  expected<void, TransportError> Listen(uint16_t port) noexcept {
+    auto listener_r = TcpListener::Create();
+    if (!listener_r.has_value()) {
+      return expected<void, TransportError>::error(
+          TransportError::kBindFailed);
+    }
+    listener_ = static_cast<TcpListener&&>(listener_r.value());
+
+    // Set SO_REUSEADDR
+    int opt = 1;
+    ::setsockopt(listener_.Fd(), SOL_SOCKET, SO_REUSEADDR, &opt,
+                 static_cast<socklen_t>(sizeof(opt)));
+
+    auto addr_r = SocketAddress::FromIpv4("0.0.0.0", port);
+    if (!addr_r.has_value()) {
+      listener_.Close();
+      return expected<void, TransportError>::error(
+          TransportError::kBindFailed);
+    }
+
+    auto bind_r = listener_.Bind(addr_r.value());
+    if (!bind_r.has_value()) {
+      listener_.Close();
+      return expected<void, TransportError>::error(
+          TransportError::kBindFailed);
+    }
+
+    auto listen_r = listener_.Listen(8);
+    if (!listen_r.has_value()) {
+      listener_.Close();
+      return expected<void, TransportError>::error(
+          TransportError::kBindFailed);
+    }
+
+    listening_ = true;
+    return expected<void, TransportError>::success();
+  }
+
+  /**
+   * @brief Accept one incoming connection and store it as a subscriber.
+   * @return Success or TransportError.
+   */
+  expected<void, TransportError> AcceptOne() noexcept {
+    if (!listening_ || !listener_.IsValid()) {
+      return expected<void, TransportError>::error(
+          TransportError::kNotConnected);
+    }
+
+    auto accept_r = listener_.Accept();
+    if (!accept_r.has_value()) {
+      return expected<void, TransportError>::error(
+          TransportError::kConnectionFailed);
+    }
+
+    // Find a free subscriber slot
+    for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
+      if (!subscribers_[i].active) {
+        subscribers_[i].transport.AcceptFrom(
+            static_cast<TcpSocket&&>(accept_r.value()));
+        subscribers_[i].type_index = 0;  // Will be determined by frame data
+        subscribers_[i].active = true;
+        ++sub_count_;
+        return expected<void, TransportError>::success();
+      }
+    }
+
+    // No free slots
+    return expected<void, TransportError>::error(TransportError::kBufferFull);
+  }
+
+  /** @brief Get the listener's file descriptor (for getsockname). */
+  int ListenerFd() const noexcept { return listener_.Fd(); }
+
+  /** @brief Check if the node is listening for connections. */
+  bool IsListening() const noexcept { return listening_; }
+
+  /** @brief Get the number of active remote publishers. */
+  uint32_t RemotePublisherCount() const noexcept { return pub_count_; }
+
+  /** @brief Get the number of active remote subscribers. */
+  uint32_t RemoteSubscriberCount() const noexcept { return sub_count_; }
+
+ private:
+  static constexpr uint32_t kMaxRemoteConnections = 8;
+
+  struct RemotePublisher {
+    TcpTransport transport;
+    uint16_t type_index;
+    bool active;
+  };
+
+  struct RemoteSubscriber {
+    TcpTransport transport;
+    uint16_t type_index;
+    bool active;
+  };
+
+  /**
+   * @brief Deserialize payload and publish to local bus based on type_index.
+   *
+   * Uses a compile-time visitor over the variant alternatives to find the
+   * matching type for deserialization.
+   */
+  bool DeserializeAndPublish(uint16_t type_index, uint32_t sender_id,
+                              const void* data, uint32_t len) noexcept {
+    return DeserializeAtIndex<0>(type_index, sender_id, data, len);
+  }
+
+  /**
+   * @brief Recursive template to match type_index to a variant alternative.
+   */
+  template <size_t I>
+  typename std::enable_if<(I < std::variant_size<PayloadVariant>::value),
+                          bool>::type
+  DeserializeAtIndex(uint16_t type_index, uint32_t sender_id,
+                      const void* data, uint32_t len) noexcept {
+    if (type_index == static_cast<uint16_t>(I)) {
+      using T = typename std::variant_alternative<I, PayloadVariant>::type;
+      T obj;
+      if (!Serializer<T>::Deserialize(data, len, obj)) return false;
+      BusType::Instance().Publish(PayloadVariant(obj), sender_id);
+      return true;
+    }
+    return DeserializeAtIndex<I + 1>(type_index, sender_id, data, len);
+  }
+
+  template <size_t I>
+  typename std::enable_if<(I >= std::variant_size<PayloadVariant>::value),
+                          bool>::type
+  DeserializeAtIndex(uint16_t /*type_index*/, uint32_t /*sender_id*/,
+                      const void* /*data*/, uint32_t /*len*/) noexcept {
+    return false;
+  }
+
+  RemotePublisher publishers_[kMaxRemoteConnections];
+  RemoteSubscriber subscribers_[kMaxRemoteConnections];
+  uint32_t pub_count_;
+  uint32_t sub_count_;
+  TcpListener listener_;
+  bool listening_;
+};
+
+#endif  // defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+
+}  // namespace osp
+
+#endif  // OSP_TRANSPORT_HPP_

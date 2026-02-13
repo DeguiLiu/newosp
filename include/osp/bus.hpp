@@ -27,8 +27,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
-#include <mutex>
-#include <shared_mutex>
+#include <thread>
 #include <type_traits>
 #include <variant>
 
@@ -200,6 +199,141 @@ struct VariantIndexImpl<T, I, std::variant<First, Rest...>> {
 
 }  // namespace detail
 
+// ============================================================================
+// SpinLock with Exponential Backoff (osp::detail)
+// ============================================================================
+
+namespace detail {
+
+/**
+ * @brief Lightweight exclusive spin lock with exponential backoff.
+ *
+ * Based on std::atomic_flag. Uses architecture-specific pause/yield hints
+ * to reduce contention on the cache line. Zero heap allocation, trivially
+ * constructible.
+ */
+class SpinLock {
+ public:
+  SpinLock() noexcept = default;
+
+  void lock() noexcept {
+    uint32_t backoff = 1;
+    while (flag_.test_and_set(std::memory_order_acquire)) {
+      for (uint32_t i = 0; i < backoff; ++i) {
+        CpuRelax();
+      }
+      if (backoff < kMaxBackoff) {
+        backoff <<= 1;
+      }
+    }
+  }
+
+  void unlock() noexcept { flag_.clear(std::memory_order_release); }
+
+  bool try_lock() noexcept {
+    return !flag_.test_and_set(std::memory_order_acquire);
+  }
+
+ private:
+  static constexpr uint32_t kMaxBackoff = 1024;
+
+  static void CpuRelax() noexcept {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    asm volatile("yield" ::: "memory");
+#else
+    std::this_thread::yield();
+#endif
+  }
+
+  std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
+};
+
+/**
+ * @brief Reader-writer spin lock using atomic counter with exponential backoff.
+ *
+ * Readers increment a shared counter; a writer sets a flag and waits for all
+ * readers to drain. Designed for short critical sections where
+ * std::shared_mutex overhead dominates actual work (e.g., callback dispatch).
+ *
+ * State encoding:
+ *   state_ >= 0  : number of active readers (0 = unlocked)
+ *   state_ == -1 : writer holds exclusive lock
+ */
+class SharedSpinLock {
+ public:
+  SharedSpinLock() noexcept = default;
+
+  /** @brief Acquire shared (reader) lock. */
+  void lock_shared() noexcept {
+    uint32_t backoff = 1;
+    for (;;) {
+      int32_t state = state_.load(std::memory_order_relaxed);
+      // Only acquire if no writer is active (state >= 0)
+      if (state >= 0 &&
+          state_.compare_exchange_weak(state, state + 1,
+                                       std::memory_order_acquire,
+                                       std::memory_order_relaxed)) {
+        return;
+      }
+      Backoff(backoff);
+    }
+  }
+
+  /** @brief Release shared (reader) lock. */
+  void unlock_shared() noexcept {
+    state_.fetch_sub(1, std::memory_order_release);
+  }
+
+  /** @brief Acquire exclusive (writer) lock. */
+  void lock() noexcept {
+    uint32_t backoff = 1;
+    // Step 1: Acquire writer flag (transition 0 -> -1)
+    for (;;) {
+      int32_t expected = 0;
+      if (state_.compare_exchange_weak(expected, kWriterActive,
+                                       std::memory_order_acquire,
+                                       std::memory_order_relaxed)) {
+        return;
+      }
+      Backoff(backoff);
+    }
+  }
+
+  /** @brief Release exclusive (writer) lock. */
+  void unlock() noexcept {
+    state_.store(0, std::memory_order_release);
+  }
+
+ private:
+  static constexpr int32_t kWriterActive = -1;
+  static constexpr uint32_t kMaxBackoff = 1024;
+
+  static void CpuRelax() noexcept {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    asm volatile("yield" ::: "memory");
+#else
+    std::this_thread::yield();
+#endif
+  }
+
+  static void Backoff(uint32_t& backoff) noexcept {
+    for (uint32_t i = 0; i < backoff; ++i) {
+      CpuRelax();
+    }
+    if (backoff < kMaxBackoff) {
+      backoff <<= 1;
+    }
+  }
+
+  std::atomic<int32_t> state_{0};
+};
+
+}  // namespace detail
+
 template <typename T, typename Variant>
 struct VariantIndex;
 
@@ -307,7 +441,7 @@ class AsyncBus {
     static_assert(type_idx < OSP_BUS_MAX_MESSAGE_TYPES,
                   "Type index exceeds OSP_BUS_MAX_MESSAGE_TYPES");
 
-    std::unique_lock<std::shared_mutex> lock(callback_mutex_);
+    callback_spin_lock_.lock();
 
     CallbackSlot& slot = callback_table_[type_idx];
     uint32_t callback_id = next_callback_id_++;
@@ -318,10 +452,13 @@ class AsyncBus {
         slot.entries[i].callback = CallbackType(std::forward<Func>(func));
         slot.entries[i].active = true;
         ++slot.count;
-        return SubscriptionHandle{static_cast<uint32_t>(type_idx), callback_id};
+        SubscriptionHandle handle{static_cast<uint32_t>(type_idx), callback_id};
+        callback_spin_lock_.unlock();
+        return handle;
       }
     }
 
+    callback_spin_lock_.unlock();
     return SubscriptionHandle::Invalid();
   }
 
@@ -336,7 +473,7 @@ class AsyncBus {
 
     CallbackType old_callback;
     {
-      std::unique_lock<std::shared_mutex> lock(callback_mutex_);
+      callback_spin_lock_.lock();
 
       CallbackSlot& slot = callback_table_[handle.type_index];
       for (uint32_t i = 0; i < OSP_BUS_MAX_CALLBACKS_PER_TYPE; ++i) {
@@ -349,6 +486,8 @@ class AsyncBus {
           break;
         }
       }
+
+      callback_spin_lock_.unlock();
     }
     // old_callback destroyed outside lock (safe re-entrancy)
     return static_cast<bool>(old_callback);
@@ -375,6 +514,14 @@ class AsyncBus {
       uint32_t seq = node.sequence.load(std::memory_order_acquire);
 
       if (seq != expected_seq) break;
+
+      // Prefetch next ring buffer slot for reduced cache miss latency
+#ifdef __GNUC__
+      if (i + 1 < kBatchSize) {
+        __builtin_prefetch(
+            &ring_buffer_[(cons_pos + 1) & kBufferMask], 0, 1);
+      }
+#endif
 
       DispatchMessage(node.envelope);
 
@@ -436,7 +583,7 @@ class AsyncBus {
   void Reset() noexcept {
     // Clear all subscriptions
     {
-      std::unique_lock<std::shared_mutex> lock(callback_mutex_);
+      callback_spin_lock_.lock();
       for (auto& slot : callback_table_) {
         for (auto& entry : slot.entries) {
           entry.active = false;
@@ -444,6 +591,7 @@ class AsyncBus {
         }
         slot.count = 0;
       }
+      callback_spin_lock_.unlock();
     }
 
     // Reset ring buffer sequences
@@ -581,16 +729,21 @@ class AsyncBus {
     size_t type_idx = envelope.payload.index();
     if (type_idx >= OSP_BUS_MAX_MESSAGE_TYPES) return;
 
-    std::shared_lock<std::shared_mutex> lock(callback_mutex_);
+    callback_spin_lock_.lock_shared();
 
     const CallbackSlot& slot = callback_table_[type_idx];
-    if (slot.count == 0) return;
+    if (slot.count == 0) {
+      callback_spin_lock_.unlock_shared();
+      return;
+    }
 
     for (uint32_t i = 0; i < OSP_BUS_MAX_CALLBACKS_PER_TYPE; ++i) {
       if (slot.entries[i].active) {
         slot.entries[i].callback(envelope);
       }
     }
+
+    callback_spin_lock_.unlock_shared();
   }
 
   void ReportError(BusError error, uint64_t msg_id) const noexcept {
@@ -624,7 +777,7 @@ class AsyncBus {
 
   BusStatistics stats_;
   std::array<CallbackSlot, OSP_BUS_MAX_MESSAGE_TYPES> callback_table_;
-  mutable std::shared_mutex callback_mutex_;
+  mutable detail::SharedSpinLock callback_spin_lock_;
   std::atomic<BusErrorCallback> error_callback_{nullptr};
 };
 
