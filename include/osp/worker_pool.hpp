@@ -65,6 +65,7 @@
 #define OSP_WORKER_POOL_HPP_
 
 #include "osp/bus.hpp"
+#include "osp/spsc_ringbuffer.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstdint>
@@ -82,6 +83,10 @@
 #ifdef __linux__
 #include <pthread.h>
 #include <sched.h>
+#endif
+
+#ifndef OSP_WORKER_QUEUE_DEPTH
+#define OSP_WORKER_QUEUE_DEPTH 1024U
 #endif
 
 namespace osp {
@@ -155,15 +160,14 @@ class AdaptiveBackoff {
 // Configuration
 // ============================================================================
 
-static constexpr uint32_t kDefaultWorkerQueueDepth = 1024U;
-
 /**
  * @brief WorkerPool configuration.
+ *
+ * Worker queue depth is now compile-time via OSP_WORKER_QUEUE_DEPTH macro.
  */
 struct WorkerPoolConfig {
   osp::FixedString<32> name{"pool"};
   uint32_t worker_num{1U};
-  uint32_t worker_queue_depth{kDefaultWorkerQueueDepth};
   int32_t priority{0};
 #ifdef __linux__
   uint32_t cpu_set_size{0U};
@@ -172,89 +176,12 @@ struct WorkerPoolConfig {
 };
 
 // ============================================================================
-// SpscQueue - Lock-free single-producer single-consumer ring buffer
+// WorkerPool Error Codes
 // ============================================================================
 
-/**
- * @brief Lock-free SPSC ring buffer with cache-line-aligned counters.
- *
- * Capacity is rounded up to the next power of 2 for mask-based indexing.
- * Single producer (dispatcher thread) and single consumer (worker thread).
- *
- * @tparam T Element type (must be movable)
- */
-template <typename T>
-class SpscQueue {
- public:
-  explicit SpscQueue(uint32_t min_capacity) noexcept
-      : capacity_(NextPowerOf2(min_capacity)), mask_(capacity_ - 1U), buffer_(capacity_) {}
-
-  SpscQueue() noexcept : SpscQueue(kDefaultWorkerQueueDepth) {}
-
-  SpscQueue(const SpscQueue&) = delete;
-  SpscQueue& operator=(const SpscQueue&) = delete;
-  SpscQueue(SpscQueue&&) = delete;
-  SpscQueue& operator=(SpscQueue&&) = delete;
-
-  /**
-   * @brief Try to push an element (producer side).
-   * @return true if pushed, false if queue is full.
-   */
-  bool TryPush(const T& item) noexcept {
-    const uint32_t wp = write_pos_.load(std::memory_order_relaxed);
-    const uint32_t rp = read_pos_.load(std::memory_order_acquire);
-    if (wp - rp >= capacity_) {
-      return false;
-    }
-    buffer_[wp & mask_] = item;
-    write_pos_.store(wp + 1U, std::memory_order_release);
-    return true;
-  }
-
-  /**
-   * @brief Try to pop an element (consumer side).
-   * @return true if popped, false if queue is empty.
-   */
-  bool TryPop(T& item) noexcept {
-    const uint32_t rp = read_pos_.load(std::memory_order_relaxed);
-    const uint32_t wp = write_pos_.load(std::memory_order_acquire);
-    if (rp == wp) {
-      return false;
-    }
-    item = std::move(buffer_[rp & mask_]);
-    read_pos_.store(rp + 1U, std::memory_order_release);
-    return true;
-  }
-
-  bool Empty() const noexcept {
-    return read_pos_.load(std::memory_order_acquire) == write_pos_.load(std::memory_order_acquire);
-  }
-
-  uint32_t Size() const noexcept {
-    return write_pos_.load(std::memory_order_acquire) - read_pos_.load(std::memory_order_acquire);
-  }
-
-  uint32_t Capacity() const noexcept { return capacity_; }
-
- private:
-  static uint32_t NextPowerOf2(uint32_t v) noexcept {
-    if (v == 0U) {
-      return 1U;
-    }
-    --v;
-    v |= v >> 1U;
-    v |= v >> 2U;
-    v |= v >> 4U;
-    v |= v >> 8U;
-    v |= v >> 16U;
-    return v + 1U;
-  }
-
-  const uint32_t capacity_;
-  const uint32_t mask_;
-  alignas(osp::kCacheLineSize) std::atomic<uint32_t> write_pos_{0U};
-  alignas(osp::kCacheLineSize) std::atomic<uint32_t> read_pos_{0U};
-  std::vector<T> buffer_;
+enum class WorkerPoolError {
+  kFlushTimeout,      ///< FlushAndPause timed out waiting for workers
+  kWorkerUnhealthy,   ///< One or more worker threads are dead
 };
 
 // ============================================================================
@@ -288,14 +215,11 @@ class WorkerPool {
   explicit WorkerPool(const WorkerPoolConfig& cfg) noexcept
       : name_(cfg.name),
         worker_num_(cfg.worker_num > 0U ? cfg.worker_num : 1U),
-        priority_(cfg.priority),
 #ifdef __linux__
         cpu_set_size_(cfg.cpu_set_size),
         cpu_set_(cfg.cpu_set),
 #endif
-        worker_queue_depth_(cfg.worker_queue_depth > 0U ? cfg.worker_queue_depth : kDefaultWorkerQueueDepth) {
-    dispatch_funcs_.fill(nullptr);
-    handler_ptrs_.fill(nullptr);
+        priority_(cfg.priority) {
   }
 
   ~WorkerPool() noexcept {
@@ -312,7 +236,7 @@ class WorkerPool {
   // ======================== Handler Registration ========================
 
   /**
-   * @brief Register a handler for message type T.
+   * @brief Register a handler for message type T (function pointer overload).
    *
    * Must be called before Start(). Handler is invoked in worker threads.
    *
@@ -323,12 +247,38 @@ class WorkerPool {
   void RegisterHandler(void (*handler)(const T&, const osp::MessageHeader&)) noexcept {
     constexpr size_t idx = osp::VariantIndex<T, PayloadVariant>::value;
     static_assert(idx < kMaxTypes, "Type not in PayloadVariant");
-    static_assert(sizeof(void*) >= sizeof(handler), "Function pointer must fit in void*");
-    dispatch_funcs_[idx] = &TypedDispatch<T>;
-    void* ptr = nullptr;
-    // MISRA Deviation: Rule 11.1 (function pointer to void*) - type erasure for generic dispatch
-    std::memcpy(&ptr, &handler, sizeof(handler));
-    handler_ptrs_[idx] = ptr;
+    auto fn_ptr = handler;
+    handlers_[idx] = HandlerFn([fn_ptr](const EnvelopeType& env) {
+      const T* data = std::get_if<T>(&env.payload);
+      if (data != nullptr) {
+        fn_ptr(*data, env.header);
+      }
+    });
+  }
+
+  /**
+   * @brief Register a callable handler for message type T.
+   *
+   * Accepts lambdas (with captures), function objects, etc.
+   * Must be called before Start(). Handler is invoked in worker threads.
+   *
+   * @tparam T    Message type (must be in PayloadVariant)
+   * @tparam Func Callable: void(const T&, const MessageHeader&)
+   */
+  template <typename T, typename Func,
+            typename = typename std::enable_if<
+                !std::is_convertible<Func, void (*)(const T&, const osp::MessageHeader&)>::value
+            >::type>
+  void RegisterHandler(Func&& func) noexcept {
+    constexpr size_t idx = osp::VariantIndex<T, PayloadVariant>::value;
+    static_assert(idx < kMaxTypes, "Type not in PayloadVariant");
+    handlers_[idx] = HandlerFn(
+        [f = static_cast<Func&&>(func)](const EnvelopeType& env) {
+          const T* data = std::get_if<T>(&env.payload);
+          if (data != nullptr) {
+            f(*data, env.header);
+          }
+        });
   }
 
   // ======================== Lifecycle ========================
@@ -348,7 +298,7 @@ class WorkerPool {
 
     workers_.reserve(worker_num_);
     for (uint32_t i = 0U; i < worker_num_; ++i) {
-      workers_.push_back(std::make_unique<WorkerContext>(worker_queue_depth_));
+      workers_.push_back(std::make_unique<WorkerContext>());
     }
 
     SubscribeAll(static_cast<PayloadVariant*>(nullptr));
@@ -362,6 +312,8 @@ class WorkerPool {
 
   /**
    * @brief Shutdown: stop accepting jobs, drain queues, join all threads.
+   *
+   * Handles dead worker threads gracefully - only joins threads that are still joinable.
    */
   void Shutdown() noexcept {
     if (!running_.load(std::memory_order_acquire)) {
@@ -369,10 +321,12 @@ class WorkerPool {
     }
     shutdown_.store(true, std::memory_order_release);
 
+    // Join dispatcher thread if still alive
     if (dispatcher_thread_.joinable()) {
       dispatcher_thread_.join();
     }
 
+    // Wake up all workers
     for (uint32_t i = 0U; i < worker_num_; ++i) {
       {
         std::lock_guard<std::mutex> lk(workers_[i]->mtx);
@@ -380,6 +334,7 @@ class WorkerPool {
       workers_[i]->cv.notify_one();
     }
 
+    // Join worker threads (skip if already dead)
     for (auto& t : worker_threads_) {
       if (t.joinable()) {
         t.join();
@@ -399,17 +354,23 @@ class WorkerPool {
   /**
    * @brief Flush all pending work and pause accepting new jobs.
    *
-   * Blocks until all dispatched jobs are processed by workers.
+   * Blocks until all dispatched jobs are processed by workers, or timeout is reached.
+   *
+   * @param timeout_ms Maximum time to wait in milliseconds (default 5000ms)
+   * @return expected<void, WorkerPoolError> - kFlushTimeout if timeout exceeded
    */
-  void FlushAndPause() noexcept {
+  osp::expected<void, WorkerPoolError> FlushAndPause(uint32_t timeout_ms = 5000U) noexcept {
     paused_.store(true, std::memory_order_release);
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto timeout = std::chrono::milliseconds(timeout_ms);
 
     // Wait until bus is drained, all worker queues empty, and all dispatched jobs processed
     while (true) {
       bool bus_empty = (BusType::Instance().Depth() == 0U);
       bool workers_empty = true;
       for (uint32_t i = 0U; i < worker_num_; ++i) {
-        if (workers_[i] && !workers_[i]->queue.Empty()) {
+        if (workers_[i] && !workers_[i]->queue.IsEmpty()) {
           workers_empty = false;
           break;
         }
@@ -417,8 +378,15 @@ class WorkerPool {
       uint64_t disp = dispatched_.load(std::memory_order_acquire);
       uint64_t proc = processed_.load(std::memory_order_acquire);
       if (bus_empty && workers_empty && disp == proc) {
-        break;
+        return osp::expected<void, WorkerPoolError>::success();
       }
+
+      // Check timeout
+      const auto elapsed = std::chrono::steady_clock::now() - start;
+      if (elapsed >= timeout) {
+        return osp::expected<void, WorkerPoolError>::error(WorkerPoolError::kFlushTimeout);
+      }
+
       std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
   }
@@ -458,13 +426,13 @@ class WorkerPool {
   template <typename T>
   bool SubmitSync(T&& payload) noexcept {
     constexpr size_t idx = osp::VariantIndex<T, PayloadVariant>::value;
-    if (dispatch_funcs_[idx] == nullptr) {
+    if (!handlers_[idx]) {
       return false;
     }
     osp::MessageHeader header(0U, SteadyNowUs(), 0U, osp::MessagePriority::kHigh);
     PayloadVariant pv(std::forward<T>(payload));
     EnvelopeType env(header, std::move(pv));
-    dispatch_funcs_[idx](env, handler_ptrs_[idx]);
+    handlers_[idx](env);
     return true;
   }
 
@@ -485,27 +453,51 @@ class WorkerPool {
 
   bool IsPaused() const noexcept { return paused_.load(std::memory_order_acquire); }
 
- private:
-  // ======================== Type-erased dispatch ========================
-
-  using DispatchFunc = void (*)(const EnvelopeType&, void*);
-
-  template <typename T>
-  static void TypedDispatch(const EnvelopeType& env, void* handler_ptr) noexcept {
-    using FuncType = void (*)(const T&, const osp::MessageHeader&);
-    FuncType fn = nullptr;
-    // MISRA Deviation: Rule 11.1 (void* to function pointer) - type erasure recovery for dispatch
-    std::memcpy(&fn, &handler_ptr, sizeof(fn));
-    const T* data = std::get_if<T>(&env.payload);
-    if (data != nullptr) {
-      fn(*data, env.header);
+  /**
+   * @brief Check if all worker threads are healthy (still joinable).
+   *
+   * A worker thread becomes unjoinable if it has terminated unexpectedly
+   * (e.g., due to a crash in a callback).
+   *
+   * @return expected<void, WorkerPoolError> - kWorkerUnhealthy if any worker is dead
+   */
+  osp::expected<void, WorkerPoolError> IsHealthy() const noexcept {
+    if (!running_.load(std::memory_order_acquire)) {
+      return osp::expected<void, WorkerPoolError>::success();  // Not started yet or already shut down - not an error
     }
+
+    for (const auto& t : worker_threads_) {
+      if (!t.joinable()) {
+        return osp::expected<void, WorkerPoolError>::error(WorkerPoolError::kWorkerUnhealthy);
+      }
+    }
+
+    if (!dispatcher_thread_.joinable() && running_.load(std::memory_order_acquire)) {
+      return osp::expected<void, WorkerPoolError>::error(WorkerPoolError::kWorkerUnhealthy);
+    }
+
+    return osp::expected<void, WorkerPoolError>::success();
   }
+
+  /**
+   * @brief Set heartbeat for external watchdog monitoring of dispatcher thread.
+   *
+   * The dispatcher thread will call hb->Beat() each iteration.
+   * Worker threads can be monitored by setting worker heartbeats via
+   * SetWorkerHeartbeat() after Start().
+   */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
+ private:
+
+  /// SBO buffer for handler callable (fits lambda with 1-2 captures).
+  static constexpr size_t kHandlerBufSize = 4 * sizeof(void*);
+  using HandlerFn = osp::FixedFunction<void(const EnvelopeType&), kHandlerBufSize>;
 
   void DispatchEnvelope(const EnvelopeType& env) noexcept {
     const size_t idx = env.payload.index();
-    if (idx < kMaxTypes && dispatch_funcs_[idx] != nullptr) {
-      dispatch_funcs_[idx](env, handler_ptrs_[idx]);
+    if (idx < kMaxTypes && handlers_[idx]) {
+      handlers_[idx](env);
     }
   }
 
@@ -514,7 +506,7 @@ class WorkerPool {
   template <typename T>
   void MaybeSubscribe() noexcept {
     constexpr size_t idx = osp::VariantIndex<T, PayloadVariant>::value;
-    if (dispatch_funcs_[idx] == nullptr) {
+    if (!handlers_[idx]) {
       return;
     }
     auto handle =
@@ -537,7 +529,7 @@ class WorkerPool {
     const uint32_t start = next_worker_.fetch_add(1U, std::memory_order_relaxed) % worker_num_;
     for (uint32_t i = 0U; i < worker_num_; ++i) {
       const uint32_t wid = (start + i) % worker_num_;
-      if (workers_[wid]->queue.TryPush(env)) {
+      if (workers_[wid]->queue.Push(env)) {
         dispatched_.fetch_add(1U, std::memory_order_release);
         { std::lock_guard<std::mutex> lk(workers_[wid]->mtx); }
         workers_[wid]->cv.notify_one();
@@ -554,6 +546,7 @@ class WorkerPool {
     detail::AdaptiveBackoff backoff;
 
     while (!shutdown_.load(std::memory_order_acquire)) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       uint32_t count = BusType::Instance().ProcessBatch();
       if (count > 0U) {
         backoff.Reset();
@@ -585,7 +578,7 @@ class WorkerPool {
     detail::AdaptiveBackoff backoff;
 
     while (!shutdown_.load(std::memory_order_acquire)) {
-      if (ctx.queue.TryPop(env)) {
+      if (ctx.queue.Pop(env)) {
         DispatchEnvelope(env);
         processed_.fetch_add(1U, std::memory_order_release);
         backoff.Reset();
@@ -601,12 +594,12 @@ class WorkerPool {
       // Fall through to CV wait (final backoff phase)
       std::unique_lock<std::mutex> lk(ctx.mtx);
       ctx.cv.wait_for(lk, std::chrono::milliseconds(1),
-                      [&] { return !ctx.queue.Empty() || shutdown_.load(std::memory_order_acquire); });
+                      [&] { return !ctx.queue.IsEmpty() || shutdown_.load(std::memory_order_acquire); });
       backoff.Reset();
     }
 
     // Drain remaining
-    while (ctx.queue.TryPop(env)) {
+    while (ctx.queue.Pop(env)) {
       DispatchEnvelope(env);
       processed_.fetch_add(1U, std::memory_order_release);
     }
@@ -633,11 +626,11 @@ class WorkerPool {
   // ======================== Worker context ========================
 
   struct WorkerContext {
-    SpscQueue<EnvelopeType> queue;
+    osp::SpscRingbuffer<EnvelopeType, OSP_WORKER_QUEUE_DEPTH> queue;
     std::mutex mtx;
     std::condition_variable cv;
 
-    explicit WorkerContext(uint32_t depth) noexcept : queue(depth) {}
+    WorkerContext() noexcept = default;
     WorkerContext(const WorkerContext&) = delete;
     WorkerContext& operator=(const WorkerContext&) = delete;
     WorkerContext(WorkerContext&&) = delete;
@@ -648,15 +641,13 @@ class WorkerPool {
 
   osp::FixedString<32> name_;
   const uint32_t worker_num_;
-  const int32_t priority_;
 #ifdef __linux__
   const uint32_t cpu_set_size_{0U};
   const cpu_set_t* cpu_set_{nullptr};
 #endif
-  const uint32_t worker_queue_depth_;
+  const int32_t priority_;
 
-  std::array<DispatchFunc, kMaxTypes> dispatch_funcs_;
-  std::array<void*, kMaxTypes> handler_ptrs_;
+  std::array<HandlerFn, kMaxTypes> handlers_;
 
   std::atomic<bool> running_{false};
   std::atomic<bool> shutdown_{false};
@@ -671,6 +662,7 @@ class WorkerPool {
   std::vector<std::thread> worker_threads_;
   std::thread dispatcher_thread_;
   std::vector<osp::SubscriptionHandle> subscription_handles_;
+  ThreadHeartbeat* heartbeat_{nullptr};  ///< Dispatcher thread heartbeat.
 };
 
 }  // namespace osp

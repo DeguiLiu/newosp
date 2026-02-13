@@ -461,6 +461,9 @@ class DebugShell final {
   /// @brief Check whether the shell is currently running.
   bool IsRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
 
+  /** @brief Set heartbeat for external watchdog monitoring (accept thread). */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
   using Session = detail::ShellSession;
 
@@ -469,6 +472,7 @@ class DebugShell final {
   std::thread accept_thread_;
   Session* sessions_ = nullptr;
   std::atomic<bool> running_{false};
+  ThreadHeartbeat* heartbeat_{nullptr};
 
   /// @brief Accept loop (runs in accept_thread_).
   inline void AcceptLoop();
@@ -529,7 +533,10 @@ inline expected<void, ShellError> DebugShell::Start() {
     return expected<void, ShellError>::error(ShellError::kPortInUse);
   }
 
-  // Allocate session slots.
+  // MISRA C++ Rule 18-4-1 deviation: dynamic allocation required because
+  // max_connections is a runtime config value. ShellSession contains
+  // std::thread (non-trivially-copyable), precluding FixedVector.
+  // Allocated once at Start(), freed at Stop() -- cold path only.
   sessions_ = new Session[cfg_.max_connections];
 
   running_.store(true, std::memory_order_release);
@@ -580,6 +587,7 @@ inline void DebugShell::Stop() {
 
 inline void DebugShell::AcceptLoop() {
   while (running_.load(std::memory_order_relaxed)) {
+    if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
 

@@ -724,7 +724,6 @@ static void BenchWorkerPool() {
   osp::WorkerPoolConfig cfg;
   cfg.name = "bench";
   cfg.worker_num = 2;
-  cfg.worker_queue_depth = 2048;
   osp::WorkerPool<WorkPayload> pool(cfg);
   pool.RegisterHandler<WorkTask>(WorkHandler);
   pool.Start();

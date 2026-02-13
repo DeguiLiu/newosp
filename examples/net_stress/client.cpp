@@ -36,11 +36,13 @@
  */
 
 #include "osp/bus.hpp"
+#include "osp/fault_collector.hpp"
 #include "osp/log.hpp"
 #include "osp/node.hpp"
 #include "osp/shell.hpp"
 #include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
+#include "osp/watchdog.hpp"
 
 #include "client_sm.hpp"
 #include "file_transfer.hpp"
@@ -100,7 +102,6 @@ struct FileThreadState {
   std::thread              thread;
   alignas(alignof(FtCtx))  uint8_t ctx_buf[sizeof(FtCtx)];
   alignas(alignof(FtSm))   uint8_t sm_buf[sizeof(FtSm)];
-  std::atomic<uint64_t>    last_heartbeat_ms{0};  // watchdog heartbeat
   std::atomic<bool>        alive{false};
   std::atomic<bool>        started{false};
   bool                     initialized{false};
@@ -126,17 +127,35 @@ static void GenerateFileData() noexcept {
   }
 }
 
-// File transfer thread function (with heartbeat for watchdog)
+// ============================================================================
+// Watchdog + FaultCollector (replaces hand-written WatchdogCallback)
+// ============================================================================
+
+static constexpr uint32_t kWatchdogTimeoutMs = 10000U;  // 10s no heartbeat
+
+// Fault codes
+static constexpr uint32_t kFaultThreadTimeout  = 0x02010001U;
+static constexpr uint32_t kFaultHighErrorRate  = 0x02020001U;
+static constexpr uint32_t kFaultFileFail       = 0x02030001U;
+
+// Fault indices
+static constexpr uint16_t kFiThreadTimeout = 0U;
+static constexpr uint16_t kFiHighErrorRate = 1U;
+static constexpr uint16_t kFiFileFail      = 2U;
+
+static osp::ThreadWatchdog<kMaxInstances + 1U>  g_watchdog;  // +1 for FCCU
+static osp::FaultCollector<8U, 64U>             g_faults;
+static uint32_t                                 g_wd_slot_ids[kMaxInstances];
+static bool                                      g_wd_registered[kMaxInstances];
+
+// File transfer thread function (watchdog heartbeat via FtCtx)
 static void FileTransferThread(uint32_t idx) noexcept {
   auto& ft = g_file_threads[idx];
   ft.alive.store(true, std::memory_order_relaxed);
-  ft.last_heartbeat_ms.store(NowMs(), std::memory_order_relaxed);
 
   auto& ctx = FtCtxOf(idx);
   bool ok = RunFileTransfer(ctx);
 
-  // Publish progress via bus (if node is available)
-  ft.last_heartbeat_ms.store(NowMs(), std::memory_order_relaxed);
   ft.alive.store(false, std::memory_order_relaxed);
 
   if (ok) {
@@ -144,33 +163,30 @@ static void FileTransferThread(uint32_t idx) noexcept {
                  ctx.client_id);
   } else {
     OSP_LOG_ERROR("FILE", "[%u] Transfer thread failed", ctx.client_id);
+    static_cast<void>(g_faults.ReportFault(
+        kFiFileFail, ctx.client_id, osp::FaultPriority::kHigh));
   }
 }
 
-// ============================================================================
-// Watchdog: detect dead threads
-// ============================================================================
+// Watchdog timeout -> report fault
+static void OnWatchdogTimeout(uint32_t slot_id, const char* name,
+                              void* /*ctx*/) {
+  OSP_LOG_ERROR("WATCHDOG", "Thread '%s' (slot %u) timed out", name, slot_id);
+  static_cast<void>(g_faults.ReportFault(
+      kFiThreadTimeout, slot_id, osp::FaultPriority::kHigh));
+}
 
-static constexpr uint64_t kWatchdogTimeoutMs = 10000U;  // 10s no heartbeat
+// Watchdog recovery -> log
+static void OnWatchdogRecovered(uint32_t slot_id, const char* name,
+                                void* /*ctx*/) {
+  OSP_LOG_INFO("WATCHDOG", "Thread '%s' (slot %u) recovered", name, slot_id);
+  g_faults.ClearFault(kFiThreadTimeout);
+}
 
-static void WatchdogCallback(void* /*ctx*/) {
-  uint64_t now = NowMs();
-  for (uint32_t i = 0; i < g_num_clients; ++i) {
-    auto& ft = g_file_threads[i];
-    if (!ft.started.load(std::memory_order_relaxed)) continue;
-    if (!ft.alive.load(std::memory_order_relaxed)) continue;
+// Error rate check (called by TimerScheduler)
+static void ErrorRateCheckCallback(void* /*ctx*/) {
+  g_watchdog.Check();
 
-    uint64_t last = ft.last_heartbeat_ms.load(std::memory_order_relaxed);
-    if (now - last > kWatchdogTimeoutMs) {
-      OSP_LOG_ERROR("WATCHDOG", "File thread [%u] unresponsive "
-                    "(last heartbeat %lu ms ago)",
-                    i, static_cast<unsigned long>(now - last));
-      // Mark as dead -- main loop can decide to restart or abort
-      ft.alive.store(false, std::memory_order_relaxed);
-    }
-  }
-
-  // Also check echo connectivity
   for (uint32_t i = 0; i < g_num_clients; ++i) {
     auto& c = Ctx(i);
     if (c.connected) {
@@ -179,6 +195,8 @@ static void WatchdogCallback(void* /*ctx*/) {
       if (sent > 10 && err > sent / 2) {
         OSP_LOG_WARN("WATCHDOG", "Client [%u] high error rate: %u/%u",
                      i, err, sent);
+        static_cast<void>(g_faults.ReportFault(
+            kFiHighErrorRate, c.id, osp::FaultPriority::kMedium));
       }
     }
   }
@@ -402,6 +420,47 @@ static int cmd_file(int /*argc*/, char* /*argv*/[]) {
 }
 OSP_SHELL_CMD(cmd_file, "Show file transfer status per client");
 
+static int cmd_watchdog(int /*argc*/, char* /*argv*/[]) {
+  osp::DebugShell::Printf("=== Watchdog Status ===\r\n");
+  osp::DebugShell::Printf("  Active:    %u / %u\r\n",
+                           g_watchdog.ActiveCount(),
+                           g_watchdog.Capacity());
+  osp::DebugShell::Printf("  Timed out: %u\r\n", g_watchdog.TimedOutCount());
+  for (uint32_t i = 0; i < g_num_clients; ++i) {
+    if (!g_file_threads[i].started.load(std::memory_order_relaxed)) continue;
+    if (!g_wd_registered[i]) continue;
+    bool timed_out = g_watchdog.IsTimedOut(osp::WatchdogSlotId(g_wd_slot_ids[i]));
+    osp::DebugShell::Printf("  [%2u] slot=%u %s\r\n",
+                             i, g_wd_slot_ids[i],
+                             timed_out ? "TIMED_OUT" : "ok");
+  }
+  return 0;
+}
+OSP_SHELL_CMD(cmd_watchdog, "Show thread watchdog status");
+
+static int cmd_faults(int /*argc*/, char* /*argv*/[]) {
+  auto fs = g_faults.GetStatistics();
+  osp::DebugShell::Printf("=== Fault Collector ===\r\n");
+  osp::DebugShell::Printf("  Reported:  %lu\r\n",
+                           static_cast<unsigned long>(fs.total_reported));
+  osp::DebugShell::Printf("  Processed: %lu\r\n",
+                           static_cast<unsigned long>(fs.total_processed));
+  osp::DebugShell::Printf("  Dropped:   %lu\r\n",
+                           static_cast<unsigned long>(fs.total_dropped));
+  osp::DebugShell::Printf("  Active:    %u\r\n",
+                           g_faults.ActiveFaultCount());
+  osp::DebugShell::Printf("  By priority:\r\n");
+  static const char* kPriNames[] = {"Critical", "High", "Medium", "Low"};
+  for (uint32_t i = 0; i < 4; ++i) {
+    osp::DebugShell::Printf("    %-8s: reported=%lu dropped=%lu\r\n",
+                             kPriNames[i],
+                             static_cast<unsigned long>(fs.priority_reported[i]),
+                             static_cast<unsigned long>(fs.priority_dropped[i]));
+  }
+  return 0;
+}
+OSP_SHELL_CMD(cmd_faults, "Show fault collector statistics");
+
 static int cmd_quit(int /*argc*/, char* /*argv*/[]) {
   osp::DebugShell::Printf("Shutting down...\r\n");
   g_running.store(false, std::memory_order_relaxed);
@@ -446,6 +505,30 @@ int main(int argc, char* argv[]) {
   StressNode node("stress_client", 1);
   static_cast<void>(node.Start());
   SetupBusSubscribers(node);
+
+  // --- Setup Watchdog + FaultCollector ---
+  g_faults.RegisterFault(kFiThreadTimeout, kFaultThreadTimeout);
+  g_faults.RegisterFault(kFiHighErrorRate, kFaultHighErrorRate);
+  g_faults.RegisterFault(kFiFileFail, kFaultFileFail);
+  g_faults.SetDefaultHook([](const osp::FaultEvent& e) -> osp::HookAction {
+    OSP_LOG_WARN("FAULT", "code=0x%08x detail=0x%08x count=%u",
+                 e.fault_code, e.detail, e.occurrence_count);
+    return osp::HookAction::kHandled;
+  });
+  // Wire fault collector consumer thread heartbeat to watchdog
+  auto fc_reg = g_watchdog.Register("fccu_consumer", kWatchdogTimeoutMs);
+  osp::ThreadHeartbeat* fc_hb = nullptr;
+  if (fc_reg.has_value()) {
+    fc_hb = fc_reg.value().heartbeat;
+    g_faults.SetConsumerHeartbeat(fc_hb);
+  }
+  g_watchdog.SetOnTimeout(OnWatchdogTimeout);
+  g_watchdog.SetOnRecovered(OnWatchdogRecovered);
+  static_cast<void>(g_faults.Start());
+  OSP_SCOPE_EXIT(g_faults.Stop();
+                 if (fc_reg.has_value()) {
+                   static_cast<void>(g_watchdog.Unregister(fc_reg.value().id));
+                 });
 
   // --- Initialize all client instances (placement new) ---
   for (uint32_t i = 0; i < g_num_clients; ++i) {
@@ -535,6 +618,16 @@ int main(int argc, char* argv[]) {
     fc->file_size = kFileSize;
     fc->drop_rate = 0.1f;  // 10% simulated loss
 
+    // Register with watchdog and pass heartbeat to FtCtx
+    char wd_name[32];
+    std::snprintf(wd_name, sizeof(wd_name), "file_tx_%u", Ctx(i).id);
+    auto wd_reg = g_watchdog.Register(wd_name, kWatchdogTimeoutMs);
+    if (wd_reg.has_value()) {
+      g_wd_slot_ids[i] = wd_reg.value().id.value();
+      g_wd_registered[i] = true;
+      fc->heartbeat = wd_reg.value().heartbeat;
+    }
+
     auto* fsm = new (ft.sm_buf) FtSm(*fc);  // NOLINT
     BuildFtSm(*fsm, *fc);
     ft.initialized = true;
@@ -552,15 +645,16 @@ int main(int argc, char* argv[]) {
     OSP_LOG_INFO("CLIENT", "Debug shell: telnet localhost %u",
                  kClientShellPort);
     OSP_LOG_INFO("CLIENT", "  Commands: cmd_p, cmd_s, cmd_stop, "
-                 "cmd_detail, cmd_bus, cmd_file, cmd_quit");
+                 "cmd_detail, cmd_bus, cmd_file, cmd_watchdog, "
+                 "cmd_faults, cmd_quit");
   }
   OSP_SCOPE_EXIT(shell.Stop());
 
-  // --- Timer: periodic echo tick + stats + watchdog ---
+  // --- Timer: periodic echo tick + stats + watchdog check ---
   osp::TimerScheduler<4> timer;
   static_cast<void>(timer.Add(interval_ms, TickCallback, &node));
   static_cast<void>(timer.Add(5000U, StatsCallback, &node));
-  static_cast<void>(timer.Add(3000U, WatchdogCallback));
+  static_cast<void>(timer.Add(3000U, ErrorRateCheckCallback));
   static_cast<void>(timer.Start());
   OSP_SCOPE_EXIT(timer.Stop());
 
@@ -616,11 +710,28 @@ int main(int argc, char* argv[]) {
                static_cast<unsigned long>(bus_stats.messages_published),
                static_cast<unsigned long>(bus_stats.messages_processed),
                static_cast<unsigned long>(bus_stats.messages_dropped));
+
+  auto fault_stats = g_faults.GetStatistics();
+  OSP_LOG_INFO("CLIENT", "--- Watchdog + Faults ---");
+  OSP_LOG_INFO("CLIENT", "Watchdog:  active=%u timed_out=%u",
+               g_watchdog.ActiveCount(), g_watchdog.TimedOutCount());
+  OSP_LOG_INFO("CLIENT", "Faults:    reported=%lu processed=%lu dropped=%lu "
+               "active=%u",
+               static_cast<unsigned long>(fault_stats.total_reported),
+               static_cast<unsigned long>(fault_stats.total_processed),
+               static_cast<unsigned long>(fault_stats.total_dropped),
+               g_faults.ActiveFaultCount());
+
   OSP_LOG_INFO("CLIENT", "===================================");
 
   // Cleanup RPC clients and file transfer objects
   for (uint32_t i = 0; i < g_num_clients; ++i) {
     if (g_file_threads[i].initialized) {
+      // Unregister from watchdog (only if registration succeeded)
+      if (g_wd_registered[i]) {
+        static_cast<void>(g_watchdog.Unregister(
+            osp::WatchdogSlotId(g_wd_slot_ids[i])));
+      }
       FtSmOf(i).~StateMachine();
       FtCtxOf(i).~FtCtx();
       g_file_threads[i].initialized = false;

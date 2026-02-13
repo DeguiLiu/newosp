@@ -282,6 +282,17 @@ class TimerScheduler final {
     return count;
   }
 
+  /**
+   * @brief Set heartbeat for external watchdog monitoring.
+   *
+   * When set, the scheduler loop calls hb->Beat() each iteration,
+   * allowing a ThreadWatchdog to detect if this thread is stuck.
+   * Must be called before Start().
+   *
+   * @param hb  Pointer to ThreadHeartbeat (from ThreadWatchdog::Register).
+   */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
   // --------------------------------------------------------------------------
   // Internal Types
@@ -325,6 +336,7 @@ class TimerScheduler final {
   std::atomic<bool> running_{false};        ///< Scheduler thread active flag.
   std::thread worker_;                      ///< Background scheduler thread.
   mutable std::mutex mutex_;                ///< Guards slots_ and next_id_.
+  ThreadHeartbeat* heartbeat_{nullptr};     ///< External watchdog heartbeat.
 
   // --------------------------------------------------------------------------
   // Scheduler Loop (collect-release-execute pattern)
@@ -343,6 +355,8 @@ class TimerScheduler final {
    */
   void ScheduleLoop() {
     while (running_.load(std::memory_order_acquire)) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+
       PendingTask pending[MaxTasks];
       uint32_t pending_count = 0U;
       uint64_t min_remaining = UINT64_MAX;

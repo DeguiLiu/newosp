@@ -6,12 +6,14 @@
  *   Host sends raw bytes -> Device parser -> DeviceHandler -> response bytes
  *   Device response bytes -> Host parser -> OtaHost::OnResponse
  *
- * newosp components used:
+ * newosp components used (12):
  *   - osp::StateMachine     -- Device OTA state machine + frame parser HSM
  *   - osp::BehaviorTree     -- Host upgrade flow (Sequence of actions)
  *   - osp::DebugShell       -- Telnet debug commands (OSP_SHELL_CMD)
  *   - osp::TimerScheduler   -- Periodic OTA tick + timeout monitoring
  *   - osp::AsyncBus         -- Message bus for OTA event notifications
+ *   - osp::WorkerPool       -- Background event processing (dispatcher + workers)
+ *   - osp::SpscRingbuffer   -- Simulated UART FIFO channels (host <-> device)
  *   - osp::FixedString      -- Stack-allocated status strings
  *   - osp::FixedVector      -- Stack-allocated firmware buffer
  *   - osp::expected         -- Error handling without exceptions
@@ -24,6 +26,8 @@
 #include "osp/shell.hpp"
 #include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
+#include "osp/worker_pool.hpp"
+#include "osp/spsc_ringbuffer.hpp"
 
 #include "protocol.hpp"
 #include "parser.hpp"
@@ -46,9 +50,13 @@ static constexpr uint32_t kFirmwareSize   = 4096U;
 static constexpr uint32_t kChunkSize      = 128U;
 static constexpr uint32_t kFlashStartAddr = 0x0000U;
 static constexpr uint16_t kShellPort      = 5090U;
-static constexpr uint32_t kOtaTickMs      = 5U;     // BT tick interval
-static constexpr uint32_t kTimeoutCheckMs = 500U;    // Timeout monitor interval
-static constexpr uint32_t kMaxOtaTimeMs   = 30000U;  // Max OTA duration
+static constexpr uint32_t kOtaTickMs        = 5U;     // BT tick interval
+static constexpr uint32_t kTimeoutCheckMs   = 500U;   // Timeout monitor interval
+static constexpr uint32_t kMaxOtaTimeMs     = 30000U; // Max OTA duration
+static constexpr uint32_t kWorkerNum        = 2U;     // WorkerPool worker threads
+static constexpr uint32_t kWorkerQueueDepth = 64U;    // Per-worker SPSC queue depth
+static constexpr size_t   kUartFifoSize    = 512U;    // Simulated UART FIFO depth
+static constexpr uint32_t kDropRate        = 5U;      // ~5% data-chunk corruption rate
 
 // ============================================================================
 // Bus Message Types (osp::AsyncBus)
@@ -74,13 +82,14 @@ struct OtaCompleteMsg {
   uint16_t flash_crc;
   uint32_t elapsed_ms;
   uint32_t tick_count;
+  uint32_t retries;
+  uint32_t drops;
 };
 
 using OtaPayload = std::variant<OtaProgressMsg, OtaStateChangeMsg,
                                 OtaCompleteMsg>;
 using OtaBus = osp::AsyncBus<OtaPayload>;
-
-static constexpr uint32_t kBusSenderId = 1U;
+using OtaWorkerPool = osp::WorkerPool<OtaPayload>;
 
 // ============================================================================
 // Global State (for shell command access)
@@ -90,22 +99,78 @@ static ota::FrameParser       g_host_parser;
 static ota::FrameParser       g_device_parser;
 static ota::DeviceHandler<>   g_device;
 static ota::OtaHost*          g_host = nullptr;
+static OtaWorkerPool*         g_pool = nullptr;
 static std::atomic<bool>      g_ota_running{false};
 static std::atomic<uint32_t>  g_tick_count{0};
 static osp::FixedString<32>   g_last_device_state{"Idle"};
 
-// ============================================================================
-// Loopback: Host -> Device parser -> DeviceHandler -> Host parser
-// ============================================================================
+// Simulated UART FIFO channels (SpscRingbuffer)
+static osp::SpscRingbuffer<uint8_t, kUartFifoSize> g_host_to_dev_fifo;
+static osp::SpscRingbuffer<uint8_t, kUartFifoSize> g_dev_to_host_fifo;
 
-static void HostSendToDevice(const uint8_t* data, uint32_t len,
-                             void* /*ctx*/) {
-  g_device_parser.PutData(data, len);
+// Channel corruption state (simple LCG PRNG for deterministic testing)
+static uint32_t g_corrupt_rng   = 12345U;
+static uint32_t g_corrupt_count = 0U;
+
+static uint32_t NextCorruptRng() noexcept {
+  g_corrupt_rng = g_corrupt_rng * 1103515245U + 12345U;
+  return (g_corrupt_rng >> 16) & 0x7FFFU;
 }
 
+// ============================================================================
+// UART FIFO Loopback (SpscRingbuffer-based)
+// ============================================================================
+
+/// Host TX -> push to FIFO (simulates UART TX with channel noise).
+/// Only OTA_DATA frames (cmd_class=0x04, cmd=0x02) are subject to
+/// random byte corruption, causing CRC errors at the device parser.
+static void HostSendToDevice(const uint8_t* data, uint32_t len,
+                             void* /*ctx*/) {
+  // Corrupt only OTA_DATA frames: frame[3]=cmd_class, frame[4]=cmd
+  if (kDropRate > 0U && len > 5U &&
+      data[3] == static_cast<uint8_t>(ota::CmdClass::kOta) &&
+      data[4] == ota::ota_cmd::kData) {
+    if (NextCorruptRng() % 100U < kDropRate) {
+      // Copy frame and flip one bit in the payload area to trigger CRC error
+      uint8_t corrupt_buf[ota::kMaxPayloadLen + ota::kFrameOverhead + 8U];
+      uint32_t copy_len = len;
+      if (copy_len > sizeof(corrupt_buf)) {
+        copy_len = static_cast<uint32_t>(sizeof(corrupt_buf));
+      }
+      std::memcpy(corrupt_buf, data, copy_len);
+      uint32_t pos = 3U + (NextCorruptRng() % (copy_len - 4U));
+      corrupt_buf[pos] ^= 0x01U;
+      ++g_corrupt_count;
+      g_host_to_dev_fifo.PushBatch(corrupt_buf, static_cast<size_t>(copy_len));
+      return;
+    }
+  }
+  g_host_to_dev_fifo.PushBatch(data, static_cast<size_t>(len));
+}
+
+/// Device TX -> push to FIFO (simulates UART TX FIFO).
 static void DeviceSendToHost(const uint8_t* data, uint32_t len,
                              void* /*ctx*/) {
-  g_host_parser.PutData(data, len);
+  g_dev_to_host_fifo.PushBatch(data, static_cast<size_t>(len));
+}
+
+/// Drain both FIFO channels into their respective parsers.
+/// Called once per main-loop iteration (simulates UART RX interrupt).
+static void DrainUartFifos() noexcept {
+  // Host -> Device direction
+  uint8_t buf[256];
+  while (!g_host_to_dev_fifo.IsEmpty()) {
+    size_t n = g_host_to_dev_fifo.PopBatch(buf, sizeof(buf));
+    if (n == 0) break;
+    g_device_parser.PutData(buf, static_cast<uint32_t>(n));
+  }
+
+  // Device -> Host direction
+  while (!g_dev_to_host_fifo.IsEmpty()) {
+    size_t n = g_dev_to_host_fifo.PopBatch(buf, sizeof(buf));
+    if (n == 0) break;
+    g_host_parser.PutData(buf, static_cast<uint32_t>(n));
+  }
 }
 
 // ============================================================================
@@ -113,7 +178,7 @@ static void DeviceSendToHost(const uint8_t* data, uint32_t len,
 // ============================================================================
 
 static void DeviceFrameCallback(const ota::Frame& frame, void* /*ctx*/) {
-  // Track device state changes via bus
+  // Track device state changes via WorkerPool (kHigh priority)
   osp::FixedString<32> old_state(osp::TruncateToCapacity,
                                   g_device.GetOtaStateName());
 
@@ -123,9 +188,10 @@ static void DeviceFrameCallback(const ota::Frame& frame, void* /*ctx*/) {
                                   g_device.GetOtaStateName());
   if (old_state != new_state) {
     g_last_device_state = new_state;
-    OtaBus::Instance().PublishTopic(
-        OtaStateChangeMsg{old_state, new_state},
-        kBusSenderId, "ota.state");
+    if (g_pool != nullptr) {
+      g_pool->Submit(OtaStateChangeMsg{old_state, new_state},
+                     osp::MessagePriority::kHigh);
+    }
   }
 }
 
@@ -144,10 +210,12 @@ static void ProgressReportCallback(void* /*ctx*/) {
   if (g_host == nullptr || !g_ota_running.load(std::memory_order_relaxed)) {
     return;
   }
-  OtaBus::Instance().PublishTopic(
-      OtaProgressMsg{g_host->GetBytesSent(), kFirmwareSize,
-                     g_host->GetStatus()},
-      kBusSenderId, "ota.progress");
+  if (g_pool != nullptr) {
+    g_pool->Submit(
+        OtaProgressMsg{g_host->GetBytesSent(), kFirmwareSize,
+                       g_host->GetStatus()},
+        osp::MessagePriority::kLow);
+  }
 }
 
 /// Periodic timeout monitor -- checks if OTA has exceeded max duration.
@@ -167,29 +235,40 @@ static void TimeoutCheckCallback(void* ctx) {
 }
 
 // ============================================================================
-// Bus Subscriber -- logs OTA events
+// WorkerPool Handlers (free functions, -fno-rtti compatible)
 // ============================================================================
 
-static void SetupBusSubscribers() {
-  // Subscribe to state changes
-  OtaBus::Instance().Subscribe<OtaStateChangeMsg>(
-      [](const osp::MessageEnvelope<OtaPayload>& env) {
-        const auto& msg = std::get<OtaStateChangeMsg>(env.payload);
-        OSP_LOG_INFO("OTA_BUS", "State: %s -> %s",
-                     msg.old_state.c_str(), msg.new_state.c_str());
-      });
+/// Worker handler: log OTA state transitions.
+static void HandleStateChange(const OtaStateChangeMsg& msg,
+                               const osp::MessageHeader& /*hdr*/) {
+  OSP_LOG_INFO("OTA_POOL", "State: %s -> %s",
+               msg.old_state.c_str(), msg.new_state.c_str());
+}
 
-  // Subscribe to completion
-  OtaBus::Instance().Subscribe<OtaCompleteMsg>(
-      [](const osp::MessageEnvelope<OtaPayload>& env) {
-        const auto& msg = std::get<OtaCompleteMsg>(env.payload);
-        if (msg.success) {
-          OSP_LOG_INFO("OTA_BUS", "OTA OK: %u ms, CRC=0x%04X",
-                       msg.elapsed_ms, msg.fw_crc);
-        } else {
-          OSP_LOG_ERROR("OTA_BUS", "OTA FAILED: %u ms", msg.elapsed_ms);
-        }
-      });
+/// Worker handler: log OTA progress.
+static void HandleProgress(const OtaProgressMsg& msg,
+                            const osp::MessageHeader& /*hdr*/) {
+  uint32_t pct = (msg.total_size > 0U)
+                     ? (msg.bytes_sent * 100U / msg.total_size) : 0U;
+  OSP_LOG_INFO("OTA_POOL", "Progress: %u/%u (%u%%) status=%s",
+               msg.bytes_sent, msg.total_size, pct,
+               osp::NodeStatusToString(msg.status));
+}
+
+/// Worker handler: log OTA completion.
+static void HandleComplete(const OtaCompleteMsg& msg,
+                            const osp::MessageHeader& /*hdr*/) {
+  if (msg.success) {
+    OSP_LOG_INFO("OTA_POOL", "OTA OK: %u ms, %u ticks, CRC=0x%04X, "
+                 "retries=%u drops=%u",
+                 msg.elapsed_ms, msg.tick_count, msg.fw_crc,
+                 msg.retries, msg.drops);
+  } else {
+    OSP_LOG_ERROR("OTA_POOL", "OTA FAILED: %u ms, %u ticks, "
+                  "retries=%u drops=%u",
+                  msg.elapsed_ms, msg.tick_count,
+                  msg.retries, msg.drops);
+  }
 }
 
 // ============================================================================
@@ -319,6 +398,56 @@ static int cmd_timer_info(int /*argc*/, char* /*argv*/[]) {
 }
 OSP_SHELL_CMD(cmd_timer_info, "Show timer scheduler configuration");
 
+static int cmd_pool_stats(int /*argc*/, char* /*argv*/[]) {
+  if (g_pool == nullptr) {
+    osp::DebugShell::Printf("WorkerPool not initialized\r\n");
+    return -1;
+  }
+  auto ps = g_pool->GetStats();
+  osp::DebugShell::Printf("=== WorkerPool Statistics ===\r\n");
+  osp::DebugShell::Printf("  workers:    %u\r\n", g_pool->WorkerCount());
+  osp::DebugShell::Printf("  running:    %s\r\n",
+                             g_pool->IsRunning() ? "yes" : "no");
+  osp::DebugShell::Printf("  paused:     %s\r\n",
+                             g_pool->IsPaused() ? "yes" : "no");
+  osp::DebugShell::Printf("  dispatched: %lu\r\n",
+                             static_cast<unsigned long>(ps.dispatched));
+  osp::DebugShell::Printf("  processed:  %lu\r\n",
+                             static_cast<unsigned long>(ps.processed));
+  osp::DebugShell::Printf("  queue_full: %lu\r\n",
+                             static_cast<unsigned long>(ps.worker_queue_full));
+  return 0;
+}
+OSP_SHELL_CMD(cmd_pool_stats, "Show WorkerPool dispatcher/worker statistics");
+
+static int cmd_uart_fifo(int /*argc*/, char* /*argv*/[]) {
+  osp::DebugShell::Printf("=== UART FIFO (SpscRingbuffer) ===\r\n");
+  osp::DebugShell::Printf("  host->dev:  size=%zu / %zu\r\n",
+                             static_cast<size_t>(g_host_to_dev_fifo.Size()),
+                             g_host_to_dev_fifo.Capacity());
+  osp::DebugShell::Printf("  dev->host:  size=%zu / %zu\r\n",
+                             static_cast<size_t>(g_dev_to_host_fifo.Size()),
+                             g_dev_to_host_fifo.Capacity());
+  return 0;
+}
+OSP_SHELL_CMD(cmd_uart_fifo, "Show simulated UART FIFO status");
+
+static int cmd_retransmit(int /*argc*/, char* /*argv*/[]) {
+  osp::DebugShell::Printf("=== Retransmission Stats ===\r\n");
+  osp::DebugShell::Printf("  drop_rate:     %u%%\r\n", kDropRate);
+  osp::DebugShell::Printf("  corrupted:     %u frames\r\n", g_corrupt_count);
+  if (g_host != nullptr) {
+    osp::DebugShell::Printf("  retries:       %u\r\n",
+                             g_host->GetTotalRetries());
+    osp::DebugShell::Printf("  drops:         %u\r\n",
+                             g_host->GetTotalDrops());
+    osp::DebugShell::Printf("  max_per_chunk: %u\r\n",
+                             ota::HostContext::kMaxChunkRetries);
+  }
+  return 0;
+}
+OSP_SHELL_CMD(cmd_retransmit, "Show channel corruption & retransmission stats");
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -326,7 +455,8 @@ OSP_SHELL_CMD(cmd_timer_info, "Show timer scheduler configuration");
 int main() {
   OSP_LOG_INFO("OTA_MAIN", "=== Serial OTA Demo ===");
   OSP_LOG_INFO("OTA_MAIN", "Components: StateMachine + BehaviorTree + "
-               "DebugShell + TimerScheduler + AsyncBus + vocabulary");
+               "DebugShell + TimerScheduler + AsyncBus + WorkerPool + "
+               "SpscRingbuffer + vocabulary");
   OSP_LOG_INFO("OTA_MAIN", "Firmware: %u bytes, chunk: %u, addr: 0x%X",
                kFirmwareSize, kChunkSize, kFlashStartAddr);
 
@@ -338,9 +468,20 @@ int main() {
   OSP_LOG_INFO("OTA_MAIN", "Firmware generated: %u bytes (FixedVector cap=%u)",
                firmware.size(), firmware.capacity());
 
-  // --- Setup bus subscribers -------------------------------------------------
+  // --- Setup bus + WorkerPool (dispatcher + 2 workers) -----------------------
   OtaBus::Instance().Reset();
-  SetupBusSubscribers();
+
+  osp::WorkerPoolConfig pool_cfg;
+  pool_cfg.name = "ota_pool";
+  pool_cfg.worker_num = kWorkerNum;
+  OtaWorkerPool pool(pool_cfg);
+  pool.RegisterHandler<OtaStateChangeMsg>(&HandleStateChange);
+  pool.RegisterHandler<OtaProgressMsg>(&HandleProgress);
+  pool.RegisterHandler<OtaCompleteMsg>(&HandleComplete);
+  g_pool = &pool;
+
+  // RAII cleanup for g_pool pointer
+  OSP_SCOPE_EXIT(g_pool = nullptr);
 
   // --- Setup parsers (HSM-based) ---------------------------------------------
   g_device_parser.SetCallback(DeviceFrameCallback);
@@ -370,8 +511,14 @@ int main() {
   if (shell_result) {
     OSP_LOG_INFO("OTA_MAIN", "Debug shell: telnet localhost %u", kShellPort);
     OSP_LOG_INFO("OTA_MAIN", "  Commands: cmd_ota_status, cmd_serial_stats, "
-                 "cmd_bus_stats, cmd_flash_dump, cmd_flash_crc, cmd_timer_info");
+                 "cmd_bus_stats, cmd_pool_stats, cmd_uart_fifo, cmd_retransmit, "
+                 "cmd_flash_dump, cmd_flash_crc, cmd_timer_info");
   }
+
+  // --- Start WorkerPool (must be before OTA start, subscribers need to be active) ---
+  pool.Start();
+  OSP_LOG_INFO("OTA_MAIN", "WorkerPool: %u workers, queue=%u",
+               kWorkerNum, kWorkerQueueDepth);
 
   // --- Start OTA upgrade (BehaviorTree) --------------------------------------
   OSP_LOG_INFO("OTA_MAIN", "Starting OTA upgrade...");
@@ -414,17 +561,19 @@ int main() {
   // RAII cleanup for timer
   OSP_SCOPE_EXIT(timer.Stop());
 
-  // --- Main loop: tick BT + process bus messages -----------------------------
+  // --- Main loop: tick BT + drain UART FIFOs --------------------------------
   OSP_LOG_INFO("OTA_MAIN", "OTA running...");
   constexpr uint32_t kMaxTicks = 50000U;
 
   while (g_ota_running.load(std::memory_order_relaxed) &&
          g_tick_count.load(std::memory_order_relaxed) < kMaxTicks) {
     auto status = host.Tick();
-    g_tick_count.fetch_add(1, std::memory_order_relaxed);
 
-    // Process bus messages (single consumer)
-    OtaBus::Instance().ProcessBatch();
+    // Drain UART FIFOs: host->dev bytes feed device parser,
+    // dev->host bytes feed host parser (simulates RX interrupt).
+    DrainUartFifos();
+
+    g_tick_count.fetch_add(1, std::memory_order_relaxed);
 
     if (status == osp::NodeStatus::kSuccess ||
         status == osp::NodeStatus::kFailure) {
@@ -434,9 +583,6 @@ int main() {
 
   // Stop timer before reading final state
   timer.Stop();
-
-  // Drain remaining bus messages
-  OtaBus::Instance().ProcessBatch();
 
   // --- Results ---------------------------------------------------------------
   auto ota_end_time = std::chrono::steady_clock::now();
@@ -461,6 +607,12 @@ int main() {
                hs.frames_received, hs.bytes_received);
   OSP_LOG_INFO("OTA_MAIN", "Dev parser:   %u frames, %u bytes",
                ds.frames_received, ds.bytes_received);
+  OSP_LOG_INFO("OTA_MAIN", "Dev CRC err:  %u (corrupted: %u)",
+               ds.crc_errors, g_corrupt_count);
+
+  // Retransmission statistics
+  OSP_LOG_INFO("OTA_MAIN", "Retransmit:   retries=%u drops=%u (rate=%u%%)",
+               host.GetTotalRetries(), host.GetTotalDrops(), kDropRate);
 
   // Bus statistics
   auto bus_stats = OtaBus::Instance().GetStatistics();
@@ -488,11 +640,21 @@ int main() {
     OSP_LOG_WARN("OTA_MAIN", "OTA timed out after %u ms", elapsed_ms);
   }
 
-  // Publish completion event via bus
-  OtaBus::Instance().PublishTopic(
-      OtaCompleteMsg{ota_success, fw_crc, flash_crc, elapsed_ms, ticks},
-      kBusSenderId, "ota.complete");
-  OtaBus::Instance().ProcessBatch();
+  // Publish completion event via WorkerPool (kHigh priority)
+  pool.Submit(
+      OtaCompleteMsg{ota_success, fw_crc, flash_crc, elapsed_ms, ticks,
+                     host.GetTotalRetries(), host.GetTotalDrops()},
+      osp::MessagePriority::kHigh);
+
+  // Drain all in-flight events before shutdown
+  pool.FlushAndPause();
+
+  // WorkerPool statistics
+  auto pool_stats = pool.GetStats();
+  OSP_LOG_INFO("OTA_MAIN", "Pool:         dispatched=%lu processed=%lu qfull=%lu",
+               static_cast<unsigned long>(pool_stats.dispatched),
+               static_cast<unsigned long>(pool_stats.processed),
+               static_cast<unsigned long>(pool_stats.worker_queue_full));
 
   OSP_LOG_INFO("OTA_MAIN", "=============================");
 
@@ -503,6 +665,8 @@ int main() {
     std::this_thread::sleep_for(std::chrono::seconds(3));
   }
 
+  // --- Shutdown (reverse order of start) ------------------------------------
+  pool.Shutdown();
   shell.Stop();
   OSP_LOG_INFO("OTA_MAIN", "Demo finished.");
   return 0;

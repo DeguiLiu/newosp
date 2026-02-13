@@ -433,11 +433,27 @@ class DeviceHandler final {
           SendOtaAck(frame.cmd, Status::kParamErr);
           break;
         }
+        // Check offset before dispatching to HSM
+        OtaDataHdr hdr;
+        std::memcpy(&hdr, frame.data, sizeof(hdr));
+        if (hdr.chunk_offset != ctx_.received_size) {
+          OSP_LOG_WARN("OTA_DEV", "Offset mismatch: expect=%u got=%u",
+                       ctx_.received_size, hdr.chunk_offset);
+          SendOtaAck(frame.cmd, Status::kParamErr);
+          break;
+        }
         sm_.Dispatch(osp::Event{kEvtOtaData, frame.data});
         SendOtaAck(frame.cmd, Status::kSuccess);
         break;
       }
       case ota_cmd::kEnd: {
+        if (ctx_.received_size != ctx_.total_size) {
+          // Size mismatch -- last chunk may have been lost
+          OSP_LOG_WARN("OTA_DEV", "END rejected: received=%u expected=%u",
+                       ctx_.received_size, ctx_.total_size);
+          SendOtaAck(frame.cmd, Status::kParamErr);
+          break;
+        }
         sm_.Dispatch(osp::Event{kEvtOtaEnd, nullptr});
         SendOtaAck(frame.cmd, Status::kSuccess);
         break;

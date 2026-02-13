@@ -104,7 +104,6 @@ int main() {
   osp::WorkerPoolConfig pool_cfg;
   pool_cfg.name = "processor";
   pool_cfg.worker_num = kWorkers;
-  pool_cfg.worker_queue_depth = kQueueDepth;
   osp::WorkerPool<Payload> pool(pool_cfg);
   pool.RegisterHandler<ClientData>(&HandleClientData);
   pool.RegisterHandler<ProcessResult>(&HandleProcessResult);

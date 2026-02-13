@@ -289,6 +289,8 @@ class MulticastDiscovery {
     bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     bind_addr.sin_port = htons(config_.port);
 
+    // MISRA C++ Rule 5-2-4 deviation: reinterpret_cast required by POSIX
+    // socket API (bind/sendto/recvfrom expect sockaddr*).
     if (::bind(sockfd_, reinterpret_cast<sockaddr*>(&bind_addr),
                sizeof(bind_addr)) < 0) {
       ::close(sockfd_);
@@ -417,8 +419,10 @@ class MulticastDiscovery {
     }
   }
 
+  /** @brief Set heartbeat for external watchdog monitoring (announce thread). */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
-  // Announce packet format: { magic(4B), name(64B), port(2B) }
   static constexpr uint32_t kAnnounceMagic = 0x4F535044;  // "OSPD"
   static constexpr uint32_t kAnnounceSize = 4 + 64 + 2;
 
@@ -457,6 +461,7 @@ class MulticastDiscovery {
     mcast_addr.sin_port = htons(config_.port);
 
     while (running_.load(std::memory_order_acquire)) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       // Build announce packet
       uint8_t packet[kAnnounceSize];
       std::memcpy(packet, &kAnnounceMagic, 4);
@@ -484,6 +489,7 @@ class MulticastDiscovery {
     constexpr uint32_t kSleepIntervalMs = 100;
 
     while (running_.load(std::memory_order_acquire)) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       sockaddr_in sender_addr{};
       socklen_t addr_len = sizeof(sender_addr);
 
@@ -631,6 +637,7 @@ class MulticastDiscovery {
   std::atomic<bool> running_;
   std::thread announce_thread_;
   std::thread receive_thread_;
+  ThreadHeartbeat* heartbeat_{nullptr};
 
   FixedString<63> local_name_;
   uint16_t local_port_;

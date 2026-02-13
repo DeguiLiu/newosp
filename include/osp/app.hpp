@@ -24,7 +24,9 @@
 #ifndef OSP_APP_HPP_
 #define OSP_APP_HPP_
 
+
 #include "osp/hsm.hpp"
+#include "osp/mem_pool.hpp"
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
@@ -43,14 +45,11 @@ namespace osp {
 enum class AppError : uint8_t {
   kInstancePoolFull,
   kInstanceNotFound,
-  kFactoryNotSet,
   kAlreadyRunning,
   kNotRunning,
   kInvalidId,
   kQueueFull
 };
-
-// ============================================================================
 // Global Instance ID (IID) encoding/decoding
 // ============================================================================
 
@@ -279,12 +278,18 @@ inline TransitionResult StateDestroying(InstanceHsmContext& /*ctx*/,
 }  // namespace instance_hsm
 }  // namespace detail
 
+
 // ============================================================================
-// Instance base class (HSM-driven lifecycle)
+// Instance base class (HSM-driven lifecycle, no virtual dispatch)
 // ============================================================================
 
 using InstanceSmType = StateMachine<InstanceHsmContext, kInstanceHsmMaxStates>;
 
+/// Instance base class with HSM-driven lifecycle.
+///
+/// Users derive from Instance and implement OnMessage(). Application<Impl>
+/// knows the concrete type at compile time, so no virtual dispatch is needed.
+/// OnMessage() is called via static_cast<Impl*>(this)->OnMessage().
 class Instance {
  public:
   Instance() noexcept
@@ -294,15 +299,18 @@ class Instance {
     InitHsm();
   }
 
-  virtual ~Instance() {
+  /// Non-virtual destructor. Safe because Application<Impl> destroys via
+  /// ObjectPool<Impl>::Destroy() which calls the derived destructor directly.
+  ~Instance() {
     if (hsm_initialized_) {
       GetHsm()->~StateMachine();
       hsm_initialized_ = false;
     }
   }
 
-  virtual void OnMessage(uint16_t event, const void* data,
-                         uint32_t len) = 0;
+  /// Default OnMessage (no-op). Derived classes hide this with their own.
+  void OnMessage(uint16_t /*event*/, const void* /*data*/,
+                 uint32_t /*len*/) noexcept {}
 
   // ======================== HSM Lifecycle API ========================
 
@@ -330,14 +338,6 @@ class Instance {
 
   void Destroy() noexcept {
     DispatchHsmEvent(InstanceHsmEvent::kInsEvtDestroy);
-  }
-
-  // ======================== Message Dispatch (HSM-aware) ========================
-
-  void DispatchMessage(uint16_t event, const void* data, uint32_t len) noexcept {
-    DispatchHsmEvent(InstanceHsmEvent::kInsEvtMessage);
-    OnMessage(event, data, len);
-    DispatchHsmEvent(InstanceHsmEvent::kInsEvtMsgDone);
   }
 
   // ======================== State Query ========================
@@ -421,6 +421,26 @@ class Instance {
 
   const InstanceHsmContext& HsmContext() const noexcept { return hsm_ctx_; }
 
+  // ======================== HSM Message Dispatch ========================
+
+  /// Called by Application::ProcessOne() before OnMessage().
+  void BeginMessage() noexcept {
+    DispatchHsmEvent(InstanceHsmEvent::kInsEvtMessage);
+  }
+
+  /// Called by Application::ProcessOne() after OnMessage().
+  void EndMessage() noexcept {
+    DispatchHsmEvent(InstanceHsmEvent::kInsEvtMsgDone);
+  }
+
+ private:
+  void DispatchHsmEvent(InstanceHsmEvent evt_id) noexcept {
+    if (!hsm_initialized_) return;
+    Event evt{static_cast<uint32_t>(evt_id), nullptr};
+    GetHsm()->Dispatch(evt);
+    legacy_state_set_ = false;
+  }
+
  private:
   void InitHsm() noexcept {
     auto* hsm = new (hsm_storage_) InstanceSmType(hsm_ctx_);
@@ -432,52 +452,42 @@ class Instance {
         "Root", -1,
         detail::instance_hsm::StateRoot,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_created = hsm->AddState({
         "Created", hsm_ctx_.idx_root,
         detail::instance_hsm::StateCreated,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_initializing = hsm->AddState({
         "Initializing", hsm_ctx_.idx_root,
         detail::instance_hsm::StateInitializing,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_ready = hsm->AddState({
         "Ready", hsm_ctx_.idx_root,
         detail::instance_hsm::StateReady,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_idle = hsm->AddState({
         "Idle", hsm_ctx_.idx_ready,
         detail::instance_hsm::StateIdle,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_processing = hsm->AddState({
         "Processing", hsm_ctx_.idx_ready,
         detail::instance_hsm::StateProcessing,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_suspended = hsm->AddState({
         "Suspended", hsm_ctx_.idx_ready,
         detail::instance_hsm::StateSuspended,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_error = hsm->AddState({
         "Error", hsm_ctx_.idx_root,
         detail::instance_hsm::StateError,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_recoverable = hsm->AddState({
         "Recoverable", hsm_ctx_.idx_error,
         detail::instance_hsm::StateRecoverable,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_fatal = hsm->AddState({
         "Fatal", hsm_ctx_.idx_error,
         detail::instance_hsm::StateFatal,
         nullptr, nullptr, nullptr});
-
     hsm_ctx_.idx_destroying = hsm->AddState({
         "Destroying", hsm_ctx_.idx_root,
         detail::instance_hsm::StateDestroying,
@@ -487,19 +497,12 @@ class Instance {
     hsm->Start();
   }
 
-  void DispatchHsmEvent(InstanceHsmEvent evt_id) noexcept {
-    if (!hsm_initialized_) return;
-    Event evt{static_cast<uint32_t>(evt_id), nullptr};
-    GetHsm()->Dispatch(evt);
-    legacy_state_set_ = false;
-  }
-
+  // MISRA C++ Rule 5-2-4 deviation: reinterpret_cast for placement-new storage
   InstanceSmType* GetHsm() noexcept {
-    return reinterpret_cast<InstanceSmType*>(hsm_storage_);
+    return reinterpret_cast<InstanceSmType*>(hsm_storage_);  // NOLINT
   }
-
   const InstanceSmType* GetHsm() const noexcept {
-    return reinterpret_cast<const InstanceSmType*>(hsm_storage_);
+    return reinterpret_cast<const InstanceSmType*>(hsm_storage_);  // NOLINT
   }
 
   InstanceHsmContext hsm_ctx_;
@@ -510,12 +513,6 @@ class Instance {
   ResponseChannel* response_channel_;
   alignas(InstanceSmType) uint8_t hsm_storage_[sizeof(InstanceSmType)];
 };
-
-// ============================================================================
-// Instance factory
-// ============================================================================
-
-using InstanceFactory = Instance* (*)();
 
 // ============================================================================
 // Application message - hybrid inline/pointer storage with bit-field packing
@@ -587,16 +584,31 @@ struct alignas(8) AppMessage {
 inline constexpr uint32_t kAppNameMaxLen = 31;
 
 // ============================================================================
-// Application<MaxInstances>
+// Application<InstanceImpl, MaxInstances>
+//
+// InstanceImpl must derive from Instance and implement:
+//   void OnMessage(uint16_t event, const void* data, uint32_t len);
+//
+// Thread-safety contract:
+//   - Post()           : thread-safe (mutex-serialized MPSC producer)
+//   - ProcessOne/All() : single-consumer, must be called from one thread only
+//   - CreateInstance()  : call during init phase, before ProcessOne() starts
+//   - DestroyInstance() : call during shutdown phase, after ProcessOne() stops
+//   - If dynamic create/destroy is needed at runtime, caller must externally
+//     serialize with ProcessOne() (e.g. same thread or stop-the-world).
+//
+// All instance memory is managed by ObjectPool -- zero heap allocation.
 // ============================================================================
 
-template <uint16_t MaxInstances = OSP_APP_MAX_INSTANCES>
+template <typename InstanceImpl, uint16_t MaxInstances = OSP_APP_MAX_INSTANCES>
 class Application {
+  static_assert(std::is_base_of<Instance, InstanceImpl>::value,
+                "InstanceImpl must derive from osp::Instance");
+
  public:
   Application(uint16_t app_id, const char* name) noexcept
       : app_id_(app_id),
         name_(TruncateToCapacity, name),
-        factory_(nullptr),
         instance_count_(0),
         queue_head_(0),
         queue_tail_(0) {
@@ -608,7 +620,7 @@ class Application {
   ~Application() noexcept {
     for (uint16_t i = 0; i < MaxInstances; ++i) {
       if (instances_[i] != nullptr) {
-        delete instances_[i];
+        pool_.Destroy(instances_[i]);
         instances_[i] = nullptr;
       }
     }
@@ -617,15 +629,10 @@ class Application {
   Application(const Application&) = delete;
   Application& operator=(const Application&) = delete;
 
-  void SetFactory(InstanceFactory factory) noexcept { factory_ = factory; }
-
   expected<uint16_t, AppError> CreateInstance() noexcept {
-    if (factory_ == nullptr) {
-      return expected<uint16_t, AppError>::error(AppError::kFactoryNotSet);
-    }
     for (uint16_t i = 0; i < MaxInstances; ++i) {
       if (instances_[i] == nullptr) {
-        Instance* inst = factory_();
+        InstanceImpl* inst = pool_.Create();
         if (inst == nullptr) {
           return expected<uint16_t, AppError>::error(
               AppError::kInstancePoolFull);
@@ -648,17 +655,21 @@ class Application {
     if (instances_[idx] == nullptr) {
       return expected<void, AppError>::error(AppError::kInstanceNotFound);
     }
-    delete instances_[idx];
+    pool_.Destroy(instances_[idx]);
     instances_[idx] = nullptr;
     --instance_count_;
     return expected<void, AppError>::success();
   }
 
+  // Post a message to this application's queue. Thread-safe (MPSC).
+  // NOTE: if len > OSP_APP_MSG_INLINE_SIZE, only the pointer is stored —
+  // caller must keep the buffer alive until ProcessOne() consumes it.
   bool Post(uint16_t ins_id, uint16_t event, const void* data,
             uint32_t len,
             ResponseChannel* response_ch = nullptr) noexcept {
+    std::lock_guard<std::mutex> lock(post_mutex_);
     uint32_t tail = queue_tail_.load(std::memory_order_relaxed);
-    uint32_t next_tail = (tail + 1) % OSP_APP_QUEUE_DEPTH;
+    uint32_t next_tail = (tail + 1U) % OSP_APP_QUEUE_DEPTH;
     if (next_tail == queue_head_.load(std::memory_order_acquire)) {
       return false;
     }
@@ -678,7 +689,7 @@ class Application {
       return false;
     }
     const AppMessage& msg = queue_[head];
-    uint32_t next_head = (head + 1) % OSP_APP_QUEUE_DEPTH;
+    uint32_t next_head = (head + 1U) % OSP_APP_QUEUE_DEPTH;
 
     const void* data = msg.Data();
     uint32_t data_len = msg.DataLen();
@@ -687,15 +698,19 @@ class Application {
       for (uint16_t i = 0; i < MaxInstances; ++i) {
         if (instances_[i] != nullptr) {
           instances_[i]->SetResponseChannel(msg.response_channel);
+          instances_[i]->BeginMessage();
           instances_[i]->OnMessage(msg.event, data, data_len);
+          instances_[i]->EndMessage();
           instances_[i]->SetResponseChannel(nullptr);
         }
       }
     } else {
-      Instance* inst = GetInstance(msg.ins_id);
+      InstanceImpl* inst = GetInstance(msg.ins_id);
       if (inst != nullptr) {
         inst->SetResponseChannel(msg.response_channel);
+        inst->BeginMessage();
         inst->OnMessage(msg.event, data, data_len);
+        inst->EndMessage();
         inst->SetResponseChannel(nullptr);
       }
     }
@@ -715,7 +730,7 @@ class Application {
   const char* Name() const noexcept { return name_.c_str(); }
   uint32_t InstanceCount() const noexcept { return instance_count_; }
 
-  Instance* GetInstance(uint16_t ins_id) noexcept {
+  InstanceImpl* GetInstance(uint16_t ins_id) noexcept {
     if (ins_id == 0 || ins_id > MaxInstances) return nullptr;
     return instances_[ins_id - 1];
   }
@@ -732,12 +747,13 @@ class Application {
  private:
   uint16_t app_id_;
   FixedString<kAppNameMaxLen> name_;
-  InstanceFactory factory_;
-  Instance* instances_[MaxInstances];
+  ObjectPool<InstanceImpl, MaxInstances> pool_;
+  InstanceImpl* instances_[MaxInstances];
   uint32_t instance_count_;
   AppMessage queue_[OSP_APP_QUEUE_DEPTH];
   std::atomic<uint32_t> queue_head_;
   std::atomic<uint32_t> queue_tail_;
+  mutable std::mutex post_mutex_;
 };
 
 }  // namespace osp

@@ -212,6 +212,9 @@ class Service {
     return ntohs(addr.sin_port);
   }
 
+  /** @brief Set heartbeat for external watchdog monitoring (accept thread). */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
   struct WorkerEntry {
     std::thread thread;
@@ -249,6 +252,7 @@ class Service {
 
   void AcceptLoop() noexcept {
     while (running_.load(std::memory_order_acquire)) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       // Reap finished workers
       ReapFinishedWorkers();
 
@@ -366,6 +370,7 @@ class Service {
   std::vector<WorkerEntry> worker_entries_;
   std::mutex threads_mutex_;
   std::atomic<uint32_t> active_workers_{0};
+  ThreadHeartbeat* heartbeat_{nullptr};
 
   Handler handler_;
   void* handler_ctx_;

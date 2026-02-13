@@ -8,6 +8,7 @@
 #ifndef OSP_PLATFORM_HPP_
 #define OSP_PLATFORM_HPP_
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -104,6 +105,33 @@ inline uint64_t SteadyNowUs() noexcept {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::microseconds>(dur).count());
 }
+
+// ============================================================================
+// ThreadHeartbeat - Lightweight liveness signal for thread monitoring
+// ============================================================================
+
+/**
+ * @brief Minimal heartbeat primitive for thread liveness monitoring.
+ *
+ * Each monitored thread holds a pointer to a ThreadHeartbeat and calls Beat()
+ * in its main loop. An external watchdog reads last_beat_us to detect timeouts.
+ *
+ * Design: lives in platform.hpp so all modules can use it without extra
+ * dependencies. Only one atomic store per loop iteration (hot path).
+ */
+struct ThreadHeartbeat {
+  std::atomic<uint64_t> last_beat_us{0};  ///< Last heartbeat timestamp (us).
+
+  /** @brief Record a heartbeat (hot path, single relaxed store). */
+  void Beat() noexcept {
+    last_beat_us.store(SteadyNowUs(), std::memory_order_relaxed);
+  }
+
+  /** @brief Read last heartbeat timestamp. */
+  uint64_t LastBeatUs() const noexcept {
+    return last_beat_us.load(std::memory_order_acquire);
+  }
+};
 
 // ============================================================================
 // Macro Helpers

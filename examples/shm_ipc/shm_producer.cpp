@@ -3,18 +3,24 @@
 //
 // shm_producer -- HSM-driven video frame producer over ShmChannel.
 //
-// Demonstrates: HSM (hierarchical states), ShmChannel, Timer, MemPool,
-//               Shutdown, Log -- all newosp components.
+// Demonstrates: HSM, ShmChannel (CreateOrReplace), Timer, MemPool,
+//               Shutdown, Log, Watchdog, FaultCollector, SpscRingbuffer.
 //
 // HSM hierarchy:
 //   Operational (root)
-//   ├── Init          -- create channel + allocate frame pool
-//   ├── Running       -- parent state (handles SHUTDOWN for children)
-//   │   ├── Streaming -- normal frame production
-//   │   ├── Paused    -- back-pressure (ring full)
-//   │   └── Throttled -- rate-limited after repeated pauses
-//   ├── Error         -- recoverable error, retry init
-//   └── Done          -- cleanup and exit
+//   +-- Init          -- create channel + allocate frame pool
+//   +-- Running       -- parent state (handles SHUTDOWN for children)
+//   |   +-- Streaming -- normal frame production
+//   |   +-- Paused    -- back-pressure (ring full)
+//   |   +-- Throttled -- rate-limited after repeated pauses
+//   +-- Error         -- recoverable error, retry init
+//   +-- Done          -- cleanup and exit
+//
+// New integrations vs original:
+//   - CreateOrReplaceWriter: tolerates stale /dev/shm files from crashes
+//   - ThreadWatchdog: monitors main loop liveness
+//   - FaultCollector: reports ring-full / thread-death faults
+//   - SpscRingbuffer<ShmStats>: pushes stats snapshots to monitor process
 //
 // Usage: ./osp_shm_producer [channel_name] [num_frames]
 
@@ -25,33 +31,18 @@
 #include <chrono>
 #include <thread>
 
+#include "osp/fault_collector.hpp"
 #include "osp/hsm.hpp"
 #include "osp/log.hpp"
 #include "osp/mem_pool.hpp"
 #include "osp/platform.hpp"
 #include "osp/shm_transport.hpp"
 #include "osp/shutdown.hpp"
+#include "osp/spsc_ringbuffer.hpp"
 #include "osp/timer.hpp"
+#include "osp/watchdog.hpp"
 
-// ---------------------------------------------------------------------------
-// Frame format
-// ---------------------------------------------------------------------------
-struct FrameHeader {
-  uint32_t magic;
-  uint32_t seq_num;
-  uint32_t width;
-  uint32_t height;
-};
-static_assert(sizeof(FrameHeader) == 16, "FrameHeader must be 16 bytes");
-
-static constexpr uint32_t kMagic      = 0x4652414Du;  // 'FRAM'
-static constexpr uint32_t kWidth      = 320;
-static constexpr uint32_t kHeight     = 240;
-static constexpr uint32_t kPixelBytes = kWidth * kHeight;
-static constexpr uint32_t kFrameSize  = sizeof(FrameHeader) + kPixelBytes;
-
-static constexpr uint32_t kSlotSize   = 81920;  // > kFrameSize (76816)
-static constexpr uint32_t kSlotCount  = 16;
+#include "shm_common.hpp"
 
 using Channel = osp::ShmChannel<kSlotSize, kSlotCount>;
 
@@ -69,11 +60,10 @@ enum ProdEvt : uint32_t {
   kEvtLimitReached,
   kEvtRetry,
   kEvtShutdown,
-  kEvtTimerTick,
 };
 
 // ---------------------------------------------------------------------------
-// Context -- shared state across all HSM handlers
+// Context
 // ---------------------------------------------------------------------------
 struct ProdCtx {
   // SHM channel
@@ -81,7 +71,7 @@ struct ProdCtx {
   const char* channel_name = "frame_ch";
   uint32_t max_frames = 1000;
 
-  // Frame pool (MemPool for frame buffers -- demonstrates mem_pool.hpp)
+  // Frame pool
   osp::FixedPool<kSlotSize, 4> frame_pool;
   void* current_frame = nullptr;
 
@@ -96,8 +86,7 @@ struct ProdCtx {
   // Timing
   uint64_t t0_us = 0;
   uint64_t pause_start_us = 0;
-  double last_fps = 0.0;
-  uint32_t throttle_delay_us = 5000;  // 5ms when throttled
+  float last_fps = 0.0f;
 
   // Timer
   osp::TimerScheduler<4> timer;
@@ -106,10 +95,19 @@ struct ProdCtx {
   // Shutdown
   osp::ShutdownManager shutdown;
 
-  // HSM pointer (for RequestTransition in handlers)
-  osp::StateMachine<ProdCtx, 8>* sm = nullptr;
+  // Watchdog
+  osp::ThreadWatchdog<4> watchdog;
+  osp::WatchdogSlotId wd_main_id{0};
+  osp::ThreadHeartbeat* wd_main_hb = nullptr;
 
-  // State indices
+  // FaultCollector
+  osp::FaultCollector<8, 32> fault_collector;
+
+  // Stats ring (producer -> monitor via shared memory or in-process)
+  osp::SpscRingbuffer<ShmStats, kStatsRingSize> stats_ring;
+
+  // HSM
+  osp::StateMachine<ProdCtx, 8>* sm = nullptr;
   int32_t s_operational = -1;
   int32_t s_init = -1;
   int32_t s_running = -1;
@@ -122,7 +120,23 @@ struct ProdCtx {
   bool finished = false;
 
   static constexpr uint32_t kReportInterval = 100;
-  static constexpr uint32_t kThrottleThreshold = 3;  // consecutive pauses
+  static constexpr uint32_t kThrottleThreshold = 3;
+
+  // Push a stats snapshot into the SpscRingbuffer
+  void PushStats() {
+    ShmStats s{};
+    s.timestamp_us = osp::SteadyNowUs();
+    s.frames_ok = seq;
+    s.dropped = dropped;
+    s.stall_count = pause_count;
+    s.queue_depth = channel.Depth();
+    s.fps = last_fps;
+    s.mbps = (last_fps > 0.0f)
+        ? last_fps * static_cast<float>(kFrameSize) / (1024.0f * 1024.0f)
+        : 0.0f;
+    s.role = 0;  // producer
+    stats_ring.Push(s);
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -158,7 +172,6 @@ static osp::TransitionResult OnOperational(ProdCtx& ctx,
 // --- Init ---
 static void OnEnterInit(ProdCtx& ctx) {
   OSP_LOG_INFO("producer", "initializing channel %s ...", ctx.channel_name);
-  // Actual init is done in main loop to avoid nested Dispatch in entry action
 }
 
 static osp::TransitionResult OnInit(ProdCtx& ctx, const osp::Event& event) {
@@ -178,7 +191,6 @@ static void OnEnterRunning(ProdCtx& ctx) {
 
 static osp::TransitionResult OnRunning(ProdCtx& ctx,
                                         const osp::Event& event) {
-  // Parent handles limit-reached for all children
   if (event.id == kEvtLimitReached) {
     OSP_LOG_INFO("producer", "frame limit reached (%u)", ctx.max_frames);
     return ctx.sm->RequestTransition(ctx.s_done);
@@ -194,7 +206,7 @@ static void OnExitRunning(ProdCtx& ctx) {
 static void OnEnterStreaming(ProdCtx& ctx) {
   ctx.consecutive_pauses = 0;
   OSP_LOG_INFO("producer", "streaming (seq=%u, fps=%.1f)",
-               ctx.seq, ctx.last_fps);
+               ctx.seq, static_cast<double>(ctx.last_fps));
 }
 
 static osp::TransitionResult OnStreaming(ProdCtx& ctx,
@@ -202,6 +214,9 @@ static osp::TransitionResult OnStreaming(ProdCtx& ctx,
   if (event.id == kEvtRingFull) {
     ++ctx.pause_count;
     ++ctx.consecutive_pauses;
+    // Report ring-full fault
+    ctx.fault_collector.ReportFault(
+        FaultCode::kRingFull, ctx.seq, osp::FaultPriority::kMedium);
     if (ctx.consecutive_pauses >= ctx.kThrottleThreshold) {
       return ctx.sm->RequestTransition(ctx.s_throttled);
     }
@@ -229,8 +244,8 @@ static osp::TransitionResult OnPaused(ProdCtx& ctx,
 // --- Throttled ---
 static void OnEnterThrottled(ProdCtx& ctx) {
   ++ctx.throttle_count;
-  OSP_LOG_WARN("producer", "throttled after %u consecutive pauses (delay=%u us)",
-               ctx.consecutive_pauses, ctx.throttle_delay_us);
+  OSP_LOG_WARN("producer", "throttled after %u consecutive pauses",
+               ctx.consecutive_pauses);
 }
 
 static osp::TransitionResult OnThrottled(ProdCtx& ctx,
@@ -248,6 +263,8 @@ static osp::TransitionResult OnThrottled(ProdCtx& ctx,
 // --- Error ---
 static void OnEnterError(ProdCtx& ctx) {
   ++ctx.error_count;
+  ctx.fault_collector.ReportFault(
+      FaultCode::kConnectFail, ctx.error_count, osp::FaultPriority::kHigh);
   OSP_LOG_ERROR("producer", "error state (count=%u), will retry...",
                 ctx.error_count);
 }
@@ -266,13 +283,13 @@ static osp::TransitionResult OnError(ProdCtx& ctx,
 
 // --- Done ---
 static void OnEnterDone(ProdCtx& ctx) {
-  // Return frame buffer to pool
   if (ctx.current_frame != nullptr) {
     ctx.frame_pool.Free(ctx.current_frame);
     ctx.current_frame = nullptr;
   }
   ctx.channel.Unlink();
   ctx.finished = true;
+  ctx.PushStats();  // Final stats snapshot
   OSP_LOG_INFO("producer",
                "done. total=%u, dropped=%u, pauses=%u, throttles=%u, errors=%u",
                ctx.seq, ctx.dropped, ctx.pause_count,
@@ -281,7 +298,7 @@ static void OnEnterDone(ProdCtx& ctx) {
 
 static osp::TransitionResult OnDone(ProdCtx& /*ctx*/,
                                      const osp::Event& /*event*/) {
-  return osp::TransitionResult::kHandled;  // absorb all events
+  return osp::TransitionResult::kHandled;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +314,50 @@ int main(int argc, char* argv[]) {
   ctx.max_frames   = max_frames;
   ctx.shutdown.InstallSignalHandlers();
 
-  // Build HSM
+  // -- Watchdog setup: monitor main loop with 5s timeout --
+  ctx.watchdog.SetOnTimeout([](uint32_t slot_id, const char* name, void* c) {
+    auto* fc = &static_cast<ProdCtx*>(c)->fault_collector;
+    fc->ReportFault(FaultCode::kThreadDeath, slot_id,
+                    osp::FaultPriority::kCritical);
+    OSP_LOG_ERROR("producer", "watchdog: thread '%s' (slot %u) timed out",
+                  name, slot_id);
+  }, &ctx);
+  ctx.watchdog.SetOnRecovered([](uint32_t, const char* name, void*) {
+    OSP_LOG_INFO("producer", "watchdog: thread '%s' recovered", name);
+  }, nullptr);
+
+  auto wd_reg = ctx.watchdog.Register("main_loop", 5000);
+  if (wd_reg.has_value()) {
+    ctx.wd_main_id = wd_reg.value().id;
+    ctx.wd_main_hb = wd_reg.value().heartbeat;
+  }
+  ctx.watchdog.StartAutoCheck(1000);
+
+  // -- FaultCollector setup --
+  ctx.fault_collector.RegisterFault(FaultCode::kThreadDeath, 0xFFFF0001U);
+  ctx.fault_collector.RegisterFault(FaultCode::kRingFull,    0x00010001U);
+  ctx.fault_collector.RegisterFault(FaultCode::kConnectFail, 0x00020001U);
+
+  ctx.fault_collector.RegisterHook(FaultCode::kThreadDeath,
+      [](const osp::FaultEvent& e) {
+        OSP_LOG_ERROR("FAULT", "thread death: slot=%u", e.detail);
+        return osp::HookAction::kEscalate;
+      });
+  ctx.fault_collector.RegisterHook(FaultCode::kRingFull,
+      [](const osp::FaultEvent& e) {
+        OSP_LOG_WARN("FAULT", "ring full at seq=%u (count=%u)",
+                     e.detail, e.occurrence_count);
+        return osp::HookAction::kHandled;
+      });
+
+  // Wire FaultCollector consumer thread to watchdog
+  auto fc_reg = ctx.watchdog.Register("fault_consumer", 5000);
+  if (fc_reg.has_value()) {
+    ctx.fault_collector.SetConsumerHeartbeat(fc_reg.value().heartbeat);
+  }
+  ctx.fault_collector.Start();
+
+  // -- Build HSM --
   osp::StateMachine<ProdCtx, 8> sm(ctx);
   ctx.sm = &sm;
 
@@ -326,28 +386,38 @@ int main(int argc, char* argv[]) {
 
   sm.SetInitialState(ctx.s_init);
 
-  // Start periodic stats timer (demonstrates timer.hpp)
-  // TimerTaskFn is void(*)(void*), so use a static function + context pointer
+  // -- Stats timer --
   ctx.timer.Start();
   auto timer_r = ctx.timer.Add(2000, [](void* arg) {
     auto* c = static_cast<ProdCtx*>(arg);
     if (c->seq > 0) {
+      c->PushStats();
+      auto fc_stats = c->fault_collector.GetStatistics();
       OSP_LOG_INFO("producer",
-                   "[timer] seq=%u fps=%.1f pauses=%u throttles=%u pool=%u/%u",
-                   c->seq, c->last_fps, c->pause_count, c->throttle_count,
+                   "[timer] seq=%u fps=%.1f pauses=%u throttles=%u "
+                   "faults=%lu pool=%u/%u state=%s",
+                   c->seq, static_cast<double>(c->last_fps),
+                   c->pause_count, c->throttle_count,
+                   static_cast<unsigned long>(fc_stats.total_reported),
                    c->frame_pool.Capacity() - c->frame_pool.FreeCount(),
-                   c->frame_pool.Capacity());
+                   c->frame_pool.Capacity(),
+                   c->sm->CurrentStateName());
     }
   }, &ctx);
   if (timer_r) {
     ctx.stats_timer_id = timer_r.value();
   }
 
-  // Start HSM
+  // -- Start HSM --
   sm.Start();
 
-  // Main loop
+  // -- Main loop --
   while (!ctx.finished) {
+    // Beat watchdog
+    if (ctx.wd_main_hb != nullptr) {
+      ctx.wd_main_hb->Beat();
+    }
+
     if (ctx.shutdown.IsShutdownRequested()) {
       sm.Dispatch({kEvtShutdown, nullptr});
       break;
@@ -356,8 +426,8 @@ int main(int argc, char* argv[]) {
     int32_t state = sm.CurrentState();
 
     if (state == ctx.s_init) {
-      // Perform init in main loop (avoid nested Dispatch in entry action)
-      auto result = Channel::CreateWriter(ctx.channel_name);
+      // Use CreateOrReplaceWriter to tolerate stale shm files
+      auto result = Channel::CreateOrReplaceWriter(ctx.channel_name);
       if (!result) {
         OSP_LOG_ERROR("producer", "failed to create channel (err=%d)",
                       static_cast<int>(result.get_error()));
@@ -391,14 +461,13 @@ int main(int argc, char* argv[]) {
       auto wr = ctx.channel.Write(buf, kFrameSize);
       if (wr) {
         ++ctx.seq;
-        // Update FPS
         if (ctx.seq % ctx.kReportInterval == 0) {
           uint64_t t1_us = osp::SteadyNowUs();
-          double elapsed_s = static_cast<double>(t1_us - ctx.t0_us) / 1000000.0;
+          double elapsed_s = static_cast<double>(t1_us - ctx.t0_us) / 1e6;
           ctx.last_fps = (elapsed_s > 0.0)
-              ? ctx.kReportInterval / elapsed_s : 0.0;
+              ? static_cast<float>(ctx.kReportInterval / elapsed_s) : 0.0f;
           OSP_LOG_INFO("producer", "frame #%u (%u bytes), %.1f fps",
-                       ctx.seq, kFrameSize, ctx.last_fps);
+                       ctx.seq, kFrameSize, static_cast<double>(ctx.last_fps));
           ctx.t0_us = t1_us;
         }
         sm.Dispatch({kEvtFrameSent, nullptr});
@@ -415,8 +484,7 @@ int main(int argc, char* argv[]) {
       }
 
     } else if (state == ctx.s_throttled) {
-      std::this_thread::sleep_for(
-          std::chrono::microseconds(ctx.throttle_delay_us));
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
       if (ctx.channel.Depth() < kSlotCount / 2) {
         sm.Dispatch({kEvtThrottleEnd, nullptr});
       }
@@ -430,7 +498,22 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  // -- Cleanup --
   ctx.timer.Remove(ctx.stats_timer_id);
   ctx.timer.Stop();
+  ctx.fault_collector.Stop();
+  ctx.watchdog.StopAutoCheck();
+  if (wd_reg.has_value()) {
+    (void)ctx.watchdog.Unregister(ctx.wd_main_id);
+  }
+  if (fc_reg.has_value()) {
+    (void)ctx.watchdog.Unregister(fc_reg.value().id);
+  }
+
+  auto fc_stats = ctx.fault_collector.GetStatistics();
+  OSP_LOG_INFO("producer", "fault stats: reported=%lu processed=%lu dropped=%lu",
+               static_cast<unsigned long>(fc_stats.total_reported),
+               static_cast<unsigned long>(fc_stats.total_processed),
+               static_cast<unsigned long>(fc_stats.total_dropped));
   return 0;
 }

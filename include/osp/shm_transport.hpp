@@ -186,6 +186,44 @@ class SharedMemorySegment final {
   }
 
   /**
+   * @brief Create a shared memory segment, removing any stale one first.
+   *
+   * Useful when a previous process crashed without calling Unlink().
+   * Equivalent to shm_unlink + Create.
+   *
+   * @param name Segment name (will be prefixed with /osp_shm_).
+   * @param size Size in bytes.
+   * @return expected with SharedMemorySegment on success.
+   */
+  static expected<SharedMemorySegment, ShmError> CreateOrReplace(
+      const char* name, uint32_t size) noexcept {
+    // Build the full name to unlink any stale segment
+    FixedString<OSP_SHM_CHANNEL_NAME_MAX> full_name;
+    full_name.assign(TruncateToCapacity, "/osp_shm_");
+    uint32_t prefix_len = full_name.size();
+    uint32_t name_len = 0;
+    while (name[name_len] != '\0' &&
+           (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
+      ++name_len;
+    }
+    for (uint32_t i = 0; i < name_len; ++i) {
+      uint32_t current_len = full_name.size();
+      if (current_len < OSP_SHM_CHANNEL_NAME_MAX) {
+        char temp[OSP_SHM_CHANNEL_NAME_MAX + 1];
+        std::memcpy(temp, full_name.c_str(), current_len);
+        temp[current_len] = name[i];
+        temp[current_len + 1] = '\0';
+        full_name.assign(TruncateToCapacity, temp);
+      }
+    }
+
+    // Remove stale segment (ignore errors -- may not exist)
+    ::shm_unlink(full_name.c_str());
+
+    return Create(name, size);
+  }
+
+  /**
    * @brief Open an existing shared memory segment.
    * @param name Segment name (will be prefixed with /osp_shm_).
    * @return expected with SharedMemorySegment on success.
@@ -489,6 +527,32 @@ class ShmChannel final {
 
     uint32_t shm_size = RingBuffer::Size();
     auto result = SharedMemorySegment::Create(name, shm_size);
+    if (!result.has_value()) {
+      return expected<ShmChannel, ShmError>::error(result.get_error());
+    }
+
+    channel.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    channel.ring_buffer_ = RingBuffer::InitAt(channel.shm_segment_.Data());
+
+    return expected<ShmChannel, ShmError>::success(
+        static_cast<ShmChannel&&>(channel));
+  }
+
+  /**
+   * @brief Create a writer endpoint, removing any stale channel first.
+   *
+   * Useful when a previous process crashed without calling Unlink().
+   *
+   * @param name Channel name.
+   * @return expected with ShmChannel on success.
+   */
+  static expected<ShmChannel, ShmError> CreateOrReplaceWriter(
+      const char* name) noexcept {
+    ShmChannel channel;
+    channel.is_writer_ = true;
+
+    uint32_t shm_size = RingBuffer::Size();
+    auto result = SharedMemorySegment::CreateOrReplace(name, shm_size);
     if (!result.has_value()) {
       return expected<ShmChannel, ShmError>::error(result.get_error());
     }

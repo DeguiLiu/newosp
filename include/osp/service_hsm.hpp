@@ -10,6 +10,7 @@
 #ifndef OSP_SERVICE_HSM_HPP_
 #define OSP_SERVICE_HSM_HPP_
 
+#include "osp/fault_collector.hpp"
 #include "osp/hsm.hpp"
 #include "osp/platform.hpp"
 
@@ -45,6 +46,12 @@ struct ServiceHsmContext {
   ServiceShutdownFn on_shutdown;
   void* callback_ctx;
 
+  // Optional fault reporting (nullptr = disabled)
+  FaultReporter fault_reporter;
+
+  // Fault index for service errors
+  static constexpr uint16_t kFaultServiceError = 0U;
+
   // State indices for RequestTransition from within handlers
   StateMachine<ServiceHsmContext, 8>* sm;
   int32_t idx_idle;
@@ -56,6 +63,7 @@ struct ServiceHsmContext {
   ServiceHsmContext() noexcept
       : active_clients(0), error_code(0),
         on_error(nullptr), on_shutdown(nullptr), callback_ctx(nullptr),
+        fault_reporter(),
         sm(nullptr), idx_idle(-1), idx_listening(-1), idx_active(-1),
         idx_error(-1), idx_shutting_down(-1) {}
 };
@@ -149,6 +157,9 @@ inline TransitionResult StateShuttingDown(ServiceHsmContext& /*ctx*/,
 
 // Entry action for Error state
 inline void OnEnterError(ServiceHsmContext& ctx) {
+  ctx.fault_reporter.Report(
+      ServiceHsmContext::kFaultServiceError,
+      static_cast<uint32_t>(ctx.error_code), FaultPriority::kHigh);
   if (ctx.on_error != nullptr) {
     ctx.on_error(ctx.error_code, ctx.callback_ctx);
   }
@@ -319,6 +330,13 @@ class HsmService {
     std::lock_guard<std::mutex> lock(mutex_);
     context_.on_shutdown = fn;
     context_.callback_ctx = ctx;
+  }
+
+  /// @brief Wire optional fault reporter for automatic error reporting.
+  /// @param reporter FaultReporter with fn + ctx (nullptr fn = disabled).
+  void SetFaultReporter(FaultReporter reporter) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    context_.fault_reporter = reporter;
   }
 
   // ==========================================================================

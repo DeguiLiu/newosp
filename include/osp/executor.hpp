@@ -292,6 +292,9 @@ class StaticExecutor {
   /** @brief Get the number of registered nodes. */
   uint32_t NodeCount() const noexcept { return node_count_; }
 
+  /** @brief Set heartbeat for external watchdog monitoring. */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
   /**
    * @brief Main dispatch loop for the background thread.
@@ -301,6 +304,7 @@ class StaticExecutor {
    */
   void DispatchLoop() noexcept {
     while (running_.load(std::memory_order_relaxed)) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
         std::this_thread::yield();
@@ -312,6 +316,7 @@ class StaticExecutor {
   uint32_t node_count_;
   std::atomic<bool> running_;
   std::thread dispatch_thread_;
+  ThreadHeartbeat* heartbeat_{nullptr};
 };
 
 // ============================================================================
@@ -411,12 +416,16 @@ class PinnedExecutor {
     return running_.load(std::memory_order_acquire);
   }
 
+  /** @brief Set heartbeat for external watchdog monitoring. */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
   /**
    * @brief Main dispatch loop for the pinned background thread.
    */
   void DispatchLoop() noexcept {
     while (running_.load(std::memory_order_relaxed)) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
         std::this_thread::yield();
@@ -461,6 +470,7 @@ class PinnedExecutor {
   std::atomic<bool> running_;
   std::thread dispatch_thread_;
   int32_t cpu_core_;
+  ThreadHeartbeat* heartbeat_{nullptr};
 };
 
 // ============================================================================
@@ -564,8 +574,7 @@ class RealtimeExecutor {
       pthread_attr_init(&attr);
       pthread_attr_setstacksize(&attr, config_.stack_size);
 
-      pthread_t thread_handle;
-      int32_t rc = pthread_create(&thread_handle, &attr, &RealtimeExecutor::ThreadEntry, this);
+      int32_t rc = pthread_create(&rt_thread_, &attr, &RealtimeExecutor::ThreadEntry, this);
       pthread_attr_destroy(&attr);
 
       if (rc != 0) {
@@ -575,24 +584,20 @@ class RealtimeExecutor {
         running_.store(false, std::memory_order_release);
         return;
       }
-      // Detach or store the handle - for simplicity, we'll use std::thread wrapper
-      // Actually, we need to store pthread_t for joining. Let's use a different approach:
-      // Create std::thread and apply settings inside the thread.
-      dispatch_thread_ = std::thread([this]() {
-        ApplyRealtimeConfig(config_);
-        DispatchLoop();
-      });
+      use_pthread_ = true;
     } else {
       dispatch_thread_ = std::thread([this]() {
         ApplyRealtimeConfig(config_);
         DispatchLoop();
       });
+      use_pthread_ = false;
     }
 #else
     (void)std::fprintf(stderr,
                        "RealtimeExecutor: realtime features not supported on "
                        "this platform, using normal thread\n");
     dispatch_thread_ = std::thread([this]() { DispatchLoop(); });
+    use_pthread_ = false;
 #endif
   }
 
@@ -601,9 +606,23 @@ class RealtimeExecutor {
    */
   void Stop() noexcept {
     running_.store(false, std::memory_order_release);
+#if defined(OSP_PLATFORM_LINUX)
+    if (use_pthread_) {
+      if (rt_thread_ != pthread_t{}) {
+        pthread_join(rt_thread_, nullptr);
+        rt_thread_ = pthread_t{};
+      }
+    } else {
+      if (dispatch_thread_.joinable()) {
+        dispatch_thread_.join();
+      }
+    }
+#else
     if (dispatch_thread_.joinable()) {
       dispatch_thread_.join();
     }
+#endif
+    use_pthread_ = false;
   }
 
   // ======================== Accessors ========================
@@ -619,12 +638,16 @@ class RealtimeExecutor {
   /** @brief Get the realtime configuration. */
   const RealtimeConfig& GetConfig() const noexcept { return config_; }
 
+  /** @brief Set heartbeat for external watchdog monitoring. */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
   /**
    * @brief Main dispatch loop for the realtime background thread.
    */
   void DispatchLoop() noexcept {
     while (running_.load(std::memory_order_relaxed)) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
         std::this_thread::yield();
@@ -695,6 +718,11 @@ class RealtimeExecutor {
   std::atomic<bool> running_;
   std::thread dispatch_thread_;
   RealtimeConfig config_;
+  ThreadHeartbeat* heartbeat_{nullptr};
+#if defined(OSP_PLATFORM_LINUX)
+  pthread_t rt_thread_{};
+  bool use_pthread_{false};
+#endif
 };
 
 }  // namespace osp

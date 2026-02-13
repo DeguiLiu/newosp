@@ -10,6 +10,7 @@
 #ifndef OSP_NODE_MANAGER_HSM_HPP_
 #define OSP_NODE_MANAGER_HSM_HPP_
 
+#include "osp/fault_collector.hpp"
 #include "osp/hsm.hpp"
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
@@ -49,6 +50,13 @@ struct NodeConnectionContext {
   NodeDisconnectFn on_disconnect;
   void* disconnect_ctx;
 
+  // Fault reporting (built-in, nullptr = disabled)
+  FaultReporter fault_reporter;
+
+  // Built-in fault indices for node connection events
+  static constexpr uint16_t kFaultHeartbeatTimeout = 0U;
+  static constexpr uint16_t kFaultDisconnected     = 1U;
+
   // State indices for RequestTransition from within handlers
   StateMachine<NodeConnectionContext, 4>* sm;
   int32_t idx_connected;
@@ -59,6 +67,7 @@ struct NodeConnectionContext {
       : node_id(0), missed_heartbeats(0), max_missed(3),
         last_heartbeat_us(0), disconnect_requested(false),
         on_disconnect(nullptr), disconnect_ctx(nullptr),
+        fault_reporter(),
         sm(nullptr), idx_connected(-1), idx_suspect(-1),
         idx_disconnected(-1) {}
 };
@@ -103,6 +112,9 @@ inline TransitionResult StateSuspect(NodeConnectionContext& ctx,
   if (event.id == static_cast<uint32_t>(NodeConnectionEvent::kEvtHeartbeatTimeout)) {
     ++ctx.missed_heartbeats;
     if (ctx.missed_heartbeats >= ctx.max_missed) {
+      ctx.fault_reporter.Report(
+          NodeConnectionContext::kFaultHeartbeatTimeout,
+          ctx.node_id, FaultPriority::kHigh);
       return ctx.sm->RequestTransition(ctx.idx_disconnected);
     }
     return TransitionResult::kHandled;
@@ -127,12 +139,27 @@ inline TransitionResult StateDisconnected(NodeConnectionContext& ctx,
 
 // Entry action for Disconnected state
 inline void OnEnterDisconnected(NodeConnectionContext& ctx) {
+  ctx.fault_reporter.Report(
+      NodeConnectionContext::kFaultDisconnected,
+      ctx.node_id, FaultPriority::kCritical);
   if (ctx.on_disconnect != nullptr) {
     ctx.on_disconnect(ctx.node_id, ctx.disconnect_ctx);
   }
 }
 
 }  // namespace detail
+
+// ============================================================================
+// HsmNodeInfo - Diagnostic snapshot for a single node
+// ============================================================================
+
+/// POD snapshot of a managed node for diagnostic iteration.
+struct HsmNodeInfo {
+  uint16_t node_id;            ///< Node identifier
+  const char* state_name;      ///< Current HSM state name
+  uint64_t last_heartbeat_us;  ///< Last heartbeat timestamp (microseconds)
+  uint32_t missed_count;       ///< Missed heartbeat count
+};
 
 // ============================================================================
 // HsmNodeManager
@@ -187,6 +214,7 @@ class HsmNodeManager {
     slot->context.disconnect_requested = false;
     slot->context.on_disconnect = global_disconnect_fn_;
     slot->context.disconnect_ctx = global_disconnect_ctx_;
+    slot->context.fault_reporter = global_fault_reporter_;
 
     // Placement new to construct HSM
     auto* hsm = new (slot->hsm_storage)
@@ -314,6 +342,19 @@ class HsmNodeManager {
     }
   }
 
+  /// @brief Wire fault reporter for automatic heartbeat/disconnect reporting.
+  /// @param reporter FaultReporter with fn + ctx (nullptr fn = disabled).
+  void SetFaultReporter(FaultReporter reporter) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    global_fault_reporter_ = reporter;
+
+    for (uint32_t i = 0; i < MaxNodes; ++i) {
+      if (entries_[i].active) {
+        entries_[i].context.fault_reporter = reporter;
+      }
+    }
+  }
+
   // ==========================================================================
   // Query
   // ==========================================================================
@@ -342,6 +383,23 @@ class HsmNodeManager {
     const NodeEntry* node = const_cast<HsmNodeManager*>(this)->FindNode(node_id);
     if (node == nullptr || !node->active) return 0;
     return node->context.missed_heartbeats;
+  }
+
+  /// Iterate active nodes for diagnostic purposes.
+  /// Callback signature: void(const HsmNodeInfo&).
+  template <typename Fn>
+  void ForEachNode(Fn&& fn) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (uint32_t i = 0U; i < MaxNodes; ++i) {
+      if (entries_[i].active && entries_[i].hsm_initialized) {
+        HsmNodeInfo info{};
+        info.node_id = entries_[i].context.node_id;
+        info.state_name = entries_[i].GetHsm()->CurrentStateName();
+        info.last_heartbeat_us = entries_[i].context.last_heartbeat_us;
+        info.missed_count = entries_[i].context.missed_heartbeats;
+        fn(info);
+      }
+    }
   }
 
   // ==========================================================================
@@ -392,6 +450,9 @@ class HsmNodeManager {
 
   bool IsRunning() const noexcept { return running_.load(); }
 
+  /** @brief Set heartbeat for external watchdog monitoring. */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
   struct NodeEntry {
     NodeConnectionContext context;
@@ -430,9 +491,11 @@ class HsmNodeManager {
   std::atomic<bool> running_;
   std::thread monitor_thread_;
   mutable std::mutex mutex_;
+  ThreadHeartbeat* heartbeat_{nullptr};
 
   NodeDisconnectFn global_disconnect_fn_;
   void* global_disconnect_ctx_;
+  FaultReporter global_fault_reporter_;
 
   TimerScheduler<>* scheduler_;
   TimerTaskId timer_task_id_{0};
@@ -444,6 +507,7 @@ class HsmNodeManager {
 
   void MonitorLoop() noexcept {
     while (running_.load()) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       const uint64_t start_us = SteadyNowUs();
       CheckTimeouts();
       const uint64_t elapsed_us = SteadyNowUs() - start_us;

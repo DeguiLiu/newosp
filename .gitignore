@@ -21,3 +21,5 @@ build_misra2/
 build_asan/
 build_asan/
 build_tsan/
+build_ex/
+build_test/

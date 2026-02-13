@@ -32,6 +32,7 @@
 
 #include "osp/hsm.hpp"
 #include "osp/log.hpp"
+#include "osp/platform.hpp"
 #include "osp/service.hpp"
 #include "osp/vocabulary.hpp"
 #include "protocol.hpp"
@@ -89,6 +90,9 @@ struct FtCtx {
   uint32_t retry_count;
   float    drop_rate;       // simulated loss probability (0.0 - 1.0)
 
+  // Heartbeat (optional, from ThreadWatchdog)
+  osp::ThreadHeartbeat* heartbeat;
+
   // Statistics
   std::atomic<uint32_t> chunks_ok;
   std::atomic<uint32_t> chunks_retried;
@@ -113,6 +117,7 @@ inline void InitFtCtx(FtCtx& c) noexcept {
   c.bytes_sent = 0;
   c.retry_count = 0;
   c.drop_rate = 0.1f;  // 10% simulated loss
+  c.heartbeat = nullptr;
   c.chunks_ok.store(0, std::memory_order_relaxed);
   c.chunks_retried.store(0, std::memory_order_relaxed);
   c.complete.store(false, std::memory_order_relaxed);
@@ -320,6 +325,10 @@ inline bool RunFileTransfer(FtCtx& ctx) noexcept {
   // Drive the transfer loop
   while (!ctx.complete.load(std::memory_order_relaxed)) {
     int32_t cur = ctx.sm->CurrentState();
+
+    if (ctx.heartbeat != nullptr) {
+      ctx.heartbeat->Beat();
+    }
 
     if (cur == ctx.si_send) {
       osp::Event evt{kFtChunkSent, nullptr};

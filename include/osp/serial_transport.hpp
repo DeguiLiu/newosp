@@ -16,6 +16,7 @@
 #define OSP_SERIAL_TRANSPORT_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/spsc_ringbuffer.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstdint>
@@ -86,6 +87,11 @@ inline constexpr uint32_t kSerialCrcSize = 2U;
 /// Default maximum frame size
 #ifndef OSP_SERIAL_MAX_FRAME_SIZE
 #define OSP_SERIAL_MAX_FRAME_SIZE 1024U
+#endif
+
+/// Default receive ring buffer size for I/O-parser decoupling
+#ifndef OSP_SERIAL_RX_RING_SIZE
+#define OSP_SERIAL_RX_RING_SIZE 4096U
 #endif
 
 // Compile-time validation of frame size constraints (MISRA C++: static_assert)
@@ -441,6 +447,70 @@ class SerialTransport {
       }
     }
     return frames_done;
+  }
+
+  // ------------------------------------------------------------------
+  // ReadToRing / ParseFromRing (multi-threaded I/O decoupling)
+  //
+  // These methods allow decoupling serial I/O from frame parsing:
+  //   - ReadToRing()   : call from the I/O thread to read raw bytes
+  //                      from the serial fd into the SPSC ring buffer.
+  //   - ParseFromRing(): call from the parser thread to drain the ring
+  //                      buffer through the FeedByte state machine.
+  //
+  // The existing Poll() method remains available for single-threaded
+  // use where I/O and parsing happen in the same thread.
+  // ------------------------------------------------------------------
+
+  /// @brief Read raw bytes from serial fd into ring buffer (I/O side).
+  ///
+  /// Reads at most rx_ring_.Available() bytes from the fd to prevent
+  /// silent data loss when the ring buffer is full.  The bytes_received
+  /// counter tracks only bytes that were actually pushed into the ring.
+  ///
+  /// @return Number of bytes pushed to ring buffer.
+  uint32_t ReadToRing() noexcept {
+    if (fd_ < 0) return 0U;
+    const uint32_t space = rx_ring_.Available();
+    if (space == 0U) return 0U;
+    uint8_t tmp[256];
+    const uint32_t to_read = std::min(space, static_cast<uint32_t>(sizeof(tmp)));
+    const ssize_t n = ::read(fd_, tmp, to_read);
+    if (n <= 0) return 0U;
+    const uint32_t pushed = static_cast<uint32_t>(
+        rx_ring_.PushBatch(tmp, static_cast<size_t>(n)));
+    stats_.bytes_received += static_cast<uint64_t>(pushed);
+    return pushed;
+  }
+
+  /// @brief Parse buffered bytes from ring buffer through frame state machine.
+  ///
+  /// Refreshes the timestamp on each PopBatch iteration so that inter-byte
+  /// timeout detection remains accurate across long parsing loops.
+  ///
+  /// @return Number of complete frames received.
+  uint32_t ParseFromRing() noexcept {
+    uint32_t frames = 0U;
+    uint8_t batch[256];
+    uint32_t n;
+    while ((n = static_cast<uint32_t>(rx_ring_.PopBatch(batch, sizeof(batch)))) > 0U) {
+      const uint64_t now = SteadyNowUs() / 1000U;
+      for (uint32_t i = 0U; i < n; ++i) {
+        if (rx_state_ != RxState::kIdle && last_byte_time_ms_ != 0U) {
+          if (now - last_byte_time_ms_ > cfg_.inter_byte_timeout_ms) {
+            ++stats_.timeout_errors;
+            IncrementErrorCount();
+            ResetRxState();
+          }
+        }
+        last_byte_time_ms_ = now;
+        if (FeedByte(batch[i])) {
+          ++frames;
+          last_rx_time_ms_ = now;
+        }
+      }
+    }
+    return frames;
   }
 
   // ------------------------------------------------------------------
@@ -950,6 +1020,9 @@ class SerialTransport {
   uint16_t rx_msg_len_;
   uint16_t rx_payload_size_;
   uint8_t rx_buf_[OSP_SERIAL_MAX_FRAME_SIZE];
+
+  /// SPSC ring buffer for I/O-parser thread decoupling (ReadToRing/ParseFromRing)
+  SpscRingbuffer<uint8_t, OSP_SERIAL_RX_RING_SIZE> rx_ring_;
 
   SerialRxCallback rx_cb_;
   void* rx_ctx_;

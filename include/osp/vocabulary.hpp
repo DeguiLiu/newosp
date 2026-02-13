@@ -52,6 +52,15 @@ enum class MemPoolError : uint8_t {
   kInvalidPointer
 };
 
+/// Queue backpressure level indicator.
+/// Enum values are labels only; each module defines its own threshold logic.
+enum class BackpressureLevel : uint8_t {
+  kNormal   = 0U,  ///< Queue utilization is low
+  kWarning  = 1U,  ///< Queue utilization is elevated
+  kCritical = 2U,  ///< Queue utilization is near capacity
+  kFull     = 3U   ///< Queue is at capacity
+};
+
 // ============================================================================
 // expected<V, E> - Lightweight error-or-value type (iceoryx inspired)
 // ============================================================================

@@ -200,7 +200,7 @@ static void RunSensorDemo() {
 struct HeartbeatInstance : public osp::Instance {
   uint32_t count = 0;
 
-  void OnMessage(uint16_t event, const void* data, uint32_t len) override {
+  void OnMessage(uint16_t event, const void* data, uint32_t len) {
     if (event == protocol::kProtocolHeartbeat && data && len >= sizeof(protocol::HeartbeatMsg)) {
       protocol::HeartbeatMsg hb{};
       std::memcpy(&hb, data, sizeof(hb));
@@ -214,16 +214,13 @@ struct HeartbeatInstance : public osp::Instance {
   }
 };
 
-static osp::Instance* HeartbeatFactory() { return new HeartbeatInstance(); }
-
 static void RunAppModelDemo() {
   OSP_LOG_INFO("demo", "--- Part 3: App/Instance + OspPost ---");
 
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  osp::Application<4> hb_app(kNodeId_heartbeat_monitor, kNodeName_heartbeat_monitor);
-  hb_app.SetFactory(HeartbeatFactory);
+  osp::Application<HeartbeatInstance, 4> hb_app(kNodeId_heartbeat_monitor, kNodeName_heartbeat_monitor);
   osp::RegisterApp(hb_app);
 
   auto r = hb_app.CreateInstance();

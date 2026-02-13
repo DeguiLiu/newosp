@@ -378,6 +378,9 @@ class NodeManager {
     }
   }
 
+  /** @brief Set heartbeat for external watchdog monitoring. */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
   NodeManagerConfig config_;
   std::atomic<bool> running_;
@@ -386,6 +389,7 @@ class NodeManager {
   NodeEntry nodes_[MaxNodes];
   mutable std::mutex mutex_;
   std::thread heartbeat_thread_;
+  ThreadHeartbeat* heartbeat_{nullptr};
 
   TimerScheduler<>* scheduler_;
   TimerTaskId timer_task_id_{0};
@@ -399,34 +403,62 @@ class NodeManager {
 
   static void HeartbeatTick(void* ctx) noexcept {
     auto* self = static_cast<NodeManager*>(ctx);
-    std::lock_guard<std::mutex> lock(self->mutex_);
-    for (uint32_t i = 0; i < MaxNodes; ++i) {
-      if (self->nodes_[i].active && !self->nodes_[i].is_listener) {
-        self->SendHeartbeat(self->nodes_[i]);
+
+    // Collect pending callbacks under lock
+    uint16_t disconnected_ids[MaxNodes];
+    uint32_t disconnect_count = 0U;
+    NodeDisconnectFn fn = nullptr;
+    void* fn_ctx = nullptr;
+
+    {
+      std::lock_guard<std::mutex> lock(self->mutex_);
+      for (uint32_t i = 0; i < MaxNodes; ++i) {
+        if (self->nodes_[i].active && !self->nodes_[i].is_listener) {
+          self->SendHeartbeat(self->nodes_[i]);
+        }
+      }
+      disconnect_count = self->CollectTimeouts(disconnected_ids);
+      fn = self->disconnect_fn_;
+      fn_ctx = self->disconnect_ctx_;
+    }
+
+    // Execute callbacks outside lock
+    if (fn != nullptr) {
+      for (uint32_t i = 0; i < disconnect_count; ++i) {
+        fn(disconnected_ids[i], fn_ctx);
       }
     }
-    self->CheckTimeouts();
   }
 
   void HeartbeatLoop() noexcept {
     while (running_.load()) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       const uint64_t start_us = SteadyNowUs();
+
+      uint16_t disconnected_ids[MaxNodes];
+      uint32_t disconnect_count = 0U;
+      NodeDisconnectFn fn = nullptr;
+      void* fn_ctx = nullptr;
 
       {
         std::lock_guard<std::mutex> lock(mutex_);
-
-        // Send heartbeats to all active connected nodes
         for (uint32_t i = 0; i < MaxNodes; ++i) {
           if (nodes_[i].active && !nodes_[i].is_listener) {
             SendHeartbeat(nodes_[i]);
           }
         }
-
-        // Check for timeouts
-        CheckTimeouts();
+        disconnect_count = CollectTimeouts(disconnected_ids);
+        fn = disconnect_fn_;
+        fn_ctx = disconnect_ctx_;
       }
 
-      // Sleep for the configured interval
+      // Execute callbacks outside lock
+      if (fn != nullptr) {
+        for (uint32_t i = 0; i < disconnect_count; ++i) {
+          fn(disconnected_ids[i], fn_ctx);
+        }
+      }
+
       const uint64_t elapsed_us = SteadyNowUs() - start_us;
       const uint64_t interval_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) * 1000U;
       if (elapsed_us < interval_us) {
@@ -452,27 +484,28 @@ class NodeManager {
     // If send fails, don't update timestamp - this will trigger timeout detection
   }
 
-  void CheckTimeouts() noexcept {
-    uint64_t now = SteadyNowUs();
-    uint64_t timeout_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) *
-                          config_.heartbeat_timeout_count * 1000;
+  /// @brief Collect timed-out nodes for deferred callback execution.
+  /// @pre Must be called with mutex_ held.
+  /// @param out_ids  Array to store timed-out node IDs.
+  /// @return Number of timed-out nodes.
+  uint32_t CollectTimeouts(uint16_t* out_ids) noexcept {
+    uint32_t count = 0U;
+    const uint64_t now = SteadyNowUs();
+    const uint64_t timeout_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) *
+                                config_.heartbeat_timeout_count * 1000U;
 
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (nodes_[i].active && !nodes_[i].is_listener) {
         if ((now - nodes_[i].last_heartbeat_us) > timeout_us) {
-          // Timeout detected
-          uint16_t node_id = nodes_[i].node_id;
+          out_ids[count] = nodes_[i].node_id;
+          ++count;
           nodes_[i].socket.Close();
           nodes_[i].active = false;
           --node_count_;
-
-          // Invoke disconnect callback
-          if (disconnect_fn_ != nullptr) {
-            disconnect_fn_(node_id, disconnect_ctx_);
-          }
         }
       }
     }
+    return count;
   }
 
   // ==========================================================================
