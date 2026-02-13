@@ -13,6 +13,7 @@ target_compile_features(osp INTERFACE cxx_std_17)
 # --- Configuration options ---
 option(OSP_BUILD_TESTS    "Build tests"                                ON)
 option(OSP_BUILD_EXAMPLES "Build examples"                             OFF)
+option(OSP_NO_EXCEPTIONS  "Build tests with -fno-exceptions -fno-rtti" OFF)
 option(OSP_CONFIG_INI     "Enable INI config support (inih)"           ON)
 option(OSP_CONFIG_JSON    "Enable JSON config support (nlohmann/json)" OFF)
 option(OSP_CONFIG_YAML    "Enable YAML config support (fkYAML)"        OFF)

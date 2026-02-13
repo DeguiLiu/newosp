@@ -86,7 +86,6 @@ class Service {
 
   explicit Service(const Config& cfg = {}) noexcept
       : config_(cfg),
-        sockfd_(-1),
         running_(false),
         handler_(nullptr),
         handler_ctx_(nullptr) {
@@ -94,6 +93,7 @@ class Service {
                   "Request must be trivially copyable");
     static_assert(std::is_trivially_copyable<Response>::value,
                   "Response must be trivially copyable");
+    sockfd_.store(-1, std::memory_order_relaxed);
   }
 
   ~Service() { Stop(); }
@@ -123,14 +123,14 @@ class Service {
     }
 
     // Create TCP socket
-    sockfd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd_ < 0) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
       return expected<void, ServiceError>::error(ServiceError::kBindFailed);
     }
 
     // Set SO_REUSEADDR
     int opt = 1;
-    ::setsockopt(sockfd_, SOL_SOCKET, SO_REUSEADDR, &opt,
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt,
                  static_cast<socklen_t>(sizeof(opt)));
 
     // Bind
@@ -139,20 +139,19 @@ class Service {
     bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     bind_addr.sin_port = htons(config_.port);
 
-    if (::bind(sockfd_, reinterpret_cast<sockaddr*>(&bind_addr),
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&bind_addr),
                sizeof(bind_addr)) < 0) {
-      ::close(sockfd_);
-      sockfd_ = -1;
+      ::close(fd);
       return expected<void, ServiceError>::error(ServiceError::kBindFailed);
     }
 
     // Listen
-    if (::listen(sockfd_, config_.backlog) < 0) {
-      ::close(sockfd_);
-      sockfd_ = -1;
+    if (::listen(fd, config_.backlog) < 0) {
+      ::close(fd);
       return expected<void, ServiceError>::error(ServiceError::kBindFailed);
     }
 
+    sockfd_.store(fd, std::memory_order_release);
     running_.store(true, std::memory_order_release);
 
     // Spawn accept thread
@@ -169,10 +168,11 @@ class Service {
 
     running_.store(false, std::memory_order_release);
 
-    if (sockfd_ >= 0) {
-      ::shutdown(sockfd_, SHUT_RDWR);
-      ::close(sockfd_);
-      sockfd_ = -1;
+    int fd = sockfd_.load(std::memory_order_acquire);
+    if (fd >= 0) {
+      sockfd_.store(-1, std::memory_order_release);
+      ::shutdown(fd, SHUT_RDWR);
+      ::close(fd);
     }
 
     if (accept_thread_.joinable()) {
@@ -196,10 +196,11 @@ class Service {
 
   /** @brief Get the bound port (useful when using port 0 for OS-assigned). */
   uint16_t GetPort() const noexcept {
-    if (sockfd_ < 0) return 0;
+    int fd = sockfd_.load(std::memory_order_acquire);
+    if (fd < 0) return 0;
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
-    ::getsockname(sockfd_, reinterpret_cast<sockaddr*>(&addr), &len);
+    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
     return ntohs(addr.sin_port);
   }
 
@@ -209,7 +210,10 @@ class Service {
       sockaddr_in client_addr{};
       socklen_t addr_len = sizeof(client_addr);
 
-      int client_fd = ::accept(sockfd_, reinterpret_cast<sockaddr*>(&client_addr),
+      int fd = sockfd_.load(std::memory_order_acquire);
+      if (fd < 0) break;
+
+      int client_fd = ::accept(fd, reinterpret_cast<sockaddr*>(&client_addr),
                                &addr_len);
       if (client_fd < 0) {
         if (!running_.load(std::memory_order_acquire)) break;
@@ -292,7 +296,7 @@ class Service {
   }
 
   Config config_;
-  int sockfd_;
+  std::atomic<int> sockfd_;
   std::atomic<bool> running_;
   std::thread accept_thread_;
   std::vector<std::thread> worker_threads_;

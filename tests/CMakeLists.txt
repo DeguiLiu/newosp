@@ -52,4 +52,9 @@ if(OSP_WITH_SOCKPP)
     target_link_libraries(osp_tests sockpp-static)
 endif()
 
+# Apply -fno-exceptions -fno-rtti only to osp_tests, not to dependencies
+if(OSP_NO_EXCEPTIONS)
+    target_compile_options(osp_tests PRIVATE -fno-exceptions -fno-rtti)
+endif()
+
 catch_discover_tests(osp_tests)

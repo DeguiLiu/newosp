@@ -2362,7 +2362,7 @@ motor.Activate();
 98. **shm_transport.hpp -- ShmTransport**: 实现 Transport 接口、Bind/Connect/Send/Poll
 99. **shm_transport.hpp -- 零拷贝 LoanedMessage**: 借鉴 ROS2 loaned_messages API，发布者直接写入共享内存 (仅限 POD 类型)
 100. **test_shm_transport.cpp**: 单进程 SHM 回环、多线程并发读写、通道创建/销毁
-101. **transport.hpp -- TransportFactory**: 自动传输选择策略 (借鉴 CyberRT) -- 部分完成
+101. **transport.hpp -- TransportFactory**: 自动传输选择策略 (借鉴 CyberRT) -- 已完成 (transport_factory.hpp)
     - 同进程同 PayloadVariant: inproc (AsyncBus 零拷贝)
     - 同机器不同进程: shm (共享内存无锁队列)
     - 跨机器: tcp/udp (网络传输)
@@ -2453,8 +2453,9 @@ motor.Activate();
 | **osppost -- 别名投递** | -- | 不实现 | 类型路由更安全，应用层可维护名称映射 |
 | **osppost -- 同步消息** | service.hpp (Phase Q) | 已实现 | Service/Client 请求-响应 |
 | **ospnodeman -- TCP 连接** | connection.hpp + transport.hpp | 已完成 | ConnectionPool 管理 |
-| **ospnodeman -- 心跳检测** | node_manager.hpp (Phase O) | 已实现 | P0，可配置心跳 + 超时断开 |
-| **ospnodeman -- 断开通知** | node_manager.hpp (Phase O) | 已实现 | P0，回调通知 |
+| **ospnodeman -- 心跳检测** | node_manager.hpp + node_manager_hsm.hpp | 已实现 | P0，TCP 心跳 + HSM 状态机驱动 |
+| **ospnodeman -- 断开通知** | node_manager.hpp + node_manager_hsm.hpp | 已实现 | P0，回调通知 + HSM Connected/Suspect/Disconnected |
+| **ospnodeman -- HSM 状态机** | node_manager_hsm.hpp (Phase O) | 已实现 | 每连接独立 HSM，三状态生命周期管理 |
 | **ospsch -- 调度器** | executor.hpp | 已完成 | Single/Static/Pinned 三种模式 |
 | **ospsch -- 内存池** | mem_pool.hpp | 已完成 | FixedPool + ObjectPool |
 | **osptimer -- 定时器** | timer.hpp | 已完成 | TimerScheduler 后台线程 |

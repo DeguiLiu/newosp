@@ -483,3 +483,219 @@ TEST_CASE("hsm - IsInState query", "[hsm]") {
   REQUIRE_FALSE(sm.IsInState(s_a));
   REQUIRE_FALSE(sm.IsInState(s_a1));
 }
+
+TEST_CASE("hsm - guard condition blocks transition", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  s_root = sm.AddState({"root", -1, nullptr, nullptr, nullptr, nullptr});
+
+  s_a = sm.AddState({
+      "A", s_root,
+      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+        if (ev.id == kEvGuarded) {
+          return ctx.sm->RequestTransition(s_b);
+        }
+        return osp::TransitionResult::kUnhandled;
+      },
+      nullptr, nullptr,
+      // Guard: only allow transition when counter >= 10
+      [](const TestContext& ctx, const osp::Event& ev) -> bool {
+        if (ev.id == kEvGuarded) {
+          return ctx.counter >= 10;
+        }
+        return true;
+      }});
+
+  s_b = sm.AddState({
+      "B", s_root,
+      nullptr,
+      [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
+      nullptr, nullptr});
+
+  sm.SetInitialState(s_a);
+  sm.Start();
+  ctx.log.clear();
+
+  // Guard blocks: counter is 0
+  sm.Dispatch({kEvGuarded, nullptr});
+  REQUIRE(sm.CurrentState() == s_a);
+  REQUIRE(ctx.log.empty());
+
+  // Satisfy guard condition
+  ctx.counter = 10;
+  sm.Dispatch({kEvGuarded, nullptr});
+  REQUIRE(sm.CurrentState() == s_b);
+  REQUIRE(ctx.log.size() == 1);
+  REQUIRE(ctx.log[0] == "B:entry");
+}
+
+TEST_CASE("hsm - deep hierarchy 3+ levels LCA transition", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  // Build 4-level hierarchy: root -> A -> A1 -> A1a
+  //                          root -> B -> B1 -> B1a
+  s_root = sm.AddState({
+      "root", -1, nullptr,
+      [](TestContext& ctx) { ctx.log.push_back("root:entry"); },
+      [](TestContext& ctx) { ctx.log.push_back("root:exit"); },
+      nullptr});
+
+  s_a = sm.AddState({
+      "A", s_root, nullptr,
+      [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
+      [](TestContext& ctx) { ctx.log.push_back("A:exit"); },
+      nullptr});
+
+  s_a1 = sm.AddState({
+      "A1", s_a, nullptr,
+      [](TestContext& ctx) { ctx.log.push_back("A1:entry"); },
+      [](TestContext& ctx) { ctx.log.push_back("A1:exit"); },
+      nullptr});
+
+  static int32_t s_a1a = sm.AddState({
+      "A1a", s_a1,
+      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+        if (ev.id == kEvDeep) {
+          return ctx.sm->RequestTransition(s_b1);
+        }
+        return osp::TransitionResult::kUnhandled;
+      },
+      [](TestContext& ctx) { ctx.log.push_back("A1a:entry"); },
+      [](TestContext& ctx) { ctx.log.push_back("A1a:exit"); },
+      nullptr});
+
+  s_b = sm.AddState({
+      "B", s_root, nullptr,
+      [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
+      [](TestContext& ctx) { ctx.log.push_back("B:exit"); },
+      nullptr});
+
+  s_b1 = sm.AddState({
+      "B1", s_b, nullptr,
+      [](TestContext& ctx) { ctx.log.push_back("B1:entry"); },
+      [](TestContext& ctx) { ctx.log.push_back("B1:exit"); },
+      nullptr});
+
+  sm.SetInitialState(s_a1a);
+  sm.Start();
+  ctx.log.clear();
+
+  // Transition from A1a to B1: LCA is root
+  // Exit: A1a, A1, A (not root)
+  // Entry: B, B1 (not root)
+  sm.Dispatch({kEvDeep, nullptr});
+
+  REQUIRE(sm.CurrentState() == s_b1);
+  REQUIRE(ctx.log.size() == 5);
+  REQUIRE(ctx.log[0] == "A1a:exit");
+  REQUIRE(ctx.log[1] == "A1:exit");
+  REQUIRE(ctx.log[2] == "A:exit");
+  REQUIRE(ctx.log[3] == "B:entry");
+  REQUIRE(ctx.log[4] == "B1:entry");
+}
+
+TEST_CASE("hsm - self-transition same state", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  s_root = sm.AddState({"root", -1, nullptr, nullptr, nullptr, nullptr});
+
+  s_a = sm.AddState({
+      "A", s_root,
+      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+        ctx.log.push_back("A:handler");
+        if (ev.id == kEvSelf) {
+          return ctx.sm->RequestTransition(s_a);
+        }
+        return osp::TransitionResult::kUnhandled;
+      },
+      [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
+      [](TestContext& ctx) { ctx.log.push_back("A:exit"); },
+      nullptr});
+
+  sm.SetInitialState(s_a);
+  sm.Start();
+  ctx.log.clear();
+
+  // Self-transition should exit and re-enter
+  sm.Dispatch({kEvSelf, nullptr});
+
+  REQUIRE(sm.CurrentState() == s_a);
+  REQUIRE(ctx.log.size() == 3);
+  REQUIRE(ctx.log[0] == "A:handler");
+  REQUIRE(ctx.log[1] == "A:exit");
+  REQUIRE(ctx.log[2] == "A:entry");
+}
+
+TEST_CASE("hsm - dispatch event with no handler", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  BuildSimpleSM(sm);
+  sm.SetInitialState(s_a);
+  sm.Start();
+  ctx.log.clear();
+
+  // Dispatch an event that no state handles
+  sm.Dispatch({kEvUnknown, nullptr});
+
+  // Should remain in state A
+  REQUIRE(sm.CurrentState() == s_a);
+
+  // Handler was called but returned kUnhandled, bubbled to root
+  REQUIRE(ctx.log.size() == 2);
+  REQUIRE(ctx.log[0] == "A:handler");
+  REQUIRE(ctx.log[1] == "root:handler");
+}
+
+TEST_CASE("hsm - entry exit action ordering in hierarchy", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  BuildDeepSM(sm);
+  sm.SetInitialState(s_a1);
+  sm.Start();
+
+  // Verify initial entry order: root -> A -> A1 (top-down)
+  REQUIRE(ctx.log.size() == 3);
+  REQUIRE(ctx.log[0] == "root:entry");
+  REQUIRE(ctx.log[1] == "A:entry");
+  REQUIRE(ctx.log[2] == "A1:entry");
+
+  ctx.log.clear();
+
+  // Transition A1 -> A2 (siblings under A)
+  // Exit: A1 (bottom-up)
+  // Entry: A2 (top-down)
+  sm.Dispatch({kEvGo, nullptr});
+
+  REQUIRE(sm.CurrentState() == s_a2);
+
+  // Find positions of exit and entry
+  bool found_a1_exit = false;
+  bool found_a2_entry = false;
+  size_t a1_exit_pos = 0;
+  size_t a2_entry_pos = 0;
+
+  for (size_t i = 0; i < ctx.log.size(); ++i) {
+    if (ctx.log[i] == "A1:exit") {
+      found_a1_exit = true;
+      a1_exit_pos = i;
+    }
+    if (ctx.log[i] == "A2:entry") {
+      found_a2_entry = true;
+      a2_entry_pos = i;
+    }
+  }
+
+  REQUIRE(found_a1_exit);
+  REQUIRE(found_a2_entry);
+  REQUIRE(a1_exit_pos < a2_entry_pos);
+}
