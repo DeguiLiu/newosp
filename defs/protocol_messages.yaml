@@ -1,0 +1,50 @@
+# protocol_messages.yaml -- Video streaming protocol message definitions.
+#
+# Generates: protocol_messages.hpp
+# Usage: python3 tools/ospgen.py -i defs/protocol_messages.yaml -o generated/osp/protocol_messages.hpp
+
+namespace: protocol
+includes:
+  - cstdint
+  - cstring
+
+events:
+  - { name: REGISTER,     id: 1 }
+  - { name: REGISTER_ACK, id: 2 }
+  - { name: HEARTBEAT,    id: 3 }
+  - { name: STREAM_START, id: 4 }
+  - { name: STREAM_STOP,  id: 5 }
+  - { name: STREAM_DATA,  id: 6 }
+  - { name: DISCONNECT,   id: 7 }
+  - { name: ERROR,        id: 8 }
+
+messages:
+  - name: RegisterRequest
+    fields:
+      - { name: device_id, type: "char[32]" }
+      - { name: ip,        type: "char[16]" }
+      - { name: port,      type: uint16_t }
+
+  - name: RegisterResponse
+    fields:
+      - { name: device_id,  type: "char[32]" }
+      - { name: result,     type: uint8_t }
+      - { name: session_id, type: uint32_t }
+
+  - name: HeartbeatMsg
+    fields:
+      - { name: session_id,   type: uint32_t }
+      - { name: timestamp_us, type: uint64_t }
+
+  - name: StreamCommand
+    fields:
+      - { name: session_id, type: uint32_t }
+      - { name: action,     type: uint8_t }
+      - { name: media_type, type: uint8_t }
+
+  - name: StreamData
+    fields:
+      - { name: session_id,   type: uint32_t }
+      - { name: seq,          type: uint32_t }
+      - { name: payload_size, type: uint16_t }
+      - { name: data,         type: "uint8_t[256]" }

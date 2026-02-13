@@ -1,0 +1,33 @@
+# sensor_messages.yaml -- Sensor data message definitions.
+#
+# Generates: sensor_messages.hpp
+# Usage: python3 tools/ospgen.py -i defs/sensor_messages.yaml -o generated/osp/sensor_messages.hpp
+
+namespace: sensor
+includes:
+  - cstdint
+  - cstring
+
+events:
+  - { name: TEMPERATURE_UPDATE, id: 1 }
+  - { name: HUMIDITY_UPDATE,    id: 2 }
+  - { name: ALARM,              id: 3 }
+  - { name: CALIBRATE,          id: 4 }
+
+messages:
+  - name: SensorData
+    fields:
+      - { name: temp,     type: float }
+      - { name: humidity, type: float }
+
+  - name: SystemLog
+    fields:
+      - { name: message, type: "char[64]" }
+      - { name: level,   type: uint8_t }
+
+  - name: SensorAlarm
+    fields:
+      - { name: sensor_id, type: uint16_t }
+      - { name: code,      type: uint32_t }
+      - { name: value,     type: float }
+      - { name: threshold, type: float }

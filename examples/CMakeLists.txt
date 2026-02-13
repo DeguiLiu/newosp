@@ -26,3 +26,9 @@ add_osp_example(osp_hsm_protocol_demo       hsm_protocol_demo.cpp)
 
 # Benchmark builds with -O3 regardless of the global build type
 target_compile_options(osp_benchmark PRIVATE -O3)
+
+# --- codegen demo (requires OSP_CODEGEN=ON) --------------------------------
+if(OSP_CODEGEN)
+    add_osp_example(osp_codegen_demo codegen_demo.cpp)
+    add_dependencies(osp_codegen_demo osp_codegen)
+endif()

@@ -88,6 +88,31 @@ if(OSP_WITH_SOCKPP)
     # Note: sockpp-static needs to be linked by consumers (tests, examples)
 endif()
 
+# --- Code generation (YAML -> C++ headers) ---
+option(OSP_CODEGEN "Enable code generation from YAML definitions" OFF)
+
+if(OSP_CODEGEN)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    file(GLOB OSP_DEFS "${CMAKE_SOURCE_DIR}/defs/*.yaml")
+
+    set(OSP_GEN_HDRS "")
+    foreach(def_file ${OSP_DEFS})
+        get_filename_component(def_name ${def_file} NAME_WE)
+        set(out "${CMAKE_BINARY_DIR}/generated/osp/${def_name}.hpp")
+        add_custom_command(OUTPUT ${out}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/ospgen.py
+                    --input ${def_file} --output ${out}
+            DEPENDS ${def_file}
+                    ${CMAKE_SOURCE_DIR}/tools/ospgen.py
+            COMMENT "ospgen: ${def_name}.yaml -> ${def_name}.hpp")
+        list(APPEND OSP_GEN_HDRS ${out})
+    endforeach()
+
+    add_custom_target(osp_codegen ALL DEPENDS ${OSP_GEN_HDRS})
+    target_include_directories(osp INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/generated>)
+endif()
+
 # --- Examples ---
 if(OSP_BUILD_EXAMPLES)
     add_subdirectory(examples)

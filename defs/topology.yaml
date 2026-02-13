@@ -1,0 +1,12 @@
+# topology.yaml -- Node topology definition.
+#
+# Generates: topology.hpp
+# Usage: python3 tools/ospgen.py -i defs/topology.yaml -o generated/osp/topology.hpp
+
+payload_header: "osp/protocol_messages.hpp"
+
+nodes:
+  - { name: registrar,          id: 1, subscriptions: [RegisterRequest, RegisterResponse] }
+  - { name: heartbeat_monitor,  id: 2, subscriptions: [HeartbeatMsg] }
+  - { name: stream_controller,  id: 3, subscriptions: [StreamCommand, StreamData] }
+  - { name: client,             id: 10, subscriptions: [RegisterResponse] }
