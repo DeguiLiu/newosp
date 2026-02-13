@@ -18,7 +18,7 @@
 TEST_CASE("discovery_hsm - Initial state is Idle", "[HsmDiscovery]") {
   osp::HsmDiscovery<64> discovery;
 
-  CHECK(std::strcmp(discovery.GetState(), "Idle") == 0);
+  CHECK(std::strcmp(discovery.GetState(), "NotStarted") == 0);
   CHECK(discovery.IsIdle());
   CHECK_FALSE(discovery.IsAnnouncing());
   CHECK_FALSE(discovery.IsDiscovering());

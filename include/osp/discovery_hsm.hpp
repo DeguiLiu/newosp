@@ -23,13 +23,13 @@ namespace osp {
 // HSM Events
 // ============================================================================
 
-enum DiscoveryEvent : uint32_t {
-  kEvtStart = 1,
-  kEvtNodeFound = 2,
-  kEvtNodeLost = 3,
-  kEvtNetworkStable = 4,
-  kEvtNetworkDegraded = 5,
-  kEvtStop = 6,
+enum DiscoveryHsmEvent : uint32_t {
+  kDiscEvtStart = 1,
+  kDiscEvtNodeFound = 2,
+  kDiscEvtNodeLost = 3,
+  kDiscEvtNetworkStable = 4,
+  kDiscEvtNetworkDegraded = 5,
+  kDiscEvtStop = 6,
 };
 
 // ============================================================================
@@ -69,107 +69,107 @@ struct DiscoveryHsmContext {
 namespace detail {
 
 // Idle state: discovery service not started
-inline TransitionResult StateIdle(DiscoveryHsmContext& ctx,
-                                  const Event& event) {
-  if (event.id == kEvtStart) {
+inline TransitionResult DiscStateIdle(DiscoveryHsmContext& ctx,
+                                      const Event& event) {
+  if (event.id == kDiscEvtStart) {
     return ctx.sm->RequestTransition(ctx.idx_announcing);
   }
   return TransitionResult::kUnhandled;
 }
 
 // Announcing state: broadcasting self existence
-inline TransitionResult StateAnnouncing(DiscoveryHsmContext& ctx,
-                                        const Event& event) {
-  if (event.id == kEvtNodeFound) {
+inline TransitionResult DiscStateAnnouncing(DiscoveryHsmContext& ctx,
+                                            const Event& event) {
+  if (event.id == kDiscEvtNodeFound) {
     ++ctx.discovered_count;
     return ctx.sm->RequestTransition(ctx.idx_discovering);
   }
-  if (event.id == kEvtStop) {
+  if (event.id == kDiscEvtStop) {
     return ctx.sm->RequestTransition(ctx.idx_stopped);
   }
   return TransitionResult::kUnhandled;
 }
 
 // Discovering state: receiving other node broadcasts
-inline TransitionResult StateDiscovering(DiscoveryHsmContext& ctx,
-                                         const Event& event) {
-  if (event.id == kEvtNodeFound) {
+inline TransitionResult DiscStateDiscovering(DiscoveryHsmContext& ctx,
+                                             const Event& event) {
+  if (event.id == kDiscEvtNodeFound) {
     ++ctx.discovered_count;
     return TransitionResult::kHandled;
   }
-  if (event.id == kEvtNetworkStable) {
+  if (event.id == kDiscEvtNetworkStable) {
     if (ctx.discovered_count >= ctx.stable_threshold) {
       return ctx.sm->RequestTransition(ctx.idx_stable);
     }
     return TransitionResult::kHandled;
   }
-  if (event.id == kEvtNodeLost) {
+  if (event.id == kDiscEvtNodeLost) {
     ++ctx.lost_count;
     return TransitionResult::kHandled;
   }
-  if (event.id == kEvtStop) {
+  if (event.id == kDiscEvtStop) {
     return ctx.sm->RequestTransition(ctx.idx_stopped);
   }
   return TransitionResult::kUnhandled;
 }
 
 // Stable state: network topology stable
-inline TransitionResult StateStable(DiscoveryHsmContext& ctx,
-                                    const Event& event) {
-  if (event.id == kEvtNodeFound) {
+inline TransitionResult DiscStateStable(DiscoveryHsmContext& ctx,
+                                        const Event& event) {
+  if (event.id == kDiscEvtNodeFound) {
     ++ctx.discovered_count;
     return TransitionResult::kHandled;
   }
-  if (event.id == kEvtNodeLost) {
+  if (event.id == kDiscEvtNodeLost) {
     ++ctx.lost_count;
     return ctx.sm->RequestTransition(ctx.idx_degraded);
   }
-  if (event.id == kEvtStop) {
+  if (event.id == kDiscEvtStop) {
     return ctx.sm->RequestTransition(ctx.idx_stopped);
   }
   return TransitionResult::kUnhandled;
 }
 
 // Degraded state: partial node timeout, network unstable
-inline TransitionResult StateDegraded(DiscoveryHsmContext& ctx,
-                                      const Event& event) {
-  if (event.id == kEvtNodeFound) {
+inline TransitionResult DiscStateDegraded(DiscoveryHsmContext& ctx,
+                                          const Event& event) {
+  if (event.id == kDiscEvtNodeFound) {
     ++ctx.discovered_count;
     return ctx.sm->RequestTransition(ctx.idx_discovering);
   }
-  if (event.id == kEvtNetworkStable) {
+  if (event.id == kDiscEvtNetworkStable) {
     if (ctx.discovered_count >= ctx.stable_threshold) {
       return ctx.sm->RequestTransition(ctx.idx_stable);
     }
     return TransitionResult::kHandled;
   }
-  if (event.id == kEvtNodeLost) {
+  if (event.id == kDiscEvtNodeLost) {
     ++ctx.lost_count;
     return TransitionResult::kHandled;
   }
-  if (event.id == kEvtStop) {
+  if (event.id == kDiscEvtStop) {
     return ctx.sm->RequestTransition(ctx.idx_stopped);
   }
   return TransitionResult::kUnhandled;
 }
 
 // Stopped state: discovery stopped
-inline TransitionResult StateStopped(DiscoveryHsmContext& ctx,
-                                     const Event& event) {
+inline TransitionResult DiscStateStopped(DiscoveryHsmContext& ctx,
+                                         const Event& event) {
   (void)ctx;
   (void)event;
   return TransitionResult::kUnhandled;
 }
 
 // Entry action for Stable state
-inline void OnEnterStable(DiscoveryHsmContext& ctx) {
+inline void OnEnterDiscStable(DiscoveryHsmContext& ctx) {
   if (ctx.on_stable != nullptr) {
     ctx.on_stable(ctx.callback_ctx);
   }
 }
 
 // Entry action for Degraded state
-inline void OnEnterDegraded(DiscoveryHsmContext& ctx) {
+inline void OnEnterDiscDegraded(DiscoveryHsmContext& ctx) {
   if (ctx.on_degraded != nullptr) {
     ctx.on_degraded(ctx.callback_ctx);
   }
@@ -199,16 +199,52 @@ inline void OnEnterDegraded(DiscoveryHsmContext& ctx) {
 template <uint32_t MaxNodes = 64>
 class HsmDiscovery {
  public:
-  HsmDiscovery() noexcept : hsm_initialized_(false) {
-    InitializeHsm();
+  HsmDiscovery() noexcept : hsm_(context_), started_(false) {
+    context_.sm = &hsm_;
+
+    // Add states
+    context_.idx_idle = hsm_.AddState({
+        "Idle", -1,
+        detail::DiscStateIdle,
+        nullptr, nullptr, nullptr
+    });
+
+    context_.idx_announcing = hsm_.AddState({
+        "Announcing", -1,
+        detail::DiscStateAnnouncing,
+        nullptr, nullptr, nullptr
+    });
+
+    context_.idx_discovering = hsm_.AddState({
+        "Discovering", -1,
+        detail::DiscStateDiscovering,
+        nullptr, nullptr, nullptr
+    });
+
+    context_.idx_stable = hsm_.AddState({
+        "Stable", -1,
+        detail::DiscStateStable,
+        detail::OnEnterDiscStable,
+        nullptr, nullptr
+    });
+
+    context_.idx_degraded = hsm_.AddState({
+        "Degraded", -1,
+        detail::DiscStateDegraded,
+        detail::OnEnterDiscDegraded,
+        nullptr, nullptr
+    });
+
+    context_.idx_stopped = hsm_.AddState({
+        "Stopped", -1,
+        detail::DiscStateStopped,
+        nullptr, nullptr, nullptr
+    });
+
+    hsm_.SetInitialState(context_.idx_idle);
   }
 
-  ~HsmDiscovery() {
-    if (hsm_initialized_) {
-      GetHsm()->~StateMachine();
-      hsm_initialized_ = false;
-    }
-  }
+  ~HsmDiscovery() = default;
 
   HsmDiscovery(const HsmDiscovery&) = delete;
   HsmDiscovery& operator=(const HsmDiscovery&) = delete;
@@ -217,31 +253,17 @@ class HsmDiscovery {
   // Configuration
   // ==========================================================================
 
-  /**
-   * @brief Set minimum node count for stable state.
-   * @param threshold Minimum discovered nodes to consider network stable.
-   */
   void SetStableThreshold(uint32_t threshold) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     context_.stable_threshold = threshold;
   }
 
-  /**
-   * @brief Register callback for stable state entry.
-   * @param fn Callback function.
-   * @param ctx User context pointer.
-   */
   void OnStable(DiscoveryCallbackFn fn, void* ctx = nullptr) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     context_.on_stable = fn;
     context_.callback_ctx = ctx;
   }
 
-  /**
-   * @brief Register callback for degraded state entry.
-   * @param fn Callback function.
-   * @param ctx User context pointer.
-   */
   void OnDegraded(DiscoveryCallbackFn fn, void* ctx = nullptr) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     context_.on_degraded = fn;
@@ -252,146 +274,111 @@ class HsmDiscovery {
   // Lifecycle Control
   // ==========================================================================
 
-  /**
-   * @brief Start discovery service (Idle -> Announcing).
-   */
   void Start() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    Event evt{kEvtStart, nullptr};
-    GetHsm()->Dispatch(evt);
+    if (!started_) {
+      hsm_.Start();
+      started_ = true;
+    }
+    Event evt{kDiscEvtStart, nullptr};
+    hsm_.Dispatch(evt);
   }
 
-  /**
-   * @brief Stop discovery service (Any -> Stopped).
-   */
   void Stop() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    Event evt{kEvtStop, nullptr};
-    GetHsm()->Dispatch(evt);
+    if (!started_) return;
+    Event evt{kDiscEvtStop, nullptr};
+    hsm_.Dispatch(evt);
   }
 
   // ==========================================================================
   // Event Triggers
   // ==========================================================================
 
-  /**
-   * @brief Notify that a new node was discovered.
-   */
   void OnNodeFound() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    Event evt{kEvtNodeFound, nullptr};
-    GetHsm()->Dispatch(evt);
+    if (!started_) return;
+    Event evt{kDiscEvtNodeFound, nullptr};
+    hsm_.Dispatch(evt);
   }
 
-  /**
-   * @brief Notify that a node was lost (timeout).
-   */
   void OnNodeLost() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    Event evt{kEvtNodeLost, nullptr};
-    GetHsm()->Dispatch(evt);
+    if (!started_) return;
+    Event evt{kDiscEvtNodeLost, nullptr};
+    hsm_.Dispatch(evt);
   }
 
-  /**
-   * @brief Check if network is stable and trigger state transition if needed.
-   *
-   * Should be called periodically after a period of no topology changes.
-   */
   void CheckStability() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    Event evt{kEvtNetworkStable, nullptr};
-    GetHsm()->Dispatch(evt);
+    if (!started_) return;
+    Event evt{kDiscEvtNetworkStable, nullptr};
+    hsm_.Dispatch(evt);
   }
 
-  /**
-   * @brief Trigger network degraded event (multiple nodes lost).
-   */
   void TriggerDegraded() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    Event evt{kEvtNetworkDegraded, nullptr};
-    GetHsm()->Dispatch(evt);
+    if (!started_) return;
+    Event evt{kDiscEvtNetworkDegraded, nullptr};
+    hsm_.Dispatch(evt);
   }
 
   // ==========================================================================
   // Query
   // ==========================================================================
 
-  /**
-   * @brief Get current state name.
-   * @return State name string (static lifetime).
-   */
   const char* GetState() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return GetHsm()->CurrentStateName();
+    if (!started_) return "NotStarted";
+    return hsm_.CurrentStateName();
   }
 
-  /**
-   * @brief Check if in Stable state.
-   */
   bool IsStable() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return GetHsm()->IsInState(context_.idx_stable);
+    if (!started_) return false;
+    return hsm_.IsInState(context_.idx_stable);
   }
 
-  /**
-   * @brief Check if in Degraded state.
-   */
   bool IsDegraded() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return GetHsm()->IsInState(context_.idx_degraded);
+    if (!started_) return false;
+    return hsm_.IsInState(context_.idx_degraded);
   }
 
-  /**
-   * @brief Check if in Discovering state.
-   */
   bool IsDiscovering() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return GetHsm()->IsInState(context_.idx_discovering);
+    if (!started_) return false;
+    return hsm_.IsInState(context_.idx_discovering);
   }
 
-  /**
-   * @brief Check if in Announcing state.
-   */
   bool IsAnnouncing() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return GetHsm()->IsInState(context_.idx_announcing);
+    if (!started_) return false;
+    return hsm_.IsInState(context_.idx_announcing);
   }
 
-  /**
-   * @brief Check if in Idle state.
-   */
   bool IsIdle() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return GetHsm()->IsInState(context_.idx_idle);
+    if (!started_) return true;
+    return hsm_.IsInState(context_.idx_idle);
   }
 
-  /**
-   * @brief Check if stopped.
-   */
   bool IsStopped() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return GetHsm()->IsInState(context_.idx_stopped);
+    if (!started_) return false;
+    return hsm_.IsInState(context_.idx_stopped);
   }
 
-  /**
-   * @brief Get discovered node count.
-   */
   uint32_t GetDiscoveredCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return context_.discovered_count;
   }
 
-  /**
-   * @brief Get lost node count.
-   */
   uint32_t GetLostCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return context_.lost_count;
   }
 
-  /**
-   * @brief Reset counters (discovered_count, lost_count).
-   */
   void ResetCounters() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     context_.discovered_count = 0;
@@ -400,71 +387,9 @@ class HsmDiscovery {
 
  private:
   DiscoveryHsmContext context_;
-  bool hsm_initialized_;
-  alignas(StateMachine<DiscoveryHsmContext, 8>)
-      uint8_t hsm_storage_[sizeof(StateMachine<DiscoveryHsmContext, 8>)];
+  StateMachine<DiscoveryHsmContext, 8> hsm_;
+  bool started_;
   mutable std::mutex mutex_;
-
-  void InitializeHsm() noexcept {
-    auto* hsm = new (hsm_storage_)
-        StateMachine<DiscoveryHsmContext, 8>(context_);
-    hsm_initialized_ = true;
-
-    // Store SM pointer in context for handlers to call RequestTransition
-    context_.sm = hsm;
-
-    // Add states
-    context_.idx_idle = hsm->AddState({
-        "Idle", -1,
-        detail::StateIdle,
-        nullptr, nullptr, nullptr
-    });
-
-    context_.idx_announcing = hsm->AddState({
-        "Announcing", -1,
-        detail::StateAnnouncing,
-        nullptr, nullptr, nullptr
-    });
-
-    context_.idx_discovering = hsm->AddState({
-        "Discovering", -1,
-        detail::StateDiscovering,
-        nullptr, nullptr, nullptr
-    });
-
-    context_.idx_stable = hsm->AddState({
-        "Stable", -1,
-        detail::StateStable,
-        detail::OnEnterStable,
-        nullptr, nullptr
-    });
-
-    context_.idx_degraded = hsm->AddState({
-        "Degraded", -1,
-        detail::StateDegraded,
-        detail::OnEnterDegraded,
-        nullptr, nullptr
-    });
-
-    context_.idx_stopped = hsm->AddState({
-        "Stopped", -1,
-        detail::StateStopped,
-        nullptr, nullptr, nullptr
-    });
-
-    hsm->SetInitialState(context_.idx_idle);
-    hsm->Start();
-  }
-
-  StateMachine<DiscoveryHsmContext, 8>* GetHsm() noexcept {
-    return reinterpret_cast<StateMachine<DiscoveryHsmContext, 8>*>(
-        hsm_storage_);
-  }
-
-  const StateMachine<DiscoveryHsmContext, 8>* GetHsm() const noexcept {
-    return reinterpret_cast<const StateMachine<DiscoveryHsmContext, 8>*>(
-        hsm_storage_);
-  }
 };
 
 }  // namespace osp
