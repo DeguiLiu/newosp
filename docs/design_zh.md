@@ -25,7 +25,7 @@
 
 ### 1.1 定位
 
-newosp 是一个面向 ARM-Linux 嵌入式平台的现代 C++17 纯头文件基础设施库。提供嵌入式系统开发所需的核心基础能力: 配置管理、日志、定时调度、远程调试、内存池、消息总线、节点通信、工作线程池。
+newosp 是一个面向 ARM-Linux 嵌入式平台的现代 C++17 纯头文件基础设施库。提供嵌入式系统开发所需的核心基础能力: 配置管理、日志、定时调度、远程调试、内存池、消息总线、节点通信、工作线程池、共享内存 IPC、网络传输。
 
 ### 1.2 适用场景
 
@@ -662,14 +662,15 @@ class ConnectionPool {
 
 **目标**: 使 Node 屏蔽本地进程和远程进程的差异，类似 ZeroMQ 的透明传输模型。应用层代码使用统一的 `Publish()` / `Subscribe()` 接口，无需关心消息目标是本地 AsyncBus 还是远程节点。
 
-**设计理念** (借鉴 ZeroMQ / ROS2 / CyberRT):
+**设计理念** (借鉴 ZeroMQ / ROS2 / CyberRT / cpp-ipc):
 
 | 特性 | 说明 |
 |------|------|
 | 位置透明 | 本地/远程节点使用相同的 Pub/Sub API |
-| 传输可插拔 | inproc (本地 AsyncBus) / tcp / udp / unix domain socket |
-| 零拷贝本地路径 | 本地通信走 AsyncBus，不经过序列化 |
+| 传输可插拔 | inproc (本地 AsyncBus) / shm (共享内存) / tcp / udp / unix domain socket |
+| 零拷贝本地路径 | 进程内走 AsyncBus，进程间走 ShmTransport LoanedMessage |
 | 自动发现 | 多播或配置文件驱动的节点发现 |
+| 自动传输选择 | 借鉴 CyberRT，根据拓扑自动选择 inproc/shm/tcp |
 | 序列化可定制 | 默认 memcpy (POD 类型)，可扩展 protobuf/flatbuffers |
 
 **架构**:
@@ -679,19 +680,22 @@ class ConnectionPool {
                               |
                     Node<Payload>::Publish(msg)
                               |
-                    ┌─────────┴─────────┐
-                    |                   |
-              LocalTransport       RemoteTransport
-              (AsyncBus, zero-copy) (TCP/UDP + serialize)
-                    |                   |
-              本地 Subscriber      网络 I/O 线程
-                                        |
-                                  IoPoller (epoll/kqueue)
-                                        |
-                              ┌─────────┴─────────┐
-                              |                   |
-                         TcpTransport        UdpTransport
-                         (可靠流)            (低延迟数据报)
+                    TransportFactory::Route()
+                              |
+              ┌───────────────┼───────────────┐
+              |               |               |
+        LocalTransport   ShmTransport    RemoteTransport
+        (AsyncBus,       (共享内存,       (TCP/UDP +
+         zero-copy)       LoanedMessage)   serialize)
+              |               |               |
+        本地 Subscriber  进程间 Subscriber  网络 I/O 线程
+                              |               |
+                        ShmChannel       IoPoller (epoll/kqueue)
+                        (eventfd 通知)         |
+                                        ┌─────┴─────┐
+                                        |           |
+                                   TcpTransport UdpTransport
+                                   (sockpp)     (sockpp)
 ```
 
 **传输策略接口**:
@@ -700,7 +704,7 @@ class ConnectionPool {
 namespace osp {
 
 // 传输层基础类型
-enum class TransportType : uint8_t { kInproc, kTcp, kUdp, kUnix };
+enum class TransportType : uint8_t { kInproc, kShm, kTcp, kUdp, kUnix };
 
 struct Endpoint {
   TransportType type;
@@ -784,10 +788,12 @@ controller.SpinOnce();  // 本地 + 远程消息统一处理
 ```
 
 **实现策略**:
-- Phase 1: `TcpTransport` + `Serializer<POD>` 基础实现
-- Phase 2: `UdpTransport` + 分片重组
-- Phase 3: 节点自动发现 (multicast)
-- Phase 4: 可选 protobuf/flatbuffers 序列化后端
+- Phase 1 (已完成): `TcpTransport` + `Serializer<POD>` 基础实现
+- Phase 2 (已完成): `UdpTransport` + 分片重组
+- Phase 3 (Phase M): `ShmTransport` + 共享内存无锁队列 + LoanedMessage 零拷贝
+- Phase 4 (Phase N): sockpp 深度集成，替代裸 POSIX Socket 封装
+- Phase 5 (Phase O): 节点自动发现 (multicast) + Service/Client RPC
+- Phase 6 (未来): 可选 protobuf/flatbuffers 序列化后端
 
 ### 6.5 层次状态机 (P1, hsm.hpp)
 
@@ -865,11 +871,308 @@ class FusedSubscription {
 }  // namespace osp
 ```
 
+### 6.9 共享内存 IPC (P0, shm_transport.hpp)
+
+**目标**: 借鉴 [cpp-ipc](https://github.com/mutouyun/cpp-ipc) 的共享内存无锁队列和 [ROS2 loaned messages](https://www.eprosima.com/r-d-projects/rosin-project-ros2-shared-memory) 的零拷贝设计，实现同机器进程间高性能通信。
+
+**设计理念** (借鉴 cpp-ipc / ROS2 / CyberRT):
+
+| 特性 | 说明 |
+|------|------|
+| 共享内存传输 | POSIX shm_open/mmap，避免内核态 Socket 开销 |
+| 无锁队列 | CAS 环形缓冲区在共享内存中，多生产者安全 |
+| 零拷贝 | LoanedMessage API，发布者直接写入共享内存段 |
+| 命名通道 | 基于名称的通道发现，类似 cpp-ipc 的 channel |
+| 轻量通知 | eventfd (Linux) 唤醒等待的消费者，热路径无系统调用 |
+
+**架构**:
+
+```
+Process A                          Process B
+┌──────────────┐                  ┌──────────────┐
+│ Node::Publish│                  │ Node::Subscribe
+│      |       │                  │      ^       │
+│ ShmTransport │                  │ ShmTransport │
+│      |       │                  │      |       │
+│  ShmChannel  │                  │  ShmChannel  │
+│   (writer)   │                  │   (reader)   │
+└──────┬───────┘                  └──────┬───────┘
+       │                                 │
+       v          Shared Memory          v
+  ┌────────────────────────────────────────┐
+  │  /osp_channel_<name>                   │
+  │  ┌──────────────────────────────────┐  │
+  │  │ ShmRingBuffer (lock-free MPSC)   │  │
+  │  │ [slot0][slot1][slot2]...[slotN]  │  │
+  │  │  prod_pos_ (atomic)              │  │
+  │  │  cons_pos_ (atomic)              │  │
+  │  └──────────────────────────────────┘  │
+  │  eventfd for wakeup notification       │
+  └────────────────────────────────────────┘
+```
+
+**核心接口**:
+
+```cpp
+namespace osp {
+
+// 共享内存段 RAII 封装
+class SharedMemorySegment {
+ public:
+  static expected<SharedMemorySegment, ShmError> Create(
+      const char* name, uint32_t size);
+  static expected<SharedMemorySegment, ShmError> Open(const char* name);
+  void* Data() noexcept;
+  uint32_t Size() const noexcept;
+  void Unlink() noexcept;  // 标记删除 (最后一个 close 时释放)
+};
+
+// 共享内存中的无锁环形缓冲区
+template <uint32_t SlotSize, uint32_t SlotCount>
+class ShmRingBuffer {
+ public:
+  // 在已有共享内存上构造 (placement)
+  static ShmRingBuffer* InitAt(void* shm_addr);
+  static ShmRingBuffer* AttachAt(void* shm_addr);
+
+  bool TryPush(const void* data, uint32_t size);
+  bool TryPop(void* data, uint32_t& size);
+  uint32_t Depth() const noexcept;
+};
+
+// 命名通道 (生产者/消费者端点)
+class ShmChannel {
+ public:
+  static expected<ShmChannel, ShmError> CreateWriter(const char* name,
+      uint32_t slot_size, uint32_t slot_count);
+  static expected<ShmChannel, ShmError> OpenReader(const char* name);
+
+  bool Write(const void* data, uint32_t size);
+  bool Read(void* data, uint32_t& size);
+  bool WaitReadable(int timeout_ms);  // eventfd 等待
+  void Notify();                       // eventfd 唤醒
+};
+
+// 零拷贝 loaned message (仅限 POD 类型)
+template <typename T>
+class LoanedMessage {
+ public:
+  T* Get() noexcept;             // 直接写入共享内存
+  void Publish() noexcept;       // 提交 (标记 slot 可读)
+  // Non-copyable, movable
+};
+
+// 共享内存传输 (实现 Transport 接口)
+template <typename PayloadVariant>
+class ShmTransport {
+ public:
+  expected<void, ShmError> Bind(const char* channel_name);
+  expected<void, ShmError> Connect(const char* channel_name);
+
+  template <typename T>
+  expected<LoanedMessage<T>, ShmError> Borrow();  // 零拷贝发布
+
+  expected<void, ShmError> Send(const void* data, uint32_t size);
+  void Poll(int timeout_ms);
+  void Close() noexcept;
+};
+
+}  // namespace osp
+```
+
+**自动传输选择** (借鉴 CyberRT):
+
+```
+Node::Publish(msg)
+       |
+  TransportFactory::Route(sender, receiver)
+       |
+       ├── 同进程? ──> inproc (AsyncBus, 零拷贝指针传递)
+       │
+       ├── 同机器不同进程? ──> shm (ShmTransport, 共享内存无锁队列)
+       │
+       └── 跨机器? ──> tcp/udp (TcpTransport, 序列化 + 网络 I/O)
+```
+
+**与原始 OSP 的对比**:
+
+| 特性 | 原始 OSP | newosp |
+|------|----------|--------|
+| 进程内通信 | 消息队列 (VOS) | AsyncBus (无锁 MPSC) |
+| 进程间通信 | 仅 TCP Socket | 共享内存 (ShmTransport) + TCP/UDP |
+| 跨机器通信 | TCP + 心跳 | TCP/UDP + 自动发现 |
+| 零拷贝 | 无 | LoanedMessage (SHM) + inproc 指针传递 |
+| 传输选择 | 手动配置 | 自动路由 (TransportFactory) |
+
+### 6.10 节点发现与服务 (P2, discovery.hpp / service.hpp)
+
+**目标**: 借鉴 ROS2 Service/Client 和 CyberRT 拓扑发现。
+
+```cpp
+namespace osp {
+
+// UDP 多播自动发现
+class MulticastDiscovery {
+ public:
+  void Announce(const char* node_name, const Endpoint& ep);
+  void SetOnNodeJoin(void(*cb)(const char* name, const Endpoint& ep));
+  void SetOnNodeLeave(void(*cb)(const char* name));
+  void Start();
+  void Stop();
+};
+
+// 请求-响应服务
+template <typename Request, typename Response>
+class Service {
+ public:
+  void SetHandler(function_ref<Response(const Request&)> handler);
+  void Start(const Endpoint& ep);
+};
+
+template <typename Request, typename Response>
+class Client {
+ public:
+  expected<Response, ServiceError> Call(const Request& req, int timeout_ms);
+};
+
+}  // namespace osp
+```
+
+### 6.11 应用-实例模型 (P1, app.hpp)
+
+**目标**: 兼容原始 OSP 的 CApp/CInstance 两层架构，提供消息驱动的应用框架。
+
+**与原始 OSP 的对应**:
+
+| 原始 OSP | newosp | 说明 |
+|----------|--------|------|
+| CApp | Application | 拥有消息队列和实例池 |
+| CInstance | Instance | 状态机驱动的逻辑实体 |
+| MAKEIID(app,ins) | MakeIID(app,ins) | 全局实例 ID 编码 |
+| InstanceEntry() | OnMessage() | 消息入口 (事件+状态分发) |
+| DaemonInstanceEntry() | Daemon::OnMessage() | 守护实例 |
+| NextState() | SetState() | 状态转换 |
+
+```cpp
+namespace osp {
+
+// 全局实例 ID 编解码 (兼容原始 OSP)
+constexpr uint32_t MakeIID(uint16_t app_id, uint16_t ins_id) {
+  return (static_cast<uint32_t>(app_id) << 16) | ins_id;
+}
+constexpr uint16_t GetAppId(uint32_t iid) { return iid >> 16; }
+constexpr uint16_t GetInsId(uint32_t iid) { return iid & 0xFFFF; }
+
+// 特殊实例 ID
+constexpr uint16_t kInsPending = 0;
+constexpr uint16_t kInsDaemon  = 0xFFFC;
+constexpr uint16_t kInsEach    = 0xFFFF;  // 广播
+
+// 实例基类 (状态机驱动)
+class Instance {
+ public:
+  virtual ~Instance() = default;
+  virtual void OnMessage(uint16_t event, const void* data, uint32_t len) = 0;
+
+  uint16_t CurState() const noexcept;
+  void SetState(uint16_t state) noexcept;
+  uint16_t InsId() const noexcept;
+};
+
+// 应用 (管理实例池 + 消息队列)
+template <uint16_t MaxInstances = 256>
+class Application {
+ public:
+  Application(uint16_t app_id, const char* name);
+
+  // 注册实例工厂
+  template <typename T>
+  void RegisterInstanceFactory();
+
+  // 创建/销毁实例
+  expected<uint16_t, AppError> CreateInstance();
+  expected<void, AppError> DestroyInstance(uint16_t ins_id);
+
+  // 消息投递 (投递到本应用的消息队列)
+  bool Post(uint16_t ins_id, uint16_t event, const void* data, uint32_t len);
+
+  // 主循环 (从消息队列取消息，分发到实例)
+  void Run();
+  void Stop();
+
+  uint16_t AppId() const noexcept;
+};
+
+}  // namespace osp
+```
+
+### 6.12 统一消息投递 (P1, post.hpp)
+
+**目标**: 兼容原始 OSP 的 OspPost() 统一投递接口，自动路由本地/进程间/网络消息。
+
+```cpp
+namespace osp {
+
+// 统一投递 (自动路由)
+// 本地: 直接投递到 Application 消息队列
+// 进程间: 通过 ShmTransport 投递
+// 跨机器: 通过 TcpTransport 投递
+bool OspPost(uint32_t dst_iid, uint16_t event,
+             const void* data, uint32_t len,
+             uint16_t dst_node = 0 /* 0=本地 */);
+
+// 同步请求-响应 (替代原始 OspSend)
+expected<uint32_t, PostError> OspSendAndWait(
+    uint32_t dst_iid, uint16_t event,
+    const void* data, uint32_t len,
+    void* ack_buf, uint32_t ack_buf_size,
+    uint16_t dst_node = 0,
+    int timeout_ms = 2000);
+
+}  // namespace osp
+```
+
+### 6.13 节点管理器 (P0, node_manager.hpp)
+
+**目标**: 兼容原始 OSP 的 ospnodeman，管理 TCP/SHM 连接、心跳检测、断开通知。
+
+```cpp
+namespace osp {
+
+struct NodeManagerConfig {
+  uint16_t max_nodes = 64;
+  uint32_t heartbeat_interval_ms = 1000;
+  uint32_t heartbeat_timeout_count = 3;
+};
+
+class NodeManager {
+ public:
+  explicit NodeManager(const NodeManagerConfig& cfg);
+
+  // 创建监听 (对应 OspCreateTcpNode)
+  expected<uint16_t, NodeError> CreateListener(uint16_t port);
+
+  // 连接远程节点 (对应 OspConnectTcpNode)
+  expected<uint16_t, NodeError> Connect(const char* host, uint16_t port);
+
+  // 断开节点 (对应 OspDisconnectTcpNode)
+  expected<void, NodeError> Disconnect(uint16_t node_id);
+
+  // 注册断开回调 (对应 OspNodeDiscCBReg)
+  void OnDisconnect(void(*cb)(uint16_t node_id));
+
+  // 获取节点信息
+  bool IsConnected(uint16_t node_id) const;
+  uint32_t NodeCount() const;
+
+  void Start();
+  void Stop();
+};
+
+}  // namespace osp
+```
+
 ---
-
-## 7. 资源预算
-
-### 7.1 已实现模块
 
 | 模块 | 静态内存 | 堆内存 | 线程数 |
 |------|----------|--------|--------|
@@ -889,15 +1192,23 @@ class FusedSubscription {
 | StaticExecutor | <1 KB | 0 | 1 |
 | PinnedExecutor | <1 KB | 0 | 1 |
 | TcpTransport (per conn) | ~256 B | 0 | 0 |
-| **典型总计** | **~462 KB** | **~22 KB** | **11** |
+| FusedSubscription | <1 KB | 0 | 0 |
+| TimeSynchronizer | <1 KB | 0 | 0 |
+| LightSemaphore | <128 B | 0 | 0 |
+| **典型总计** | **~466 KB** | **~22 KB** | **11** |
 
 ### 7.2 规划模块 (估算)
 
 | 模块 | 静态内存 | 堆内存 | 线程数 |
 |------|----------|--------|--------|
-| FusedSubscription | <1 KB | 0 | 0 |
-| TimeSynchronizer | <1 KB | 0 | 0 |
-| LightSemaphore | <128 B | 0 | 0 |
+| ShmRingBuffer (per channel, 256 slots x 4KB) | ~1 MB (共享内存) | 0 | 0 |
+| ShmChannel (per channel) | ~256 B | 0 | 0 |
+| ShmTransport | ~1 KB | 0 | 0 |
+| MulticastDiscovery | ~2 KB | ~1 KB | 1 |
+| Service/Client (per service) | ~512 B | 0 | 0 |
+| Application<256> | ~8 KB | 0 | 1 |
+| Instance (per instance) | ~128 B | 0 | 0 |
+| NodeManager (64 nodes) | ~4 KB | ~2 KB | 2 |
 
 ---
 
@@ -1063,21 +1374,123 @@ class FusedSubscription {
 84. **executor.hpp -- PinnedExecutor**: CPU 核心绑定、最低延迟
 85. **test_executor.cpp**: 节点调度公平性、停止安全性
 
-### Phase K: 扩展模块 -- 高级特性 (规划中)
+### Phase K: 扩展模块 -- 高级特性 (已完成)
 
 86. **data_fusion.hpp -- FusedSubscription**: 多消息对齐触发、时间窗口
 87. **data_fusion.hpp -- TimeSynchronizer**: 时间戳对齐策略
-88. **test_data_fusion.cpp**: 多源融合、超时处理
-89. **semaphore.hpp**: 计数信号量、POSIX sem 封装
-90. **优化 bus.hpp**: 借鉴 eventpp SpinLock + 指数退避、批量预取
-91. **优化 worker_pool.hpp**: 自适应退避 (spin -> yield -> futex)
+88. **test_data_fusion.cpp**: 多源融合、超时处理 (10 test cases)
+89. **semaphore.hpp**: LightSemaphore/BinarySemaphore/PosixSemaphore (12 test cases)
+90. **优化 bus.hpp**: SpinLock + SharedSpinLock 指数退避、批量预取 (__builtin_prefetch)
+91. **优化 worker_pool.hpp**: AdaptiveBackoff 三阶段退避 (spin -> yield -> sleep)
 
-### Phase L: 集成验证
+### Phase L: 集成验证 (已完成)
 
-92. **全模块集成测试**: 跨模块交互场景 (Node + Transport + WorkerPool)
-93. **跨进程通信测试**: 两个进程通过 TcpTransport 通信
-94. **Sanitizer 全量验证**: ASan + TSan + UBSan 全测试通过
-95. **性能基准回归**: 吞吐量/延迟基线记录
+92. **全模块集成测试**: 7 个跨模块场景 (Node+WorkerPool+Bus, HSM+Bus, BT+Node, FusedSubscription+Node, Executor+Node, ConnectionPool+Timer, Node+Timer+Bus)
+93. **Sanitizer 全量验证**: ASan + UBSan + TSan 全部通过 (255 tests, 1003 assertions)
+94. **原始 OSP 代码分析**: osp_legacy_analysis.md -- 从 demo/test 入手的完整功能文档
+
+### Phase M: 共享内存 IPC -- 进程间通信 (规划中)
+
+> 借鉴 [cpp-ipc](https://github.com/mutouyun/cpp-ipc) 的共享内存无锁队列、
+> [ROS2 Fast DDS SHM Transport](https://www.eprosima.com/index.php/products-all/tools/eprosima-shared-memory) 的零拷贝 loaned message、
+> [CyberRT](https://developer.apollo.auto/cyber.html) 的自动传输选择策略。
+>
+> 原始 OSP 的节点间通信仅支持 TCP Socket，newosp 需要同时支持进程内 (inproc)、
+> 进程间同机 (shm)、跨机器 (tcp/udp) 三种传输，并自动选择最优路径。
+
+95. **shm_transport.hpp -- SharedMemorySegment**: POSIX shm_open/mmap RAII 封装、命名共享内存段
+96. **shm_transport.hpp -- ShmRingBuffer**: 共享内存中的无锁 SPSC/MPSC 环形缓冲区 (借鉴 cpp-ipc 的 CAS 设计)
+97. **shm_transport.hpp -- ShmChannel**: 命名通道抽象、生产者/消费者端点、waiter 通知 (eventfd/futex)
+98. **shm_transport.hpp -- ShmTransport**: 实现 Transport 接口、Bind/Connect/Send/Poll
+99. **shm_transport.hpp -- 零拷贝 LoanedMessage**: 借鉴 ROS2 loaned_messages API，发布者直接写入共享内存 (仅限 POD 类型)
+100. **test_shm_transport.cpp**: 单进程 SHM 回环、多线程并发读写、通道创建/销毁
+101. **transport.hpp -- TransportFactory**: 自动传输选择策略 (借鉴 CyberRT)
+    - 同进程同 PayloadVariant: inproc (AsyncBus 零拷贝)
+    - 同机器不同进程: shm (共享内存无锁队列)
+    - 跨机器: tcp/udp (网络传输)
+102. **transport.hpp -- TopicRegistry**: 基于主题名的端点注册表、支持类型路由 + 主题路由混合模式
+103. **test_shm_ipc.cpp**: 跨进程通信集成测试 (fork + shm_channel)
+
+### Phase N: sockpp 深度集成 -- 网络传输重构 (规划中)
+
+> Fork [sockpp](https://github.com/fpagliughi/sockpp) 到 DeguiLiu/sockpp，
+> 在 fork 分支上按嵌入式需求优化 (去除异常依赖、减少堆分配、添加 expected<> 接口)。
+> socket.hpp / transport.hpp 的网络路径深度依赖 sockpp，替代当前的裸 POSIX 封装。
+
+104. **Fork sockpp**: 创建 DeguiLiu/sockpp fork，建立 osp-embedded 分支
+105. **sockpp 嵌入式适配**: -fno-exceptions 兼容、expected<> 错误返回、减少 std::string 使用
+106. **CMake 集成**: FetchContent 从 fork 拉取 sockpp，作为 osp 的可选依赖
+107. **socket.hpp 重构**: TcpSocket/UdpSocket/TcpListener 底层切换为 sockpp::tcp_socket 等
+108. **transport.hpp 网络路径重构**: TcpTransport/UdpTransport 使用 sockpp 的 stream_socket/datagram_socket
+109. **io_poller.hpp 集成**: sockpp 的 socket fd 与 IoPoller 无缝配合
+110. **shell.hpp 统一**: DebugShell 的 TCP 监听切换为 sockpp (与 socket.hpp 共享依赖)
+111. **test_sockpp_integration.cpp**: sockpp 集成回归测试
+
+### Phase O: 节点发现与服务 (规划中)
+
+> 借鉴 ROS2 的 Service/Client 模式和 CyberRT 的拓扑自动发现。
+
+112. **discovery.hpp -- MulticastDiscovery**: UDP 多播节点自动发现、心跳保活
+113. **discovery.hpp -- StaticDiscovery**: 配置文件驱动的静态端点表
+114. **service.hpp -- Service/Client**: 请求-响应模式 (借鉴 ROS2 Service)
+115. **test_discovery.cpp**: 多播发现、节点上下线通知
+116. **性能基准回归**: 全传输路径 (inproc/shm/tcp) 吞吐量/延迟基线
+
+### Phase P: 原始 OSP 功能兼容 (规划中)
+
+> 确保 newosp 覆盖原始 OSP (osp_legacy_analysis.md) 的绝大部分功能。
+> 表现形式不同，但功能等价。进程内/进程间/网络间通信做到兼容。
+> 仅支持 Linux 平台 (含 ARM-Linux)。
+
+117. **app.hpp -- Application 应用抽象**: 对应原始 OSP 的 CApp，拥有消息队列和实例池
+118. **app.hpp -- Instance 实例抽象**: 对应原始 OSP 的 CInstance，状态机驱动的逻辑实体
+119. **app.hpp -- InstanceEntry 消息分发**: 事件+状态 二维分发表，替代 switch-case
+120. **app.hpp -- MAKEIID/GETAPP/GETINS**: 全局实例 ID 编解码，兼容原始 OSP 寻址模型
+121. **post.hpp -- OspPost 统一投递**: 本地/远程/广播三种投递方式，自动路由
+122. **post.hpp -- 同步消息 (SendAndWait)**: 借鉴 ROS2 Service，替代原始 OspSend()
+123. **node_manager.hpp -- NodeManager**: TCP/SHM 连接管理、心跳检测、断开通知回调
+124. **node_manager.hpp -- 心跳机制**: 可配置间隔和超时次数，断开时广播 OSP_DISCONNECT
+125. **test_app.cpp**: Application/Instance 生命周期、消息分发、状态转换
+126. **test_post.cpp**: 本地投递、远程投递、广播投递、同步消息
+127. **test_node_manager.cpp**: 连接建立、心跳超时、断开通知
+
+---
+
+### 原始 OSP 功能覆盖对照表
+
+| 原始 OSP 功能 | newosp 对应 | 状态 | 备注 |
+|--------------|------------|------|------|
+| **ospvos -- 线程管理** | std::thread + worker_pool.hpp | 已完成 | C++17 标准线程 |
+| **ospvos -- 信号量** | semaphore.hpp | 已完成 | LightSemaphore/PosixSemaphore |
+| **ospvos -- 消息队列** | bus.hpp (AsyncBus) | 已完成 | 无锁 MPSC 替代 VOS 消息队列 |
+| **ospvos -- Socket** | socket.hpp + sockpp (Phase N) | 已完成/重构中 | RAII 封装 |
+| **ospvos -- 串口** | -- | 不实现 | 仅 Linux，如需可单独扩展 |
+| **osppost -- 本地投递** | bus.hpp Publish() | 已完成 | 类型路由替代 ID 路由 |
+| **osppost -- 远程投递** | transport.hpp NetworkNode | 已完成 | TCP/UDP 透明传输 |
+| **osppost -- 广播投递** | bus.hpp (所有订阅者) | 已完成 | 类型订阅天然广播 |
+| **osppost -- 别名投递** | -- | 不实现 | 类型路由更安全，应用层可维护名称映射 |
+| **osppost -- 同步消息** | service.hpp (Phase O) | 规划中 | Service/Client 请求-响应 |
+| **ospnodeman -- TCP 连接** | connection.hpp + transport.hpp | 已完成 | ConnectionPool 管理 |
+| **ospnodeman -- 心跳检测** | node_manager.hpp (Phase P) | 规划中 | 可配置心跳 + 超时断开 |
+| **ospnodeman -- 断开通知** | node_manager.hpp (Phase P) | 规划中 | 回调通知 |
+| **ospsch -- 调度器** | executor.hpp | 已完成 | Single/Static/Pinned 三种模式 |
+| **ospsch -- 内存池** | mem_pool.hpp | 已完成 | FixedPool + ObjectPool |
+| **osptimer -- 定时器** | timer.hpp | 已完成 | TimerScheduler 后台线程 |
+| **osptimer -- 绝对定时器** | -- | 不实现 | 相对定时器 + 应用层调度 |
+| **osplog -- 日志** | log.hpp | 已完成 | 编译期过滤 + stderr |
+| **osplog -- 文件轮转** | -- | 未来扩展 | 可集成 zlog |
+| **ospteleserver -- Telnet** | shell.hpp (DebugShell) | 已完成 | TCP Telnet + 命令注册 |
+| **osptest -- 测试框架** | Catch2 v3.5.2 | 已完成 | 现代测试框架替代 |
+| **CApp -- 应用** | app.hpp Application (Phase P) | 规划中 | 消息队列 + 实例池 |
+| **CInstance -- 实例** | app.hpp Instance (Phase P) | 规划中 | 状态机驱动 |
+| **CMessage -- 消息** | MessageEnvelope (bus.hpp) | 已完成 | header + variant payload |
+| **COspStack -- 栈内存** | mem_pool.hpp FixedPool | 已完成 | 固定块分配 |
+| **进程内通信** | AsyncBus (inproc, 零拷贝) | 已完成 | 无锁 MPSC |
+| **进程间通信 (同机)** | ShmTransport (Phase M) | 规划中 | 共享内存无锁队列 |
+| **网络间通信 (跨机)** | TcpTransport/UdpTransport | 已完成 | sockpp 重构 (Phase N) |
+| **自动传输选择** | TransportFactory (Phase M) | 规划中 | inproc/shm/tcp 自动路由 |
+| **节点发现** | discovery.hpp (Phase O) | 规划中 | UDP 多播 + 静态配置 |
+| **字节序转换** | Serializer<T> (transport.hpp) | 已完成 | POD memcpy，可扩展 protobuf |
 
 ---
 
@@ -1104,6 +1517,17 @@ class FusedSubscription {
 | ROS2 CallbackGroup | ROS2 rclcpp | Executor 分组调度 |
 | CyberRT DataFusion | CyberRT | FusedSubscription 多源对齐 |
 | 二级排队 (MPSC+SPSC) | consumer-producer | WorkerPool |
+| 共享内存无锁队列 | cpp-ipc | ShmRingBuffer 进程间通信 |
+| 零拷贝 LoanedMessage | ROS2 Fast DDS | ShmTransport 共享内存发布 |
+| 自动传输选择 | CyberRT | TransportFactory 路由策略 |
+| 命名通道 IPC | cpp-ipc | ShmChannel 进程间命名管道 |
+| eventfd 轻量通知 | Linux kernel | ShmChannel 消费者唤醒 |
+| Service/Client RPC | ROS2 rclcpp | service.hpp 请求-响应 |
+| UDP 多播发现 | ROS2 DDS | discovery.hpp 节点自动发现 |
+| App-Instance 两层模型 | 原始 OSP | app.hpp 应用-实例架构 |
+| 全局实例 ID (IID) | 原始 OSP | post.hpp MAKEIID 寻址 |
+| 心跳检测 + 断开通知 | 原始 OSP | node_manager.hpp 连接管理 |
+| sockpp RAII Socket | sockpp | socket.hpp/transport.hpp 网络层 |
 
 ### 10.2 编译期配置汇总
 
@@ -1125,6 +1549,16 @@ class FusedSubscription {
 | `OSP_EXECUTOR_MAX_NODES` | 16 | executor.hpp | Executor 最大节点数 |
 | `OSP_TRANSPORT_MAX_FRAME_SIZE` | 4096 | transport.hpp | 最大帧大小 |
 | `OSP_CONNECTION_POOL_CAPACITY` | 32 | connection.hpp | 连接池默认容量 |
+| `OSP_SHM_SLOT_SIZE` | 4096 | shm_transport.hpp | 共享内存 slot 大小 |
+| `OSP_SHM_SLOT_COUNT` | 256 | shm_transport.hpp | 共享内存 slot 数量 |
+| `OSP_SHM_CHANNEL_NAME_MAX` | 64 | shm_transport.hpp | 通道名最大长度 |
+| `OSP_DISCOVERY_PORT` | 9999 | discovery.hpp | 多播发现端口 |
+| `OSP_DISCOVERY_INTERVAL_MS` | 1000 | discovery.hpp | 心跳广播间隔 |
+| `OSP_APP_MAX_INSTANCES` | 256 | app.hpp | 每应用最大实例数 |
+| `OSP_APP_MAX_APPS` | 64 | app.hpp | 最大应用数 |
+| `OSP_NODE_MANAGER_MAX_NODES` | 64 | node_manager.hpp | 最大节点数 |
+| `OSP_HEARTBEAT_INTERVAL_MS` | 1000 | node_manager.hpp | 心跳间隔 |
+| `OSP_HEARTBEAT_TIMEOUT_COUNT` | 3 | node_manager.hpp | 心跳超时次数 |
 
 ### 10.3 线程安全性总结
 
@@ -1148,3 +1582,11 @@ class FusedSubscription {
 | hsm | 单线程 Dispatch; guard/handler 不可重入 |
 | bt | 单线程 Tick; 叶节点回调不可重入 |
 | executor | 内部线程安全; Stop 可跨线程调用 |
+| data_fusion | FusedSubscription 继承 Bus 订阅线程安全性 |
+| semaphore | LightSemaphore/PosixSemaphore 全线程安全 |
+| shm_transport (规划) | ShmRingBuffer 无锁 CAS; ShmChannel 单写多读 |
+| discovery (规划) | 内部线程安全; 回调在发现线程执行 |
+| service (规划) | Service handler 在服务线程执行; Client::Call 可跨线程 |
+| app (规划) | Application::Post 线程安全; Instance::OnMessage 单线程 |
+| post (规划) | OspPost 线程安全; OspSendAndWait 阻塞调用线程 |
+| node_manager (规划) | 内部 mutex 保护; 回调在心跳线程执行 |
