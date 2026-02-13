@@ -31,6 +31,7 @@ add_executable(osp_tests
     test_io_poller.cpp
     test_transport.cpp
     test_semaphore.cpp
+    test_shm_transport.cpp
     test_data_fusion.cpp
     test_integration.cpp
 )
