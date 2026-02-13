@@ -14,3 +14,4 @@ cmake-build-*/
 *.dylib
 examples/basic_demo
 docs/osp_analysis_summary.txt
+build_san/
