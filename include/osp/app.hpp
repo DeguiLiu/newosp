@@ -17,6 +17,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <condition_variable>
+#include <mutex>
 
 namespace osp {
 
@@ -54,12 +56,40 @@ constexpr uint16_t kInsDaemon  = 0xFFFC;
 constexpr uint16_t kInsEach    = 0xFFFF;
 
 // ============================================================================
+// ResponseChannel - for synchronous request-response (OspSendAndWait)
+// ============================================================================
+
+#ifndef OSP_RESPONSE_DATA_SIZE
+#define OSP_RESPONSE_DATA_SIZE 256U
+#endif
+
+struct ResponseChannel {
+  std::mutex mtx;
+  std::condition_variable cv;
+  uint8_t data[OSP_RESPONSE_DATA_SIZE];
+  uint32_t data_len;
+  bool replied;
+
+  ResponseChannel() noexcept : data{}, data_len(0), replied(false) {}
+
+  void Reply(const void* buf, uint32_t len) noexcept {
+    std::lock_guard<std::mutex> lock(mtx);
+    data_len = (len <= OSP_RESPONSE_DATA_SIZE) ? len : OSP_RESPONSE_DATA_SIZE;
+    if (buf != nullptr && data_len > 0) {
+      std::memcpy(data, buf, data_len);
+    }
+    replied = true;
+    cv.notify_one();
+  }
+};
+
+// ============================================================================
 // Instance base class
 // ============================================================================
 
 class Instance {
  public:
-  Instance() noexcept : state_(0), ins_id_(0) {}
+  Instance() noexcept : state_(0), ins_id_(0), response_channel_(nullptr) {}
   virtual ~Instance() = default;
 
   virtual void OnMessage(uint16_t event, const void* data,
@@ -71,9 +101,26 @@ class Instance {
 
   void SetInsId(uint16_t id) noexcept { ins_id_ = id; }
 
+  // Reply to a synchronous OspSendAndWait call
+  bool Reply(const void* data, uint32_t len) noexcept {
+    if (response_channel_ == nullptr) return false;
+    response_channel_->Reply(data, len);
+    return true;
+  }
+
+  bool HasPendingReply() const noexcept {
+    return response_channel_ != nullptr;
+  }
+
+  // Internal: set by Application when dispatching sync messages
+  void SetResponseChannel(ResponseChannel* ch) noexcept {
+    response_channel_ = ch;
+  }
+
  private:
   uint16_t state_;
   uint16_t ins_id_;
+  ResponseChannel* response_channel_;
 };
 
 // ============================================================================
@@ -95,6 +142,7 @@ struct AppMessage {
   uint16_t event;
   uint32_t data_len;
   uint8_t data[OSP_APP_MSG_DATA_SIZE];
+  ResponseChannel* response_channel;  // non-null for sync messages
 };
 
 // ============================================================================
@@ -195,7 +243,8 @@ class Application {
   // ======================== Message Queue ========================
 
   bool Post(uint16_t ins_id, uint16_t event, const void* data,
-            uint32_t len) noexcept {
+            uint32_t len,
+            ResponseChannel* response_ch = nullptr) noexcept {
     uint32_t next_tail = (queue_tail_ + 1) % OSP_APP_QUEUE_DEPTH;
     if (next_tail == queue_head_) {
       return false;  // Queue full
@@ -207,6 +256,7 @@ class Application {
     if (data != nullptr && msg.data_len > 0) {
       std::memcpy(msg.data, data, msg.data_len);
     }
+    msg.response_channel = response_ch;
     queue_tail_ = next_tail;
     return true;
   }
@@ -222,13 +272,17 @@ class Application {
       // Broadcast to all instances
       for (uint16_t i = 0; i < MaxInstances; ++i) {
         if (instances_[i] != nullptr) {
+          instances_[i]->SetResponseChannel(msg.response_channel);
           instances_[i]->OnMessage(msg.event, msg.data, msg.data_len);
+          instances_[i]->SetResponseChannel(nullptr);
         }
       }
     } else {
       Instance* inst = GetInstance(msg.ins_id);
       if (inst != nullptr) {
+        inst->SetResponseChannel(msg.response_channel);
         inst->OnMessage(msg.event, msg.data, msg.data_len);
+        inst->SetResponseChannel(nullptr);
       }
     }
     return true;

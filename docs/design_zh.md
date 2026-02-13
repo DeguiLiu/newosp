@@ -2451,7 +2451,7 @@ motor.Activate();
 | **osppost -- 远程投递** | transport.hpp NetworkNode | 已完成 | TCP/UDP 透明传输 |
 | **osppost -- 广播投递** | bus.hpp (所有订阅者) | 已完成 | 类型订阅天然广播 |
 | **osppost -- 别名投递** | -- | 不实现 | 类型路由更安全，应用层可维护名称映射 |
-| **osppost -- 同步消息** | service.hpp (Phase Q) | 已实现 | Service/Client 请求-响应 |
+| **osppost -- 同步消息** | post.hpp OspSendAndWait + service.hpp | 已实现 | ResponseChannel 阻塞等待回复，支持超时 |
 | **ospnodeman -- TCP 连接** | connection.hpp + transport.hpp | 已完成 | ConnectionPool 管理 |
 | **ospnodeman -- 心跳检测** | node_manager.hpp + node_manager_hsm.hpp | 已实现 | P0，TCP 心跳 + HSM 状态机驱动 |
 | **ospnodeman -- 断开通知** | node_manager.hpp + node_manager_hsm.hpp | 已实现 | P0，回调通知 + HSM Connected/Suspect/Disconnected |
