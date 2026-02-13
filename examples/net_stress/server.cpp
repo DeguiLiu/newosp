@@ -206,21 +206,26 @@ static int cmd_stats(int /*argc*/, char* /*argv*/[]) {
   uint64_t bytes = g_total_bytes.load(std::memory_order_relaxed);
   uint32_t hs = g_total_handshake.load(std::memory_order_relaxed);
   uint32_t active = g_active_count.load(std::memory_order_relaxed);
+  uint32_t fchunks = g_total_file_chunks.load(std::memory_order_relaxed);
+  uint64_t fbytes = g_total_file_bytes.load(std::memory_order_relaxed);
 
   osp::DebugShell::Printf("=== Server Statistics ===\r\n");
-  osp::DebugShell::Printf("  Uptime:      %lu ms\r\n",
+  osp::DebugShell::Printf("  Uptime:       %lu ms\r\n",
                            static_cast<unsigned long>(elapsed));
-  osp::DebugShell::Printf("  Clients:     %u / %u\r\n",
+  osp::DebugShell::Printf("  Clients:      %u / %u\r\n",
                            active, net_stress::kMaxClients);
-  osp::DebugShell::Printf("  Handshakes:  %u\r\n", hs);
-  osp::DebugShell::Printf("  Echo msgs:   %u\r\n", echo);
-  osp::DebugShell::Printf("  Total bytes: %lu\r\n",
+  osp::DebugShell::Printf("  Handshakes:   %u\r\n", hs);
+  osp::DebugShell::Printf("  Echo msgs:    %u\r\n", echo);
+  osp::DebugShell::Printf("  Echo bytes:   %lu\r\n",
                            static_cast<unsigned long>(bytes));
+  osp::DebugShell::Printf("  File chunks:  %u\r\n", fchunks);
+  osp::DebugShell::Printf("  File bytes:   %lu\r\n",
+                           static_cast<unsigned long>(fbytes));
 
   if (elapsed > 0) {
-    double kbps = static_cast<double>(bytes) * 8.0 /
+    double kbps = static_cast<double>(bytes + fbytes) * 8.0 /
                   static_cast<double>(elapsed);
-    osp::DebugShell::Printf("  Throughput:  %.1f kbps\r\n", kbps);
+    osp::DebugShell::Printf("  Throughput:   %.1f kbps\r\n", kbps);
   }
   return 0;
 }
@@ -258,14 +263,16 @@ OSP_SHELL_CMD(cmd_quit, "Shutdown server");
 int main(int argc, char* argv[]) {
   uint16_t hs_port   = net_stress::kHandshakePort;
   uint16_t echo_port = net_stress::kEchoPort;
+  uint16_t file_port = net_stress::kFilePort;
   uint16_t shell_port = net_stress::kServerShellPort;
 
   if (argc >= 2) hs_port = static_cast<uint16_t>(std::atoi(argv[1]));
   if (argc >= 3) echo_port = static_cast<uint16_t>(std::atoi(argv[2]));
+  if (argc >= 4) file_port = static_cast<uint16_t>(std::atoi(argv[3]));
 
   OSP_LOG_INFO("SERVER", "=== Net Stress Server ===");
-  OSP_LOG_INFO("SERVER", "Handshake port: %u, Echo port: %u, Shell port: %u",
-               hs_port, echo_port, shell_port);
+  OSP_LOG_INFO("SERVER", "Handshake: %u, Echo: %u, File: %u, Shell: %u",
+               hs_port, echo_port, file_port, shell_port);
 
   InitSlots();
   g_start_time_ms = net_stress::NowMs();
@@ -295,6 +302,19 @@ int main(int argc, char* argv[]) {
   }
   OSP_LOG_INFO("SERVER", "Echo service started on port %u", echo_port);
   OSP_SCOPE_EXIT(echo_svc.Stop());
+
+  // --- File Transfer Service ---
+  osp::Service<net_stress::FileTransferReq, net_stress::FileTransferResp>
+      file_svc({file_port, 8, net_stress::kMaxClients});
+  file_svc.SetHandler(HandleFileTransfer);
+  auto file_r = file_svc.Start();
+  if (!file_r.has_value()) {
+    OSP_LOG_ERROR("SERVER", "Failed to start file service on port %u",
+                  file_port);
+    return 1;
+  }
+  OSP_LOG_INFO("SERVER", "File service started on port %u", file_port);
+  OSP_SCOPE_EXIT(file_svc.Stop());
 
   // --- Debug Shell ---
   osp::DebugShell::Config shell_cfg;

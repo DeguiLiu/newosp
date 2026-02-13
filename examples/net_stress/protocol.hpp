@@ -176,6 +176,7 @@ inline uint64_t NowMs() noexcept { return NowNs() / 1000000ULL; }
 
 /// Fill buffer with repeating pattern based on seq number.
 inline void FillPattern(uint8_t* buf, uint32_t len, uint32_t seq) noexcept {
+  if (buf == nullptr) return;
   for (uint32_t i = 0; i < len; ++i) {
     buf[i] = static_cast<uint8_t>((seq + i) & 0xFFU);
   }
@@ -184,6 +185,7 @@ inline void FillPattern(uint8_t* buf, uint32_t len, uint32_t seq) noexcept {
 /// Verify pattern in buffer.
 inline bool VerifyPattern(const uint8_t* buf, uint32_t len,
                           uint32_t seq) noexcept {
+  if (buf == nullptr) return false;
   for (uint32_t i = 0; i < len; ++i) {
     if (buf[i] != static_cast<uint8_t>((seq + i) & 0xFFU)) return false;
   }

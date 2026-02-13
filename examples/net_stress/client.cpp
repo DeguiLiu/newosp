@@ -43,6 +43,7 @@
 #include "osp/vocabulary.hpp"
 
 #include "client_sm.hpp"
+#include "file_transfer.hpp"
 #include "protocol.hpp"
 
 #include <atomic>
@@ -89,6 +90,98 @@ static ClientCtx& Ctx(uint32_t i) noexcept {
 
 static ClientSm& Sm(uint32_t i) noexcept {
   return *reinterpret_cast<ClientSm*>(g_slots[i].sm_buf);
+}
+
+// ============================================================================
+// File Transfer Thread State
+// ============================================================================
+
+struct FileThreadState {
+  std::thread              thread;
+  alignas(alignof(FtCtx))  uint8_t ctx_buf[sizeof(FtCtx)];
+  alignas(alignof(FtSm))   uint8_t sm_buf[sizeof(FtSm)];
+  std::atomic<uint64_t>    last_heartbeat_ms{0};  // watchdog heartbeat
+  std::atomic<bool>        alive{false};
+  std::atomic<bool>        started{false};
+  bool                     initialized{false};
+};
+
+static FileThreadState g_file_threads[kMaxInstances];
+
+static FtCtx& FtCtxOf(uint32_t i) noexcept {
+  return *reinterpret_cast<FtCtx*>(g_file_threads[i].ctx_buf);
+}
+
+static FtSm& FtSmOf(uint32_t i) noexcept {
+  return *reinterpret_cast<FtSm*>(g_file_threads[i].sm_buf);
+}
+
+// Simulated file data (shared across all clients)
+static constexpr uint32_t kFileSize = 32768U;  // 32KB test file
+static uint8_t g_file_data[kFileSize];
+
+static void GenerateFileData() noexcept {
+  for (uint32_t i = 0; i < kFileSize; ++i) {
+    g_file_data[i] = static_cast<uint8_t>(i & 0xFFU);
+  }
+}
+
+// File transfer thread function (with heartbeat for watchdog)
+static void FileTransferThread(uint32_t idx) noexcept {
+  auto& ft = g_file_threads[idx];
+  ft.alive.store(true, std::memory_order_relaxed);
+  ft.last_heartbeat_ms.store(NowMs(), std::memory_order_relaxed);
+
+  auto& ctx = FtCtxOf(idx);
+  bool ok = RunFileTransfer(ctx);
+
+  // Publish progress via bus (if node is available)
+  ft.last_heartbeat_ms.store(NowMs(), std::memory_order_relaxed);
+  ft.alive.store(false, std::memory_order_relaxed);
+
+  if (ok) {
+    OSP_LOG_INFO("FILE", "[%u] Transfer thread completed successfully",
+                 ctx.client_id);
+  } else {
+    OSP_LOG_ERROR("FILE", "[%u] Transfer thread failed", ctx.client_id);
+  }
+}
+
+// ============================================================================
+// Watchdog: detect dead threads
+// ============================================================================
+
+static constexpr uint64_t kWatchdogTimeoutMs = 10000U;  // 10s no heartbeat
+
+static void WatchdogCallback(void* /*ctx*/) {
+  uint64_t now = NowMs();
+  for (uint32_t i = 0; i < g_num_clients; ++i) {
+    auto& ft = g_file_threads[i];
+    if (!ft.started.load(std::memory_order_relaxed)) continue;
+    if (!ft.alive.load(std::memory_order_relaxed)) continue;
+
+    uint64_t last = ft.last_heartbeat_ms.load(std::memory_order_relaxed);
+    if (now - last > kWatchdogTimeoutMs) {
+      OSP_LOG_ERROR("WATCHDOG", "File thread [%u] unresponsive "
+                    "(last heartbeat %lu ms ago)",
+                    i, static_cast<unsigned long>(now - last));
+      // Mark as dead -- main loop can decide to restart or abort
+      ft.alive.store(false, std::memory_order_relaxed);
+    }
+  }
+
+  // Also check echo connectivity
+  for (uint32_t i = 0; i < g_num_clients; ++i) {
+    auto& c = Ctx(i);
+    if (c.connected) {
+      uint32_t err = c.n_err.load(std::memory_order_relaxed);
+      uint32_t sent = c.n_sent.load(std::memory_order_relaxed);
+      if (sent > 10 && err > sent / 2) {
+        OSP_LOG_WARN("WATCHDOG", "Client [%u] high error rate: %u/%u",
+                     i, err, sent);
+      }
+    }
+  }
 }
 
 // ============================================================================
@@ -287,6 +380,28 @@ static int cmd_bus(int /*argc*/, char* /*argv*/[]) {
 }
 OSP_SHELL_CMD(cmd_bus, "Show AsyncBus statistics");
 
+static int cmd_file(int /*argc*/, char* /*argv*/[]) {
+  osp::DebugShell::Printf("=== File Transfer Status ===\r\n");
+  for (uint32_t i = 0; i < g_num_clients; ++i) {
+    auto& ft = g_file_threads[i];
+    if (!ft.started.load(std::memory_order_relaxed)) {
+      osp::DebugShell::Printf("  [%2u] not started\r\n", i);
+      continue;
+    }
+    auto& fc = FtCtxOf(i);
+    bool alive = ft.alive.load(std::memory_order_relaxed);
+    osp::DebugShell::Printf(
+        "  [%2u] state=%-12s alive=%s chunks=%u/%u retries=%u\r\n",
+        i, fc.sm->CurrentStateName(),
+        alive ? "yes" : "no",
+        fc.chunks_ok.load(std::memory_order_relaxed),
+        fc.total_chunks,
+        fc.chunks_retried.load(std::memory_order_relaxed));
+  }
+  return 0;
+}
+OSP_SHELL_CMD(cmd_file, "Show file transfer status per client");
+
 static int cmd_quit(int /*argc*/, char* /*argv*/[]) {
   osp::DebugShell::Printf("Shutting down...\r\n");
   g_running.store(false, std::memory_order_relaxed);
@@ -403,6 +518,31 @@ int main(int argc, char* argv[]) {
   node.Publish(start_cmd);
   node.SpinOnce();
 
+  // --- Phase 3: Launch file transfer threads (parallel to echo) ---
+  GenerateFileData();
+  OSP_LOG_INFO("CLIENT", "Launching file transfer threads (%u bytes, "
+               "10%% simulated loss)...", kFileSize);
+
+  for (uint32_t i = 0; i < g_num_clients; ++i) {
+    if (!Ctx(i).connected) continue;
+
+    auto& ft = g_file_threads[i];
+    auto* fc = new (ft.ctx_buf) FtCtx();  // NOLINT
+    InitFtCtx(*fc);
+    fc->client_id = Ctx(i).id;
+    fc->server_host.assign(osp::TruncateToCapacity, server_ip);
+    fc->file_data = g_file_data;
+    fc->file_size = kFileSize;
+    fc->drop_rate = 0.1f;  // 10% simulated loss
+
+    auto* fsm = new (ft.sm_buf) FtSm(*fc);  // NOLINT
+    BuildFtSm(*fsm, *fc);
+    ft.initialized = true;
+    ft.started.store(true, std::memory_order_relaxed);
+
+    ft.thread = std::thread(FileTransferThread, i);
+  }
+
   // --- Debug Shell ---
   osp::DebugShell::Config shell_cfg;
   shell_cfg.port = kClientShellPort;
@@ -412,14 +552,15 @@ int main(int argc, char* argv[]) {
     OSP_LOG_INFO("CLIENT", "Debug shell: telnet localhost %u",
                  kClientShellPort);
     OSP_LOG_INFO("CLIENT", "  Commands: cmd_p, cmd_s, cmd_stop, "
-                 "cmd_detail, cmd_bus, cmd_quit");
+                 "cmd_detail, cmd_bus, cmd_file, cmd_quit");
   }
   OSP_SCOPE_EXIT(shell.Stop());
 
-  // --- Timer: periodic echo tick + stats ---
+  // --- Timer: periodic echo tick + stats + watchdog ---
   osp::TimerScheduler<4> timer;
   static_cast<void>(timer.Add(interval_ms, TickCallback, &node));
   static_cast<void>(timer.Add(5000U, StatsCallback, &node));
+  static_cast<void>(timer.Add(3000U, WatchdogCallback));
   static_cast<void>(timer.Start());
   OSP_SCOPE_EXIT(timer.Stop());
 
@@ -434,10 +575,19 @@ int main(int argc, char* argv[]) {
   timer.Stop();
   g_test_running.store(false, std::memory_order_relaxed);
 
+  // Join file transfer threads
+  for (uint32_t i = 0; i < g_num_clients; ++i) {
+    auto& ft = g_file_threads[i];
+    if (ft.thread.joinable()) {
+      ft.thread.join();
+    }
+  }
+
   OSP_LOG_INFO("CLIENT", "");
   OSP_LOG_INFO("CLIENT", "========== Final Results ==========");
   OSP_LOG_INFO("CLIENT", "Elapsed:   %lu ms",
                static_cast<unsigned long>(NowMs() - g_start_time_ms));
+  OSP_LOG_INFO("CLIENT", "--- Echo Channel ---");
   OSP_LOG_INFO("CLIENT", "Sent:      %u", AggSent());
   OSP_LOG_INFO("CLIENT", "Received:  %u", AggRecv());
   OSP_LOG_INFO("CLIENT", "Errors:    %u", AggErr());
@@ -448,12 +598,34 @@ int main(int argc, char* argv[]) {
     OSP_LOG_INFO("CLIENT", "Avg RTT:   %.1f us", avg_rtt);
   }
 
+  OSP_LOG_INFO("CLIENT", "--- File Channel ---");
+  for (uint32_t i = 0; i < g_num_clients; ++i) {
+    if (!g_file_threads[i].initialized) continue;
+    auto& fc = FtCtxOf(i);
+    OSP_LOG_INFO("CLIENT", "  [%u] %s: chunks=%u/%u retries=%u",
+                 fc.client_id,
+                 fc.success.load(std::memory_order_relaxed) ? "OK" : "FAIL",
+                 fc.chunks_ok.load(std::memory_order_relaxed),
+                 fc.total_chunks,
+                 fc.chunks_retried.load(std::memory_order_relaxed));
+  }
+
   auto bus_stats = StressBus::Instance().GetStatistics();
+  OSP_LOG_INFO("CLIENT", "--- Bus ---");
   OSP_LOG_INFO("CLIENT", "Bus:       pub=%lu proc=%lu drop=%lu",
                static_cast<unsigned long>(bus_stats.messages_published),
                static_cast<unsigned long>(bus_stats.messages_processed),
                static_cast<unsigned long>(bus_stats.messages_dropped));
   OSP_LOG_INFO("CLIENT", "===================================");
+
+  // Cleanup RPC clients and file transfer objects
+  for (uint32_t i = 0; i < g_num_clients; ++i) {
+    if (g_file_threads[i].initialized) {
+      FtSmOf(i).~StateMachine();
+      FtCtxOf(i).~FtCtx();
+      g_file_threads[i].initialized = false;
+    }
+  }
 
   node.Stop();
   shell.Stop();

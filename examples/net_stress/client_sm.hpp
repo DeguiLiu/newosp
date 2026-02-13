@@ -277,6 +277,7 @@ inline bool DoHandshake(ClientCtx& ctx) noexcept {
   req.client_id = ctx.id;
   req.version = kProtocolVersion;
   std::strncpy(req.name, ctx.name.c_str(), sizeof(req.name) - 1);
+  req.name[sizeof(req.name) - 1] = '\0';
 
   auto resp = hs->Call(req, static_cast<int32_t>(kConnectTimeoutMs));
   if (!resp.has_value() || resp.value().accepted == 0) {

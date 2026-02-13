@@ -47,9 +47,9 @@ struct ProbeStats {
   std::atomic<uint32_t> probe_sent{0};
   std::atomic<uint32_t> probe_ok{0};
   std::atomic<uint32_t> probe_fail{0};
-  uint64_t min_rtt_us{UINT64_MAX};
-  uint64_t max_rtt_us{0};
-  uint64_t sum_rtt_us{0};
+  std::atomic<uint64_t> min_rtt_us{UINT64_MAX};
+  std::atomic<uint64_t> max_rtt_us{0};
+  std::atomic<uint64_t> sum_rtt_us{0};
 };
 
 static ProbeStats             g_probe;
@@ -105,10 +105,25 @@ static void ProbeCallback(void* ctx) {
     pr.ok = true;
     g_probe.probe_ok.fetch_add(1, std::memory_order_relaxed);
 
-    // Update stats
-    g_probe.sum_rtt_us += rtt;
-    if (rtt < g_probe.min_rtt_us) g_probe.min_rtt_us = rtt;
-    if (rtt > g_probe.max_rtt_us) g_probe.max_rtt_us = rtt;
+    // Update stats with atomic operations
+    g_probe.sum_rtt_us.fetch_add(rtt, std::memory_order_relaxed);
+
+    // Update min_rtt_us using CAS loop
+    uint64_t old_min = g_probe.min_rtt_us.load(std::memory_order_relaxed);
+    while (rtt < old_min &&
+           !g_probe.min_rtt_us.compare_exchange_weak(old_min, rtt,
+                                                      std::memory_order_relaxed)) {
+      // CAS failed, retry with updated old_min
+    }
+
+    // Update max_rtt_us using CAS loop
+    uint64_t old_max = g_probe.max_rtt_us.load(std::memory_order_relaxed);
+    while (rtt > old_max &&
+           !g_probe.max_rtt_us.compare_exchange_weak(old_max, rtt,
+                                                      std::memory_order_relaxed)) {
+      // CAS failed, retry with updated old_max
+    }
+
     if (g_probe.rtt_history.size() < g_probe.rtt_history.capacity()) {
       g_probe.rtt_history.push_back(rtt);
     }
@@ -138,12 +153,12 @@ static int cmd_probe(int /*argc*/, char* /*argv*/[]) {
   osp::DebugShell::Printf("  Failed:  %u\r\n", fail);
 
   if (ok > 0) {
-    double avg = static_cast<double>(g_probe.sum_rtt_us) /
+    double avg = static_cast<double>(g_probe.sum_rtt_us.load(std::memory_order_relaxed)) /
                  static_cast<double>(ok);
     osp::DebugShell::Printf("  Min RTT: %lu us\r\n",
-                             static_cast<unsigned long>(g_probe.min_rtt_us));
+                             static_cast<unsigned long>(g_probe.min_rtt_us.load(std::memory_order_relaxed)));
     osp::DebugShell::Printf("  Max RTT: %lu us\r\n",
-                             static_cast<unsigned long>(g_probe.max_rtt_us));
+                             static_cast<unsigned long>(g_probe.max_rtt_us.load(std::memory_order_relaxed)));
     osp::DebugShell::Printf("  Avg RTT: %.1f us\r\n", avg);
   }
 
@@ -264,11 +279,11 @@ int main(int argc, char* argv[]) {
                g_probe.probe_sent.load(std::memory_order_relaxed),
                ok, g_probe.probe_fail.load(std::memory_order_relaxed));
   if (ok > 0) {
-    double avg = static_cast<double>(g_probe.sum_rtt_us) /
+    double avg = static_cast<double>(g_probe.sum_rtt_us.load(std::memory_order_relaxed)) /
                  static_cast<double>(ok);
     OSP_LOG_INFO("MONITOR", "RTT: min=%lu avg=%.1f max=%lu us",
-                 static_cast<unsigned long>(g_probe.min_rtt_us), avg,
-                 static_cast<unsigned long>(g_probe.max_rtt_us));
+                 static_cast<unsigned long>(g_probe.min_rtt_us.load(std::memory_order_relaxed)), avg,
+                 static_cast<unsigned long>(g_probe.max_rtt_us.load(std::memory_order_relaxed)));
   }
   OSP_LOG_INFO("MONITOR", "==================================");
 
