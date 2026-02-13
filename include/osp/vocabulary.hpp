@@ -86,7 +86,7 @@ class expected final {
     return e;
   }
 
-  expected(const expected& other) noexcept : has_value_(other.has_value_), err_(other.err_) {
+  expected(const expected& other) noexcept : storage_{}, err_(other.err_), has_value_(other.has_value_) {
     if (has_value_) {
       ::new (&storage_) V(other.value());
     }
@@ -106,7 +106,7 @@ class expected final {
     return *this;
   }
 
-  expected(expected&& other) noexcept : has_value_(other.has_value_), err_(other.err_) {
+  expected(expected&& other) noexcept : storage_{}, err_(other.err_), has_value_(other.has_value_) {
     if (has_value_) {
       ::new (&storage_) V(static_cast<V&&>(other.value()));
     }
@@ -154,7 +154,7 @@ class expected final {
   }
 
  private:
-  expected() noexcept : has_value_(false), err_{} {}
+  expected() noexcept : storage_{}, err_{}, has_value_(false) {}
 
   typename std::aligned_storage<sizeof(V), alignof(V)>::type storage_;
   E err_;
