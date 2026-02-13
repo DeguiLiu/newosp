@@ -258,6 +258,15 @@ class SpscQueue {
 };
 
 // ============================================================================
+// WorkerPool Error Codes
+// ============================================================================
+
+enum class WorkerPoolError {
+  kFlushTimeout,      ///< FlushAndPause timed out waiting for workers
+  kWorkerUnhealthy,   ///< One or more worker threads are dead
+};
+
+// ============================================================================
 // WorkerPool Statistics
 // ============================================================================
 
@@ -362,6 +371,8 @@ class WorkerPool {
 
   /**
    * @brief Shutdown: stop accepting jobs, drain queues, join all threads.
+   *
+   * Handles dead worker threads gracefully - only joins threads that are still joinable.
    */
   void Shutdown() noexcept {
     if (!running_.load(std::memory_order_acquire)) {
@@ -369,10 +380,12 @@ class WorkerPool {
     }
     shutdown_.store(true, std::memory_order_release);
 
+    // Join dispatcher thread if still alive
     if (dispatcher_thread_.joinable()) {
       dispatcher_thread_.join();
     }
 
+    // Wake up all workers
     for (uint32_t i = 0U; i < worker_num_; ++i) {
       {
         std::lock_guard<std::mutex> lk(workers_[i]->mtx);
@@ -380,6 +393,7 @@ class WorkerPool {
       workers_[i]->cv.notify_one();
     }
 
+    // Join worker threads (skip if already dead)
     for (auto& t : worker_threads_) {
       if (t.joinable()) {
         t.join();
@@ -399,10 +413,16 @@ class WorkerPool {
   /**
    * @brief Flush all pending work and pause accepting new jobs.
    *
-   * Blocks until all dispatched jobs are processed by workers.
+   * Blocks until all dispatched jobs are processed by workers, or timeout is reached.
+   *
+   * @param timeout_ms Maximum time to wait in milliseconds (default 5000ms)
+   * @return expected<void, WorkerPoolError> - kFlushTimeout if timeout exceeded
    */
-  void FlushAndPause() noexcept {
+  osp::expected<void, WorkerPoolError> FlushAndPause(uint32_t timeout_ms = 5000U) noexcept {
     paused_.store(true, std::memory_order_release);
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto timeout = std::chrono::milliseconds(timeout_ms);
 
     // Wait until bus is drained, all worker queues empty, and all dispatched jobs processed
     while (true) {
@@ -417,8 +437,15 @@ class WorkerPool {
       uint64_t disp = dispatched_.load(std::memory_order_acquire);
       uint64_t proc = processed_.load(std::memory_order_acquire);
       if (bus_empty && workers_empty && disp == proc) {
-        break;
+        return osp::expected<void, WorkerPoolError>::success();
       }
+
+      // Check timeout
+      const auto elapsed = std::chrono::steady_clock::now() - start;
+      if (elapsed >= timeout) {
+        return osp::expected<void, WorkerPoolError>::error(WorkerPoolError::kFlushTimeout);
+      }
+
       std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
   }
@@ -484,6 +511,32 @@ class WorkerPool {
   bool IsRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
   bool IsPaused() const noexcept { return paused_.load(std::memory_order_acquire); }
+
+  /**
+   * @brief Check if all worker threads are healthy (still joinable).
+   *
+   * A worker thread becomes unjoinable if it has terminated unexpectedly
+   * (e.g., due to a crash in a callback).
+   *
+   * @return expected<void, WorkerPoolError> - kWorkerUnhealthy if any worker is dead
+   */
+  osp::expected<void, WorkerPoolError> IsHealthy() const noexcept {
+    if (!running_.load(std::memory_order_acquire)) {
+      return osp::expected<void, WorkerPoolError>::success();  // Not started yet or already shut down - not an error
+    }
+
+    for (const auto& t : worker_threads_) {
+      if (!t.joinable()) {
+        return osp::expected<void, WorkerPoolError>::error(WorkerPoolError::kWorkerUnhealthy);
+      }
+    }
+
+    if (dispatcher_thread_.joinable() == false && running_.load(std::memory_order_acquire)) {
+      return osp::expected<void, WorkerPoolError>::error(WorkerPoolError::kWorkerUnhealthy);
+    }
+
+    return osp::expected<void, WorkerPoolError>::success();
+  }
 
  private:
   // ======================== Type-erased dispatch ========================

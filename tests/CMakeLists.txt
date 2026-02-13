@@ -39,6 +39,7 @@ set(OSP_TEST_CORE_SOURCES
     test_qos.cpp
     test_app.cpp
     test_post.cpp
+    test_watchdog.cpp
 )
 
 # Network test sources (depend on sockpp, incompatible with -fno-exceptions)

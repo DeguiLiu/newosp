@@ -2366,6 +2366,186 @@ python3 tools/ospgen.py --input defs/protocol_messages.yaml \
 | TcpClient/TcpServer (net.hpp) | ~256 B | 0 | 0 |
 | TransportFactory | 0 (无状态) | 0 | 0 |
 
+### 6.23 线程看门狗 (P0, watchdog.hpp) -- 新增
+
+#### 6.23.1 问题分析
+
+newosp 共有 8 个模块创建 `std::thread`，可产生 15+ 个线程。当前存在以下系统性缺陷:
+
+| 缺陷 | 影响 | 涉及模块 |
+|------|------|----------|
+| `IsRunning()` 只检查 flag，不检查线程存活 | 线程死后 flag 仍为 true，调用者无法感知 | 全部 |
+| 无线程死亡检测 | 静默失效，无日志无告警 | 全部 |
+| 无恢复机制 | 单线程死亡可导致级联故障 | timer, worker_pool, executor |
+| 回调崩溃 = 宿主线程死亡 | 用户回调 SIGSEGV 杀死调度线程 | timer, worker_pool, shell |
+| WorkerPool::FlushAndPause 死锁 | worker 死后 dispatched != processed 永远成立 | worker_pool |
+| Service worker 资源泄漏 | worker 死后 active_workers_ 永久偏高 | service |
+
+级联故障链: TimerScheduler 线程死亡 -> NodeManager/HsmNodeManager/Discovery 心跳停止 -> 远端节点误判断连 -> 系统静默失效。
+
+#### 6.23.2 设计目标
+
+| 目标 | 约束 |
+|------|------|
+| 零堆分配 | 编译期 `MaxThreads` 模板参数，嵌入式数组 |
+| 无额外线程 | 复用 TimerScheduler tick 或用户主动调用 `Check()` |
+| 无锁热路径 | `Feed()` 只写一个 atomic bit，O(1) |
+| 兼容 `-fno-exceptions -fno-rtti` | 纯 C++17，无虚函数 |
+| 可选启用 | 宏 `OSP_WATCHDOG_ENABLED` 控制，禁用时零开销 |
+
+#### 6.23.3 架构设计
+
+参考 FreeRTOS TWDT (Task Watchdog Timer) 的 Event Group 模式 + Folly Observer 回调模式:
+
+```
++------------------+     Feed()      +------------------+
+| Monitored Thread | -------------> | ThreadWatchdog   |
+| (timer/worker/   |   atomic OR    | <MaxThreads=32>  |
+|  executor/...)   |                |                  |
++------------------+                | - slots_[N]      |
+                                    | - fed_bits_      |
+        Check() tick                | - expect_bits_   |
+        (from TimerScheduler        | - on_timeout_    |
+         or user poll)              | - on_recovered_  |
+              |                     +------------------+
+              v                            |
+     Compare fed vs expect                 | timeout detected
+     Reset fed_bits_                       v
+                                    Callback(slot_id, thread_name)
+```
+
+核心数据结构:
+
+```cpp
+template <uint32_t MaxThreads = 32>
+class ThreadWatchdog final {
+  struct Slot {
+    std::atomic<bool> active{false};     // 是否被注册
+    std::atomic<uint64_t> last_feed_us{0}; // 最后一次 Feed 时间戳
+    uint64_t timeout_us{0};              // 超时阈值 (微秒)
+    bool timed_out{false};               // 当前是否处于超时状态
+    FixedString<32> name;                // 线程名称 (调试用)
+  };
+
+  Slot slots_[MaxThreads];
+  TimeoutCallback on_timeout_{nullptr};  // void(*)(uint32_t slot_id, const char* name, void* ctx)
+  RecoverCallback on_recovered_{nullptr}; // void(*)(uint32_t slot_id, const char* name, void* ctx)
+  void* timeout_ctx_{nullptr};
+  void* recover_ctx_{nullptr};
+  std::atomic<uint32_t> active_count_{0};
+};
+```
+
+#### 6.23.4 核心 API
+
+```cpp
+// 注册线程监控 (线程启动时调用)
+expected<WatchdogSlotId, WatchdogError> Register(
+    const char* name, uint32_t timeout_ms) noexcept;
+
+// 注销线程监控 (线程退出时调用)
+expected<void, WatchdogError> Unregister(WatchdogSlotId id) noexcept;
+
+// 喂狗 (被监控线程在循环中周期性调用)
+void Feed(WatchdogSlotId id) noexcept;  // 热路径，只写 atomic
+
+// 检查超时 (由 TimerScheduler tick 或用户定期调用)
+uint32_t Check() noexcept;  // 返回超时线程数
+
+// 设置回调
+void SetOnTimeout(TimeoutCallback fn, void* ctx) noexcept;
+void SetOnRecovered(RecoverCallback fn, void* ctx) noexcept;
+
+// 查询
+bool IsTimedOut(WatchdogSlotId id) const noexcept;
+uint32_t ActiveCount() const noexcept;
+uint32_t TimedOutCount() const noexcept;
+```
+
+#### 6.23.5 RAII 守卫
+
+```cpp
+// 自动注册/注销 + 自动喂狗
+class WatchdogGuard {
+  ThreadWatchdog<>* wd_;
+  WatchdogSlotId id_;
+public:
+  WatchdogGuard(ThreadWatchdog<>* wd, const char* name, uint32_t timeout_ms);
+  ~WatchdogGuard();  // Unregister
+  void Feed() noexcept;  // 转发到 wd_->Feed(id_)
+};
+```
+
+#### 6.23.6 集成模式
+
+各模块线程函数的集成方式 (以 TimerScheduler 为例):
+
+```cpp
+void ScheduleLoop() noexcept {
+  WatchdogGuard guard(watchdog_, "timer_scheduler", timeout_ms);
+  while (running_.load(std::memory_order_acquire)) {
+    guard.Feed();  // 每次循环喂狗
+    // ... 原有调度逻辑 ...
+  }
+  // ~WatchdogGuard 自动 Unregister
+}
+```
+
+需要集成的模块:
+
+| 模块 | 线程 | 建议超时 |
+|------|------|----------|
+| TimerScheduler | ScheduleLoop | 2x max(period_ms) |
+| WorkerPool | DispatcherLoop, WorkerLoop | 2x dispatch_interval |
+| StaticExecutor | DispatchLoop | 2x batch_interval |
+| PinnedExecutor | DispatchLoop | 2x batch_interval |
+| RealtimeExecutor | DispatchLoop | 2x period |
+| NodeManager | HeartbeatLoop | 2x heartbeat_interval |
+| HsmNodeManager | MonitorLoop | 2x monitor_interval |
+| MulticastDiscovery | AnnounceLoop, ReceiveLoop | 2x announce_interval |
+| DebugShell | AcceptLoop, SessionLoop | 30s (长超时) |
+| Service | AcceptLoop, HandleConnection | 30s |
+
+#### 6.23.7 与 TimerScheduler 集成
+
+ThreadWatchdog 本身不创建线程，通过 TimerScheduler 驱动 Check():
+
+```cpp
+// 应用层启动代码
+TimerScheduler<> scheduler;
+ThreadWatchdog<32> watchdog;
+
+watchdog.SetOnTimeout([](uint32_t id, const char* name, void* ctx) {
+  OSP_LOG_ERROR("Thread '%s' (slot %u) timed out!", name, id);
+}, nullptr);
+
+scheduler.Add(500, ThreadWatchdog<32>::CheckTick, &watchdog);  // 500ms 检查一次
+scheduler.Start();
+```
+
+特殊处理: TimerScheduler 自身的线程由谁监控?
+- 方案: 应用层在主循环中定期调用 `watchdog.Check()`，或使用独立的硬件 watchdog
+
+#### 6.23.8 已知缺陷修复
+
+本次同步修复以下已知缺陷:
+
+1. **RealtimeExecutor 双线程 bug**: `config_.stack_size > 0` 分支先 `pthread_create` 再 `std::thread`，导致两个线程同时运行。修复: 统一使用 pthread_create 或 std::thread，不混用。
+
+2. **WorkerPool::FlushAndPause 死锁**: worker 死亡后 `dispatched_ != processed_` 永远成立。修复: FlushAndPause 增加超时参数，超时后返回错误而非无限阻塞。
+
+3. **Service worker 资源泄漏**: worker 线程死亡后 `finished` flag 不会被设置。修复: ReapFinishedWorkers 增加 joinable() 检查，对已 join 但未 finish 的线程强制回收。
+
+#### 6.23.9 资源预算
+
+| 项目 | 开销 |
+|------|------|
+| ThreadWatchdog<32> 静态内存 | ~2 KB (32 slots x 64B) |
+| Feed() 热路径 | 1 次 atomic store (relaxed) + 1 次 clock_gettime |
+| Check() 冷路径 | 遍历 active slots，比较时间戳 |
+| 额外线程 | 0 (复用 TimerScheduler) |
+| 堆分配 | 0 |
+
 ---
 
 ## 8. 编码规范与质量保障

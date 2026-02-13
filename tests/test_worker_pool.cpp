@@ -306,7 +306,8 @@ TEST_CASE("WorkerPool FlushAndPause/Resume", "[worker_pool]") {
       pool.Submit(TaskA{i});
     }
 
-    pool.FlushAndPause();
+    auto result = pool.FlushAndPause();
+    REQUIRE(result.has_value());
 
     REQUIRE(pool.IsPaused());
     REQUIRE(g_task_a_count.load() == kCount);
@@ -316,7 +317,8 @@ TEST_CASE("WorkerPool FlushAndPause/Resume", "[worker_pool]") {
   }
 
   SECTION("Resume allows new submissions") {
-    pool.FlushAndPause();
+    auto result = pool.FlushAndPause();
+    REQUIRE(result.has_value());
     REQUIRE(pool.IsPaused());
 
     pool.Resume();
@@ -332,6 +334,68 @@ TEST_CASE("WorkerPool FlushAndPause/Resume", "[worker_pool]") {
   }
 
   pool.Shutdown();
+}
+
+TEST_CASE("WorkerPool FlushAndPause timeout", "[worker_pool]") {
+  ResetBus();
+  ResetCounters();
+
+  osp::WorkerPoolConfig cfg;
+  cfg.name = "timeout";
+  cfg.worker_num = 2U;
+  osp::WorkerPool<TestPayload> pool(cfg);
+
+  // Register a handler that blocks indefinitely
+  pool.RegisterHandler<TaskA>([](const TaskA&, const osp::MessageHeader&) {
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+  });
+
+  pool.Start();
+
+  // Submit a blocking task
+  pool.Submit(TaskA{1});
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));  // Let it start processing
+
+  // FlushAndPause should timeout because the worker is blocked
+  auto result = pool.FlushAndPause(100U);  // 100ms timeout
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::WorkerPoolError::kFlushTimeout);
+
+  pool.Shutdown();
+}
+
+TEST_CASE("WorkerPool IsHealthy", "[worker_pool]") {
+  ResetBus();
+  ResetCounters();
+
+  osp::WorkerPoolConfig cfg;
+  cfg.name = "health";
+  cfg.worker_num = 2U;
+  osp::WorkerPool<TestPayload> pool(cfg);
+  pool.RegisterHandler<TaskA>(&HandleTaskA);
+
+  SECTION("Healthy before start") {
+    auto result = pool.IsHealthy();
+    REQUIRE(result.has_value());
+  }
+
+  SECTION("Healthy after start") {
+    pool.Start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    auto result = pool.IsHealthy();
+    REQUIRE(result.has_value());
+
+    pool.Shutdown();
+  }
+
+  SECTION("Healthy after shutdown") {
+    pool.Start();
+    pool.Shutdown();
+
+    auto result = pool.IsHealthy();
+    REQUIRE(result.has_value());  // Not an error after shutdown
+  }
 }
 
 TEST_CASE("WorkerPool multiple workers", "[worker_pool]") {
