@@ -20,6 +20,8 @@ add_executable(osp_tests
     test_shell.cpp
     test_mem_pool.cpp
     test_shutdown.cpp
+    test_bus.cpp
+    test_node.cpp
 )
 target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads)
 catch_discover_tests(osp_tests)
