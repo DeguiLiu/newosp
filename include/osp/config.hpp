@@ -60,7 +60,7 @@
 #include <cstring>
 
 #ifdef OSP_CONFIG_INI_ENABLED
-#include "ini.h"
+#include "osp/inicpp.h"
 #endif
 
 #ifdef OSP_CONFIG_JSON_ENABLED
@@ -321,28 +321,57 @@ template <>
 struct ConfigParser<IniBackend> {
   static expected<void, ConfigError> ParseFile(ConfigStore& store,
                                                 const char* path) {
-    int result = ini_parse(path, Handler, &store);
-    if (result == -1)
-      return expected<void, ConfigError>::error(ConfigError::kFileNotFound);
-    if (result != 0)
+    try {
+      ini::IniFile ini_file;
+      ini_file.Load(path);
+      
+      // Iterate through all sections and fields
+      for (const auto& section_pair : ini_file) {
+        const std::string& section_name = section_pair.first;
+        const auto& section = section_pair.second;
+        
+        for (const auto& field_pair : section) {
+          const std::string& field_name = field_pair.first;
+          const auto& field = field_pair.second;
+          std::string value = field.template As<std::string>();
+          
+          if (!store.AddEntry(section_name.c_str(), field_name.c_str(), value.c_str())) {
+            return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+          }
+        }
+      }
+      return expected<void, ConfigError>::success();
+    } catch (const std::exception&) {
       return expected<void, ConfigError>::error(ConfigError::kParseError);
-    return expected<void, ConfigError>::success();
+    }
   }
 
   static expected<void, ConfigError> ParseBuffer(ConfigStore& store,
                                                   const char* data, uint32_t) {
-    int result = ini_parse_string(data, Handler, &store);
-    if (result != 0)
+    try {
+      ini::IniFile ini_file;
+      std::string data_str(data);
+      ini_file.Decode(data_str);
+      
+      // Iterate through all sections and fields
+      for (const auto& section_pair : ini_file) {
+        const std::string& section_name = section_pair.first;
+        const auto& section = section_pair.second;
+        
+        for (const auto& field_pair : section) {
+          const std::string& field_name = field_pair.first;
+          const auto& field = field_pair.second;
+          std::string value = field.template As<std::string>();
+          
+          if (!store.AddEntry(section_name.c_str(), field_name.c_str(), value.c_str())) {
+            return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+          }
+        }
+      }
+      return expected<void, ConfigError>::success();
+    } catch (const std::exception&) {
       return expected<void, ConfigError>::error(ConfigError::kParseError);
-    return expected<void, ConfigError>::success();
-  }
-
- private:
-  static int Handler(void* user, const char* section, const char* name,
-                     const char* value) {
-    auto* s = static_cast<ConfigStore*>(user);
-    return s->AddEntry(section ? section : "", name ? name : "",
-                       value ? value : "") ? 1 : 0;
+    }
   }
 };
 #endif

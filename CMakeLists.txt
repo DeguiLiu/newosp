@@ -14,32 +14,14 @@ target_compile_features(osp INTERFACE cxx_std_17)
 option(OSP_BUILD_TESTS    "Build tests"                                ON)
 option(OSP_BUILD_EXAMPLES "Build examples"                             OFF)
 option(OSP_NO_EXCEPTIONS  "Build tests with -fno-exceptions -fno-rtti" OFF)
-option(OSP_CONFIG_INI     "Enable INI config support (inih)"           ON)
+option(OSP_CONFIG_INI     "Enable INI config support (inicpp)"         ON)
 option(OSP_CONFIG_JSON    "Enable JSON config support (nlohmann/json)" OFF)
 option(OSP_CONFIG_YAML    "Enable YAML config support (fkYAML)"        OFF)
 option(OSP_WITH_SOCKPP    "Use sockpp for network transport"           ON)
 
-# --- inih (INI parser, used by config.hpp) ---
+# --- INI Config (using embedded inicpp.h) ---
 if(OSP_CONFIG_INI)
-    FetchContent_Declare(
-        inih
-        URL https://ghfast.top/https://github.com/benhoyt/inih/archive/refs/tags/r58.zip
-        DOWNLOAD_EXTRACT_TIMESTAMP ON
-    )
-    FetchContent_MakeAvailable(inih)
-
-    # inih doesn't provide a proper CMake target; create one
-    if(NOT TARGET inih)
-        add_library(inih STATIC
-            ${inih_SOURCE_DIR}/ini.c
-        )
-        target_include_directories(inih PUBLIC
-            $<BUILD_INTERFACE:${inih_SOURCE_DIR}>
-            $<INSTALL_INTERFACE:include>)
-    endif()
-
     target_compile_definitions(osp INTERFACE OSP_CONFIG_INI_ENABLED)
-    target_link_libraries(osp INTERFACE inih)
 endif()
 
 # --- nlohmann/json (JSON parser, used by config.hpp) ---
@@ -127,9 +109,6 @@ endif()
 # --- Install ---
 include(CMakePackageConfigHelpers)
 install(TARGETS osp EXPORT ospTargets)
-if(TARGET inih)
-    install(TARGETS inih EXPORT ospTargets)
-endif()
 if(TARGET nlohmann_json)
     install(TARGETS nlohmann_json EXPORT ospTargets)
 endif()

@@ -243,7 +243,7 @@ cmake --build build -j$(nproc)
 |------|--------|------|
 | `OSP_BUILD_TESTS` | ON | 构建测试套件 (Catch2 v3.5.2) |
 | `OSP_BUILD_EXAMPLES` | OFF | 构建示例程序 |
-| `OSP_CONFIG_INI` | ON | 启用 INI 配置后端 (inih) |
+| `OSP_CONFIG_INI` | ON | 启用 INI 配置后端 (inicpp) |
 | `OSP_CONFIG_JSON` | OFF | 启用 JSON 配置后端 (nlohmann/json) |
 | `OSP_CONFIG_YAML` | OFF | 启用 YAML 配置后端 (fkYAML) |
 | `OSP_NO_EXCEPTIONS` | OFF | 禁用异常 (`-fno-exceptions`) |
@@ -333,11 +333,12 @@ int main() {
 
 | 库 | 版本 | 用途 | 条件 |
 |----|------|------|------|
-| [inih](https://github.com/benhoyt/inih) | r58 | INI 配置解析 | `OSP_CONFIG_INI=ON` |
 | [nlohmann/json](https://github.com/nlohmann/json) | v3.11.3 | JSON 配置解析 | `OSP_CONFIG_JSON=ON` |
 | [fkYAML](https://github.com/fktn-k/fkYAML) | v0.4.0 | YAML 配置解析 | `OSP_CONFIG_YAML=ON` |
 | [sockpp](https://github.com/fpagliughi/sockpp) | v1.0.0 | TCP/UDP 套接字封装 | `OSP_WITH_SOCKPP=ON` |
 | [Catch2](https://github.com/catchorg/Catch2) | v3.5.2 | 单元测试 | `OSP_BUILD_TESTS=ON` |
+
+**注意**: INI 配置解析使用内嵌的 `inicpp.h` 头文件（来自 [inifile-cpp](https://github.com/DeguiLiu/inifile-cpp)），位于 `include/osp/inicpp.h`。
 
 ## 示例和测试
 

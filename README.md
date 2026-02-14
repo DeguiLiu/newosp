@@ -204,7 +204,7 @@ cmake --build build -j$(nproc)
 |--------|---------|-------------|
 | `OSP_BUILD_TESTS` | ON | Build test suite (Catch2 v3.5.2) |
 | `OSP_BUILD_EXAMPLES` | OFF | Build example programs |
-| `OSP_CONFIG_INI` | ON | Enable INI config backend (inih) |
+| `OSP_CONFIG_INI` | ON | Enable INI config backend (inicpp) |
 | `OSP_CONFIG_JSON` | OFF | Enable JSON config backend (nlohmann/json) |
 | `OSP_CONFIG_YAML` | OFF | Enable YAML config backend (fkYAML) |
 | `OSP_NO_EXCEPTIONS` | OFF | Disable exceptions (`-fno-exceptions`) |
@@ -293,11 +293,12 @@ All dependencies are fetched automatically via CMake FetchContent:
 
 | Library | Version | Usage | Condition |
 |---------|---------|-------|-----------|
-| [inih](https://github.com/benhoyt/inih) | r58 | INI config parsing | `OSP_CONFIG_INI=ON` |
 | [nlohmann/json](https://github.com/nlohmann/json) | v3.11.3 | JSON config parsing | `OSP_CONFIG_JSON=ON` |
 | [fkYAML](https://github.com/fktn-k/fkYAML) | v0.4.0 | YAML config parsing | `OSP_CONFIG_YAML=ON` |
 | [sockpp](https://github.com/fpagliughi/sockpp) | v1.0.0 | TCP/UDP socket wrapper | `OSP_WITH_SOCKPP=ON` |
 | [Catch2](https://github.com/catchorg/Catch2) | v3.5.2 | Unit testing | `OSP_BUILD_TESTS=ON` |
+
+**Note**: INI config parsing uses the embedded `inicpp.h` header (from [inifile-cpp](https://github.com/DeguiLiu/inifile-cpp)) located in `include/osp/inicpp.h`.
 
 ## Examples and Tests
 
