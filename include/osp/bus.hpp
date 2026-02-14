@@ -51,7 +51,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <functional>
 #include <thread>
 #include <type_traits>
 #include <variant>
@@ -401,7 +400,9 @@ template <typename PayloadVariant>
 class AsyncBus {
  public:
   using EnvelopeType = MessageEnvelope<PayloadVariant>;
-  using CallbackType = std::function<void(const EnvelopeType&)>;
+  /// SBO buffer for subscription callable (fits lambda with 1-2 captures).
+  static constexpr size_t kCallbackBufSize = 4 * sizeof(void*);
+  using CallbackType = FixedFunction<void(const EnvelopeType&), kCallbackBufSize>;
 
   static constexpr uint32_t kQueueDepth =
       static_cast<uint32_t>(OSP_BUS_QUEUE_DEPTH);

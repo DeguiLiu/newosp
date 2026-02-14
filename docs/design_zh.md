@@ -302,7 +302,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 |------|------|
 | `FixedVector<T, Cap>` | 栈分配定长向量 |
 | `FixedString<Cap>` | 固定容量字符串 |
-| `FixedFunction<Sig, BufSize>` | SBO 回调 (默认 2*sizeof(void*)) |
+| `FixedFunction<Sig, BufSize>` | SBO 回调 (默认 2\*sizeof(void\*)); const-qualified `operator()`; 支持 `nullptr_t` 构造/赋值; 编译期 `static_assert` 拒绝超限可调用体 |
 | `function_ref<Sig>` | 非拥有型函数引用 (2 指针) |
 
 **类型安全工具**: `not_null<T>`, `NewType<T, Tag>`, `ScopeGuard`, `OSP_SCOPE_EXIT(...)`
@@ -432,7 +432,7 @@ SIGINT/SIGTERM ──> 信号处理器 (写 pipe, async-signal-safe)
 ```
 Producer 0 ─┐
 Producer 1 ──┼── CAS Publish ──> Ring Buffer ──> ProcessBatch() ──> Type-Based Dispatch
-Producer 2 ─┘   (模板参数化)     (sequence-based)                   (std::variant + VariantIndex<T>)
+Producer 2 ─┘   (模板参数化)     (sequence-based)   (批量消费)      (variant + FixedFunction SBO)
 ```
 
 **模板参数化**:
@@ -456,6 +456,7 @@ using HighBus = AsyncBus<Payload, 4096, 256>;   // ~320KB (高吞吐)
 | 批量处理 | `ProcessBatch()` 每轮最多 BatchSize 条消息 |
 | 背压感知 | Normal/Warning/Critical/Full 四级 |
 | 缓存行分离 | 生产者/消费者计数器分属不同缓存行 |
+| 零堆分配回调 | `FixedFunction` SBO 替代 `std::function`，编译期拒绝超限捕获 |
 
 **variant 内存优化策略**:
 
@@ -464,6 +465,23 @@ using HighBus = AsyncBus<Payload, 4096, 256>;   // ~320KB (高吞吐)
 | 控制 variant 类型大小 | 大消息用指针/ID 间接引用 | 推荐，零改动 |
 | 分离总线 | 不同大小的消息使用不同 AsyncBus 实例 | 子系统隔离 |
 | MemPool 间接 | 大消息存入 ObjectPool，variant 存 `PoolHandle<T>` | 混合大小消息 |
+
+**零堆分配回调 (FixedFunction SBO)**:
+
+订阅回调使用 `FixedFunction<void(const Envelope&), 4*sizeof(void*)>` 替代 `std::function`，彻底消除热路径堆分配:
+
+```cpp
+// bus.hpp -- 订阅回调类型定义
+static constexpr size_t kCallbackBufSize = 4 * sizeof(void*);  // 32B (64-bit)
+using CallbackType = FixedFunction<void(const EnvelopeType&), kCallbackBufSize>;
+```
+
+| 特性 | 说明 |
+|------|------|
+| SBO 内联存储 | 32 字节缓冲区，容纳含 1-2 个捕获变量的 lambda |
+| 编译期大小校验 | `static_assert(sizeof(Decay) <= BufferSize)` 拒绝超限可调用体 |
+| const 正确性 | `operator()` 为 const 限定，匹配 Envelope 的 const 引用语义 |
+| 零堆分配 | 整个代码库不再使用 `std::function`，与 worker_pool.hpp 保持一致 |
 
 **单消费者设计取舍**: 消费侧无锁、无竞争，延迟确定性好。消息处理回调应轻量 (<10us)，重计算应转发到 WorkerPool。如需多消费者，可按消息类型分片到多个 AsyncBus 实例。
 
@@ -1547,7 +1565,7 @@ expected<V, E> 返回
 | 标签分发 + 模板特化 | -- | config.hpp 后端选择 |
 | 变参模板 + if constexpr | -- | Config<Backends...> 编译期组合 |
 | CRTP | -- | Shell 命令扩展 |
-| SBO 回调 | iceoryx | FixedFunction |
+| SBO 回调 | iceoryx | FixedFunction (bus/worker_pool/shell/fault_collector 全覆盖，零 std::function) |
 | 无锁 MPSC 环形缓冲 | LMAX Disruptor | AsyncBus |
 | 优先级准入控制 | MCCC | AsyncBus 背压 |
 | SpinLock + 指数退避 | eventpp | 低延迟锁 |

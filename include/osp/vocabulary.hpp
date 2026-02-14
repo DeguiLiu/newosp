@@ -331,9 +331,13 @@ class FixedFunction<Ret(Args...), BufferSize> final {
  public:
   FixedFunction() noexcept = default;
 
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  FixedFunction(std::nullptr_t) noexcept {}
+
   template <typename F,
             typename = typename std::enable_if<
-                !std::is_same<typename std::decay<F>::type, FixedFunction>::value>::type>
+                !std::is_same<typename std::decay<F>::type, FixedFunction>::value &&
+                !std::is_same<typename std::decay<F>::type, std::nullptr_t>::value>::type>
   FixedFunction(F&& f) noexcept {  // NOLINT
     using Decay = typename std::decay<F>::type;
     static_assert(sizeof(Decay) <= BufferSize,
@@ -341,8 +345,8 @@ class FixedFunction<Ret(Args...), BufferSize> final {
     static_assert(alignof(Decay) <= alignof(Storage),
                   "Callable alignment exceeds buffer alignment");
     ::new (&storage_) Decay(static_cast<F&&>(f));
-    invoker_ = [](Storage& s, Args... args) -> Ret {
-      return (*reinterpret_cast<Decay*>(&s))(static_cast<Args&&>(args)...);
+    invoker_ = [](const Storage& s, Args... args) -> Ret {
+      return (*reinterpret_cast<const Decay*>(&s))(static_cast<Args&&>(args)...);
     };
     destroyer_ = [](Storage& s) {
       reinterpret_cast<Decay*>(&s)->~Decay();
@@ -374,6 +378,15 @@ class FixedFunction<Ret(Args...), BufferSize> final {
     return *this;
   }
 
+  FixedFunction& operator=(std::nullptr_t) noexcept {
+    if (destroyer_) {
+      destroyer_(storage_);
+    }
+    invoker_ = nullptr;
+    destroyer_ = nullptr;
+    return *this;
+  }
+
   ~FixedFunction() {
     if (destroyer_) {
       destroyer_(storage_);
@@ -383,7 +396,7 @@ class FixedFunction<Ret(Args...), BufferSize> final {
   FixedFunction(const FixedFunction&) = delete;
   FixedFunction& operator=(const FixedFunction&) = delete;
 
-  Ret operator()(Args... args) {
+  Ret operator()(Args... args) const {
     OSP_ASSERT(invoker_);
     return invoker_(storage_, static_cast<Args&&>(args)...);
   }
@@ -392,7 +405,7 @@ class FixedFunction<Ret(Args...), BufferSize> final {
 
  private:
   using Storage = typename std::aligned_storage<BufferSize, alignof(void*)>::type;
-  using Invoker = Ret (*)(Storage&, Args...);
+  using Invoker = Ret (*)(const Storage&, Args...);
   using Destroyer = void (*)(Storage&);
 
   Storage storage_{};
