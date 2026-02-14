@@ -1,4 +1,28 @@
 /**
+ * MIT License
+ *
+ * Copyright (c) 2024 liudegui
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+/**
  * @file config.hpp
  * @brief Multi-format configuration parser with template-based backend dispatch.
  *
@@ -10,9 +34,9 @@
  *   - CRTP-friendly base: ConfigStore provides shared data + getters
  *
  * Supported backends (CMake opt-in):
- *   - IniBackend  : inih library       (OSP_CONFIG_INI_ENABLED)
- *   - JsonBackend : nlohmann/json       (OSP_CONFIG_JSON_ENABLED)
- *   - YamlBackend : fkYAML             (OSP_CONFIG_YAML_ENABLED)
+ *   - IniBackend  : inicpp library (embedded) (OSP_CONFIG_INI_ENABLED)
+ *   - JsonBackend : nlohmann/json              (OSP_CONFIG_JSON_ENABLED)
+ *   - YamlBackend : fkYAML                     (OSP_CONFIG_YAML_ENABLED)
  *
  * All formats are flattened to "section + key = value" model.
  * Compatible with -fno-exceptions -fno-rtti.
@@ -36,7 +60,7 @@
 #include <cstring>
 
 #ifdef OSP_CONFIG_INI_ENABLED
-#include "ini.h"
+#include "osp/inicpp.hpp"
 #endif
 
 #ifdef OSP_CONFIG_JSON_ENABLED
@@ -297,28 +321,65 @@ template <>
 struct ConfigParser<IniBackend> {
   static expected<void, ConfigError> ParseFile(ConfigStore& store,
                                                 const char* path) {
-    int result = ini_parse(path, Handler, &store);
-    if (result == -1)
-      return expected<void, ConfigError>::error(ConfigError::kFileNotFound);
-    if (result != 0)
+    // Check file existence before loading (inicpp silently ignores missing files)
+    {
+      FILE* f = std::fopen(path, "r");
+      if (f == nullptr) {
+        return expected<void, ConfigError>::error(ConfigError::kFileNotFound);
+      }
+      std::fclose(f);
+    }
+    try {
+      ini::IniFile ini_file;
+      ini_file.Load(path);
+      
+      // Iterate through all sections and fields
+      for (const auto& section_pair : ini_file) {
+        const std::string& section_name = section_pair.first;
+        const auto& section = section_pair.second;
+        
+        for (const auto& field_pair : section) {
+          const std::string& field_name = field_pair.first;
+          const auto& field = field_pair.second;
+          std::string value = field.template As<std::string>();
+          
+          if (!store.AddEntry(section_name.c_str(), field_name.c_str(), value.c_str())) {
+            return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+          }
+        }
+      }
+      return expected<void, ConfigError>::success();
+    } catch (const std::exception&) {
       return expected<void, ConfigError>::error(ConfigError::kParseError);
-    return expected<void, ConfigError>::success();
+    }
   }
 
   static expected<void, ConfigError> ParseBuffer(ConfigStore& store,
                                                   const char* data, uint32_t) {
-    int result = ini_parse_string(data, Handler, &store);
-    if (result != 0)
+    try {
+      ini::IniFile ini_file;
+      std::string data_str(data);
+      ini_file.Decode(data_str);
+      
+      // Iterate through all sections and fields
+      for (const auto& section_pair : ini_file) {
+        const std::string& section_name = section_pair.first;
+        const auto& section = section_pair.second;
+        
+        for (const auto& field_pair : section) {
+          const std::string& field_name = field_pair.first;
+          const auto& field = field_pair.second;
+          std::string value = field.template As<std::string>();
+          
+          if (!store.AddEntry(section_name.c_str(), field_name.c_str(), value.c_str())) {
+            return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+          }
+        }
+      }
+      return expected<void, ConfigError>::success();
+    } catch (const std::exception&) {
       return expected<void, ConfigError>::error(ConfigError::kParseError);
-    return expected<void, ConfigError>::success();
-  }
-
- private:
-  static int Handler(void* user, const char* section, const char* name,
-                     const char* value) {
-    auto* s = static_cast<ConfigStore*>(user);
-    return s->AddEntry(section ? section : "", name ? name : "",
-                       value ? value : "") ? 1 : 0;
+    }
   }
 };
 #endif

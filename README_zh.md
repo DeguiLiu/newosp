@@ -2,17 +2,22 @@
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
 
-现代 C++17 纯头文件嵌入式基础设施库，面向 ARM-Linux 平台，专为工业嵌入式系统 (激光雷达、机器人、边缘计算) 全新设计。38 个头文件，788 测试用例，ASan/TSan/UBSan 全部通过。
+现代 C++17 纯头文件嵌入式基础设施库，面向嵌入式Linux 平台，专为工业嵌入式系统 (传感器、机器人、边缘计算) 设计。
 
 ## 特性
 
-- **零全局状态**: 所有状态封装在对象中 (RAII)
-- **栈优先分配**: 固定容量容器，热路径零堆分配
-- **兼容 `-fno-exceptions -fno-rtti`**: 专为嵌入式 ARM-Linux 设计
-- **类型安全错误处理**: `expected<V,E>` 和 `optional<T>` 词汇类型
-- **纯头文件**: 单一 CMake INTERFACE 库，C++17 标准
-- **无锁消息传递**: 基于 MPSC 环形缓冲区的消息总线，支持优先级准入控制
-- **模板化设计模式**: 标签分发、变参模板、CRTP、编译期组合
+- **纯头文件**: 单一 CMake INTERFACE 库，C++17 标准，零外部强依赖
+- **零全局状态**: 所有状态封装在对象中 (RAII)，支持多实例并行
+- **栈优先分配**: 固定容量容器 (`FixedVector`/`FixedString`/`FixedFunction`)，热路径零堆分配
+- **兼容 `-fno-exceptions -fno-rtti`**: 适配资源受限的嵌入式 Linux 环境
+- **类型安全错误处理**: `expected<V,E>` 和 `optional<T>` 词汇类型，替代异常
+- **无锁消息传递**: MPSC/SPSC 环形缓冲区，CAS 发布，优先级准入控制
+- **多传输后端**: TCP/UDP/Unix Domain Socket/共享内存/串口，`transport_factory` 自动选择
+- **实时调度**: `RealtimeExecutor` 支持 SCHED_FIFO、mlockall、CPU 亲和性绑定
+- **层次状态机 + 行为树**: 零堆分配 HSM (LCA 转换) 和缓存友好 BT (扁平数组存储)
+- **服务发现与 RPC**: UDP 多播发现、请求-响应 RPC、异步客户端
+- **可靠性基础设施**: 软件看门狗、故障收集器、生命周期节点、QoS 配置
+- **模板化设计模式**: 标签分发、变参模板、CRTP、编译期组合，替代虚函数 OOP
 
 ## 模块
 
@@ -52,14 +57,14 @@
 
 | 模块 | 说明 |
 |------|------|
-| `socket.hpp` | TCP/UDP RAII 封装 (基于 sockpp) |
+| `socket.hpp` | TCP/UDP/Unix Domain Socket RAII 封装 (基于 sockpp) |
 | `io_poller.hpp` | epoll 事件循环 (边缘触发 + 超时) |
 | `connection.hpp` | 连接池管理 (自动重连、心跳) |
 | `transport.hpp` | 网络传输 (v0/v1 帧协议, SequenceTracker) |
 | `shm_transport.hpp` | 共享内存 IPC (无锁 SPSC, ARM 内存序, CreateOrReplace 崩溃恢复) |
 | `serial_transport.hpp` | 工业串口传输 (CRC-CCITT, PTY 测试, IEC 61508) |
 | `net.hpp` | 网络层封装 (地址解析、套接字选项) |
-| `transport_factory.hpp` | 自动传输选择 (inproc/shm/tcp) |
+| `transport_factory.hpp` | 自动传输选择 (inproc/shm/tcp/unix) |
 
 ### 服务与发现层 (6 个)
 
@@ -81,7 +86,7 @@
 | `qos.hpp` | QoS 服务质量配置 (Reliability/History/Deadline/Lifespan) |
 | `lifecycle_node.hpp` | 生命周期节点 (Unconfigured/Inactive/Active/Finalized, HSM 驱动) |
 
-### 可靠性层 (2 个)
+### 可靠性层 (3 个)
 
 | 模块 | 说明 |
 |------|------|
@@ -122,13 +127,13 @@
 │  │ serial_transport.hpp (串口传输)                                    │  │
 │  │ transport_factory.hpp (传输选择) / data_fusion.hpp (数据融合)     │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
-└──────────┬────────────────────────────────��─────────────────────────────┘
+└──────────┬───────────────────────────────────────────────────────────────┘
            │
            v
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                            网络层                                        │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │ socket.hpp (TCP/UDP封装) / connection.hpp (连接管理)              │  │
+│  │ socket.hpp (TCP/UDP/Unix封装) / connection.hpp (连接管理)              │  │
 │  │ io_poller.hpp (epoll事件循环) / net.hpp (网络工具)                │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 └──────────┬──────────────────────────────────────────────────────────────┘
@@ -243,7 +248,7 @@ cmake --build build -j$(nproc)
 |------|--------|------|
 | `OSP_BUILD_TESTS` | ON | 构建测试套件 (Catch2 v3.5.2) |
 | `OSP_BUILD_EXAMPLES` | OFF | 构建示例程序 |
-| `OSP_CONFIG_INI` | ON | 启用 INI 配置后端 (inih) |
+| `OSP_CONFIG_INI` | ON | 启用 INI 配置后端 (inicpp) |
 | `OSP_CONFIG_JSON` | OFF | 启用 JSON 配置后端 (nlohmann/json) |
 | `OSP_CONFIG_YAML` | OFF | 启用 YAML 配置后端 (fkYAML) |
 | `OSP_NO_EXCEPTIONS` | OFF | 禁用异常 (`-fno-exceptions`) |
@@ -325,7 +330,7 @@ int main() {
 
 - CMake >= 3.14
 - C++17 编译器 (GCC >= 7, Clang >= 5)
-- Linux (ARM-Linux 嵌入式平台)
+- Linux (嵌入式 Linux 平台)
 
 ## 第三方依赖
 
@@ -333,7 +338,6 @@ int main() {
 
 | 库 | 版本 | 用途 | 条件 |
 |----|------|------|------|
-| [inih](https://github.com/benhoyt/inih) | r58 | INI 配置解析 | `OSP_CONFIG_INI=ON` |
 | [nlohmann/json](https://github.com/nlohmann/json) | v3.11.3 | JSON 配置解析 | `OSP_CONFIG_JSON=ON` |
 | [fkYAML](https://github.com/fktn-k/fkYAML) | v0.4.0 | YAML 配置解析 | `OSP_CONFIG_YAML=ON` |
 | [sockpp](https://github.com/fpagliughi/sockpp) | v1.0.0 | TCP/UDP 套接字封装 | `OSP_WITH_SOCKPP=ON` |
@@ -341,13 +345,13 @@ int main() {
 
 ## 示例和测试
 
-- **示例程序**: `examples/` 目录，15 个示例 (13 个单文件 + 2 个多文件应用)
+- **示例程序**: `examples/` 目录，18+ 个示例 (13 个单文件 + 5 个多文件应用)
   - 单文件示例: `basic_demo.cpp`, `protocol_demo.cpp`, `client_demo.cpp`, `priority_demo.cpp`, `benchmark.cpp`, `serial_demo.cpp`, `realtime_executor_demo.cpp`, `node_manager_hsm_demo.cpp`, `hsm_bt_combo_demo.cpp`, `bt_patrol_demo.cpp`, `hsm_protocol_demo.cpp`, `watchdog_demo.cpp`, `fault_collector_demo.cpp`
-  - 多文件应用: `shm_ipc/` (共享内存 IPC 演示), `client_gateway/` (多节点客户端网关)
+  - 多文件应用: `shm_ipc/` (共享内存 IPC 演示), `client_gateway/` (多节点客户端网关), `streaming_protocol/` (流式协议), `serial_ota/` (串口 OTA), `net_stress/` (网络压力测试)
   - 性能基准: `examples/benchmarks/` (串口、TCP、SHM、Bus 大 payload 吞吐测试)
   - 详见 [docs/examples_zh.md](docs/examples_zh.md)
 
-- **单元测试**: `tests/` 目录，758 测试用例，ASan/TSan/UBSan 全部通过
+- **单元测试**: `tests/` 目录，覆盖所有模块
   - 详见 [tests/README.md](tests/README.md)
 
 - **代码生成**: `tools/ospgen.py` (YAML → C++ 头文件)
@@ -380,4 +384,4 @@ int main() {
 
 ## 许可证
 
-Apache-2.0
+MIT — 详见 [LICENSE](LICENSE)
