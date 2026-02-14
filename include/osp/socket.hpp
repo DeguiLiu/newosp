@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <cstring>
@@ -46,7 +47,8 @@ enum class SocketError : uint8_t {
   kRecvFailed,
   kAcceptFailed,
   kAlreadyClosed,
-  kSetOptFailed
+  kSetOptFailed,
+  kPathTooLong
 };
 
 // ============================================================================
@@ -82,11 +84,13 @@ class SocketAddress {
   }
 
   /** @brief Raw pointer to the underlying sockaddr structure. */
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: POSIX sockaddr cast
   const sockaddr* Raw() const noexcept {
     return reinterpret_cast<const sockaddr*>(&addr_);
   }
 
   /** @brief Mutable raw pointer (used internally by Accept/RecvFrom). */
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: POSIX sockaddr cast
   sockaddr* RawMut() noexcept {
     return reinterpret_cast<sockaddr*>(&addr_);
   }
@@ -473,6 +477,293 @@ class TcpListener {
 
  private:
   explicit TcpListener(int32_t fd) noexcept : fd_(fd) {}
+
+  int32_t fd_;
+};
+
+// ============================================================================
+// UnixAddress
+// ============================================================================
+
+/**
+ * @brief Wrapper for Unix Domain Socket address (sockaddr_un).
+ *
+ * Provides a type-safe interface for Unix socket paths.
+ */
+class UnixAddress {
+ public:
+  UnixAddress() noexcept {
+    std::memset(&addr_, 0, sizeof(addr_));
+    addr_.sun_family = AF_UNIX;
+  }
+
+  /**
+   * @brief Create a Unix socket address from a filesystem path.
+   *
+   * @param path Filesystem path for the Unix socket
+   * @return expected<UnixAddress, SocketError> on success; kPathTooLong if path exceeds limit
+   */
+  static expected<UnixAddress, SocketError> FromPath(const char* path) noexcept {
+    UnixAddress ua;
+    size_t len = std::strlen(path);
+    if (len >= sizeof(ua.addr_.sun_path)) {
+      return expected<UnixAddress, SocketError>::error(SocketError::kPathTooLong);
+    }
+    std::memcpy(ua.addr_.sun_path, path, len + 1);
+    return expected<UnixAddress, SocketError>::success(ua);
+  }
+
+  /** @brief Return the socket path. */
+  const char* Path() const noexcept { return addr_.sun_path; }
+
+  /** @brief Raw pointer to the underlying sockaddr structure. */
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: POSIX sockaddr cast
+  const sockaddr* Raw() const noexcept {
+    return reinterpret_cast<const sockaddr*>(&addr_);
+  }
+
+  /** @brief Mutable raw pointer (used internally by Accept). */
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: POSIX sockaddr cast
+  sockaddr* RawMut() noexcept {
+    return reinterpret_cast<sockaddr*>(&addr_);
+  }
+
+  /** @brief Size of the underlying sockaddr_un structure. */
+  socklen_t Size() const noexcept {
+    return static_cast<socklen_t>(sizeof(addr_));
+  }
+
+ private:
+  sockaddr_un addr_;
+};
+
+// Forward declaration so UnixListener::Accept can construct UnixSocket from fd.
+class UnixSocket;
+
+// ============================================================================
+// UnixSocket
+// ============================================================================
+
+/**
+ * @brief RAII Unix Domain Socket stream socket.
+ *
+ * Owns a file descriptor. Movable but not copyable.
+ * On destruction (or explicit Close()), the fd is closed.
+ */
+class UnixSocket {
+ public:
+  UnixSocket() noexcept : fd_(-1) {}
+
+  ~UnixSocket() { Close(); }
+
+  // Move-only ---------------------------------------------------------------
+  UnixSocket(UnixSocket&& other) noexcept : fd_(other.fd_) {
+    other.fd_ = -1;
+  }
+
+  UnixSocket& operator=(UnixSocket&& other) noexcept {
+    if (this != &other) {
+      Close();
+      fd_ = other.fd_;
+      other.fd_ = -1;
+    }
+    return *this;
+  }
+
+  UnixSocket(const UnixSocket&) = delete;
+  UnixSocket& operator=(const UnixSocket&) = delete;
+
+  // Factory -----------------------------------------------------------------
+
+  /**
+   * @brief Create a Unix Domain Socket (SOCK_STREAM).
+   * @return UnixSocket on success, SocketError::kInvalidFd on failure.
+   */
+  static expected<UnixSocket, SocketError> Create() noexcept {
+    int32_t fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+      return expected<UnixSocket, SocketError>::error(SocketError::kInvalidFd);
+    }
+    return expected<UnixSocket, SocketError>::success(UnixSocket(fd));
+  }
+
+  // Operations --------------------------------------------------------------
+
+  expected<void, SocketError> Connect(const UnixAddress& addr) noexcept {
+    if (fd_ < 0) {
+      return expected<void, SocketError>::error(SocketError::kInvalidFd);
+    }
+    if (::connect(fd_, addr.Raw(), addr.Size()) < 0) {
+      return expected<void, SocketError>::error(SocketError::kConnectFailed);
+    }
+    return expected<void, SocketError>::success();
+  }
+
+  expected<int32_t, SocketError> Send(const void* data, size_t len) noexcept {
+    if (fd_ < 0) {
+      return expected<int32_t, SocketError>::error(SocketError::kInvalidFd);
+    }
+    auto n = ::send(fd_, data, len, MSG_NOSIGNAL);
+    if (n < 0) {
+      return expected<int32_t, SocketError>::error(SocketError::kSendFailed);
+    }
+    return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));
+  }
+
+  expected<int32_t, SocketError> Recv(void* buf, size_t len) noexcept {
+    if (fd_ < 0) {
+      return expected<int32_t, SocketError>::error(SocketError::kInvalidFd);
+    }
+    auto n = ::recv(fd_, buf, len, 0);
+    if (n < 0) {
+      return expected<int32_t, SocketError>::error(SocketError::kRecvFailed);
+    }
+    return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));
+  }
+
+  expected<void, SocketError> SetNonBlocking(bool enable) noexcept {
+    if (fd_ < 0) {
+      return expected<void, SocketError>::error(SocketError::kInvalidFd);
+    }
+    int32_t flags = ::fcntl(fd_, F_GETFL, 0);
+    if (flags < 0) {
+      return expected<void, SocketError>::error(SocketError::kSetOptFailed);
+    }
+    if (enable) {
+      flags |= O_NONBLOCK;
+    } else {
+      flags &= ~O_NONBLOCK;
+    }
+    if (::fcntl(fd_, F_SETFL, flags) < 0) {
+      return expected<void, SocketError>::error(SocketError::kSetOptFailed);
+    }
+    return expected<void, SocketError>::success();
+  }
+
+  /** @brief Close the socket. Idempotent - safe to call multiple times. */
+  void Close() noexcept {
+    if (fd_ >= 0) {
+      ::close(fd_);
+      fd_ = -1;
+    }
+  }
+
+  /** @brief Return the raw file descriptor. */
+  int32_t Fd() const noexcept { return fd_; }
+
+  /** @brief Check whether the socket holds a valid file descriptor. */
+  bool IsValid() const noexcept { return fd_ >= 0; }
+
+ private:
+  friend class UnixListener;
+
+  /** @brief Construct from an already-open file descriptor (used by Accept). */
+  explicit UnixSocket(int32_t fd) noexcept : fd_(fd) {}
+
+  int32_t fd_;
+};
+
+// ============================================================================
+// UnixListener
+// ============================================================================
+
+/**
+ * @brief RAII Unix Domain Socket listener (server) socket.
+ *
+ * Binds to a filesystem path, listens for incoming connections, and accepts them
+ * as UnixSocket instances.
+ */
+class UnixListener {
+ public:
+  UnixListener() noexcept : fd_(-1) {}
+
+  ~UnixListener() { Close(); }
+
+  // Move-only ---------------------------------------------------------------
+  UnixListener(UnixListener&& other) noexcept : fd_(other.fd_) {
+    other.fd_ = -1;
+  }
+
+  UnixListener& operator=(UnixListener&& other) noexcept {
+    if (this != &other) {
+      Close();
+      fd_ = other.fd_;
+      other.fd_ = -1;
+    }
+    return *this;
+  }
+
+  UnixListener(const UnixListener&) = delete;
+  UnixListener& operator=(const UnixListener&) = delete;
+
+  // Factory -----------------------------------------------------------------
+
+  /**
+   * @brief Create a Unix Domain Socket listener.
+   * @return UnixListener on success, SocketError::kInvalidFd on failure.
+   */
+  static expected<UnixListener, SocketError> Create() noexcept {
+    int32_t fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+      return expected<UnixListener, SocketError>::error(SocketError::kInvalidFd);
+    }
+    return expected<UnixListener, SocketError>::success(UnixListener(fd));
+  }
+
+  // Operations --------------------------------------------------------------
+
+  expected<void, SocketError> Bind(const UnixAddress& addr) noexcept {
+    if (fd_ < 0) {
+      return expected<void, SocketError>::error(SocketError::kInvalidFd);
+    }
+    ::unlink(addr.Path());  // Remove stale socket file
+    if (::bind(fd_, addr.Raw(), addr.Size()) < 0) {
+      return expected<void, SocketError>::error(SocketError::kBindFailed);
+    }
+    return expected<void, SocketError>::success();
+  }
+
+  expected<void, SocketError> Listen(int32_t backlog = kDefaultBacklog) noexcept {
+    if (fd_ < 0) {
+      return expected<void, SocketError>::error(SocketError::kInvalidFd);
+    }
+    if (::listen(fd_, backlog) < 0) {
+      return expected<void, SocketError>::error(SocketError::kListenFailed);
+    }
+    return expected<void, SocketError>::success();
+  }
+
+  /**
+   * @brief Accept an incoming connection.
+   * @return A connected UnixSocket on success.
+   */
+  expected<UnixSocket, SocketError> Accept() noexcept {
+    if (fd_ < 0) {
+      return expected<UnixSocket, SocketError>::error(SocketError::kInvalidFd);
+    }
+    int32_t client_fd = ::accept(fd_, nullptr, nullptr);
+    if (client_fd < 0) {
+      return expected<UnixSocket, SocketError>::error(SocketError::kAcceptFailed);
+    }
+    return expected<UnixSocket, SocketError>::success(UnixSocket(client_fd));
+  }
+
+  /** @brief Close the listener socket. Idempotent. */
+  void Close() noexcept {
+    if (fd_ >= 0) {
+      ::close(fd_);
+      fd_ = -1;
+    }
+  }
+
+  /** @brief Return the raw file descriptor. */
+  int32_t Fd() const noexcept { return fd_; }
+
+  /** @brief Check whether the socket holds a valid file descriptor. */
+  bool IsValid() const noexcept { return fd_ >= 0; }
+
+ private:
+  explicit UnixListener(int32_t fd) noexcept : fd_(fd) {}
 
   int32_t fd_;
 };

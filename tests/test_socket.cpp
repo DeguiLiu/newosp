@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <thread>
+#include <unistd.h>
 
 // ============================================================================
 // TcpSocket::Create
@@ -268,4 +269,126 @@ TEST_CASE("socket - UdpSocket SendTo RecvFrom loopback",
   REQUIRE(recv_r.has_value());
   REQUIRE(recv_r.value() == static_cast<int32_t>(std::strlen(payload)));
   REQUIRE(std::strncmp(buf, payload, std::strlen(payload)) == 0);
+}
+
+// ============================================================================
+// UnixAddress
+// ============================================================================
+
+TEST_CASE("socket - UnixAddress::FromPath succeeds", "[socket][unix]") {
+  auto result = osp::UnixAddress::FromPath("/tmp/osp_test.sock");
+  REQUIRE(result.has_value());
+  REQUIRE(std::strcmp(result.value().Path(), "/tmp/osp_test.sock") == 0);
+}
+
+TEST_CASE("socket - UnixAddress::FromPath rejects too-long path", "[socket][unix]") {
+  // sockaddr_un::sun_path is typically 108 bytes
+  char long_path[256];
+  std::memset(long_path, 'a', sizeof(long_path) - 1);
+  long_path[sizeof(long_path) - 1] = '\0';
+  auto result = osp::UnixAddress::FromPath(long_path);
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::SocketError::kPathTooLong);
+}
+
+// ============================================================================
+// UnixSocket + UnixListener echo
+// ============================================================================
+
+TEST_CASE("socket - UnixSocket Create succeeds", "[socket][unix]") {
+  auto result = osp::UnixSocket::Create();
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().IsValid());
+  REQUIRE(result.value().Fd() >= 0);
+}
+
+TEST_CASE("socket - UnixListener Create succeeds", "[socket][unix]") {
+  auto result = osp::UnixListener::Create();
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().IsValid());
+}
+
+TEST_CASE("socket - Unix domain echo round-trip", "[socket][unix]") {
+  const char* path = "/tmp/osp_test_echo.sock";
+
+  // Setup listener
+  auto addr_r = osp::UnixAddress::FromPath(path);
+  REQUIRE(addr_r.has_value());
+  auto& addr = addr_r.value();
+
+  auto listener_r = osp::UnixListener::Create();
+  REQUIRE(listener_r.has_value());
+  auto& listener = listener_r.value();
+
+  auto bind_r = listener.Bind(addr);
+  REQUIRE(bind_r.has_value());
+  auto listen_r = listener.Listen();
+  REQUIRE(listen_r.has_value());
+
+  // Client thread
+  std::thread client([&addr]() {
+    auto sock_r = osp::UnixSocket::Create();
+    REQUIRE(sock_r.has_value());
+    auto& sock = sock_r.value();
+
+    auto conn_r = sock.Connect(addr);
+    REQUIRE(conn_r.has_value());
+
+    const char msg[] = "hello unix";
+    auto send_r = sock.Send(msg, sizeof(msg));
+    REQUIRE(send_r.has_value());
+
+    char buf[64] = {};
+    auto recv_r = sock.Recv(buf, sizeof(buf));
+    REQUIRE(recv_r.has_value());
+    REQUIRE(std::strcmp(buf, "hello unix") == 0);
+  });
+
+  // Server: accept, echo back
+  auto accepted_r = listener.Accept();
+  REQUIRE(accepted_r.has_value());
+  auto& conn = accepted_r.value();
+
+  char buf[64] = {};
+  auto recv_r = conn.Recv(buf, sizeof(buf));
+  REQUIRE(recv_r.has_value());
+  REQUIRE(recv_r.value() > 0);
+
+  auto send_r = conn.Send(buf, static_cast<size_t>(recv_r.value()));
+  REQUIRE(send_r.has_value());
+
+  client.join();
+
+  // Cleanup
+  ::unlink(path);
+}
+
+TEST_CASE("socket - UnixSocket move semantics", "[socket][unix]") {
+  auto result = osp::UnixSocket::Create();
+  REQUIRE(result.has_value());
+  int32_t fd = result.value().Fd();
+
+  osp::UnixSocket moved(std::move(result.value()));
+  REQUIRE(moved.Fd() == fd);
+  REQUIRE(moved.IsValid());
+  // Original should be invalidated
+  REQUIRE_FALSE(result.value().IsValid());
+}
+
+TEST_CASE("socket - UnixListener move semantics", "[socket][unix]") {
+  auto result = osp::UnixListener::Create();
+  REQUIRE(result.has_value());
+  int32_t fd = result.value().Fd();
+
+  osp::UnixListener moved(std::move(result.value()));
+  REQUIRE(moved.Fd() == fd);
+  REQUIRE(moved.IsValid());
+  REQUIRE_FALSE(result.value().IsValid());
+}
+
+TEST_CASE("socket - UnixSocket SetNonBlocking", "[socket][unix]") {
+  auto result = osp::UnixSocket::Create();
+  REQUIRE(result.has_value());
+  auto nb = result.value().SetNonBlocking(true);
+  REQUIRE(nb.has_value());
 }

@@ -29,6 +29,7 @@ enum class TransportType : uint8_t {
   kInproc = 0,  ///< In-process (same process, lock-free queue)
   kShm,         ///< Shared memory (local host, zero-copy)
   kTcp,         ///< TCP socket (remote host, network)
+  kUnix,        ///< Unix domain socket (local host, stream)
   kAuto         ///< Automatic detection based on config
 };
 
@@ -48,6 +49,7 @@ struct TransportConfig {
   FixedString<63> shm_channel_name;
   uint32_t shm_slot_size = 4096;
   uint32_t shm_slot_count = 256;
+  FixedString<107> unix_path;  ///< Unix domain socket path (max 108 chars)
 };
 
 // ============================================================================
@@ -66,6 +68,8 @@ class TransportFactory final {
    * @brief Detects the best transport type based on configuration.
    *
    * Selection logic:
+   * - If remote_host is "127.0.0.1" or "localhost" and unix_path is
+   *   non-empty -> kUnix
    * - If remote_host is "127.0.0.1" or "localhost" and shm_channel_name is
    *   non-empty -> kShm
    * - If remote_host is "127.0.0.1" or "localhost" and shm_channel_name is
@@ -80,6 +84,10 @@ class TransportFactory final {
     const bool is_local = IsLocalHost(cfg.remote_host.c_str());
 
     if (is_local) {
+      // Check unix_path first (highest priority for local)
+      if (!cfg.unix_path.empty()) {
+        return TransportType::kUnix;
+      }
       // Check if shm_channel_name is non-empty
       if (!cfg.shm_channel_name.empty()) {
         return TransportType::kShm;
@@ -94,7 +102,7 @@ class TransportFactory final {
    * @brief Returns the string name of a transport type.
    *
    * @param type Transport type
-   * @return String name ("inproc", "shm", "tcp", or "auto")
+   * @return String name ("inproc", "shm", "tcp", "unix", or "auto")
    */
   static const char* TransportTypeName(TransportType type) noexcept {
     switch (type) {
@@ -104,6 +112,8 @@ class TransportFactory final {
         return "shm";
       case TransportType::kTcp:
         return "tcp";
+      case TransportType::kUnix:
+        return "unix";
       case TransportType::kAuto:
         return "auto";
       default:
@@ -168,13 +178,14 @@ class TransportSelector final {
   TransportType ResolvedType() const noexcept { return resolved_type_; }
 
   /**
-   * @brief Checks if the resolved transport is local (inproc or shm).
+   * @brief Checks if the resolved transport is local (inproc, shm, or unix).
    *
-   * @return true if resolved type is kInproc or kShm
+   * @return true if resolved type is kInproc, kShm, or kUnix
    */
   bool IsLocal() const noexcept {
     return resolved_type_ == TransportType::kInproc ||
-           resolved_type_ == TransportType::kShm;
+           resolved_type_ == TransportType::kShm ||
+           resolved_type_ == TransportType::kUnix;
   }
 
   /**

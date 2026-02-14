@@ -24,9 +24,11 @@ add_osp_example(osp_node_manager_hsm_demo   node_manager_hsm_demo.cpp)
 add_osp_example(osp_realtime_demo           realtime_executor_demo.cpp)
 add_osp_example(osp_hsm_bt_combo_demo       hsm_bt_combo_demo.cpp)
 add_osp_example(osp_hsm_protocol_demo       hsm_protocol_demo.cpp)
+add_osp_example(unix_socket_benchmark       benchmarks/unix_socket_benchmark.cpp)
 
 # Benchmark builds with -O3 regardless of the global build type
 target_compile_options(osp_benchmark PRIVATE -O3)
+target_compile_options(unix_socket_benchmark PRIVATE -O3)
 
 # --- codegen demo (requires OSP_CODEGEN=ON) --------------------------------
 if(OSP_CODEGEN)
