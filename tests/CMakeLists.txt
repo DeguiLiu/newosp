@@ -16,6 +16,7 @@ set(OSP_TEST_CORE_SOURCES
     test_platform.cpp
     test_vocabulary.cpp
     test_config.cpp
+    test_inicpp.cpp
     test_log.cpp
     test_timer.cpp
     test_shell.cpp
@@ -45,16 +46,6 @@ set(OSP_TEST_CORE_SOURCES
     test_shell_commands.cpp
 )
 
-# Inicpp test sources (embedded ini library tests)
-set(OSP_TEST_INICPP_SOURCES
-    inicpp/test_convert.cpp
-    inicpp/test_edge_cases.cpp
-    inicpp/test_file_io.cpp
-    inicpp/test_inifield.cpp
-    inicpp/test_inifile.cpp
-    inicpp/test_inisection.cpp
-)
-
 # Network test sources (depend on sockpp, incompatible with -fno-exceptions)
 set(OSP_TEST_NET_SOURCES
     test_socket.cpp
@@ -69,11 +60,11 @@ set(OSP_TEST_NET_SOURCES
 
 if(OSP_NO_EXCEPTIONS)
     # -fno-exceptions mode: only core tests (sockpp uses throw internally)
-    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES} ${OSP_TEST_INICPP_SOURCES})
+    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES})
     target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
     target_compile_options(osp_tests PRIVATE -fno-exceptions -fno-rtti)
 else()
-    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES} ${OSP_TEST_INICPP_SOURCES} ${OSP_TEST_NET_SOURCES})
+    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES} ${OSP_TEST_NET_SOURCES})
     target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
     if(OSP_WITH_SOCKPP)
         target_sources(osp_tests PRIVATE test_net.cpp)

@@ -338,8 +338,6 @@ int main() {
 | [sockpp](https://github.com/fpagliughi/sockpp) | v1.0.0 | TCP/UDP 套接字封装 | `OSP_WITH_SOCKPP=ON` |
 | [Catch2](https://github.com/catchorg/Catch2) | v3.5.2 | 单元测试 | `OSP_BUILD_TESTS=ON` |
 
-**注意**: INI 配置解析使用内嵌的 `inicpp.h` 头文件（来自 [inifile-cpp](https://github.com/DeguiLiu/inifile-cpp)），位于 `include/osp/inicpp.h`。
-
 ## 示例和测试
 
 - **示例程序**: `examples/` 目录，15 个示例 (13 个单文件 + 2 个多文件应用)

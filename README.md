@@ -298,8 +298,6 @@ All dependencies are fetched automatically via CMake FetchContent:
 | [sockpp](https://github.com/fpagliughi/sockpp) | v1.0.0 | TCP/UDP socket wrapper | `OSP_WITH_SOCKPP=ON` |
 | [Catch2](https://github.com/catchorg/Catch2) | v3.5.2 | Unit testing | `OSP_BUILD_TESTS=ON` |
 
-**Note**: INI config parsing uses the embedded `inicpp.h` header (from [inifile-cpp](https://github.com/DeguiLiu/inifile-cpp)) located in `include/osp/inicpp.h`.
-
 ## Examples and Tests
 
 - **Examples**: 13 single-file demos + 2 multi-file applications (15 total)

@@ -8,7 +8,8 @@
 #include "osp/inicpp.h"
 #include <iostream>
 
-// the conversion functor must live in the "ini" namespace
+// the conversion functor must live in the "osp::ini" namespace
+namespace osp {
 namespace ini {
 /** Conversion functor to parse std::vectors from an ini field-
  * The generic template can be passed down to the vector. */
@@ -71,6 +72,7 @@ struct Convert<std::vector<T>> {
   }
 };
 }  // namespace ini
+}  // namespace osp
 
 int main() {
   // create some ini content that we can parse

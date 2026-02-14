@@ -43,8 +43,4 @@ add_subdirectory(shm_ipc)
 add_subdirectory(net_stress)
 
 # --- Inicpp examples (embedded ini library examples) -----------------------
-add_osp_example(osp_inicpp_load                inicpp/load_ini_file.cpp)
-add_osp_example(osp_inicpp_decode              inicpp/decode_ini_file.cpp)
-add_osp_example(osp_inicpp_encode              inicpp/encode_ini_file.cpp)
-add_osp_example(osp_inicpp_save                inicpp/save_ini_file.cpp)
-add_osp_example(osp_inicpp_custom_type         inicpp/custom_type_conversion.cpp)
+add_subdirectory(inicpp)

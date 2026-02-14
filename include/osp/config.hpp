@@ -34,9 +34,9 @@
  *   - CRTP-friendly base: ConfigStore provides shared data + getters
  *
  * Supported backends (CMake opt-in):
- *   - IniBackend  : inih library       (OSP_CONFIG_INI_ENABLED)
- *   - JsonBackend : nlohmann/json       (OSP_CONFIG_JSON_ENABLED)
- *   - YamlBackend : fkYAML             (OSP_CONFIG_YAML_ENABLED)
+ *   - IniBackend  : inicpp library (embedded) (OSP_CONFIG_INI_ENABLED)
+ *   - JsonBackend : nlohmann/json              (OSP_CONFIG_JSON_ENABLED)
+ *   - YamlBackend : fkYAML                     (OSP_CONFIG_YAML_ENABLED)
  *
  * All formats are flattened to "section + key = value" model.
  * Compatible with -fno-exceptions -fno-rtti.
