@@ -883,3 +883,273 @@ TEST_CASE("Watchdog monitors FaultCollector consumer thread",
   fc.Stop();
   wd.Unregister(reg.value().id);
 }
+
+// ============================================================================
+// QueueUsage
+// ============================================================================
+
+TEST_CASE("QueueUsage returns correct size and capacity", "[fault_collector]") {
+  FaultCollector<16, 64> fc;
+  fc.RegisterFault(0U, 0x01010001U);
+
+  // Initially empty
+  auto usage = fc.QueueUsage(FaultPriority::kMedium);
+  REQUIRE(usage.size == 0U);
+  REQUIRE(usage.capacity == 64U);
+
+  // Report some faults
+  fc.ReportFault(0U, 0x1111U, FaultPriority::kMedium);
+  fc.ReportFault(0U, 0x2222U, FaultPriority::kMedium);
+  fc.ReportFault(0U, 0x3333U, FaultPriority::kMedium);
+
+  usage = fc.QueueUsage(FaultPriority::kMedium);
+  REQUIRE(usage.size == 3U);
+  REQUIRE(usage.capacity == 64U);
+
+  // Other priorities should be empty
+  auto usage_high = fc.QueueUsage(FaultPriority::kHigh);
+  REQUIRE(usage_high.size == 0U);
+  REQUIRE(usage_high.capacity == 64U);
+}
+
+TEST_CASE("QueueUsage after processing", "[fault_collector]") {
+  FaultCollector<16, 64> fc;
+  fc.RegisterFault(0U, 0x01010001U);
+  fc.SetDefaultHook([](const FaultEvent&) {
+    return HookAction::kHandled;
+  });
+
+  fc.ReportFault(0U, 0x1111U, FaultPriority::kCritical);
+  fc.ReportFault(0U, 0x2222U, FaultPriority::kCritical);
+
+  auto usage_before = fc.QueueUsage(FaultPriority::kCritical);
+  REQUIRE(usage_before.size == 2U);
+
+  fc.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  fc.Stop();
+
+  auto usage_after = fc.QueueUsage(FaultPriority::kCritical);
+  REQUIRE(usage_after.size == 0U);
+  REQUIRE(usage_after.capacity == 64U);
+}
+
+TEST_CASE("QueueUsage with different priorities", "[fault_collector]") {
+  FaultCollector<16, 128> fc;
+  fc.RegisterFault(0U, 0x01010001U);
+
+  // Fill different priority queues
+  for (uint32_t i = 0U; i < 5U; ++i) {
+    fc.ReportFault(0U, i, FaultPriority::kCritical);
+  }
+  for (uint32_t i = 0U; i < 3U; ++i) {
+    fc.ReportFault(0U, i, FaultPriority::kHigh);
+  }
+  for (uint32_t i = 0U; i < 7U; ++i) {
+    fc.ReportFault(0U, i, FaultPriority::kMedium);
+  }
+  for (uint32_t i = 0U; i < 2U; ++i) {
+    fc.ReportFault(0U, i, FaultPriority::kLow);
+  }
+
+  REQUIRE(fc.QueueUsage(FaultPriority::kCritical).size == 5U);
+  REQUIRE(fc.QueueUsage(FaultPriority::kHigh).size == 3U);
+  REQUIRE(fc.QueueUsage(FaultPriority::kMedium).size == 7U);
+  REQUIRE(fc.QueueUsage(FaultPriority::kLow).size == 2U);
+
+  // All should have same capacity
+  REQUIRE(fc.QueueUsage(FaultPriority::kCritical).capacity == 128U);
+  REQUIRE(fc.QueueUsage(FaultPriority::kHigh).capacity == 128U);
+  REQUIRE(fc.QueueUsage(FaultPriority::kMedium).capacity == 128U);
+  REQUIRE(fc.QueueUsage(FaultPriority::kLow).capacity == 128U);
+}
+
+// ============================================================================
+// ForEachRecent
+// ============================================================================
+
+TEST_CASE("ForEachRecent on empty collector", "[fault_collector]") {
+  FaultCollector<16, 64> fc;
+
+  uint32_t count = 0U;
+  fc.ForEachRecent([&count](const RecentFaultInfo&) {
+    ++count;
+    return true;
+  });
+
+  REQUIRE(count == 0U);
+}
+
+TEST_CASE("ForEachRecent returns faults in reverse chronological order",
+          "[fault_collector]") {
+  FaultCollector<16, 64> fc;
+  fc.RegisterFault(0U, 0x01010001U);
+  fc.RegisterFault(1U, 0x01010002U);
+  fc.RegisterFault(2U, 0x01010003U);
+
+  // Report faults with different details
+  fc.ReportFault(0U, 0x1111U, FaultPriority::kMedium);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  fc.ReportFault(1U, 0x2222U, FaultPriority::kHigh);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  fc.ReportFault(2U, 0x3333U, FaultPriority::kCritical);
+
+  std::vector<uint32_t> details;
+  fc.ForEachRecent([&details](const RecentFaultInfo& info) {
+    details.push_back(info.detail);
+    return true;
+  });
+
+  REQUIRE(details.size() == 3U);
+  // Most recent first
+  REQUIRE(details[0] == 0x3333U);
+  REQUIRE(details[1] == 0x2222U);
+  REQUIRE(details[2] == 0x1111U);
+}
+
+TEST_CASE("ForEachRecent with max_count limit", "[fault_collector]") {
+  FaultCollector<16, 64> fc;
+  fc.RegisterFault(0U, 0x01010001U);
+
+  // Report 10 faults
+  for (uint32_t i = 0U; i < 10U; ++i) {
+    fc.ReportFault(0U, i, FaultPriority::kMedium);
+  }
+
+  // Request only 5 most recent
+  uint32_t count = 0U;
+  std::vector<uint32_t> details;
+  fc.ForEachRecent([&count, &details](const RecentFaultInfo& info) {
+    ++count;
+    details.push_back(info.detail);
+    return true;
+  }, 5U);
+
+  REQUIRE(count == 5U);
+  REQUIRE(details.size() == 5U);
+  // Should get 9, 8, 7, 6, 5 (newest to oldest)
+  REQUIRE(details[0] == 9U);
+  REQUIRE(details[1] == 8U);
+  REQUIRE(details[2] == 7U);
+  REQUIRE(details[3] == 6U);
+  REQUIRE(details[4] == 5U);
+}
+
+TEST_CASE("ForEachRecent early termination", "[fault_collector]") {
+  FaultCollector<16, 64> fc;
+  fc.RegisterFault(0U, 0x01010001U);
+
+  for (uint32_t i = 0U; i < 10U; ++i) {
+    fc.ReportFault(0U, i, FaultPriority::kMedium);
+  }
+
+  uint32_t count = 0U;
+  fc.ForEachRecent([&count](const RecentFaultInfo& info) {
+    ++count;
+    // Stop after 3 items
+    return count < 3U;
+  });
+
+  REQUIRE(count == 3U);
+}
+
+TEST_CASE("ForEachRecent ring buffer wraparound", "[fault_collector]") {
+  FaultCollector<16, 64> fc;
+  fc.RegisterFault(0U, 0x01010001U);
+
+  // Report more than kRecentRingSize (16) faults
+  for (uint32_t i = 0U; i < 25U; ++i) {
+    fc.ReportFault(0U, i, FaultPriority::kMedium);
+  }
+
+  std::vector<uint32_t> details;
+  fc.ForEachRecent([&details](const RecentFaultInfo& info) {
+    details.push_back(info.detail);
+    return true;
+  });
+
+  // Should only get the last 16 faults
+  REQUIRE(details.size() == 16U);
+  // Most recent should be 24, then 23, ..., down to 9
+  REQUIRE(details[0] == 24U);
+  REQUIRE(details[1] == 23U);
+  REQUIRE(details[15] == 9U);
+}
+
+TEST_CASE("ForEachRecent captures all fault fields", "[fault_collector]") {
+  FaultCollector<16, 64> fc;
+  fc.RegisterFault(5U, 0xAABBCCDDU);
+
+  fc.ReportFault(5U, 0x12345678U, FaultPriority::kHigh);
+
+  bool verified = false;
+  fc.ForEachRecent([&verified](const RecentFaultInfo& info) {
+    if (info.fault_index == 5U &&
+        info.detail == 0x12345678U &&
+        info.priority == FaultPriority::kHigh &&
+        info.timestamp_us > 0U) {
+      verified = true;
+    }
+    return true;
+  });
+
+  REQUIRE(verified);
+}
+
+TEST_CASE("ForEachRecent thread-safe with concurrent reports",
+          "[fault_collector]") {
+  FaultCollector<16, 256> fc;
+  fc.RegisterFault(0U, 0x01010001U);
+
+  std::atomic<bool> done{false};
+
+  // Reporter thread
+  std::thread reporter([&fc, &done] {
+    for (uint32_t i = 0U; i < 100U; ++i) {
+      fc.ReportFault(0U, i, FaultPriority::kMedium);
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    done.store(true, std::memory_order_release);
+  });
+
+  // Reader thread
+  std::thread reader([&fc, &done] {
+    while (!done.load(std::memory_order_acquire)) {
+      uint32_t count = 0U;
+      fc.ForEachRecent([&count](const RecentFaultInfo&) {
+        ++count;
+        return true;
+      });
+      std::this_thread::yield();
+    }
+  });
+
+  reporter.join();
+  reader.join();
+
+  // No crash, no data race
+  SUCCEED("Concurrent ForEachRecent completed without crash");
+}
+
+TEST_CASE("ForEachRecent with mixed priorities", "[fault_collector]") {
+  FaultCollector<16, 64> fc;
+  fc.RegisterFault(0U, 0x01010001U);
+
+  fc.ReportFault(0U, 0x1111U, FaultPriority::kLow);
+  fc.ReportFault(0U, 0x2222U, FaultPriority::kCritical);
+  fc.ReportFault(0U, 0x3333U, FaultPriority::kMedium);
+  fc.ReportFault(0U, 0x4444U, FaultPriority::kHigh);
+
+  std::vector<FaultPriority> priorities;
+  fc.ForEachRecent([&priorities](const RecentFaultInfo& info) {
+    priorities.push_back(info.priority);
+    return true;
+  });
+
+  REQUIRE(priorities.size() == 4U);
+  // Reverse chronological order
+  REQUIRE(priorities[0] == FaultPriority::kHigh);
+  REQUIRE(priorities[1] == FaultPriority::kMedium);
+  REQUIRE(priorities[2] == FaultPriority::kCritical);
+  REQUIRE(priorities[3] == FaultPriority::kLow);
+}

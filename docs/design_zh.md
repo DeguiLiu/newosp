@@ -221,7 +221,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
     └────────────┘  └────────────┘
 ```
 
-### 3.4 模块总览 (35 个头文件)
+### 3.4 模块总览 (38 个头文件)
 
 | 层 | 模块 | 头文件 | 说明 |
 |----|------|--------|------|
@@ -262,6 +262,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 | 应用层 | LifecycleNode | lifecycle_node.hpp | 生命周期节点 |
 | 可靠性 | Watchdog | watchdog.hpp | 线程看门狗 |
 | 可靠性 | FaultCollector | fault_collector.hpp | 故障收集器 |
+| 可靠性 | ShellCommands | shell_commands.hpp | 内置诊断 Shell 命令桥接 |
 
 ---
 
@@ -1143,6 +1144,8 @@ python3 tools/ospgen.py --input defs/protocol_messages.yaml \
 
 CMake 集成: `OSP_CODEGEN=ON` 时通过 `add_custom_command` + `DEPENDS` 增量生成。
 
+> 详细设计见 [design_codegen_zh.md](design_codegen_zh.md)
+
 ---
 
 ## 10. 可靠性组件
@@ -1313,6 +1316,66 @@ struct FaultSystem {
   }
 };
 ```
+
+### 10.5 shell_commands.hpp -- 内置诊断 Shell 命令
+
+零侵入桥接文件，将各模块运行时状态暴露为 telnet shell 命令。模块本身不依赖 shell.hpp。
+
+**依赖方向**:
+
+```
+shell.hpp (OSP_SHELL_CMD, DebugShell::Printf)
+    ^
+    |
+shell_commands.hpp (桥接层，按需 include)
+    ^
+    |
+各模块头文件 (bus.hpp, watchdog.hpp, ...)
+```
+
+**命令列表**:
+
+| 命令 | 注册函数 | 模块 | 输出内容 |
+|------|---------|------|----------|
+| `osp_watchdog` | `RegisterWatchdog()` | watchdog.hpp | slot 状态、超时配置、最后心跳 |
+| `osp_faults` | `RegisterFaults()` | fault_collector.hpp | 统计、队列使用率、最近故障 |
+| `osp_bus` | `RegisterBusStats()` | bus.hpp | 发布/丢弃/背压统计 |
+| `osp_pool` | `RegisterWorkerPool()` | worker_pool.hpp | 分发/处理/队列满统计 |
+| `osp_transport` | `RegisterTransport()` | transport.hpp | 丢包/重排/重复统计 |
+| `osp_serial` | `RegisterSerial()` | serial_transport.hpp | 帧/字节/错误全量统计 |
+| `osp_nodes` | `RegisterHsmNodes()` | node_manager_hsm.hpp | HSM 节点状态、心跳、丢失计数 |
+| `osp_nodes_basic` | `RegisterNodeManager()` | node_manager.hpp | 基础节点连接状态 |
+| `osp_service` | `RegisterServiceHsm()` | service_hsm.hpp | 服务 HSM 状态 |
+| `osp_discovery` | `RegisterDiscoveryHsm()` | discovery_hsm.hpp | 发现 HSM 状态、丢失节点数 |
+| `osp_lifecycle` | `RegisterLifecycle()` | lifecycle_node.hpp | 生命周期状态 |
+| `osp_qos` | `RegisterQos()` | qos.hpp | QoS 配置各字段 |
+| `osp_mempool` | `RegisterMemPool()` | mem_pool.hpp | 容量/已用/空闲 |
+
+**实现模式**: 模板函数 + 静态局部变量捕获对象指针，编译期绑定，无虚函数:
+
+```cpp
+template <typename WatchdogType>
+inline void RegisterWatchdog(WatchdogType& wd) {
+  static WatchdogType* s_wd = &wd;
+  static auto cmd = [](int, char*[]) -> int {
+    // 使用 s_wd 访问模块状态，DebugShell::Printf 输出
+    return 0;
+  };
+  osp::detail::GlobalCmdRegistry::Instance().Register(
+      "osp_watchdog", +cmd, "Show thread watchdog status");
+}
+```
+
+**新增诊断查询接口** (为 shell_commands 补充):
+
+| 模块 | 新增接口 | 说明 |
+|------|---------|------|
+| watchdog.hpp | `WatchdogSlotInfo` + `ForEachSlot(Fn)` | 遍历活跃 slot 快照 |
+| fault_collector.hpp | `QueueUsageInfo` + `QueueUsage(pri)` | 单队列使用率 |
+| fault_collector.hpp | `RecentFaultInfo` + `ForEachRecent(Fn, max)` | 遍历最近 N 条故障 |
+| node_manager_hsm.hpp | `HsmNodeInfo` + `ForEachNode(Fn)` | 遍历活跃节点快照 |
+
+**资源开销**: 每个 Register 函数 1 个 static 指针 (8B)，每个命令占用 GlobalCmdRegistry 1 个 slot，运行时仅在 telnet 执行命令时触发。
 
 ---
 

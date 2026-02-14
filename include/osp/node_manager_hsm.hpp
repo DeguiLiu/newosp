@@ -150,6 +150,18 @@ inline void OnEnterDisconnected(NodeConnectionContext& ctx) {
 }  // namespace detail
 
 // ============================================================================
+// HsmNodeInfo - Diagnostic snapshot for a single node
+// ============================================================================
+
+/// POD snapshot of a managed node for diagnostic iteration.
+struct HsmNodeInfo {
+  uint16_t node_id;            ///< Node identifier
+  const char* state_name;      ///< Current HSM state name
+  uint64_t last_heartbeat_us;  ///< Last heartbeat timestamp (microseconds)
+  uint32_t missed_count;       ///< Missed heartbeat count
+};
+
+// ============================================================================
 // HsmNodeManager
 // ============================================================================
 
@@ -371,6 +383,23 @@ class HsmNodeManager {
     const NodeEntry* node = const_cast<HsmNodeManager*>(this)->FindNode(node_id);
     if (node == nullptr || !node->active) return 0;
     return node->context.missed_heartbeats;
+  }
+
+  /// Iterate active nodes for diagnostic purposes.
+  /// Callback signature: void(const HsmNodeInfo&).
+  template <typename Fn>
+  void ForEachNode(Fn&& fn) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (uint32_t i = 0U; i < MaxNodes; ++i) {
+      if (entries_[i].active && entries_[i].hsm_initialized) {
+        HsmNodeInfo info{};
+        info.node_id = entries_[i].context.node_id;
+        info.state_name = entries_[i].GetHsm()->CurrentStateName();
+        info.last_heartbeat_us = entries_[i].context.last_heartbeat_us;
+        info.missed_count = entries_[i].context.missed_heartbeats;
+        fn(info);
+      }
+    }
   }
 
   // ==========================================================================

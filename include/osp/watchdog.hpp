@@ -77,6 +77,19 @@ enum class WatchdogError : uint8_t {
 };
 
 // ============================================================================
+// WatchdogSlotInfo - Diagnostic snapshot for a single slot
+// ============================================================================
+
+/// POD snapshot of a watchdog slot for diagnostic iteration.
+struct WatchdogSlotInfo {
+  uint32_t slot_id;       ///< Slot index
+  const char* name;       ///< Thread name (pointer into slot, stable)
+  uint64_t timeout_us;    ///< Configured timeout (microseconds)
+  uint64_t last_beat_us;  ///< Last heartbeat timestamp (microseconds)
+  bool timed_out;         ///< Currently timed out
+};
+
+// ============================================================================
 // ThreadWatchdog - Thread liveness monitor
 // ============================================================================
 
@@ -347,6 +360,24 @@ class ThreadWatchdog final {
 
   /** @brief Compile-time capacity. */
   static constexpr uint32_t Capacity() noexcept { return MaxThreads; }
+
+  /// Iterate active watchdog slots for diagnostic purposes.
+  /// Callback signature: void(const WatchdogSlotInfo&).
+  template <typename Fn>
+  void ForEachSlot(Fn&& fn) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (uint32_t i = 0U; i < MaxThreads; ++i) {
+      if (slots_[i].active.load(std::memory_order_acquire)) {
+        WatchdogSlotInfo info{};
+        info.slot_id = i;
+        info.name = slots_[i].name.c_str();
+        info.timeout_us = slots_[i].timeout_us;
+        info.last_beat_us = slots_[i].heartbeat.LastBeatUs();
+        info.timed_out = slots_[i].timed_out;
+        fn(info);
+      }
+    }
+  }
 
   // --------------------------------------------------------------------------
   // TimerScheduler Integration

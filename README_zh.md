@@ -87,6 +87,7 @@
 |------|------|
 | `watchdog.hpp` | 软件看门狗 (截止时间监控、超时回调) |
 | `fault_collector.hpp` | 故障收集与上报 (FaultReporter POD 注入, 环形缓冲) |
+| `shell_commands.hpp` | 内置诊断 Shell 命令桥接 (零侵入, 15 个 Register 函数) |
 
 ## 架构
 
@@ -140,6 +141,7 @@ graph TB
     subgraph 可靠性层
         R1[watchdog.hpp<br/>看门狗]
         R2[fault_collector.hpp<br/>故障收集]
+        R3[shell_commands.hpp<br/>诊断命令]
     end
 
     subgraph 基础层
@@ -207,6 +209,11 @@ graph LR
     mem_pool[mem_pool.hpp] --> platform
     shutdown[shutdown.hpp] --> vocabulary
     fault_collector[fault_collector.hpp] --> vocabulary
+    shell_commands[shell_commands.hpp] --> shell
+    shell_commands --> watchdog
+    shell_commands --> fault_collector
+    shell_commands --> node_manager_hsm
+    shell_commands --> bus
 ```
 
 ## 构建
@@ -308,7 +315,12 @@ sensor.SpinOnce();
 
 ## 文档
 
-- [设计文档](docs/design_zh.md) - 架构设计、模块详解、关键决策
+- [架构设计](docs/design_zh.md) - 系统架构、模块设计、资源预算
+- [编码规范](docs/coding_standards_zh.md) - 代码风格、命名约定、CI、测试策略
+- [开发参考](docs/reference_zh.md) - 编译期配置汇总、线程安全性总结
+- [Shell 命令设计](docs/design_shell_commands_zh.md) - 内置诊断命令规划
+- [串口集成设计](docs/cserialport_integration_analysis.md) - CSerialPort 集成方案
+- [代码生成设计](docs/design_codegen_zh.md) - ospgen YAML → C++ 代码生成
 - [变更日志](docs/changelog_zh.md) - P0 调整 + Phase 实施记录
 - [示例指南](docs/examples_zh.md) - 示例用途与架构映射
 

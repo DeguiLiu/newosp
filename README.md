@@ -89,6 +89,7 @@ Modern C++17 header-only embedded infrastructure library for ARM-Linux, extracte
 |--------|-------------|
 | `watchdog.hpp` | Software watchdog (deadline monitoring, timeout callbacks) |
 | `fault_collector.hpp` | Fault collection and reporting (FaultReporter POD injection, ring buffer) |
+| `shell_commands.hpp` | Built-in diagnostic shell command bridge (zero-intrusion, 15 Register functions) |
 
 ## Architecture
 
@@ -129,6 +130,7 @@ graph TB
     subgraph Reliability["Reliability Layer"]
         WD[watchdog.hpp]
         FC[fault_collector.hpp]
+        SC[shell_commands.hpp]
     end
 
     subgraph Foundation["Foundation Layer"]
@@ -182,6 +184,12 @@ flowchart LR
 
     StateMachine --> Foundation
     Reliability --> Foundation
+
+    shell_commands[shell_commands.hpp] --> shell
+    shell_commands --> watchdog
+    shell_commands --> fault_collector
+    shell_commands --> node_manager_hsm
+    shell_commands --> bus
 ```
 
 ## Build
@@ -278,7 +286,12 @@ All dependencies are fetched automatically via CMake FetchContent:
 
 ## Documentation
 
-- Design document: [docs/design_zh.md](docs/design_zh.md)
+- Architecture design: [docs/design_zh.md](docs/design_zh.md)
+- Coding standards: [docs/coding_standards_zh.md](docs/coding_standards_zh.md)
+- Developer reference: [docs/reference_zh.md](docs/reference_zh.md)
+- Shell commands design: [docs/design_shell_commands_zh.md](docs/design_shell_commands_zh.md)
+- Serial integration design: [docs/cserialport_integration_analysis.md](docs/cserialport_integration_analysis.md)
+- Codegen design: [docs/design_codegen_zh.md](docs/design_codegen_zh.md)
 - Changelog: [docs/changelog_zh.md](docs/changelog_zh.md)
 - Examples guide: [docs/examples_zh.md](docs/examples_zh.md)
 

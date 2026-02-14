@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 
 namespace osp {
 
@@ -98,6 +99,20 @@ struct FaultStatistics {
   uint64_t total_dropped;
   std::array<uint64_t, 4> priority_reported;  ///< Per-priority reported counts
   std::array<uint64_t, 4> priority_dropped;   ///< Per-priority dropped counts
+};
+
+/// Queue usage snapshot for a single priority level.
+struct QueueUsageInfo {
+  uint32_t size;      ///< Current queue depth
+  uint32_t capacity;  ///< Maximum queue depth
+};
+
+/// Recent fault record for diagnostic iteration.
+struct RecentFaultInfo {
+  uint16_t fault_index;       ///< Fault point index
+  uint32_t detail;            ///< User-defined detail value
+  FaultPriority priority;     ///< Fault priority level
+  uint64_t timestamp_us;      ///< Steady-clock timestamp (microseconds)
 };
 
 // ============================================================================
@@ -401,6 +416,20 @@ class FaultCollector {
     stats_total_reported_.fetch_add(1U, std::memory_order_relaxed);
     SetFaultActive(fault_index);
 
+    // Record to recent ring buffer
+    {
+      std::lock_guard<std::mutex> lock(recent_mutex_);
+      auto& slot = recent_ring_[recent_head_];
+      slot.fault_index = fault_index;
+      slot.detail = detail;
+      slot.priority = priority;
+      slot.timestamp_us = entry.timestamp_us;
+      recent_head_ = (recent_head_ + 1U) % kRecentRingSize;
+      if (recent_count_ < kRecentRingSize) {
+        ++recent_count_;
+      }
+    }
+
     // Wake consumer
     wake_cv_.notify_one();
 
@@ -501,6 +530,37 @@ class FaultCollector {
       return BackpressureLevel::kWarning;
     }
     return BackpressureLevel::kNormal;
+  }
+
+  /// Get queue usage for a specific priority level.
+  QueueUsageInfo QueueUsage(FaultPriority pri) const noexcept {
+    auto idx = static_cast<uint32_t>(pri);
+    if (idx >= detail::kPriorityLevels) {
+      return {0U, 0U};
+    }
+    return {queues_[idx].Size(), QueueDepth};
+  }
+
+  /// Iterate recent faults in reverse chronological order (newest first).
+  /// Callback signature: bool(const RecentFaultInfo&) — return false to stop.
+  /// Also accepts void(const RecentFaultInfo&) — iterates all entries.
+  /// @param fn         Callback invoked for each recent fault.
+  /// @param max_count  Maximum number of entries to visit (default: all).
+  template <typename Fn>
+  void ForEachRecent(Fn&& fn, uint32_t max_count = kRecentRingSize) const {
+    std::lock_guard<std::mutex> lock(recent_mutex_);
+    uint32_t n = (recent_count_ < max_count) ? recent_count_ : max_count;
+    for (uint32_t i = 0U; i < n; ++i) {
+      // Walk backwards from most recent
+      uint32_t idx = (recent_head_ + kRecentRingSize - 1U - i) % kRecentRingSize;
+      if constexpr (std::is_same_v<decltype(fn(recent_ring_[idx])), bool>) {
+        if (!fn(recent_ring_[idx])) {
+          break;
+        }
+      } else {
+        fn(recent_ring_[idx]);
+      }
+    }
   }
 
  private:
@@ -744,6 +804,13 @@ class FaultCollector {
   std::thread consumer_thread_;
   std::mutex wake_mutex_;
   std::condition_variable wake_cv_;
+
+  // Recent fault ring buffer (diagnostic)
+  static constexpr uint32_t kRecentRingSize = 16U;
+  mutable std::mutex recent_mutex_;
+  std::array<RecentFaultInfo, kRecentRingSize> recent_ring_{};
+  uint32_t recent_head_{0U};
+  uint32_t recent_count_{0U};
 };
 
 }  // namespace osp
