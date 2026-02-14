@@ -602,9 +602,7 @@ class IniFileBase : public std::map<std::string, IniSectionBase<Comparator>, Com
 };
 
 using IniFile = IniFileBase<std::less<std::string>>;
-using IniSection = IniSectionBase<std::less<std::string>>;
 using IniFileCaseInsensitive = IniFileBase<StringInsensitiveLess>;
-using IniSectionCaseInsensitive = IniSectionBase<StringInsensitiveLess>;
 }  // namespace ini
 }  // namespace osp
 

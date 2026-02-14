@@ -1,5 +1,5 @@
 
-/* decode_ini_file.cpp
+/* custom_type_conversion.cpp
  *
  * Author: Fabian Meyer
  * Created On: 14 Nov 2020
@@ -58,7 +58,7 @@ struct Convert<std::vector<T>> {
     for (size_t i = 0; i < value.size(); ++i) {
       // use the conversion functor for the type contained in
       // the vector, so the vector can use any type that
-      // is compatible with inifile-cp
+      // is compatible with inifile-cpp
       Convert<T> conv;
       conv.Encode(value[i], encoded);
       ss << encoded;
