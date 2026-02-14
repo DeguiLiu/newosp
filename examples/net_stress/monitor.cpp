@@ -207,16 +207,30 @@ OSP_SHELL_CMD(cmd_quit, "Quit monitor");
 // ============================================================================
 
 int main(int argc, char* argv[]) {
-  if (argc < 2) {
-    std::printf("Usage: %s <server_ip> [echo_port] [probe_interval_ms]\n",
-                argv[0]);
+  // --- Load INI config (--config path or default net_stress.ini) ---
+  NetStressConfig cfg;
+  const char* ini_path = FindConfigArg(argc, argv);
+  LoadConfig(ini_path ? ini_path : "net_stress.ini", cfg);
+
+  // Build positional args (skip --config pairs)
+  const char* pos_args[8] = {};
+  int pos_count = 0;
+  for (int i = 1; i < argc && pos_count < 8; ++i) {
+    if (std::strcmp(argv[i], "--config") == 0) { ++i; continue; }
+    pos_args[pos_count++] = argv[i];
+  }
+
+  if (pos_count < 1) {
+    std::printf("Usage: %s [--config net_stress.ini] <server_ip> "
+                "[echo_port] [probe_interval_ms]\n", argv[0]);
     return 1;
   }
 
-  g_server_host.assign(osp::TruncateToCapacity, argv[1]);
-  if (argc >= 3) g_echo_port = static_cast<uint16_t>(std::atoi(argv[2]));
-  uint32_t probe_interval = 2000U;
-  if (argc >= 4) probe_interval = static_cast<uint32_t>(std::atoi(argv[3]));
+  g_server_host.assign(osp::TruncateToCapacity, pos_args[0]);
+  g_echo_port = cfg.server_echo_port;
+  if (pos_count >= 2) g_echo_port = static_cast<uint16_t>(std::atoi(pos_args[1]));
+  uint32_t probe_interval = cfg.monitor_probe_ms;
+  if (pos_count >= 3) probe_interval = static_cast<uint32_t>(std::atoi(pos_args[2]));
 
   OSP_LOG_INFO("MONITOR", "=== Net Stress Monitor ===");
   OSP_LOG_INFO("MONITOR", "Target: %s:%u, Probe interval: %u ms",
@@ -242,12 +256,12 @@ int main(int argc, char* argv[]) {
 
   // --- Debug Shell ---
   osp::DebugShell::Config shell_cfg;
-  shell_cfg.port = kMonitorShellPort;
+  shell_cfg.port = cfg.monitor_shell_port;
   osp::DebugShell shell(shell_cfg);
   auto shell_r = shell.Start();
   if (shell_r) {
     OSP_LOG_INFO("MONITOR", "Debug shell: telnet localhost %u",
-                 kMonitorShellPort);
+                 cfg.monitor_shell_port);
     OSP_LOG_INFO("MONITOR", "  Commands: cmd_probe, cmd_history, "
                  "cmd_bus_stats, cmd_quit");
   }
