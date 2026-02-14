@@ -1,0 +1,3134 @@
+# newosp - Full API Reference
+
+> C++17 header-only infrastructure library for industrial embedded systems (ARM-Linux)
+> Complete API documentation for all 38 modules
+
+**Repository:** https://github.com/DeguiLiu/newosp
+**Version:** v0.1.0
+**Test Coverage:** 788+ test cases, ASan/TSan/UBSan clean
+
+---
+
+## Table of Contents
+
+1. [Foundation Layer](#foundation-layer)
+2. [Core Communication Layer](#core-communication-layer)
+3. [State Machine & Behavior Tree](#state-machine--behavior-tree)
+4. [Network & Transport Layer](#network--transport-layer)
+5. [Service & Discovery Layer](#service--discovery-layer)
+6. [Application Layer](#application-layer)
+7. [Reliability Components](#reliability-components)
+
+---
+
+# Foundation Layer
+
+## platform.hpp
+
+**Purpose:** Platform detection, compiler hints, assertion macros, and monotonic time utilities.
+
+**Dependencies:** None (pure macros and constexpr)
+
+### Platform Detection Macros
+
+```cpp
+#define OSP_PLATFORM_LINUX   // Defined on Linux
+#define OSP_PLATFORM_MACOS   // Defined on macOS
+#define OSP_PLATFORM_WINDOWS // Defined on Windows
+
+#define OSP_ARCH_ARM         // Defined on ARM/AArch64
+#define OSP_ARCH_X86         // Defined on x86/x86_64
+```
+
+### Constants
+
+```cpp
+namespace osp {
+  static constexpr size_t kCacheLineSize = 64;  // Cache line size for alignment
+}
+```
+
+### Compiler Hints
+
+```cpp
+#define OSP_LIKELY(x)    // Branch prediction hint: likely true
+#define OSP_UNLIKELY(x)  // Branch prediction hint: likely false
+#define OSP_UNUSED       // Suppress unused variable warnings
+```
+
+### Assertion
+
+```cpp
+#define OSP_ASSERT(cond)  // Debug assertion (compiled out in NDEBUG)
+```
+
+**Behavior:** Prints condition, file, line to stderr and calls `std::abort()` on failure.
+
+### Monotonic Time
+
+```cpp
+namespace osp {
+  inline uint64_t SteadyNowUs() noexcept;  // Monotonic time in microseconds
+  inline uint64_t SteadyNowNs() noexcept;  // Monotonic time in nanoseconds
+}
+```
+
+**Thread Safety:** Thread-safe (uses `std::chrono::steady_clock`)
+
+### Thread Heartbeat
+
+```cpp
+namespace osp {
+  struct ThreadHeartbeat {
+    std::atomic<uint64_t> last_beat_us{0};
+    
+    void Beat() noexcept;  // Update heartbeat timestamp
+  };
+}
+```
+
+**Usage:** Modules call `Beat()` in hot path; `ThreadWatchdog` reads `last_beat_us`.
+
+---
+
+## vocabulary.hpp
+
+**Purpose:** Zero-heap vocabulary types for error handling, fixed containers, and type safety.
+
+**Dependencies:** platform.hpp
+
+### Error Handling
+
+```cpp
+namespace osp {
+  // Lightweight error-or-value type
+  template <typename V, typename E>
+  class expected {
+   public:
+    bool has_value() const noexcept;
+    const V& value() const&;
+    V& value() &;
+    V&& value() &&;
+    const E& get_error() const&;
+    E& get_error() &;
+    
+    explicit operator bool() const noexcept { return has_value(); }
+  };
+  
+  // Nullable value wrapper
+  template <typename T>
+  class optional {
+   public:
+    bool has_value() const noexcept;
+    const T& value() const&;
+    T& value() &;
+    T* operator->() noexcept;
+    const T* operator->() const noexcept;
+  };
+  
+  // Monadic chaining
+  template <typename V, typename E, typename F>
+  auto and_then(const expected<V,E>& exp, F&& func);
+  
+  template <typename V, typename E, typename F>
+  auto or_else(const expected<V,E>& exp, F&& func);
+}
+```
+
+### Fixed Containers
+
+```cpp
+namespace osp {
+  // Stack-allocated fixed-capacity vector
+  template <typename T, size_t Cap>
+  class FixedVector {
+   public:
+    bool push_back(const T& val);
+    bool push_back(T&& val);
+    void pop_back();
+    T& operator[](size_t idx);
+    const T& operator[](size_t idx) const;
+    size_t size() const noexcept;
+    size_t capacity() const noexcept { return Cap; }
+    bool empty() const noexcept;
+    bool full() const noexcept;
+    void clear() noexcept;
+    
+    T* begin() noexcept;
+    T* end() noexcept;
+    const T* begin() const noexcept;
+    const T* end() const noexcept;
+  };
+  
+  // Fixed-capacity string
+  template <size_t Cap>
+  class FixedString {
+   public:
+    bool append(const char* str);
+    bool append(char c);
+    const char* c_str() const noexcept;
+    size_t size() const noexcept;
+    size_t capacity() const noexcept { return Cap; }
+    void clear() noexcept;
+  };
+  
+  // Small Buffer Optimization function wrapper
+  template <typename Sig, size_t BufSize = 2 * sizeof(void*)>
+  class FixedFunction;  // Similar to std::function but SBO
+  
+  // Non-owning function reference (2 pointers)
+  template <typename Sig>
+  class function_ref;  // Similar to std::function_ref (C++26)
+}
+```
+
+### Type Safety
+
+```cpp
+namespace osp {
+  // Non-null pointer wrapper
+  template <typename T>
+  class not_null {
+   public:
+    explicit not_null(T ptr);
+    T get() const noexcept;
+    operator T() const noexcept;
+  };
+  
+  // Strong typedef
+  template <typename T, typename Tag>
+  class NewType {
+   public:
+    explicit NewType(T val) : value_(val) {}
+    T get() const noexcept { return value_; }
+   private:
+    T value_;
+  };
+  
+  // RAII scope guard
+  class ScopeGuard {
+   public:
+    template <typename F>
+    explicit ScopeGuard(F&& func);
+    ~ScopeGuard();
+    void dismiss() noexcept;
+  };
+  
+  #define OSP_SCOPE_EXIT(...)  // Macro for inline scope guard
+}
+```
+
+### Error Enums
+
+```cpp
+namespace osp {
+  enum class ConfigError : uint8_t {
+    kFileNotFound,
+    kParseError,
+    kFormatNotSupported,
+    kBufferFull
+  };
+  
+  enum class TimerError : uint8_t {
+    kSlotsFull,
+    kInvalidPeriod,
+    kNotRunning,
+    kAlreadyRunning
+  };
+  
+  enum class ShellError : uint8_t {
+    kRegistryFull,
+    kDuplicateName,
+    kPortInUse,
+    kNotRunning
+  };
+  
+  enum class MemPoolError : uint8_t {
+    kPoolExhausted,
+    kInvalidPointer
+  };
+}
+```
+
+---
+
+## config.hpp
+
+**Purpose:** Multi-format configuration parser (INI/JSON/YAML) with unified interface.
+
+**Dependencies:** vocabulary.hpp, inih (optional), nlohmann/json (optional), fkYAML (optional)
+
+### Configuration Class
+
+```cpp
+namespace osp {
+  // Multi-backend configuration
+  template <typename... Backends>
+  class Config {
+   public:
+    expected<void, ConfigError> LoadFile(const char* path);
+    
+    int32_t GetInt(const char* section, const char* key, int32_t default_val) const;
+    const char* GetString(const char* section, const char* key, const char* default_val) const;
+    bool GetBool(const char* section, const char* key, bool default_val) const;
+    double GetDouble(const char* section, const char* key, double default_val) const;
+    
+    optional<int32_t> FindInt(const char* section, const char* key) const;
+    optional<bool> FindBool(const char* section, const char* key) const;
+    optional<double> FindDouble(const char* section, const char* key) const;
+  };
+  
+  // Convenience typedef with all backends
+  using MultiConfig = Config<IniBackend, JsonBackend, YamlBackend>;
+}
+```
+
+**Thread Safety:** Load once, then read-only (thread-safe)
+
+**Example:**
+
+```cpp
+osp::MultiConfig cfg;
+auto result = cfg.LoadFile("app.yaml");
+if (!result.has_value()) {
+  OSP_LOG_ERROR("config", "Failed to load: %d", static_cast<int>(result.get_error()));
+  return -1;
+}
+
+int port = cfg.GetInt("network", "port", 8080);
+auto verbose = cfg.FindBool("debug", "verbose");  // optional<bool>
+```
+
+---
+
+## log.hpp
+
+**Purpose:** Lightweight thread-safe logging with compile-time and runtime level filtering.
+
+**Dependencies:** None (pure C stdlib)
+
+### Log Levels
+
+```cpp
+namespace osp {
+namespace log {
+  enum class Level : uint8_t {
+    kDebug = 0,
+    kInfo = 1,
+    kWarn = 2,
+    kError = 3,
+    kFatal = 4,
+    kOff = 5
+  };
+  
+  void SetLevel(Level level) noexcept;
+  Level GetLevel() noexcept;
+}}
+```
+
+### Logging Macros
+
+```cpp
+#define OSP_LOG_DEBUG(tag, fmt, ...)
+#define OSP_LOG_INFO(tag, fmt, ...)
+#define OSP_LOG_WARN(tag, fmt, ...)
+#define OSP_LOG_ERROR(tag, fmt, ...)
+#define OSP_LOG_FATAL(tag, fmt, ...)
+```
+
+**Compile-Time Filtering:**
+
+```cpp
+#define OSP_LOG_MIN_LEVEL 1  // 0=Debug, 1=Info (default Release), 2=Warn, ...
+```
+
+**Output Format:**
+
+```
+[2026-02-14 14:30:00.123] [INFO] [sensor] temp=25.0 from 1
+```
+
+**Thread Safety:** Thread-safe (POSIX `fprintf` atomic write)
+
+**Resource:** Stack buffers (32B timestamp + 512B message), zero heap allocation
+
+---
+
+## timer.hpp
+
+**Purpose:** Background thread-driven periodic task scheduler.
+
+**Dependencies:** vocabulary.hpp
+
+### Timer Scheduler
+
+```cpp
+namespace osp {
+  using TimerTaskId = NewType<uint32_t, struct TimerTaskIdTag>;
+  
+  class TimerScheduler {
+   public:
+    explicit TimerScheduler(uint32_t max_tasks);
+    ~TimerScheduler();
+    
+    expected<TimerTaskId, TimerError> Add(uint32_t period_ms,
+                                          void (*callback)(void*),
+                                          void* ctx);
+    expected<void, TimerError> Remove(TimerTaskId id);
+    
+    expected<void, TimerError> Start();
+    void Stop() noexcept;
+    bool IsRunning() const noexcept;
+  };
+}
+```
+
+**Thread Safety:** All public methods mutex-protected
+
+**Behavior:**
+- Background thread uses `std::chrono::steady_clock`
+- Automatic catch-up for missed periods
+- Pre-allocated task slots (fixed capacity)
+
+**Example:**
+
+```cpp
+osp::TimerScheduler scheduler(16);
+
+auto result = scheduler.Add(1000, [](void* ctx) {
+  OSP_LOG_INFO("timer", "Heartbeat tick");
+}, nullptr);
+
+if (result.has_value()) {
+  scheduler.Start();
+  // ... run ...
+  scheduler.Stop();
+}
+```
+
+---
+
+## shell.hpp
+
+**Purpose:** Remote debug shell with telnet interface, command registration, and multi-session support.
+
+**Dependencies:** vocabulary.hpp
+
+### Debug Shell
+
+```cpp
+namespace osp {
+  struct ShellConfig {
+    uint16_t port = 5090;
+    uint32_t max_sessions = 2;
+    uint32_t session_timeout_s = 300;
+  };
+  
+  class DebugShell {
+   public:
+    explicit DebugShell(const ShellConfig& cfg);
+    ~DebugShell();
+    
+    expected<void, ShellError> Start();
+    void Stop() noexcept;
+    bool IsRunning() const noexcept;
+    
+    // Thread-local session output
+    static int Printf(const char* fmt, ...);
+  };
+}
+```
+
+### Command Registration
+
+```cpp
+#define OSP_SHELL_CMD(name, description) \
+  static int shell_cmd_##name(int argc, char* argv[]); \
+  static auto shell_reg_##name = /* ... */; \
+  static int shell_cmd_##name(int argc, char* argv[])
+```
+
+**Example:**
+
+```cpp
+OSP_SHELL_CMD(stats, "Show system statistics") {
+  osp::DebugShell::Printf("Uptime: %u seconds\n", get_uptime());
+  osp::DebugShell::Printf("Memory: %u KB\n", get_memory_usage());
+  return 0;
+}
+
+int main() {
+  osp::DebugShell shell({.port = 5090});
+  shell.Start();
+  // telnet localhost 5090
+  // > stats
+}
+```
+
+**Thread Safety:**
+- Command registry: mutex-protected
+- Session I/O: thread-local routing
+
+**Features:**
+- TAB completion
+- Command history
+- Multi-session support (max configurable)
+- Meyer's singleton registry (max 64 commands)
+
+---
+
+## mem_pool.hpp
+
+**Purpose:** Fixed-block memory pool with O(1) alloc/free for embedded systems.
+
+**Dependencies:** vocabulary.hpp
+
+### Fixed Pool (Low-Level)
+
+```cpp
+namespace osp {
+  template <size_t BlockSize, size_t MaxBlocks>
+  class FixedPool {
+   public:
+    FixedPool();
+    
+    void* Allocate() noexcept;
+    void Deallocate(void* ptr) noexcept;
+    
+    size_t Capacity() const noexcept { return MaxBlocks; }
+    size_t Available() const noexcept;
+  };
+}
+```
+
+### Object Pool (High-Level)
+
+```cpp
+namespace osp {
+  template <typename T, size_t MaxObjects>
+  class ObjectPool {
+   public:
+    ObjectPool();
+    ~ObjectPool();
+    
+    template <typename... Args>
+    T* Create(Args&&... args);
+    
+    template <typename... Args>
+    expected<T*, MemPoolError> CreateChecked(Args&&... args);
+    
+    void Destroy(T* ptr) noexcept;
+    
+    size_t Capacity() const noexcept { return MaxObjects; }
+    size_t Available() const noexcept;
+  };
+}
+```
+
+**Thread Safety:** Mutex-protected alloc/free
+
+**Memory Layout:** Inline storage (all stack-allocated), embedded free-list
+
+**Example:**
+
+```cpp
+struct Packet {
+  uint8_t data[1024];
+  uint32_t len;
+};
+
+osp::ObjectPool<Packet, 256> pool;
+
+auto result = pool.CreateChecked(/* args */);
+if (result.has_value()) {
+  Packet* pkt = result.value();
+  // ... use packet ...
+  pool.Destroy(pkt);
+}
+```
+
+---
+
+## shutdown.hpp
+
+**Purpose:** Graceful shutdown with signal handling and LIFO callback execution.
+
+**Dependencies:** vocabulary.hpp
+
+### Shutdown Manager
+
+```cpp
+namespace osp {
+  class ShutdownManager {
+   public:
+    ShutdownManager();
+    ~ShutdownManager();
+    
+    void Register(void (*callback)(int signal), int priority = 0);
+    void InstallSignalHandlers();
+    void WaitForShutdown();
+    void Trigger(int signal = SIGTERM);
+  };
+}
+```
+
+**Signal Handling:**
+- Catches `SIGINT` and `SIGTERM`
+- Async-signal-safe: writes to pipe, wakes up `WaitForShutdown()`
+- LIFO callback execution (last registered, first executed)
+
+**Example:**
+
+```cpp
+osp::ShutdownManager shutdown;
+
+shutdown.Register([](int sig) {
+  OSP_LOG_INFO("app", "Stopping worker pool...");
+  worker_pool.Shutdown();
+});
+
+shutdown.Register([](int sig) {
+  OSP_LOG_INFO("app", "Stopping timer...");
+  timer.Stop();
+});
+
+shutdown.InstallSignalHandlers();
+shutdown.WaitForShutdown();  // Blocks until SIGINT/SIGTERM
+```
+
+---
+
+# Core Communication Layer
+
+## bus.hpp
+
+**Purpose:** Lock-free MPSC message bus with priority admission control and batch processing.
+
+**Dependencies:** platform.hpp, vocabulary.hpp
+
+### Message Bus
+
+```cpp
+namespace osp {
+  enum class MessagePriority : uint8_t {
+    kLow = 0,     // Dropped when queue >= 60% full
+    kMedium = 1,  // Dropped when queue >= 80% full
+    kHigh = 2     // Dropped when queue >= 99% full
+  };
+  
+  struct MessageHeader {
+    uint64_t msg_id;
+    uint64_t timestamp_us;
+    uint32_t sender_id;
+    uint32_t topic_hash;  // 0 = no topic, non-zero = FNV-1a hash
+    MessagePriority priority;
+  };
+  
+  template <typename PayloadVariant,
+            uint32_t QueueDepth = 4096,
+            uint32_t BatchSize = 256>
+  class AsyncBus {
+   public:
+    AsyncBus();
+    ~AsyncBus();
+    
+    // Publish message (lock-free, multi-producer safe)
+    template <typename T>
+    bool Publish(const T& payload, uint32_t sender_id,
+                 MessagePriority priority = MessagePriority::kMedium);
+    
+    template <typename T>
+    bool Publish(const T& payload, uint32_t sender_id, const char* topic,
+                 MessagePriority priority = MessagePriority::kMedium);
+    
+    // Subscribe to message type
+    template <typename T>
+    uint32_t Subscribe(void (*callback)(const MessageEnvelope<PayloadVariant>&));
+    
+    // Subscribe with topic filter
+    template <typename T>
+    uint32_t Subscribe(const char* topic,
+                       void (*callback)(const MessageEnvelope<PayloadVariant>&));
+    
+    // Unsubscribe
+    template <typename T>
+    void Unsubscribe(uint32_t sub_id);
+    
+    // Process batch (single consumer)
+    uint32_t ProcessBatch();
+    
+    // Statistics
+    struct Stats {
+      uint64_t published;
+      uint64_t dropped_low;
+      uint64_t dropped_medium;
+      uint64_t dropped_high;
+      uint32_t current_depth;
+    };
+    Stats GetStats() const noexcept;
+  };
+  
+  // FNV-1a hash for topic routing
+  constexpr uint32_t Fnv1a32(const char* str) noexcept;
+}
+```
+
+**Thread Safety:**
+- `Publish()`: Lock-free, multi-producer safe (CAS-based)
+- `Subscribe()/Unsubscribe()`: SharedMutex (read-heavy optimization)
+- `ProcessBatch()`: Single consumer only
+
+**Memory Layout:**
+- Ring buffer: `QueueDepth` slots
+- Producer/consumer counters: separate cache lines (64B aligned)
+
+**Backpressure Levels:**
+- Normal: < 60%
+- Warning: 60-80%
+- Critical: 80-99%
+- Full: >= 99%
+
+**Example:**
+
+```cpp
+struct SensorData { float temp; };
+struct MotorCmd { int speed; };
+using Payload = std::variant<SensorData, MotorCmd>;
+
+osp::AsyncBus<Payload, 1024, 128> bus;
+
+// Subscribe
+bus.Subscribe<SensorData>([](const auto& env) {
+  const auto& data = std::get<SensorData>(env.payload);
+  OSP_LOG_INFO("bus", "temp=%.1f", data.temp);
+});
+
+// Publish
+bus.Publish(SensorData{25.0f}, 1, osp::MessagePriority::kHigh);
+
+// Process (in consumer thread)
+while (running) {
+  uint32_t processed = bus.ProcessBatch();
+  if (processed == 0) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+```
+
+---
+
+## node.hpp
+
+**Purpose:** Lightweight Pub/Sub node with bus injection and topic-aware routing.
+
+**Dependencies:** vocabulary.hpp, bus.hpp
+
+### Node
+
+```cpp
+namespace osp {
+  template <typename PayloadVariant>
+  class Node {
+   public:
+    Node(const char* name, uint32_t id, AsyncBus<PayloadVariant>& bus);
+    ~Node();
+    
+    // Subscribe (type-only routing)
+    template <typename T>
+    void Subscribe(void (*callback)(const T&, const MessageHeader&));
+    
+    // Subscribe with topic filter
+    template <typename T>
+    void Subscribe(const char* topic,
+                   void (*callback)(const T&, const MessageHeader&));
+    
+    // Publish (type-only)
+    template <typename T>
+    bool Publish(const T& payload,
+                 MessagePriority priority = MessagePriority::kMedium);
+    
+    // Publish with topic
+    template <typename T>
+    bool Publish(const T& payload, const char* topic,
+                 MessagePriority priority = MessagePriority::kMedium);
+    
+    // Process messages (single consumer)
+    void SpinOnce();
+    void Spin();  // Infinite loop
+    
+    const char* Name() const noexcept;
+    uint32_t Id() const noexcept;
+  };
+  
+  // Lightweight publisher (no RAII cleanup)
+  template <typename T, typename PayloadVariant>
+  class Publisher {
+   public:
+    Publisher(AsyncBus<PayloadVariant>& bus, uint32_t sender_id);
+    
+    bool Publish(const T& payload,
+                 MessagePriority priority = MessagePriority::kMedium);
+    bool Publish(const T& payload, const char* topic,
+                 MessagePriority priority = MessagePriority::kMedium);
+  };
+}
+```
+
+**Thread Safety:**
+- `Publish()`: Thread-safe (delegates to AsyncBus)
+- `Subscribe()`: Not thread-safe (call before `SpinOnce()`)
+- `SpinOnce()`: Single consumer only
+
+**Routing:**
+- Type-first: Compile-time `std::variant` index dispatch
+- Topic-aware: FNV-1a 32-bit hash for same-type different-topic messages
+
+**Example:**
+
+```cpp
+osp::AsyncBus<Payload> bus;
+osp::Node<Payload> sensor("sensor", 1, bus);
+
+// Type-only subscription
+sensor.Subscribe<SensorData>([](const SensorData& data, const osp::MessageHeader& hdr) {
+  OSP_LOG_INFO("node", "temp=%.1f from %u", data.temp, hdr.sender_id);
+});
+
+// Topic-aware subscription (disambiguate same type)
+sensor.Subscribe<SensorData>("imu/temperature", on_imu_temp);
+sensor.Subscribe<SensorData>("env/temperature", on_env_temp);
+
+// Publish
+sensor.Publish(SensorData{25.0f});
+sensor.Publish(SensorData{18.0f}, "env/temperature");
+
+// Process
+sensor.SpinOnce();
+```
+
+---
+
+## worker_pool.hpp
+
+**Purpose:** Multi-threaded worker pool with MPSC entry + SPSC per-worker dispatch.
+
+**Dependencies:** vocabulary.hpp, bus.hpp, spsc_ringbuffer.hpp
+
+### Worker Pool
+
+```cpp
+namespace osp {
+  struct WorkerPoolConfig {
+    const char* name = "worker_pool";
+    uint32_t worker_num = 4;
+    uint32_t dispatcher_sleep_us = 100;
+    int32_t cpu_affinity_start = -1;  // -1 = no affinity
+    int32_t thread_priority = 0;      // 0 = default
+  };
+  
+  template <typename PayloadVariant>
+  class WorkerPool {
+   public:
+    explicit WorkerPool(const WorkerPoolConfig& cfg);
+    ~WorkerPool();
+    
+    // Register handler for message type
+    template <typename T>
+    void RegisterHandler(void (*handler)(const T&, const MessageHeader&));
+    
+    // Submit message (thread-safe)
+    template <typename T>
+    bool Submit(const T& payload, uint32_t sender_id = 0,
+                MessagePriority priority = MessagePriority::kMedium);
+    
+    // Lifecycle
+    void Start();
+    void Shutdown();
+    void FlushAndPause();
+    void Resume();
+    
+    // Statistics
+    struct Stats {
+      uint64_t dispatched;
+      uint64_t processed;
+      uint64_t queue_full;
+    };
+    Stats GetStats() const noexcept;
+  };
+}
+```
+
+**Architecture:**
+```
+Submit() → AsyncBus (MPSC) → Dispatcher Thread (round-robin)
+                                  ↓
+                    ┌─────────────┼─────────────┐
+                    ↓             ↓             ↓
+                Worker[0]     Worker[1]     Worker[N-1]
+              SpscRingbuffer SpscRingbuffer SpscRingbuffer
+```
+
+**Thread Safety:**
+- `Submit()`: Thread-safe (MPSC bus)
+- `RegisterHandler()`: Not thread-safe (call before `Start()`)
+
+**Example:**
+
+```cpp
+osp::WorkerPoolConfig cfg{
+  .name = "processor",
+  .worker_num = 4,
+  .cpu_affinity_start = 4  // Bind to CPU 4-7
+};
+
+osp::WorkerPool<Payload> pool(cfg);
+
+pool.RegisterHandler<SensorData>([](const SensorData& data, const auto& hdr) {
+  // Heavy processing here
+  process_sensor_data(data);
+});
+
+pool.Start();
+pool.Submit(SensorData{25.0f}, 1);
+// ...
+pool.Shutdown();
+```
+
+---
+
+## spsc_ringbuffer.hpp
+
+**Purpose:** Lock-free wait-free SPSC ring buffer with batch operations and zero-copy access.
+
+**Dependencies:** platform.hpp
+
+### SPSC Ring Buffer
+
+```cpp
+namespace osp {
+  template <typename T,
+            size_t BufferSize = 16,
+            bool FakeTSO = false,
+            typename IndexT = size_t>
+  class SpscRingbuffer {
+   public:
+    SpscRingbuffer();
+    
+    // Single element operations
+    bool Push(const T& item);
+    bool Push(T&& item);
+    bool Pop(T& item);
+    
+    // Batch operations
+    size_t PushBatch(const T* items, size_t count);
+    size_t PopBatch(T* items, size_t count);
+    
+    // Zero-copy access
+    const T* Peek() const noexcept;  // Front element pointer
+    const T* At(size_t offset) const noexcept;  // Random access
+    void Discard(size_t count) noexcept;  // Skip elements
+    
+    // Status
+    size_t Size() const noexcept;
+    size_t Capacity() const noexcept { return BufferSize; }
+    bool Empty() const noexcept;
+    bool Full() const noexcept;
+  };
+}
+```
+
+**Thread Safety:** Single producer, single consumer (SPSC contract)
+
+**Memory Ordering:**
+- `FakeTSO=false`: `acquire/release` (ARM, RISC-V)
+- `FakeTSO=true`: `relaxed` (x86 TSO, single-core MCU)
+
+**Compile-Time Optimization:**
+- `if constexpr (std::is_trivially_copyable_v<T>)`: memcpy path
+- Otherwise: move semantics
+
+**Cache-Line Alignment:**
+- `head_` and `tail_` on separate cache lines (64B aligned)
+
+**Example:**
+
+```cpp
+osp::SpscRingbuffer<uint8_t, 4096> rx_buffer;
+
+// Producer thread
+rx_buffer.Push(byte);
+
+// Consumer thread
+uint8_t byte;
+if (rx_buffer.Pop(byte)) {
+  process(byte);
+}
+
+// Batch operations
+uint8_t batch[256];
+size_t count = rx_buffer.PopBatch(batch, 256);
+```
+
+---
+
+## executor.hpp
+
+**Purpose:** Task scheduler with multiple execution modes (single-thread, static, pinned, realtime).
+
+**Dependencies:** vocabulary.hpp, node.hpp
+
+### Executor Types
+
+```cpp
+namespace osp {
+  struct RealtimeConfig {
+    int sched_policy = SCHED_OTHER;   // SCHED_OTHER / SCHED_FIFO / SCHED_RR
+    int sched_priority = 0;           // SCHED_FIFO: 1-99
+    bool lock_memory = false;         // mlockall(MCL_CURRENT | MCL_FUTURE)
+    uint32_t stack_size = 0;          // 0 = system default
+    int cpu_affinity = -1;            // -1 = no binding, >=0 = bind to CPU core
+  };
+  
+  // Single-threaded executor
+  template <typename PayloadVariant>
+  class SingleThreadExecutor {
+   public:
+    void AddNode(Node<PayloadVariant>* node);
+    void Spin();      // Infinite loop
+    void SpinOnce();  // Single iteration
+    void Stop();
+  };
+  
+  // Static executor (fixed node-thread mapping)
+  template <typename PayloadVariant>
+  class StaticExecutor {
+   public:
+    void AddNode(Node<PayloadVariant>* node, uint32_t thread_id);
+    void Start();
+    void Stop();
+  };
+  
+  // Pinned executor (per-node CPU affinity)
+  template <typename PayloadVariant>
+  class PinnedExecutor {
+   public:
+    void AddNode(Node<PayloadVariant>* node, int cpu_core);
+    void Start();
+    void Stop();
+  };
+  
+  // Realtime executor (SCHED_FIFO + mlockall + priority queue)
+  template <typename PayloadVariant>
+  class RealtimeExecutor {
+   public:
+    explicit RealtimeExecutor(const RealtimeConfig& cfg);
+    
+    void AddNode(Node<PayloadVariant>* node, uint32_t priority);
+    void Start();
+    void Stop();
+  };
+}
+```
+
+**Thread Safety:**
+- `AddNode()`: Not thread-safe (call before `Start()`/`Spin()`)
+- `Stop()`: Thread-safe (can be called from signal handler)
+
+**Example:**
+
+```cpp
+osp::RealtimeConfig rt_cfg{
+  .sched_policy = SCHED_FIFO,
+  .sched_priority = 80,
+  .lock_memory = true,
+  .cpu_affinity = 2
+};
+
+osp::RealtimeExecutor<Payload> executor(rt_cfg);
+executor.AddNode(&sensor_node, 10);   // Priority 10
+executor.AddNode(&control_node, 20);  // Priority 20 (higher)
+executor.Start();
+```
+
+---
+
+## semaphore.hpp
+
+**Purpose:** Semaphore primitives for thread synchronization.
+
+**Dependencies:** platform.hpp
+
+### Semaphore Types
+
+```cpp
+namespace osp {
+  // Futex-based lightweight semaphore
+  class LightSemaphore {
+   public:
+    explicit LightSemaphore(uint32_t initial_count = 0);
+    
+    void Wait();
+    bool TryWait();
+    void Post();
+    uint32_t GetValue() const noexcept;
+  };
+  
+  // Binary semaphore (0 or 1)
+  class BinarySemaphore {
+   public:
+    BinarySemaphore();
+    
+    void Wait();
+    bool TryWait();
+    void Post();
+  };
+  
+  // POSIX semaphore wrapper
+  class PosixSemaphore {
+   public:
+    explicit PosixSemaphore(uint32_t initial_count = 0);
+    ~PosixSemaphore();
+    
+    void Wait();
+    bool TryWait();
+    bool TimedWait(uint32_t timeout_ms);
+    void Post();
+    int GetValue() const noexcept;
+  };
+}
+```
+
+**Thread Safety:** All operations thread-safe
+
+---
+
+## data_fusion.hpp
+
+**Purpose:** Multi-source data fusion with time alignment (inspired by CyberRT).
+
+**Dependencies:** vocabulary.hpp, bus.hpp
+
+### Fused Subscription
+
+```cpp
+namespace osp {
+  template <typename PayloadVariant, typename... MsgTypes>
+  class FusedSubscription {
+   public:
+    using FusedCallback = void (*)(const MsgTypes&...);
+    
+    FusedSubscription(AsyncBus<PayloadVariant>& bus, FusedCallback callback);
+    ~FusedSubscription();
+    
+    void Start();
+    void Stop();
+  };
+}
+```
+
+**Behavior:**
+- Subscribes to all `MsgTypes` on the bus
+- Triggers callback when at least one message of each type is received
+- Passes latest message of each type to callback
+
+**Example:**
+
+```cpp
+struct CameraFrame { uint64_t timestamp; uint8_t data[1024]; };
+struct LidarScan { uint64_t timestamp; float points[256]; };
+struct ImuData { uint64_t timestamp; float accel[3]; };
+
+using Payload = std::variant<CameraFrame, LidarScan, ImuData>;
+
+osp::AsyncBus<Payload> bus;
+
+osp::FusedSubscription<Payload, CameraFrame, LidarScan, ImuData> fusion(
+  bus,
+  [](const CameraFrame& cam, const LidarScan& lidar, const ImuData& imu) {
+    // All three sensors have data, perform fusion
+    fuse_sensors(cam, lidar, imu);
+  }
+);
+
+fusion.Start();
+```
+
+---
+
+# State Machine & Behavior Tree
+
+## hsm.hpp
+
+**Purpose:** Hierarchical State Machine with LCA-based transitions and guard conditions.
+
+**Dependencies:** platform.hpp
+
+### State Machine
+
+```cpp
+namespace osp {
+  template <typename Context, uint32_t MaxStates = 16>
+  class StateMachine {
+   public:
+    using StateId = uint16_t;
+    using EventId = uint16_t;
+    
+    struct State {
+      StateId id;
+      StateId parent;
+      void (*on_entry)(Context&);
+      void (*on_exit)(Context&);
+      StateId (*on_event)(Context&, EventId);
+    };
+    
+    explicit StateMachine(Context& ctx);
+    
+    void AddState(const State& state);
+    void SetInitialState(StateId state_id);
+    
+    void Dispatch(EventId event);
+    StateId CurrentState() const noexcept;
+    bool IsInState(StateId state_id) const noexcept;
+  };
+}
+```
+
+**Features:**
+- LCA (Lowest Common Ancestor) algorithm for entry/exit path
+- Event bubbling to parent states
+- Guard conditions in `on_event` handler
+- Zero heap allocation (compile-time `MaxStates`)
+
+**Thread Safety:** Single-threaded dispatch, handlers non-reentrant
+
+**Example:**
+
+```cpp
+enum States : uint16_t { kOff, kOn, kIdle, kRunning, kPaused };
+enum Events : uint16_t { kEvtPowerOn, kEvtStart, kEvtPause, kEvtStop };
+
+struct DeviceContext {
+  bool is_ready;
+};
+
+osp::StateMachine<DeviceContext, 8> sm(ctx);
+
+sm.AddState({
+  .id = kOn,
+  .parent = 0,
+  .on_entry = [](DeviceContext& ctx) { OSP_LOG_INFO("hsm", "Device ON"); },
+  .on_exit = [](DeviceContext& ctx) { OSP_LOG_INFO("hsm", "Device OFF"); },
+  .on_event = nullptr
+});
+
+sm.AddState({
+  .id = kRunning,
+  .parent = kOn,
+  .on_entry = [](DeviceContext& ctx) { start_motor(); },
+  .on_exit = [](DeviceContext& ctx) { stop_motor(); },
+  .on_event = [](DeviceContext& ctx, uint16_t evt) -> uint16_t {
+    if (evt == kEvtPause) return kPaused;
+    return kRunning;
+  }
+});
+
+sm.SetInitialState(kOff);
+sm.Dispatch(kEvtPowerOn);  // Off → On
+sm.Dispatch(kEvtStart);    // On → Running
+```
+
+---
+
+## bt.hpp
+
+**Purpose:** Behavior Tree for async task orchestration with flat array storage.
+
+**Dependencies:** platform.hpp
+
+### Behavior Tree
+
+```cpp
+namespace osp {
+  enum class NodeStatus : uint8_t {
+    kSuccess,
+    kFailure,
+    kRunning
+  };
+  
+  template <typename Context, uint32_t MaxNodes = 32, uint32_t MaxChildren = 8>
+  class BehaviorTree {
+   public:
+    using NodeId = uint16_t;
+    using TickFunc = NodeStatus (*)(Context&);
+    
+    enum class NodeType : uint8_t {
+      kSequence,   // All children must succeed
+      kSelector,   // First child to succeed
+      kAction,     // Leaf node (user callback)
+      kCondition,  // Leaf node (boolean check)
+      kDecorator   // Single child with modifier
+    };
+    
+    explicit BehaviorTree(Context& ctx);
+    
+    NodeId AddNode(NodeType type, TickFunc tick_func = nullptr);
+    void AddChild(NodeId parent, NodeId child);
+    void SetRoot(NodeId root);
+    
+    NodeStatus Tick();
+    NodeStatus GetStatus(NodeId node_id) const noexcept;
+  };
+}
+```
+
+**Node Types:**
+- **Sequence:** Returns `kSuccess` if all children succeed, `kFailure` on first failure
+- **Selector:** Returns `kSuccess` on first child success, `kFailure` if all fail
+- **Action:** User-defined async task (can return `kRunning`)
+- **Condition:** Boolean check (returns `kSuccess` or `kFailure`)
+- **Decorator:** Modifies child behavior (e.g., inverter, repeater)
+
+**Thread Safety:** Single-threaded tick, leaf callbacks non-reentrant
+
+**Example:**
+
+```cpp
+struct RobotContext {
+  bool battery_ok;
+  bool target_visible;
+};
+
+osp::BehaviorTree<RobotContext, 32, 8> bt(ctx);
+
+auto check_battery = bt.AddNode(osp::BehaviorTree::NodeType::kCondition,
+  [](RobotContext& ctx) {
+    return ctx.battery_ok ? osp::NodeStatus::kSuccess : osp::NodeStatus::kFailure;
+  });
+
+auto move_to_target = bt.AddNode(osp::BehaviorTree::NodeType::kAction,
+  [](RobotContext& ctx) {
+    if (!ctx.target_visible) return osp::NodeStatus::kFailure;
+    // Async movement, return kRunning until complete
+    return move_robot() ? osp::NodeStatus::kSuccess : osp::NodeStatus::kRunning;
+  });
+
+auto root = bt.AddNode(osp::BehaviorTree::NodeType::kSequence);
+bt.AddChild(root, check_battery);
+bt.AddChild(root, move_to_target);
+bt.SetRoot(root);
+
+// Tick loop
+while (running) {
+  auto status = bt.Tick();
+  if (status != osp::NodeStatus::kRunning) break;
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+```
+
+---
+
+# Network & Transport Layer
+
+## socket.hpp
+
+**Purpose:** RAII socket wrapper for TCP/UDP with `expected` error handling.
+
+**Dependencies:** vocabulary.hpp
+
+### Socket Classes
+
+```cpp
+namespace osp {
+  enum class SocketError : uint8_t {
+    kConnectFailed,
+    kBindFailed,
+    kListenFailed,
+    kAcceptFailed,
+    kSendFailed,
+    kRecvFailed,
+    kTimeout,
+    kClosed
+  };
+  
+  class TcpSocket {
+   public:
+    static expected<TcpSocket, SocketError> Connect(const char* host, uint16_t port);
+    
+    expected<size_t, SocketError> Send(const void* data, size_t len);
+    expected<size_t, SocketError> Recv(void* buf, size_t len);
+    void Close() noexcept;
+    
+    int Fd() const noexcept;
+    bool IsOpen() const noexcept;
+  };
+  
+  class UdpSocket {
+   public:
+    static expected<UdpSocket, SocketError> Bind(uint16_t port);
+    
+    expected<size_t, SocketError> SendTo(const void* data, size_t len,
+                                         const char* host, uint16_t port);
+    expected<size_t, SocketError> RecvFrom(void* buf, size_t len,
+                                           char* src_host, uint16_t* src_port);
+    void Close() noexcept;
+  };
+  
+  class TcpListener {
+   public:
+    static expected<TcpListener, SocketError> Bind(uint16_t port);
+    
+    expected<void, SocketError> Listen(int backlog = 5);
+    expected<TcpSocket, SocketError> Accept();
+    void Close() noexcept;
+  };
+}
+```
+
+**Thread Safety:** Single-threaded use (fd not shareable)
+
+**RAII:** Automatic `close()` on destruction
+
+---
+
+## io_poller.hpp
+
+**Purpose:** I/O multiplexing abstraction (epoll on Linux, kqueue on macOS).
+
+**Dependencies:** vocabulary.hpp
+
+### I/O Poller
+
+```cpp
+namespace osp {
+  enum class IoError : uint8_t {
+    kCreateFailed,
+    kAddFailed,
+    kModifyFailed,
+    kRemoveFailed,
+    kWaitFailed
+  };
+  
+  enum IoEventType : uint32_t {
+    kRead = 0x01,
+    kWrite = 0x02,
+    kError = 0x04,
+    kHangup = 0x08
+  };
+  
+  struct IoEvent {
+    int fd;
+    uint32_t events;
+    void* ctx;
+  };
+  
+  class IoPoller {
+   public:
+    static expected<IoPoller, IoError> Create();
+    ~IoPoller();
+    
+    expected<void, IoError> Add(int fd, uint32_t events, void* ctx);
+    expected<void, IoError> Modify(int fd, uint32_t events);
+    expected<void, IoError> Remove(int fd);
+    
+    expected<uint32_t, IoError> Wait(IoEvent* events, uint32_t max_events,
+                                     int timeout_ms);
+  };
+}
+```
+
+**Thread Safety:** Single-threaded (event loop thread)
+
+**Example:**
+
+```cpp
+auto poller_result = osp::IoPoller::Create();
+if (!poller_result.has_value()) return -1;
+
+auto& poller = poller_result.value();
+poller.Add(tcp_socket.Fd(), osp::kRead, &tcp_socket);
+
+osp::IoEvent events[64];
+while (running) {
+  auto result = poller.Wait(events, 64, 1000);
+  if (!result.has_value()) break;
+  
+  for (uint32_t i = 0; i < result.value(); ++i) {
+    if (events[i].events & osp::kRead) {
+      auto* sock = static_cast<osp::TcpSocket*>(events[i].ctx);
+      // Handle read
+    }
+  }
+}
+```
+
+---
+
+## connection.hpp
+
+**Purpose:** Fixed-capacity connection pool with mutex protection.
+
+**Dependencies:** vocabulary.hpp
+
+### Connection Pool
+
+```cpp
+namespace osp {
+  template <uint32_t MaxConns = 32>
+  class ConnectionPool {
+   public:
+    struct Connection {
+      uint16_t id;
+      int fd;
+      void* ctx;
+      bool active;
+    };
+    
+    ConnectionPool();
+    
+    expected<uint16_t, uint8_t> Add(int fd, void* ctx);
+    void Remove(uint16_t conn_id);
+    Connection* Get(uint16_t conn_id);
+    
+    template <typename F>
+    void ForEach(F&& func);
+    
+    uint32_t Count() const noexcept;
+  };
+}
+```
+
+**Thread Safety:** Mutex-protected
+
+---
+
+## transport.hpp
+
+**Purpose:** Transparent network transport with frame protocol and sequence tracking.
+
+**Dependencies:** vocabulary.hpp, spsc_ringbuffer.hpp, net.hpp
+
+### Frame Protocol
+
+```cpp
+namespace osp {
+  // Frame header v1 (26 bytes)
+  struct FrameHeaderV1 {
+    uint32_t magic;        // 0x4F535000
+    uint32_t total_len;    // Header + payload
+    uint16_t type_index;   // std::variant index
+    uint32_t sender_id;
+    uint32_t seq_num;      // Monotonic sequence number
+    uint64_t timestamp_ns; // steady_clock nanoseconds
+  };
+  
+  // Sequence tracker (detects loss/reorder/duplicate)
+  class SequenceTracker {
+   public:
+    enum class Status : uint8_t {
+      kInOrder,
+      kLoss,
+      kReorder,
+      kDuplicate
+    };
+    
+    Status Track(uint32_t seq_num);
+    
+    struct Stats {
+      uint64_t in_order;
+      uint64_t loss;
+      uint64_t reorder;
+      uint64_t duplicate;
+    };
+    Stats GetStats() const noexcept;
+  };
+  
+  // Network node (extends Node with remote pub/sub)
+  template <typename PayloadVariant>
+  class NetworkNode : public Node<PayloadVariant> {
+   public:
+    NetworkNode(const char* name, uint32_t id, AsyncBus<PayloadVariant>& bus);
+    
+    template <typename T>
+    void AdvertiseTo(const std::vector<const char*>& endpoints);
+    
+    template <typename T>
+    bool Publish(const T& payload, MessagePriority priority = MessagePriority::kMedium);
+  };
+}
+```
+
+**Thread Safety:**
+- `Publish()`: Thread-safe
+- Frame parsing: Single I/O thread
+
+**Example:**
+
+```cpp
+osp::NetworkNode<Payload> sensor("sensor", 1, bus);
+
+// Advertise to remote endpoints
+sensor.AdvertiseTo<SensorData>({"tcp://192.168.1.100:9001", "tcp://192.168.1.101:9001"});
+
+// Publish (local + remote)
+sensor.Publish(SensorData{25.0f});
+```
+
+---
+
+## shm_transport.hpp
+
+**Purpose:** Shared memory IPC with lock-free SPSC ring buffer and ARM memory ordering.
+
+**Dependencies:** vocabulary.hpp, platform.hpp
+
+### Shared Memory Classes
+
+```cpp
+namespace osp {
+  enum class ShmError : uint8_t {
+    kCreateFailed,
+    kOpenFailed,
+    kMapFailed,
+    kUnlinkFailed,
+    kInvalidSize
+  };
+  
+  // Shared memory segment RAII wrapper
+  class SharedMemorySegment {
+   public:
+    static expected<SharedMemorySegment, ShmError> Create(const char* name, uint32_t size);
+    static expected<SharedMemorySegment, ShmError> CreateOrReplace(const char* name, uint32_t size);
+    static expected<SharedMemorySegment, ShmError> Open(const char* name);
+    ~SharedMemorySegment();
+    
+    void* Data() noexcept;
+    uint32_t Size() const noexcept;
+    void Unlink() noexcept;
+  };
+  
+  // Lock-free SPSC ring buffer in shared memory
+  template <uint32_t SlotSize, uint32_t SlotCount>
+  class ShmRingBuffer {
+   public:
+    static ShmRingBuffer* InitAt(void* shm_addr);
+    static ShmRingBuffer* AttachAt(void* shm_addr);
+    
+    bool TryPush(const void* data, uint32_t size);
+    bool TryPop(void* data, uint32_t& size);
+    
+    uint32_t Depth() const noexcept;
+    bool Empty() const noexcept;
+    bool Full() const noexcept;
+  };
+  
+  // Named channel (segment + ring buffer + eventfd)
+  template <uint32_t SlotSize, uint32_t SlotCount>
+  class ShmChannel {
+   public:
+    static expected<ShmChannel, ShmError> CreateWriter(const char* name);
+    static expected<ShmChannel, ShmError> CreateOrReplaceWriter(const char* name);
+    static expected<ShmChannel, ShmError> OpenReader(const char* name);
+    
+    bool Write(const void* data, uint32_t size);
+    bool Read(void* data, uint32_t& size);
+    bool WaitReadable(int timeout_ms);
+  };
+}
+```
+
+**Memory Ordering (ARM):**
+- Producer writes slot data (non-atomic) → `prod_pos_.store(release)`
+- Consumer `prod_pos_.load(acquire)` → reads slot data (non-atomic)
+- Explicit `acquire/release` pairing avoids `seq_cst` overhead (3-5x faster on ARM)
+
+**Crash Recovery:**
+- `CreateOrReplace()`: Unlinks stale `/dev/shm/osp_shm_*` before creating
+
+**Example:**
+
+```cpp
+// Writer process
+auto writer = osp::ShmChannel<4096, 256>::CreateOrReplaceWriter("frame_ch");
+if (writer.has_value()) {
+  uint8_t frame[1024] = { /* ... */ };
+  writer.value().Write(frame, 1024);
+}
+
+// Reader process
+auto reader = osp::ShmChannel<4096, 256>::OpenReader("frame_ch");
+if (reader.has_value()) {
+  uint8_t frame[4096];
+  uint32_t size;
+  if (reader.value().WaitReadable(1000)) {
+    reader.value().Read(frame, size);
+  }
+}
+```
+
+---
+
+## serial_transport.hpp
+
+**Purpose:** Industrial serial communication with CRC validation and frame sync FSM.
+
+**Dependencies:** vocabulary.hpp, spsc_ringbuffer.hpp, CSerialPort
+
+### Serial Transport
+
+```cpp
+namespace osp {
+  enum class SerialError : uint8_t {
+    kOpenFailed,
+    kConfigFailed,
+    kReadFailed,
+    kWriteFailed,
+    kCrcError,
+    kFrameError
+  };
+  
+  struct SerialConfig {
+    const char* port = "/dev/ttyS0";
+    uint32_t baudrate = 115200;
+    uint8_t data_bits = 8;
+    uint8_t stop_bits = 1;
+    char parity = 'N';  // 'N', 'E', 'O'
+  };
+  
+  // Frame format: magic(4) + len(4) + type(2) + sender(4) + payload + crc16(2)
+  template <typename PayloadVariant>
+  class SerialTransport {
+   public:
+    explicit SerialTransport(const SerialConfig& cfg);
+    ~SerialTransport();
+    
+    expected<void, SerialError> Open();
+    void Close();
+    
+    template <typename T>
+    expected<void, SerialError> Send(const T& payload, uint32_t sender_id);
+    
+    // Integrate with IoPoller
+    int Fd() const noexcept;
+    void OnReadable();  // Call from IoPoller event loop
+    
+    // Set receive callback
+    void SetOnReceive(void (*callback)(const PayloadVariant&, const MessageHeader&));
+    
+    // Statistics
+    struct Stats {
+      uint64_t frames_sent;
+      uint64_t frames_received;
+      uint64_t bytes_sent;
+      uint64_t bytes_received;
+      uint64_t crc_errors;
+      uint64_t frame_errors;
+    };
+    Stats GetStats() const noexcept;
+  };
+}
+```
+
+**Frame Sync FSM:**
+```
+WaitMagic → WaitHeader → WaitPayload → WaitCrc → (validate) → Dispatch
+```
+
+**SPSC Ring Buffer:**
+- Decouples I/O read from frame parsing
+- `SpscRingbuffer<uint8_t, 4096>` for byte stream
+
+**Thread Safety:** Single I/O thread (IoPoller event loop)
+
+**Example:**
+
+```cpp
+osp::SerialConfig cfg{
+  .port = "/dev/ttyUSB0",
+  .baudrate = 115200
+};
+
+osp::SerialTransport<Payload> serial(cfg);
+auto result = serial.Open();
+if (!result.has_value()) return -1;
+
+serial.SetOnReceive([](const Payload& payload, const osp::MessageHeader& hdr) {
+  std::visit([](const auto& msg) {
+    OSP_LOG_INFO("serial", "Received message");
+  }, payload);
+});
+
+// Integrate with IoPoller
+poller.Add(serial.Fd(), osp::kRead, &serial);
+
+// Event loop
+while (running) {
+  auto result = poller.Wait(events, 64, 1000);
+  for (uint32_t i = 0; i < result.value(); ++i) {
+    if (events[i].ctx == &serial) {
+      serial.OnReadable();
+    }
+  }
+}
+```
+
+---
+
+## net.hpp
+
+**Purpose:** Network layer wrapper integrating sockpp with `osp::expected` error handling.
+
+**Dependencies:** vocabulary.hpp, sockpp (conditional: `OSP_HAS_SOCKPP`)
+
+### Network Classes
+
+```cpp
+namespace osp {
+  #ifdef OSP_HAS_SOCKPP
+  
+  class TcpClient {
+   public:
+    static expected<TcpClient, SocketError> Connect(const char* host, uint16_t port);
+    
+    expected<size_t, SocketError> Send(const void* data, size_t len);
+    expected<size_t, SocketError> Recv(void* buf, size_t len);
+    void Close();
+  };
+  
+  class TcpServer {
+   public:
+    static expected<TcpServer, SocketError> Listen(uint16_t port);
+    
+    expected<TcpClient, SocketError> Accept();
+    void Close();
+  };
+  
+  class UdpPeer {
+   public:
+    static expected<UdpPeer, SocketError> Bind(uint16_t port);
+    
+    expected<size_t, SocketError> SendTo(const void* data, size_t len,
+                                         const char* host, uint16_t port);
+    expected<size_t, SocketError> RecvFrom(void* buf, size_t len,
+                                           std::string& src_host, uint16_t& src_port);
+  };
+  
+  #endif  // OSP_HAS_SOCKPP
+}
+```
+
+**Conditional Compilation:** Only available when `OSP_WITH_SOCKPP=ON`
+
+---
+
+## transport_factory.hpp
+
+**Purpose:** Automatic transport selection based on configuration (inspired by CyberRT).
+
+**Dependencies:** platform.hpp, vocabulary.hpp
+
+### Transport Factory
+
+```cpp
+namespace osp {
+  enum class TransportType : uint8_t {
+    kInproc,   // Same process (direct bus)
+    kShm,      // Shared memory IPC
+    kTcp,      // TCP network
+    kUdp,      // UDP network
+    kSerial    // Serial port
+  };
+  
+  struct TransportConfig {
+    const char* endpoint;  // "tcp://host:port", "shm://name", "serial:///dev/ttyS0"
+    bool is_local;
+    const char* shm_channel_name;
+  };
+  
+  class TransportFactory {
+   public:
+    static TransportType Detect(const TransportConfig& cfg);
+  };
+}
+```
+
+**Detection Rules:**
+- Has SHM channel name → `kShm`
+- Endpoint is localhost → `kShm`
+- Remote address → `kTcp` or `kUdp`
+- Serial port path → `kSerial`
+
+**Example:**
+
+```cpp
+osp::TransportConfig cfg{.endpoint = "tcp://192.168.1.100:9001"};
+auto type = osp::TransportFactory::Detect(cfg);  // Returns kTcp
+```
+
+---
+
+# Service & Discovery Layer
+
+## discovery.hpp
+
+**Purpose:** Node discovery with static config and UDP multicast auto-discovery.
+
+**Dependencies:** vocabulary.hpp, net.hpp
+
+### Discovery Classes
+
+```cpp
+namespace osp {
+  struct Endpoint {
+    char host[64];
+    uint16_t port;
+  };
+  
+  // UDP multicast discovery
+  class MulticastDiscovery {
+   public:
+    explicit MulticastDiscovery(const char* multicast_addr = "239.255.0.1",
+                                uint16_t port = 9999);
+    ~MulticastDiscovery();
+    
+    void Announce(const char* node_name, const Endpoint& ep);
+    void SetOnNodeJoin(void (*callback)(const char* name, const Endpoint& ep));
+    void SetOnNodeLeave(void (*callback)(const char* name));
+    
+    void Start();
+    void Stop();
+  };
+  
+  // Topic-aware discovery
+  class TopicAwareDiscovery {
+   public:
+    void AnnouncePublisher(const char* topic, const Endpoint& ep);
+    void AnnounceSubscriber(const char* topic, const Endpoint& ep);
+    
+    void SetOnPublisherFound(void (*callback)(const char* topic, const Endpoint& ep));
+    void SetOnSubscriberFound(void (*callback)(const char* topic, const Endpoint& ep));
+  };
+}
+```
+
+**Thread Safety:** Internal thread-safe, callbacks executed in discovery thread
+
+**Example:**
+
+```cpp
+osp::MulticastDiscovery discovery;
+
+discovery.SetOnNodeJoin([](const char* name, const osp::Endpoint& ep) {
+  OSP_LOG_INFO("discovery", "Node %s joined at %s:%u", name, ep.host, ep.port);
+});
+
+discovery.Announce("sensor_node", {.host = "192.168.1.100", .port = 9001});
+discovery.Start();
+```
+
+---
+
+## service.hpp
+
+**Purpose:** RPC service with request-response pattern (inspired by ROS2).
+
+**Dependencies:** vocabulary.hpp, net.hpp
+
+### Service Classes
+
+```cpp
+namespace osp {
+  enum class ServiceError : uint8_t {
+    kTimeout,
+    kConnectionFailed,
+    kSendFailed,
+    kRecvFailed,
+    kInvalidResponse
+  };
+  
+  // Service server
+  template <typename Request, typename Response>
+  class Service {
+   public:
+    using Handler = Response (*)(const Request&);
+    
+    void SetHandler(Handler handler);
+    void Start(const Endpoint& ep);
+    void Stop();
+  };
+  
+  // Synchronous client
+  template <typename Request, typename Response>
+  class Client {
+   public:
+    explicit Client(const Endpoint& ep);
+    
+    expected<Response, ServiceError> Call(const Request& req, int timeout_ms = 2000);
+  };
+  
+  // Asynchronous client
+  template <typename Request, typename Response>
+  class AsyncClient {
+   public:
+    using Callback = void (*)(const expected<Response, ServiceError>&);
+    
+    explicit AsyncClient(const Endpoint& ep);
+    
+    void CallAsync(const Request& req, Callback callback, int timeout_ms = 2000);
+  };
+  
+  // Service registry
+  class ServiceRegistry {
+   public:
+    static ServiceRegistry& Instance();
+    
+    void Register(const char* service_name, const Endpoint& ep);
+    optional<Endpoint> Lookup(const char* service_name);
+  };
+}
+```
+
+**Thread Safety:**
+- `Service`: Handler executed in service thread
+- `Client::Call()`: Thread-safe (can be called from any thread)
+
+**Example:**
+
+```cpp
+struct AddRequest { int a; int b; };
+struct AddResponse { int sum; };
+
+// Server
+osp::Service<AddRequest, AddResponse> service;
+service.SetHandler([](const AddRequest& req) -> AddResponse {
+  return {.sum = req.a + req.b};
+});
+service.Start({.host = "0.0.0.0", .port = 9002});
+
+// Client
+osp::Client<AddRequest, AddResponse> client({.host = "127.0.0.1", .port = 9002});
+auto result = client.Call({.a = 10, .b = 20}, 1000);
+if (result.has_value()) {
+  OSP_LOG_INFO("client", "Sum = %d", result.value().sum);
+}
+```
+
+---
+
+## node_manager.hpp
+
+**Purpose:** Node connection manager with heartbeat detection.
+
+**Dependencies:** vocabulary.hpp, net.hpp
+
+### Node Manager
+
+```cpp
+namespace osp {
+  enum class NodeError : uint8_t {
+    kListenFailed,
+    kConnectFailed,
+    kNodeNotFound
+  };
+  
+  class NodeManager {
+   public:
+    NodeManager();
+    ~NodeManager();
+    
+    expected<uint16_t, NodeError> CreateListener(uint16_t port);
+    expected<uint16_t, NodeError> Connect(const char* host, uint16_t port);
+    
+    void OnDisconnect(void (*callback)(uint16_t node_id));
+    
+    void Start();
+    void Stop();
+    
+    uint32_t NodeCount() const noexcept;
+  };
+}
+```
+
+**Heartbeat:**
+- Interval: `OSP_HEARTBEAT_INTERVAL_MS` (default 1000ms)
+- Timeout: `OSP_HEARTBEAT_TIMEOUT_COUNT` (default 3 missed heartbeats)
+
+**Thread Safety:** Mutex-protected, callbacks in heartbeat thread
+
+---
+
+## node_manager_hsm.hpp
+
+**Purpose:** HSM-driven node management with per-connection state machine.
+
+**Dependencies:** hsm.hpp, fault_collector.hpp
+
+### Node Manager HSM
+
+```cpp
+namespace osp {
+  enum class NodeState : uint8_t {
+    kConnected,
+    kSuspect,
+    kDisconnected
+  };
+  
+  template <uint32_t MaxNodes = 64>
+  class NodeManagerHsm {
+   public:
+    NodeManagerHsm();
+    
+    void RegisterNode(uint16_t node_id, const char* name);
+    void UnregisterNode(uint16_t node_id);
+    
+    void OnHeartbeat(uint16_t node_id);
+    void OnTimeout(uint16_t node_id);
+    
+    NodeState GetState(uint16_t node_id) const noexcept;
+    
+    void SetFaultReporter(const FaultReporter& reporter);
+    
+    struct HsmNodeInfo {
+      uint16_t node_id;
+      char name[32];
+      NodeState state;
+      uint32_t missed_heartbeats;
+    };
+    
+    template <typename F>
+    void ForEachNode(F&& func);
+  };
+}
+```
+
+**State Transitions:**
+```
+Connected ──(heartbeat timeout)──> Suspect ──(timeout count >= threshold)──> Disconnected
+    ^                                  |
+    └──────(heartbeat received)────────┘
+```
+
+**Fault Reporting:**
+- Heartbeat timeout → `kFaultHeartbeatTimeout` (kHigh)
+- Disconnected → `kFaultDisconnected` (kCritical)
+
+**Example:**
+
+```cpp
+osp::NodeManagerHsm<64> nm_hsm;
+osp::FaultCollector<64, 256> fault_collector;
+
+nm_hsm.SetFaultReporter({
+  .fn = [](uint16_t fault_idx, uint32_t detail, osp::FaultPriority pri, void* ctx) {
+    auto* fc = static_cast<osp::FaultCollector<64, 256>*>(ctx);
+    fc->ReportFault(fault_idx, detail, pri);
+  },
+  .ctx = &fault_collector
+});
+
+nm_hsm.RegisterNode(1, "sensor_node");
+nm_hsm.OnHeartbeat(1);  // Keep alive
+```
+
+---
+
+## service_hsm.hpp
+
+**Purpose:** HSM-driven service lifecycle management.
+
+**Dependencies:** hsm.hpp, fault_collector.hpp
+
+### Service HSM
+
+```cpp
+namespace osp {
+  enum class ServiceState : uint8_t {
+    kIdle,
+    kListening,
+    kActive,
+    kError,
+    kShuttingDown
+  };
+  
+  class ServiceHsm {
+   public:
+    ServiceHsm();
+    
+    void Start(const Endpoint& ep);
+    void Stop();
+    void OnClientConnected();
+    void OnError();
+    
+    ServiceState CurrentState() const noexcept;
+    void SetFaultReporter(const FaultReporter& reporter);
+  };
+}
+```
+
+**State Transitions:**
+```
+Idle ──(Start)──> Listening ──(ClientConnected)──> Active
+                                                      |
+                                               (Error) |  (Stop)
+                                                      v      v
+                                                    Error  ShuttingDown
+```
+
+**Fault Reporting:**
+- Error state entry → `kFaultServiceError` (kHigh)
+
+---
+
+## discovery_hsm.hpp
+
+**Purpose:** HSM-driven discovery flow management.
+
+**Dependencies:** hsm.hpp, fault_collector.hpp
+
+### Discovery HSM
+
+```cpp
+namespace osp {
+  enum class DiscoveryState : uint8_t {
+    kIdle,
+    kAnnouncing,
+    kDiscovering,
+    kStable,
+    kDegraded
+  };
+  
+  class DiscoveryHsm {
+   public:
+    explicit DiscoveryHsm(uint32_t stable_threshold = 3);
+    
+    void Start();
+    void Stop();
+    void OnNodeFound();
+    void OnNodeLost();
+    
+    DiscoveryState CurrentState() const noexcept;
+    void SetFaultReporter(const FaultReporter& reporter);
+  };
+}
+```
+
+**State Transitions:**
+```
+Idle ──(Start)──> Announcing ──(NodeFound)──> Discovering
+                                                  |
+                                    (达到阈值)     |  (节点丢失)
+                                                  v      v
+                                               Stable  Degraded
+```
+
+**Fault Reporting:**
+- Degraded state entry → `kFaultNetworkDegraded` (kMedium)
+
+---
+
+# Application Layer
+
+## app.hpp
+
+**Purpose:** Application-Instance two-tier model with HSM-driven instance lifecycle.
+
+**Dependencies:** vocabulary.hpp, hsm.hpp, mem_pool.hpp
+
+### Application-Instance Model
+
+```cpp
+namespace osp {
+  // IID encoding/decoding
+  constexpr uint32_t MakeIID(uint16_t app_id, uint16_t ins_id) {
+    return (static_cast<uint32_t>(app_id) << 16) | ins_id;
+  }
+  
+  constexpr uint16_t GetAppId(uint32_t iid) {
+    return static_cast<uint16_t>(iid >> 16);
+  }
+  
+  constexpr uint16_t GetInsId(uint32_t iid) {
+    return static_cast<uint16_t>(iid & 0xFFFF);
+  }
+  
+  enum class AppError : uint8_t {
+    kPoolExhausted,
+    kInstanceNotFound,
+    kInvalidState
+  };
+  
+  // Instance base class (HSM-driven, 11 states)
+  class Instance {
+   public:
+    Instance();
+    virtual ~Instance();
+    
+    // Non-virtual, derived class uses name hiding to override
+    void OnMessage(uint16_t event, const void* data, uint32_t len) noexcept;
+    
+    // HSM state transitions (public wrappers)
+    void BeginMessage() noexcept;  // Idle → Processing
+    void EndMessage() noexcept;    // Processing → Idle
+    void Initialize() noexcept;    // Created → Idle
+    
+    uint16_t CurState() const noexcept;
+  };
+  
+  // Application (ObjectPool manages instances)
+  template <typename InstanceImpl, uint16_t MaxInstances = 64>
+  class Application {
+   public:
+    static_assert(std::is_base_of<Instance, InstanceImpl>::value,
+                  "InstanceImpl must derive from Instance");
+    
+    explicit Application(uint16_t app_id);
+    
+    expected<uint16_t, AppError> CreateInstance();
+    expected<void, AppError> DestroyInstance(uint16_t ins_id);
+    
+    bool Post(uint16_t ins_id, uint16_t event, const void* data, uint32_t len);
+    bool ProcessOne() noexcept;  // BeginMessage → OnMessage → EndMessage
+    
+    uint16_t AppId() const noexcept;
+  };
+}
+```
+
+**Design Decisions:**
+- No virtual `OnMessage()`: Derived class uses name hiding (compile-time dispatch)
+- ObjectPool: Zero heap allocation, all instances pre-allocated
+- HSM: 11 states (Created/Idle/Processing/Paused/Resuming/Stopping/Stopped/Error/Recovering/Destroying/Destroyed)
+
+**Example:**
+
+```cpp
+class MyInstance : public osp::Instance {
+ public:
+  // Override via name hiding (non-virtual)
+  void OnMessage(uint16_t event, const void* data, uint32_t len) noexcept {
+    OSP_LOG_INFO("app", "Instance received event %u", event);
+  }
+};
+
+osp::Application<MyInstance, 64> app(1);  // app_id = 1
+
+auto result = app.CreateInstance();
+if (result.has_value()) {
+  uint16_t ins_id = result.value();
+  uint32_t iid = osp::MakeIID(1, ins_id);
+  
+  app.Post(ins_id, 100, nullptr, 0);
+  app.ProcessOne();
+}
+```
+
+---
+
+## post.hpp
+
+**Purpose:** Unified message delivery with automatic routing (local/IPC/remote).
+
+**Dependencies:** vocabulary.hpp, app.hpp
+
+### Post API
+
+```cpp
+namespace osp {
+  enum class PostError : uint8_t {
+    kAppNotFound,
+    kInstanceNotFound,
+    kTimeout,
+    kSendFailed
+  };
+  
+  // Unified post (auto-routing)
+  bool OspPost(uint32_t dst_iid, uint16_t event,
+               const void* data, uint32_t len, uint16_t dst_node = 0);
+  
+  // Synchronous request-response
+  expected<uint32_t, PostError> OspSendAndWait(
+      uint32_t dst_iid, uint16_t event,
+      const void* data, uint32_t len,
+      void* ack_buf, uint32_t ack_buf_size,
+      uint16_t dst_node = 0, int timeout_ms = 2000);
+  
+  // Application registry
+  class AppRegistry {
+   public:
+    static AppRegistry& Instance();
+    
+    template <typename InstanceImpl, uint16_t MaxInstances>
+    void Register(Application<InstanceImpl, MaxInstances>* app);
+    
+    void* Lookup(uint16_t app_id);
+  };
+}
+```
+
+**Routing:**
+- `dst_node == 0`: Local (same process)
+- `dst_node != 0`: Remote (via NodeManager)
+
+**Example:**
+
+```cpp
+osp::Application<MyInstance, 64> app(1);
+osp::AppRegistry::Instance().Register(&app);
+
+// Local post
+uint32_t iid = osp::MakeIID(1, 0);
+osp::OspPost(iid, 100, nullptr, 0);
+
+// Remote post
+osp::OspPost(iid, 100, nullptr, 0, 2);  // dst_node = 2
+```
+
+---
+
+## qos.hpp
+
+**Purpose:** Quality of Service profiles for transport selection.
+
+**Dependencies:** platform.hpp
+
+### QoS Profile
+
+```cpp
+namespace osp {
+  enum class Reliability : uint8_t {
+    kBestEffort,
+    kReliable
+  };
+  
+  enum class HistoryPolicy : uint8_t {
+    kKeepLast,
+    kKeepAll
+  };
+  
+  struct QosProfile {
+    Reliability reliability = Reliability::kBestEffort;
+    HistoryPolicy history = HistoryPolicy::kKeepLast;
+    uint16_t depth = 10;
+    uint32_t deadline_ms = 0;   // 0 = no deadline check
+    uint32_t lifespan_ms = 0;   // 0 = never expire
+  };
+  
+  // Predefined QoS profiles (constexpr, zero overhead)
+  inline constexpr QosProfile kQosSensorData{
+      Reliability::kBestEffort, HistoryPolicy::kKeepLast, 5, 0, 100};
+  
+  inline constexpr QosProfile kQosControlCommand{
+      Reliability::kReliable, HistoryPolicy::kKeepLast, 20, 50, 0};
+  
+  inline constexpr QosProfile kQosSystemStatus{
+      Reliability::kReliable, HistoryPolicy::kKeepLast, 1, 1000, 0};
+}
+```
+
+**Transport Selection:**
+- Reliable + remote → TCP
+- BestEffort + remote → UDP
+- Reliable + serial → Serial + ACK/retransmit
+- BestEffort + serial → Serial (CRC only)
+
+**Compatibility Matrix:**
+- Reliable publisher ↔ any subscriber
+- BestEffort publisher ↔ BestEffort subscriber only
+
+---
+
+## lifecycle_node.hpp
+
+**Purpose:** Lifecycle node with HSM-driven 16-state hierarchy (inspired by ROS2).
+
+**Dependencies:** hsm.hpp, fault_collector.hpp, node.hpp
+
+### Lifecycle Node
+
+```cpp
+namespace osp {
+  enum class LifecycleState : uint8_t {
+    kUnconfigured,
+    kConfiguring,
+    kInactive,
+    kActivating,
+    kActive,
+    kDeactivating,
+    kCleaningUp,
+    kShuttingDown,
+    kFinalized,
+    kError
+  };
+  
+  enum class CallbackReturn : uint8_t {
+    kSuccess,
+    kFailure,
+    kError
+  };
+  
+  template <typename PayloadVariant>
+  class LifecycleNode : public Node<PayloadVariant> {
+   public:
+    LifecycleNode(const char* name, uint32_t id, AsyncBus<PayloadVariant>& bus);
+    
+    CallbackReturn Configure();
+    CallbackReturn Activate();
+    CallbackReturn Deactivate();
+    CallbackReturn Cleanup();
+    CallbackReturn Shutdown();
+    
+    LifecycleState CurrentState() const noexcept;
+    
+   protected:
+    virtual CallbackReturn on_configure() { return CallbackReturn::kSuccess; }
+    virtual CallbackReturn on_activate() { return CallbackReturn::kSuccess; }
+    virtual CallbackReturn on_deactivate() { return CallbackReturn::kSuccess; }
+    virtual CallbackReturn on_cleanup() { return CallbackReturn::kSuccess; }
+    virtual CallbackReturn on_shutdown() { return CallbackReturn::kSuccess; }
+    virtual CallbackReturn on_error(LifecycleState previous_state);
+  };
+}
+```
+
+**State Hierarchy (16 states):**
+```
+Root
+├── Operational
+│   ├── Unconfigured
+│   ├── Configuring (transition)
+│   ├── Inactive (Idle / Ready)
+│   ├── Activating (transition)
+│   ├── Active (Running / Degraded)
+│   ├── Deactivating (transition)
+│   └── CleaningUp (transition)
+├── Error (Recoverable / Fatal)
+├── ShuttingDown (transition)
+└── Finalized
+```
+
+**Fault Reporting:**
+- configure/activate failure → kHigh
+- cleanup failure → kMedium
+
+**Example:**
+
+```cpp
+class SensorNode : public osp::LifecycleNode<Payload> {
+ protected:
+  CallbackReturn on_configure() override {
+    // Initialize hardware
+    if (!init_sensor()) return CallbackReturn::kFailure;
+    return CallbackReturn::kSuccess;
+  }
+  
+  CallbackReturn on_activate() override {
+    // Start data acquisition
+    start_acquisition();
+    return CallbackReturn::kSuccess;
+  }
+  
+  CallbackReturn on_deactivate() override {
+    stop_acquisition();
+    return CallbackReturn::kSuccess;
+  }
+};
+
+SensorNode sensor("sensor", 1, bus);
+sensor.Configure();
+sensor.Activate();
+// ... run ...
+sensor.Deactivate();
+sensor.Cleanup();
+sensor.Shutdown();
+```
+
+---
+
+# Reliability Components
+
+## watchdog.hpp
+
+**Purpose:** Thread watchdog for detecting thread hangs and deadlocks.
+
+**Dependencies:** platform.hpp
+
+### Thread Watchdog
+
+```cpp
+namespace osp {
+  enum class WatchdogError : uint8_t {
+    kSlotsFull,
+    kInvalidId,
+    kNotFound
+  };
+  
+  using WatchdogSlotId = NewType<uint32_t, struct WatchdogSlotIdTag>;
+  
+  struct RegResult {
+    WatchdogSlotId id;
+    ThreadHeartbeat* heartbeat;  // Pointer for thread to call Beat()
+  };
+  
+  template <uint32_t MaxThreads = 32>
+  class ThreadWatchdog {
+   public:
+    ThreadWatchdog();
+    
+    expected<RegResult, WatchdogError> Register(const char* name, uint32_t timeout_ms);
+    expected<void, WatchdogError> Unregister(WatchdogSlotId id);
+    
+    uint32_t Check() noexcept;  // Returns timeout count
+    
+    using TimeoutCallback = void (*)(uint32_t slot_id, const char* name, void* ctx);
+    using RecoverCallback = void (*)(uint32_t slot_id, const char* name, void* ctx);
+    
+    void SetOnTimeout(TimeoutCallback fn, void* ctx);
+    void SetOnRecovered(RecoverCallback fn, void* ctx);
+    
+    void StartAutoCheck(uint32_t interval_ms);  // Backup self-check thread
+    void StopAutoCheck();
+    
+    struct WatchdogSlotInfo {
+      uint32_t slot_id;
+      char name[32];
+      uint32_t timeout_ms;
+      uint64_t last_beat_us;
+      bool active;
+    };
+    
+    template <typename F>
+    void ForEachSlot(F&& func);
+  };
+  
+  // RAII guard
+  template <uint32_t MaxThreads = 32>
+  class WatchdogGuard {
+   public:
+    WatchdogGuard(ThreadWatchdog<MaxThreads>& wd, const char* name, uint32_t timeout_ms);
+    ~WatchdogGuard();
+    
+    ThreadHeartbeat* Heartbeat() noexcept;
+  };
+}
+```
+
+**Usage Pattern:**
+1. Thread registers with watchdog → gets `ThreadHeartbeat*`
+2. Thread calls `heartbeat->Beat()` in hot path (atomic store)
+3. Watchdog `Check()` compares `last_beat_us` vs `now - timeout_ms`
+4. Timeout callback triggered if thread missed deadline
+
+**Thread Safety:**
+- `Register()/Unregister()`: Mutex-protected
+- `Beat()`: Lock-free atomic store
+- `Check()`: Single-threaded (call from timer or auto-check thread)
+
+**Dual-Path Monitoring:**
+- Primary: TimerScheduler calls `Check()` every 500ms
+- Backup: `StartAutoCheck(1000)` - independent thread in case timer hangs
+
+**Example:**
+
+```cpp
+osp::ThreadWatchdog<32> watchdog;
+
+watchdog.SetOnTimeout([](uint32_t slot_id, const char* name, void* ctx) {
+  OSP_LOG_ERROR("watchdog", "Thread %s (slot %u) timeout!", name, slot_id);
+  // Report to FaultCollector
+}, nullptr);
+
+// Worker thread
+auto reg = watchdog.Register("worker_0", 2000);
+if (reg.has_value()) {
+  auto* hb = reg.value().heartbeat;
+  
+  while (running) {
+    hb->Beat();  // Keep alive
+    do_work();
+  }
+  
+  watchdog.Unregister(reg.value().id);
+}
+
+// Or use RAII guard
+{
+  osp::WatchdogGuard guard(watchdog, "worker_1", 2000);
+  while (running) {
+    guard.Heartbeat()->Beat();
+    do_work();
+  }
+}  // Auto unregister
+```
+
+---
+
+## fault_collector.hpp
+
+**Purpose:** Multi-priority fault collection with hook-based decision making.
+
+**Dependencies:** platform.hpp, vocabulary.hpp
+
+### Fault Collector
+
+```cpp
+namespace osp {
+  enum class FaultPriority : uint8_t {
+    kLow = 0,
+    kMedium = 1,
+    kHigh = 2,
+    kCritical = 3
+  };
+  
+  enum class HookDecision : uint8_t {
+    kHandled,    // Fault handled, clear from active set
+    kEscalate,   // Escalate to higher priority
+    kDefer,      // Keep in active set, retry later
+    kShutdown    // Trigger graceful shutdown
+  };
+  
+  template <uint32_t MaxFaults = 64U,
+            uint32_t QueueDepth = 256U,
+            uint32_t HookBufSize = 32U>
+  class FaultCollector {
+   public:
+    FaultCollector();
+    ~FaultCollector();
+    
+    // Report fault (lock-free MPSC)
+    void ReportFault(uint16_t fault_index, uint32_t detail, FaultPriority priority);
+    
+    // Register hook
+    using HookFunc = HookDecision (*)(uint16_t fault_index, uint32_t detail,
+                                      FaultPriority priority, void* ctx);
+    void RegisterHook(uint16_t fault_index, HookFunc hook, void* ctx);
+    
+    // Lifecycle
+    void Start();
+    void Stop();
+    
+    // Watchdog integration
+    void SetConsumerHeartbeat(ThreadHeartbeat* hb);
+    
+    // Statistics
+    struct Stats {
+      uint64_t reported[4];   // Per-priority
+      uint64_t dropped[4];
+      uint64_t handled;
+      uint64_t escalated;
+      uint64_t deferred;
+      uint64_t shutdown_triggered;
+    };
+    Stats GetStats() const noexcept;
+    
+    // Active faults
+    bool IsActive(uint16_t fault_index) const noexcept;
+    uint32_t ActiveCount() const noexcept;
+    
+    // Queue usage
+    struct QueueUsageInfo {
+      uint32_t depth;
+      uint32_t capacity;
+      float usage_percent;
+    };
+    QueueUsageInfo QueueUsage(FaultPriority priority) const noexcept;
+    
+    // Recent faults
+    struct RecentFaultInfo {
+      uint16_t fault_index;
+      uint32_t detail;
+      FaultPriority priority;
+      uint64_t timestamp_us;
+    };
+    
+    template <typename F>
+    void ForEachRecent(F&& func, uint32_t max_count = 10);
+  };
+  
+  // FaultReporter POD (16 bytes)
+  using FaultReportFn = void (*)(uint16_t fault_index, uint32_t detail,
+                                 FaultPriority priority, void* ctx);
+  
+  struct FaultReporter {
+    FaultReportFn fn = nullptr;
+    void* ctx = nullptr;
+    
+    void Report(uint16_t fault_index, uint32_t detail,
+                FaultPriority priority) const noexcept {
+      if (fn != nullptr) { fn(fault_index, detail, priority, ctx); }
+    }
+  };
+}
+```
+
+**Architecture:**
+```
+ReportFault() → 4 MPSC Queues (kCritical/kHigh/kMedium/kLow)
+                       ↓
+              Consumer Thread (priority order)
+                       ↓
+              Hook Decision (kHandled/kEscalate/kDefer/kShutdown)
+                       ↓
+              Active Bitmap (atomic<uint64_t>, O(1) query)
+```
+
+**Admission Control:**
+- kLow: Dropped when queue >= 60% full
+- kMedium: Dropped when queue >= 80% full
+- kHigh: Dropped when queue >= 99% full
+- kCritical: Never dropped
+
+**Thread Safety:**
+- `ReportFault()`: Lock-free MPSC
+- Consumer thread: Independent thread with CV + 10ms timeout wakeup
+
+**Resource Budget:**
+- Default (64, 256): ~36 KB
+- Compact (16, 64): ~9.6 KB
+
+**Example:**
+
+```cpp
+osp::FaultCollector<64, 256> collector;
+
+// Register hooks
+collector.RegisterHook(kFaultThreadDeath, [](uint16_t idx, uint32_t detail,
+                                             osp::FaultPriority pri, void* ctx) {
+  OSP_LOG_ERROR("fault", "Thread %u died!", detail);
+  return osp::HookDecision::kShutdown;  // Critical fault
+}, nullptr);
+
+collector.RegisterHook(kFaultSensorTimeout, [](uint16_t idx, uint32_t detail,
+                                               osp::FaultPriority pri, void* ctx) {
+  OSP_LOG_WARN("fault", "Sensor timeout, retrying...");
+  return osp::HookDecision::kDefer;  // Retry later
+}, nullptr);
+
+collector.Start();
+
+// Report faults from anywhere
+collector.ReportFault(kFaultSensorTimeout, 1, osp::FaultPriority::kMedium);
+collector.ReportFault(kFaultThreadDeath, 5, osp::FaultPriority::kCritical);
+```
+
+---
+
+## shell_commands.hpp
+
+**Purpose:** Zero-intrusion diagnostic shell commands bridge.
+
+**Dependencies:** shell.hpp, watchdog.hpp, fault_collector.hpp, bus.hpp, etc.
+
+### Shell Commands Registration
+
+```cpp
+namespace osp {
+  // Register watchdog diagnostics
+  template <typename WatchdogType>
+  void RegisterWatchdog(WatchdogType& wd);
+  
+  // Register fault collector diagnostics
+  template <typename FaultCollectorType>
+  void RegisterFaults(FaultCollectorType& fc);
+  
+  // Register bus statistics
+  template <typename BusType>
+  void RegisterBusStats(BusType& bus);
+  
+  // Register worker pool statistics
+  template <typename WorkerPoolType>
+  void RegisterWorkerPool(WorkerPoolType& pool);
+  
+  // Register transport statistics
+  template <typename TransportType>
+  void RegisterTransport(TransportType& transport);
+  
+  // Register serial transport statistics
+  template <typename SerialTransportType>
+  void RegisterSerial(SerialTransportType& serial);
+  
+  // Register node manager HSM
+  template <typename NodeManagerHsmType>
+  void RegisterHsmNodes(NodeManagerHsmType& nm_hsm);
+  
+  // Register basic node manager
+  template <typename NodeManagerType>
+  void RegisterNodeManager(NodeManagerType& nm);
+  
+  // Register service HSM
+  template <typename ServiceHsmType>
+  void RegisterServiceHsm(ServiceHsmType& svc_hsm);
+  
+  // Register discovery HSM
+  template <typename DiscoveryHsmType>
+  void RegisterDiscoveryHsm(DiscoveryHsmType& disc_hsm);
+  
+  // Register lifecycle node
+  template <typename LifecycleNodeType>
+  void RegisterLifecycle(LifecycleNodeType& node);
+  
+  // Register QoS profile
+  void RegisterQos(const char* name, const QosProfile& qos);
+  
+  // Register memory pool
+  template <typename MemPoolType>
+  void RegisterMemPool(const char* name, MemPoolType& pool);
+}
+```
+
+**Available Commands:**
+- `osp_watchdog` - Thread watchdog status (slots, timeouts, last heartbeat)
+- `osp_faults` - Fault collector stats (queue usage, recent faults, active bitmap)
+- `osp_bus` - Bus statistics (published, dropped, backpressure)
+- `osp_pool` - Worker pool stats (dispatched, processed, queue full)
+- `osp_transport` - Transport stats (loss, reorder, duplicate)
+- `osp_serial` - Serial stats (frames, bytes, CRC errors)
+- `osp_nodes` - HSM node states (connected/suspect/disconnected)
+- `osp_nodes_basic` - Basic node manager connections
+- `osp_service` - Service HSM state
+- `osp_discovery` - Discovery HSM state
+- `osp_lifecycle` - Lifecycle node state
+- `osp_qos` - QoS profile configuration
+- `osp_mempool` - Memory pool usage (capacity/used/free)
+
+**Implementation Pattern:**
+```cpp
+template <typename WatchdogType>
+inline void RegisterWatchdog(WatchdogType& wd) {
+  static WatchdogType* s_wd = &wd;
+  static auto cmd = [](int argc, char* argv[]) -> int {
+    s_wd->ForEachSlot([](const auto& info) {
+      osp::DebugShell::Printf("  [%u] %s: timeout=%ums, last_beat=%lluus\n",
+                              info.slot_id, info.name, info.timeout_ms, info.last_beat_us);
+    });
+    return 0;
+  };
+  osp::detail::GlobalCmdRegistry::Instance().Register(
+      "osp_watchdog", +cmd, "Show thread watchdog status");
+}
+```
+
+**Example:**
+
+```cpp
+osp::ThreadWatchdog<32> watchdog;
+osp::FaultCollector<64, 256> collector;
+osp::AsyncBus<Payload> bus;
+
+// Register diagnostics
+osp::RegisterWatchdog(watchdog);
+osp::RegisterFaults(collector);
+osp::RegisterBusStats(bus);
+
+osp::DebugShell shell({.port = 5090});
+shell.Start();
+
+// telnet localhost 5090
+// > osp_watchdog
+//   [0] timer: timeout=2000ms, last_beat=123456789us
+//   [1] worker_0: timeout=3000ms, last_beat=123456790us
+// > osp_faults
+//   Total reported: 42 (kCritical=2, kHigh=10, kMedium=20, kLow=10)
+//   Active faults: 3
+// > osp_bus
+//   Published: 10000, Dropped: 5 (low=3, medium=2, high=0)
+//   Current depth: 256/4096 (6.25%)
+```
+
+---
+
+# Integration Examples
+
+## Watchdog + FaultCollector Integration
+
+```cpp
+struct FaultSystem {
+  osp::ThreadWatchdog<32> watchdog;
+  osp::FaultCollector<64, 256> collector;
+  
+  void Init() {
+    // Watchdog timeout → Report to FaultCollector
+    watchdog.SetOnTimeout([](uint32_t slot_id, const char* name, void* ctx) {
+      auto* fc = static_cast<osp::FaultCollector<64, 256>*>(ctx);
+      fc->ReportFault(kFaultThreadDeath, slot_id, osp::FaultPriority::kCritical);
+    }, &collector);
+    
+    // FaultCollector consumer thread monitored by Watchdog
+    auto reg = watchdog.Register("fault_consumer", 5000);
+    if (reg.has_value()) {
+      collector.SetConsumerHeartbeat(reg.value().heartbeat);
+    }
+    
+    // Dual-path monitoring
+    watchdog.StartAutoCheck(1000);
+    collector.Start();
+  }
+};
+```
+
+## Full System Startup
+
+```cpp
+int main() {
+  // 1. Configuration
+  osp::MultiConfig cfg;
+  cfg.LoadFile("app.yaml");
+  
+  // 2. Logging
+  osp::log::SetLevel(osp::log::Level::kInfo);
+  
+  // 3. Reliability
+  osp::ThreadWatchdog<32> watchdog;
+  osp::FaultCollector<64, 256> collector;
+  
+  watchdog.SetOnTimeout([&](uint32_t slot_id, const char* name, void*) {
+    collector.ReportFault(kFaultThreadDeath, slot_id, osp::FaultPriority::kCritical);
+  }, nullptr);
+  
+  collector.RegisterHook(kFaultThreadDeath, [](uint16_t, uint32_t, auto, void*) {
+    return osp::HookDecision::kShutdown;
+  }, nullptr);
+  
+  auto reg = watchdog.Register("fault_consumer", 5000);
+  if (reg.has_value()) {
+    collector.SetConsumerHeartbeat(reg.value().heartbeat);
+  }
+  
+  watchdog.StartAutoCheck(1000);
+  collector.Start();
+  
+  // 4. Timer
+  osp::TimerScheduler timer(16);
+  timer.Add(500, [](void* ctx) {
+    static_cast<osp::ThreadWatchdog<32>*>(ctx)->Check();
+  }, &watchdog);
+  timer.Start();
+  
+  // 5. Debug Shell
+  osp::DebugShell shell({.port = 5090});
+  osp::RegisterWatchdog(watchdog);
+  osp::RegisterFaults(collector);
+  shell.Start();
+  
+  // 6. Communication
+  osp::AsyncBus<Payload> bus;
+  osp::Node<Payload> sensor("sensor", 1, bus);
+  sensor.Subscribe<SensorData>(on_sensor_data);
+  
+  // 7. Worker Pool
+  osp::WorkerPoolConfig wp_cfg{.worker_num = 4};
+  osp::WorkerPool<Payload> pool(wp_cfg);
+  pool.RegisterHandler<MotorCmd>(execute_motor);
+  pool.Start();
+  
+  // 8. Lifecycle Node
+  SensorLifecycleNode sensor_node("sensor", 1, bus);
+  sensor_node.Configure();
+  sensor_node.Activate();
+  
+  // 9. Executor
+  osp::RealtimeConfig rt_cfg{
+    .sched_policy = SCHED_FIFO,
+    .sched_priority = 80,
+    .lock_memory = true,
+    .cpu_affinity = 2
+  };
+  osp::RealtimeExecutor<Payload> executor(rt_cfg);
+  executor.AddNode(&sensor_node, 10);
+  executor.Start();
+  
+  // 10. Shutdown
+  osp::ShutdownManager shutdown;
+  shutdown.Register([&](int) {
+    executor.Stop();
+    sensor_node.Shutdown();
+    pool.Shutdown();
+    timer.Stop();
+    shell.Stop();
+    collector.Stop();
+    watchdog.StopAutoCheck();
+  });
+  shutdown.InstallSignalHandlers();
+  shutdown.WaitForShutdown();
+  
+  return 0;
+}
+```
+
+---
+
+# Compile-Time Configuration Summary
+
+| Macro | Default | Module | Description |
+|-------|---------|--------|-------------|
+| `OSP_LOG_MIN_LEVEL` | 0/1 | log.hpp | Compile-time log level filtering |
+| `OSP_CONFIG_MAX_FILE_SIZE` | 8192 | config.hpp | Max config file size |
+| `OSP_BUS_QUEUE_DEPTH` | 4096 | bus.hpp | Ring buffer depth |
+| `OSP_BUS_MAX_MESSAGE_TYPES` | 8 | bus.hpp | Max message types |
+| `OSP_BUS_MAX_CALLBACKS_PER_TYPE` | 16 | bus.hpp | Max subscriptions per type |
+| `OSP_BUS_BATCH_SIZE` | 256 | bus.hpp | Batch processing limit |
+| `OSP_MAX_NODE_SUBSCRIPTIONS` | 16 | node.hpp | Max subscriptions per node |
+| `OSP_WORKER_QUEUE_DEPTH` | 1024 | worker_pool.hpp | SPSC queue depth per worker |
+| `OSP_IO_POLLER_MAX_EVENTS` | 64 | io_poller.hpp | Max events per Wait() |
+| `OSP_BT_MAX_NODES` | 32 | bt.hpp | Max behavior tree nodes |
+| `OSP_BT_MAX_CHILDREN` | 8 | bt.hpp | Max children per composite node |
+| `OSP_EXECUTOR_MAX_NODES` | 16 | executor.hpp | Max nodes per executor |
+| `OSP_TRANSPORT_MAX_FRAME_SIZE` | 4096 | transport.hpp | Max frame size |
+| `OSP_CONNECTION_POOL_CAPACITY` | 32 | connection.hpp | Connection pool capacity |
+| `OSP_SHM_SLOT_SIZE` | 4096 | shm_transport.hpp | Shared memory slot size |
+| `OSP_SHM_SLOT_COUNT` | 256 | shm_transport.hpp | Shared memory slot count |
+| `OSP_DISCOVERY_PORT` | 9999 | discovery.hpp | Multicast discovery port |
+| `OSP_HEARTBEAT_INTERVAL_MS` | 1000 | node_manager.hpp | Heartbeat interval |
+| `OSP_HEARTBEAT_TIMEOUT_COUNT` | 3 | node_manager.hpp | Heartbeat timeout count |
+| `OSP_SERIAL_FRAME_MAX_SIZE` | 1024 | serial_transport.hpp | Max serial frame size |
+| `OSP_SERIAL_CRC_ENABLED` | 1 | serial_transport.hpp | CRC16 validation |
+| `OSP_SERIAL_RX_RING_SIZE` | 4096 | serial_transport.hpp | Serial RX ring buffer |
+| `OSP_TRANSPORT_RECV_RING_DEPTH` | 32 | transport.hpp | Network frame RX buffer |
+
+---
+
+# Thread Safety Summary
+
+| Module | Thread Safety |
+|--------|---------------|
+| platform | N/A (pure macros) |
+| vocabulary | Local objects, no shared state |
+| config | Load once, then read-only (thread-safe) |
+| log | fprintf atomic write (thread-safe) |
+| timer | Mutex-protected all public methods |
+| shell | Registry mutex + session thread isolation |
+| mem_pool | Mutex-protected alloc/free |
+| shutdown | Atomic flag + async-signal-safe pipe |
+| bus | Lock-free MPSC publish + SharedMutex subscribe |
+| node | Publish thread-safe; SpinOnce single consumer |
+| worker_pool | Atomic flags + CV + SPSC lock-free |
+| spsc_ringbuffer | SPSC contract (single producer, single consumer) |
+| socket | Single-threaded use (fd not shareable) |
+| io_poller | Single-threaded (event loop thread) |
+| connection | Mutex-protected |
+| transport | Publish thread-safe; parsing single I/O thread |
+| shm_transport | Lock-free CAS; single writer multiple readers |
+| serial_transport | Single I/O thread (IoPoller event loop) |
+| hsm | Single-threaded dispatch; handlers non-reentrant |
+| bt | Single-threaded tick; leaf callbacks non-reentrant |
+| executor | Internal thread-safe; Stop() cross-thread callable |
+| data_fusion | Inherits Bus subscription thread safety |
+| discovery | Internal thread-safe; callbacks in discovery thread |
+| service | Handler in service thread; Client::Call() thread-safe |
+| app | Post thread-safe (mutex); ProcessOne single consumer |
+| post | OspPost thread-safe; OspSendAndWait blocks caller |
+| node_manager | Mutex-protected; callbacks in heartbeat thread |
+| node_manager_hsm | Mutex-protected; per-connection HSM single-threaded |
+| service_hsm | Mutex-protected; HSM single-threaded dispatch |
+| discovery_hsm | Mutex-protected; HSM single-threaded dispatch |
+| watchdog | Register/Unregister mutex; Beat() lock-free; Check() single-threaded |
+| fault_collector | ReportFault lock-free MPSC; consumer independent thread |
+
+---
+
+*End of Full API Reference*
+
+For more information, see:
+- Design Document: /docs/design_zh.md
+- Benchmark Report: /docs/benchmark_report_zh.md
+- Examples: /examples/README.md
+- Tests: /tests/README.md
+- GitHub: https://github.com/DeguiLiu/newosp
