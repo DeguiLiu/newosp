@@ -4,13 +4,15 @@
  *
  * Demonstrates:
  *   - Defining message types and using std::variant as Payload
- *   - Creating nodes with typed subscriptions
+ *   - Creating nodes with typed subscriptions (runtime callback)
+ *   - StaticNode with compile-time handler binding (zero-overhead dispatch)
  *   - Publishing and processing messages via SpinOnce()
  *   - Querying bus statistics after processing
  */
 
 #include "osp/bus.hpp"
 #include "osp/node.hpp"
+#include "osp/static_node.hpp"
 #include "osp/log.hpp"
 
 #include <cstdint>
@@ -91,6 +93,45 @@ int main() {
   // Clean shutdown
   sensor.Stop();
   logger.Stop();
+
+  // =====================================================================
+  // Part 2: StaticNode -- compile-time handler binding (zero overhead)
+  // =====================================================================
+
+  Bus::Instance().Reset();
+  std::printf("\n--- StaticNode Demo (compile-time dispatch) ---\n");
+
+  // Define a handler struct with operator() for each message type.
+  // Because the type is known at compile time, the compiler can inline.
+  struct DemoHandler {
+    uint32_t sensor_count{0};
+    uint32_t log_count{0};
+
+    void operator()(const SensorData& d, const osp::MessageHeader& /*h*/) {
+      ++sensor_count;
+      OSP_LOG_INFO("static", "sensor temp=%.1f humidity=%.1f",
+                   static_cast<double>(d.temp),
+                   static_cast<double>(d.humidity));
+    }
+    void operator()(const SystemLog& l, const osp::MessageHeader& /*h*/) {
+      ++log_count;
+      OSP_LOG_INFO("static", "log [L%u] %s",
+                   static_cast<unsigned>(l.level), l.message);
+    }
+  };
+
+  osp::StaticNode<Payload, DemoHandler> static_node("static", 10, DemoHandler{});
+  static_node.Start();
+
+  static_node.Publish(SensorData{30.0f, 55.0f});
+  static_node.Publish(log_msg);
+  static_node.SpinOnce();
+
+  const auto& h = static_node.GetHandler();
+  std::printf("  handler stats: sensor=%u  log=%u\n", h.sensor_count, h.log_count);
+
+  static_node.Stop();
+
   osp::log::Shutdown();
   return 0;
 }
