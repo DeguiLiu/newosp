@@ -8,7 +8,8 @@
  * the watchdog invokes a timeout callback.
  *
  * Design:
- * - Zero heap allocation, fixed-capacity slot array.
+ * - Fixed-capacity slot array, no heap allocation in hot path.
+ * - StartAutoCheck() allocates via std::thread (cold path only).
  * - Beat() is lock-free (hot path) - just atomic store via ThreadHeartbeat.
  * - Check() uses mutex for slot iteration (cold path, called from timer).
  * - Callbacks executed outside mutex (collect-release-execute pattern).
@@ -94,6 +95,8 @@ enum class WatchdogError : uint8_t {
  */
 template <uint32_t MaxThreads = 32>
 class ThreadWatchdog final {
+  static_assert(MaxThreads > 0, "MaxThreads must be greater than 0");
+
  public:
   // --------------------------------------------------------------------------
   // Callback Types
@@ -117,7 +120,7 @@ class ThreadWatchdog final {
   // --------------------------------------------------------------------------
 
   ThreadWatchdog() noexcept = default;
-  ~ThreadWatchdog() { StopAutoCheck(); }
+  ~ThreadWatchdog() noexcept { StopAutoCheck(); }
 
   ThreadWatchdog(const ThreadWatchdog&) = delete;
   ThreadWatchdog& operator=(const ThreadWatchdog&) = delete;
@@ -289,12 +292,16 @@ class ThreadWatchdog final {
   // Callback Configuration
   // --------------------------------------------------------------------------
 
+  /// @pre Must be called before StartAutoCheck() or any concurrent Check().
   void SetOnTimeout(TimeoutCallback fn, void* ctx = nullptr) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     on_timeout_ = fn;
     timeout_ctx_ = ctx;
   }
 
+  /// @pre Must be called before StartAutoCheck() or any concurrent Check().
   void SetOnRecovered(RecoverCallback fn, void* ctx = nullptr) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     on_recovered_ = fn;
     recover_ctx_ = ctx;
   }
@@ -305,9 +312,13 @@ class ThreadWatchdog final {
 
   bool IsTimedOut(WatchdogSlotId id) const noexcept {
     const uint32_t idx = id.value();
-    if (idx >= MaxThreads) return false;
+    if (idx >= MaxThreads) {
+      return false;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!slots_[idx].active.load(std::memory_order_acquire)) return false;
+    if (!slots_[idx].active.load(std::memory_order_acquire)) {
+      return false;
+    }
     return slots_[idx].timed_out;
   }
 
@@ -315,7 +326,9 @@ class ThreadWatchdog final {
     std::lock_guard<std::mutex> lock(mutex_);
     uint32_t count = 0U;
     for (uint32_t i = 0U; i < MaxThreads; ++i) {
-      if (slots_[i].active.load(std::memory_order_acquire)) ++count;
+      if (slots_[i].active.load(std::memory_order_acquire)) {
+        ++count;
+      }
     }
     return count;
   }
@@ -391,7 +404,11 @@ class ThreadWatchdog final {
    * was never called (no-op).
    */
   void StopAutoCheck() noexcept {
-    auto_check_running_.store(false, std::memory_order_release);
+    bool expected = true;
+    if (!auto_check_running_.compare_exchange_strong(
+            expected, false, std::memory_order_acq_rel)) {
+      return;  // Another thread is already stopping or not running
+    }
     if (auto_check_thread_.joinable()) {
       auto_check_thread_.join();
     }
@@ -429,6 +446,8 @@ class ThreadWatchdog final {
  */
 template <uint32_t MaxThreads = 32>
 class WatchdogGuard final {
+  static_assert(MaxThreads > 0, "MaxThreads must be greater than 0");
+
  public:
   /**
    * @brief Construct and register with the watchdog.
@@ -437,7 +456,7 @@ class WatchdogGuard final {
    */
   explicit WatchdogGuard(ThreadWatchdog<MaxThreads>* wd, const char* name,
                          uint32_t timeout_ms) noexcept
-      : wd_(wd), id_(WatchdogSlotId(0)), hb_(nullptr), valid_(false) {
+      : wd_(wd), hb_(nullptr), id_(WatchdogSlotId(0)), valid_(false) {
     if (wd_ == nullptr) return;
     auto result = wd_->Register(name, timeout_ms);
     if (result.has_value()) {
@@ -447,7 +466,7 @@ class WatchdogGuard final {
     }
   }
 
-  ~WatchdogGuard() {
+  ~WatchdogGuard() noexcept {
     if (valid_) {
       (void)wd_->Unregister(id_);
     }
@@ -469,8 +488,8 @@ class WatchdogGuard final {
 
  private:
   ThreadWatchdog<MaxThreads>* wd_;
-  WatchdogSlotId id_;
   ThreadHeartbeat* hb_;
+  WatchdogSlotId id_;
   bool valid_;
 };
 

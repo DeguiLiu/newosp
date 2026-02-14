@@ -472,7 +472,7 @@ class WorkerPool {
       }
     }
 
-    if (dispatcher_thread_.joinable() == false && running_.load(std::memory_order_acquire)) {
+    if (!dispatcher_thread_.joinable() && running_.load(std::memory_order_acquire)) {
       return osp::expected<void, WorkerPoolError>::error(WorkerPoolError::kWorkerUnhealthy);
     }
 

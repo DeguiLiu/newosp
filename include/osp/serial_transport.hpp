@@ -471,15 +471,16 @@ class SerialTransport {
   /// @return Number of bytes pushed to ring buffer.
   uint32_t ReadToRing() noexcept {
     if (fd_ < 0) return 0U;
-    const size_t space = rx_ring_.Available();
+    const uint32_t space = rx_ring_.Available();
     if (space == 0U) return 0U;
     uint8_t tmp[256];
-    const size_t to_read = std::min(space, sizeof(tmp));
+    const uint32_t to_read = std::min(space, static_cast<uint32_t>(sizeof(tmp)));
     const ssize_t n = ::read(fd_, tmp, to_read);
     if (n <= 0) return 0U;
-    const size_t pushed = rx_ring_.PushBatch(tmp, static_cast<size_t>(n));
+    const uint32_t pushed = static_cast<uint32_t>(
+        rx_ring_.PushBatch(tmp, static_cast<size_t>(n)));
     stats_.bytes_received += static_cast<uint64_t>(pushed);
-    return static_cast<uint32_t>(pushed);
+    return pushed;
   }
 
   /// @brief Parse buffered bytes from ring buffer through frame state machine.
@@ -491,10 +492,10 @@ class SerialTransport {
   uint32_t ParseFromRing() noexcept {
     uint32_t frames = 0U;
     uint8_t batch[256];
-    size_t n;
-    while ((n = rx_ring_.PopBatch(batch, sizeof(batch))) > 0U) {
+    uint32_t n;
+    while ((n = static_cast<uint32_t>(rx_ring_.PopBatch(batch, sizeof(batch)))) > 0U) {
       const uint64_t now = SteadyNowUs() / 1000U;
-      for (size_t i = 0U; i < n; ++i) {
+      for (uint32_t i = 0U; i < n; ++i) {
         if (rx_state_ != RxState::kIdle && last_byte_time_ms_ != 0U) {
           if (now - last_byte_time_ms_ > cfg_.inter_byte_timeout_ms) {
             ++stats_.timeout_errors;

@@ -289,6 +289,8 @@ class MulticastDiscovery {
     bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     bind_addr.sin_port = htons(config_.port);
 
+    // MISRA C++ Rule 5-2-4 deviation: reinterpret_cast required by POSIX
+    // socket API (bind/sendto/recvfrom expect sockaddr*).
     if (::bind(sockfd_, reinterpret_cast<sockaddr*>(&bind_addr),
                sizeof(bind_addr)) < 0) {
       ::close(sockfd_);

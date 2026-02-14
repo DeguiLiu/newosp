@@ -16,103 +16,197 @@
 
 ## 模块
 
-### 基础层
+### 基础层 (8 个)
 
 | 模块 | 说明 |
 |------|------|
 | `platform.hpp` | 平台/架构检测、编译器提示、`OSP_ASSERT` 宏、`SteadyNowUs` 时基 |
 | `vocabulary.hpp` | `expected`、`optional`、`FixedVector`、`FixedString`、`FixedFunction`、`function_ref`、`not_null`、`NewType`、`ScopeGuard` |
-| `spsc_ringbuffer.hpp` | 无锁 wait-free SPSC 环形缓冲区 (trivially_copyable, 批量操作, 单核 MCU FakeTSO) |
 | `config.hpp` | 多格式配置解析器 (INI/JSON/YAML)，基于模板的后端分发 |
 | `log.hpp` | 日志宏，编译期级别过滤 (stderr 后端) |
-
-### 核心层
-
-| 模块 | 说明 |
-|------|------|
 | `timer.hpp` | 基于 `std::chrono::steady_clock` 的定时任务调度器 |
 | `shell.hpp` | 远程调试 Shell (telnet)，支持 TAB 补全、命令历史、`OSP_SHELL_CMD` 注册 |
 | `mem_pool.hpp` | 固定块内存池 (`FixedPool<BlockSize, MaxBlocks>`)，嵌入式空闲链表 |
 | `shutdown.hpp` | 异步信号安全的优雅关停，LIFO 回调链 + `pipe(2)` 唤醒 |
-| `watchdog.hpp` | 软件看门狗 (SteadyNowUs 时基, 可配置超时/动作) |
-| `fault_collector.hpp` | 故障收集与上报 (FaultReporter POD 注入, 环形缓冲存储) |
-| `bus.hpp` | 无锁 MPSC 消息总线 (`AsyncBus<PayloadVariant>`)，基于类型的路由 |
-| `node.hpp` | 轻量级发布/订阅节点抽象 (`Node<PayloadVariant>`)，灵感来自 ROS2/CyberRT |
-| `worker_pool.hpp` | 多工作线程池，基于 AsyncBus + SPSC 每工作线程队列 |
-| `executor.hpp` | 调度器 (Single/Static/Pinned + Realtime SCHED_FIFO/DEADLINE) |
-| `semaphore.hpp` | 轻量信号量 (futex-based LightSemaphore/PosixSemaphore) |
 
-### 状态机与行为树
+### 核心通信层 (7 个)
 
 | 模块 | 说明 |
 |------|------|
-| `hsm.hpp` | 层次状态机 (LCA-based transitions, 嵌套状态) |
-| `bt.hpp` | 行为树 (Sequence/Fallback/Parallel 组合节点) |
+| `bus.hpp` | 无锁 MPSC 消息总线 (`AsyncBus<PayloadVariant>`)，CAS 发布，topic 路由 |
+| `node.hpp` | 轻量级发布/订阅节点 (`Node<PayloadVariant>`)，Bus 依赖注入，FNV-1a topic hash |
+| `worker_pool.hpp` | 多工作线程池，AsyncBus + SPSC 每工作线程队列，AdaptiveBackoff |
+| `spsc_ringbuffer.hpp` | 无锁 wait-free SPSC 环形缓冲 (trivially_copyable, 批量操作, FakeTSO) |
+| `executor.hpp` | 调度器 (Single/Static/Pinned + RealtimeExecutor SCHED_FIFO) |
+| `semaphore.hpp` | 轻量信号量 (futex-based LightSemaphore/PosixSemaphore) |
+| `data_fusion.hpp` | 多源数据融合 (时间对齐、插值) |
 
-### 网络层
+### 状态机与行为树 (2 个)
+
+| 模块 | 说明 |
+|------|------|
+| `hsm.hpp` | 层次状态机 (LCA 转换、guard 条件、零堆分配) |
+| `bt.hpp` | 行为树 (Sequence/Fallback/Parallel，扁平数组存储，缓存友好) |
+
+### 网络与传输层 (8 个)
 
 | 模块 | 说明 |
 |------|------|
 | `socket.hpp` | TCP/UDP RAII 封装 (基于 sockpp) |
-| `connection.hpp` | 连接池管理 (自动重连、心跳) |
 | `io_poller.hpp` | epoll 事件循环 (边缘触发 + 超时) |
-| `net.hpp` | 网络层封装 (地址解析、套接字选项) |
-
-### 传输层
-
-| 模块 | 说明 |
-|------|------|
-| `transport.hpp` | 透明网络传输 (TCP/UDP 帧协议, v0/v1 双版本帧头) |
-| `shm_transport.hpp` | 共享内存 IPC (无锁 SPSC 环形缓冲区) |
+| `connection.hpp` | 连接池管理 (自动重连、心跳) |
+| `transport.hpp` | 网络传输 (v0/v1 帧协议, SequenceTracker) |
+| `shm_transport.hpp` | 共享内存 IPC (无锁 SPSC, ARM 内存序, CreateOrReplace 崩溃恢复) |
 | `serial_transport.hpp` | 工业串口传输 (CRC-CCITT, PTY 测试, IEC 61508) |
-| `transport_factory.hpp` | 自动传输选择 (inproc/shm/tcp, FixedString 配置) |
-| `data_fusion.hpp` | 多源数据融合 (时间对齐、插值) |
+| `net.hpp` | 网络层封装 (地址解析、套接字选项) |
+| `transport_factory.hpp` | 自动传输选择 (inproc/shm/tcp) |
 
-### 服务与发现层
-
-| 模块 | 说明 |
-|------|------|
-| `service.hpp` | RPC 服务 (请求-响应模式, ServiceRegistry FixedVector) |
-| `service_hsm.hpp` | HSM 驱动的服务生命周期 (Idle/Listening/Active/Error) |
-| `discovery.hpp` | 节点发现 (UDP 多播 + 静态配置, FixedString) |
-| `discovery_hsm.hpp` | HSM 驱动的节点发现流程 (Idle/Announcing/Stable/Degraded) |
-| `node_manager.hpp` | 节点管理 + 心跳监控 (FixedString remote_host) |
-| `node_manager_hsm.hpp` | HSM 驱动的节点连接管理 (Connected/Suspect/Disconnected) |
-
-### 应用层
+### 服务与发现层 (6 个)
 
 | 模块 | 说明 |
 |------|------|
-| `lifecycle_node.hpp` | HSM 驱动生命周期节点 (16 状态层次结构，含 Degraded/Error/Fatal) |
+| `service.hpp` | RPC 服务 (请求-响应, ServiceRegistry, AsyncClient) |
+| `discovery.hpp` | 节点发现 (UDP 多播 + 静态配置, TopicAwareDiscovery) |
+| `node_manager.hpp` | 节点管理 + 心跳监控 |
+| `node_manager_hsm.hpp` | HSM 驱动节点心跳状态机 (Connected/Suspect/Disconnected) |
+| `service_hsm.hpp` | HSM 驱动服务生命周期 (Idle/Listening/Active/Error/ShuttingDown) |
+| `discovery_hsm.hpp` | HSM 驱动发现流程 (Idle/Announcing/Discovering/Stable/Degraded) |
+
+### 应用层 (4 个)
+
+| 模块 | 说明 |
+|------|------|
+| `app.hpp` | Application/Instance 两层模型 (MakeIID, HSM 驱动) |
+| `post.hpp` | 统一投递 (AppRegistry + OspPost + OspSendAndWait) |
 | `qos.hpp` | QoS 服务质量配置 (Reliability/History/Deadline/Lifespan) |
-| `app.hpp` | HSM 驱动 Application/Instance 两层模型 (11 状态层次结构) |
-| `post.hpp` | 统一投递 (FixedVector 注册表 + 同步消息) |
+| `lifecycle_node.hpp` | 生命周期节点 (Unconfigured/Inactive/Active/Finalized, HSM 驱动) |
+
+### 可靠性层 (2 个)
+
+| 模块 | 说明 |
+|------|------|
+| `watchdog.hpp` | 软件看门狗 (截止时间监控、超时回调) |
+| `fault_collector.hpp` | 故障收集与上报 (FaultReporter POD 注入, 环形缓冲) |
 
 ## 架构
 
+### 七层架构
+
+```mermaid
+graph TB
+    subgraph 应用层
+        A1[app.hpp<br/>Application/Instance]
+        A2[post.hpp<br/>统一投递]
+        A3[qos.hpp<br/>QoS配置]
+        A4[lifecycle_node.hpp<br/>生命周期节点]
+    end
+
+    subgraph 服务与发现层
+        S1[service.hpp<br/>RPC服务]
+        S2[discovery.hpp<br/>节点发现]
+        S3[node_manager.hpp<br/>节点管理]
+        S4[*_hsm.hpp<br/>HSM驱动]
+    end
+
+    subgraph 传输层
+        T1[transport.hpp<br/>网络传输]
+        T2[shm_transport.hpp<br/>共享内存IPC]
+        T3[serial_transport.hpp<br/>串口传输]
+        T4[transport_factory.hpp<br/>传输选择]
+        T5[data_fusion.hpp<br/>数据融合]
+    end
+
+    subgraph 网络层
+        N1[socket.hpp<br/>TCP/UDP封装]
+        N2[connection.hpp<br/>连接管理]
+        N3[io_poller.hpp<br/>epoll事件循环]
+        N4[net.hpp<br/>网络工具]
+    end
+
+    subgraph 核心通信层
+        C1[bus.hpp<br/>MPSC消息总线]
+        C2[node.hpp<br/>Pub/Sub节点]
+        C3[worker_pool.hpp<br/>工作线程池]
+        C4[spsc_ringbuffer.hpp<br/>SPSC环形缓冲]
+    end
+
+    subgraph 调度与状态层
+        E1[executor.hpp<br/>调度器]
+        E2[hsm.hpp<br/>层次状态机]
+        E3[bt.hpp<br/>行为树]
+        E4[semaphore.hpp<br/>信号量]
+    end
+
+    subgraph 可靠性层
+        R1[watchdog.hpp<br/>看门狗]
+        R2[fault_collector.hpp<br/>故障收集]
+    end
+
+    subgraph 基础层
+        B1[platform.hpp<br/>平台检测]
+        B2[vocabulary.hpp<br/>词汇类型]
+        B3[config.hpp<br/>配置解析]
+        B4[log.hpp<br/>日志]
+        B5[timer.hpp<br/>定时器]
+        B6[shell.hpp<br/>调试Shell]
+        B7[mem_pool.hpp<br/>内存池]
+        B8[shutdown.hpp<br/>优雅关停]
+    end
+
+    应用层 --> 服务与发现层
+    服务与发现层 --> 传输层
+    传输层 --> 网络层
+    服务与发现层 --> 核心通信层
+    核心通信层 --> 调度与状态层
+    应用层 --> 可靠性层
+    可靠性层 --> 基础层
+    调度与状态层 --> 基础层
+    网络层 --> 基础层
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  应用层: App/Instance(HSM), LifecycleNode(HSM), QoS, Post      │
-├─────────────────────────────────────────────────────────────────┤
-│  服务层: Service(RPC), Discovery, NodeManager                   │
-│          ServiceHSM, DiscoveryHSM, NodeManagerHSM               │
-├─────────────────────────────────────────────────────────────────┤
-│  传输层: Transport(TCP/UDP), ShmTransport, SerialTransport      │
-│          TransportFactory, DataFusion                           │
-├─────────────────────────────────────────────────────────────────┤
-│  网络层: Socket, Connection, IoPoller(epoll), Net               │
-├─────────────────────────────────────────────────────────────────┤
-│  消息层: AsyncBus(MPSC), Node(Pub/Sub), Post(FixedVector)      │
-├─────────────────────────────────────────────────────────────────┤
-│  调度层: Executor(Realtime), WorkerPool(SpscRingbuffer)         │
-├─────────────────────────────────────────────────────────────────┤
-│  可靠性: Watchdog, FaultCollector(FaultReporter)                │
-├─────────────────────────────────────────────────────────────────┤
-│  核心层: HSM(层次状态机), BT(行为树), Semaphore                 │
-├─────────────────────────────────────────────────────────────────┤
-│  基础层: Platform, Vocabulary, SpscRingbuffer, Config, Log      │
-│          Timer, Shell, MemPool, Shutdown                        │
-└─────────────────────────────────────────────────────────────────┘
+
+### 关键模块依赖
+
+```mermaid
+graph LR
+    lifecycle_node[lifecycle_node.hpp] --> hsm[hsm.hpp]
+    lifecycle_node --> node[node.hpp]
+
+    app[app.hpp] --> hsm
+    app --> post[post.hpp]
+
+    node --> bus[bus.hpp]
+    bus --> spsc[spsc_ringbuffer.hpp]
+
+    worker_pool[worker_pool.hpp] --> spsc
+    worker_pool --> bus
+
+    service[service.hpp] --> transport[transport.hpp]
+    discovery[discovery.hpp] --> socket[socket.hpp]
+    node_manager[node_manager.hpp] --> connection[connection.hpp]
+
+    transport --> socket
+    shm_transport[shm_transport.hpp] --> spsc
+    serial_transport[serial_transport.hpp] --> vocabulary[vocabulary.hpp]
+
+    connection --> io_poller[io_poller.hpp]
+    io_poller --> socket
+
+    executor[executor.hpp] --> platform[platform.hpp]
+    watchdog[watchdog.hpp] --> platform
+
+    hsm --> vocabulary
+    bt[bt.hpp] --> vocabulary
+
+    socket --> net[net.hpp]
+    net --> platform
+
+    config[config.hpp] --> vocabulary
+    log[log.hpp] --> platform
+    timer[timer.hpp] --> platform
+    shell[shell.hpp] --> vocabulary
+    mem_pool[mem_pool.hpp] --> platform
+    shutdown[shutdown.hpp] --> vocabulary
+    fault_collector[fault_collector.hpp] --> vocabulary
 ```
 
 ## 构建
@@ -201,15 +295,22 @@ sensor.SpinOnce();
 
 ## 示例和测试
 
-- 示例程序: `examples/` 目录 (18 个示例: 13 单文件 + 5 多文件应用)，参见 [examples/README.md](examples/README.md)
-- 单元测试: `tests/` 目录，758 测试用例，参见 [tests/README.md](tests/README.md)
-- 代码生成: `tools/ospgen.py` (YAML → C++ 头文件)，参见 `defs/` 目录
+- **示例程序**: `examples/` 目录，15 个示例 (13 个单文件 + 2 个多文件应用)
+  - 单文件示例: `basic_demo.cpp`, `protocol_demo.cpp`, `client_demo.cpp`, `priority_demo.cpp`, `benchmark.cpp`, `serial_demo.cpp`, `realtime_executor_demo.cpp`, `node_manager_hsm_demo.cpp`, `hsm_bt_combo_demo.cpp`, `bt_patrol_demo.cpp`, `hsm_protocol_demo.cpp`, `watchdog_demo.cpp`, `fault_collector_demo.cpp`
+  - 多文件应用: `shm_ipc/` (共享内存 IPC 演示), `client_gateway/` (多节点客户端网关)
+  - 详见 [docs/examples_zh.md](docs/examples_zh.md)
+
+- **单元测试**: `tests/` 目录，758 测试用例，ASan/TSan/UBSan 全部通过
+  - 详见 [tests/README.md](tests/README.md)
+
+- **代码生成**: `tools/ospgen.py` (YAML → C++ 头文件)
+  - 定义文件: `defs/` 目录
 
 ## 文档
 
-- 设计文档: [docs/design_zh.md](docs/design_zh.md) (架构设计)
-- 变更日志: [docs/changelog_zh.md](docs/changelog_zh.md) (P0 调整 + Phase 实施记录)
-- 示例指南: [docs/examples_zh.md](docs/examples_zh.md) (示例���途与架构映射)
+- [设计文档](docs/design_zh.md) - 架构设计、模块详解、关键决策
+- [变更日志](docs/changelog_zh.md) - P0 调整 + Phase 实施记录
+- [示例指南](docs/examples_zh.md) - 示例用途与架构映射
 
 ## 设计模式
 

@@ -285,6 +285,10 @@ inline TransitionResult StateDestroying(InstanceHsmContext& /*ctx*/,
 
 using InstanceSmType = StateMachine<InstanceHsmContext, kInstanceHsmMaxStates>;
 
+/// MISRA C++ Rule 10-3-1 deviation: Instance uses virtual dispatch for
+/// OnMessage() because the factory pattern requires runtime polymorphism.
+/// All other osp modules use compile-time dispatch (function pointer tables).
+/// Refactoring to static dispatch is tracked as a future improvement.
 class Instance {
  public:
   Instance() noexcept
@@ -494,6 +498,8 @@ class Instance {
     legacy_state_set_ = false;
   }
 
+  // MISRA C++ Rule 5-2-4 deviation: reinterpret_cast for placement-new storage.
+  // Required for in-place HSM construction without heap allocation.
   InstanceSmType* GetHsm() noexcept {
     return reinterpret_cast<InstanceSmType*>(hsm_storage_);
   }
@@ -654,11 +660,16 @@ class Application {
     return expected<void, AppError>::success();
   }
 
+  /// @brief Post a message to this application's queue.
+  ///
+  /// Thread safety: This queue is SPSC -- only one producer thread may call
+  /// Post() at a time. Multiple consumers are not supported either.
+  /// For multi-producer use, external synchronization (mutex) is required.
   bool Post(uint16_t ins_id, uint16_t event, const void* data,
             uint32_t len,
             ResponseChannel* response_ch = nullptr) noexcept {
     uint32_t tail = queue_tail_.load(std::memory_order_relaxed);
-    uint32_t next_tail = (tail + 1) % OSP_APP_QUEUE_DEPTH;
+    uint32_t next_tail = (tail + 1U) % OSP_APP_QUEUE_DEPTH;
     if (next_tail == queue_head_.load(std::memory_order_acquire)) {
       return false;
     }

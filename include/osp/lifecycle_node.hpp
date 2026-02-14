@@ -37,6 +37,7 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
+#include <array>
 #include <cstdint>
 
 namespace osp {
@@ -156,7 +157,7 @@ struct LifecycleHsmContext {
   StateMachine<LifecycleHsmContext, kLifecycleHsmMaxStates>* sm;
 
   // State indices (one per LifecycleDetailedState)
-  int32_t idx[static_cast<uint8_t>(LifecycleDetailedState::kCount)];
+  std::array<int32_t, static_cast<uint8_t>(LifecycleDetailedState::kCount)> idx;
 
   LifecycleHsmContext() noexcept
       : on_configure(nullptr), on_activate(nullptr),
@@ -164,9 +165,7 @@ struct LifecycleHsmContext {
         on_shutdown(nullptr),
         last_error(LifecycleError::kInvalidTransition),
         transition_failed(false), sm(nullptr) {
-    for (uint8_t i = 0; i < static_cast<uint8_t>(LifecycleDetailedState::kCount); ++i) {
-      idx[i] = -1;
-    }
+    idx.fill(-1);
   }
 
   int32_t I(LifecycleDetailedState s) const noexcept {
@@ -641,6 +640,8 @@ class LifecycleNode : public Node<PayloadVariant> {
   bool hsm_initialized_;
   alignas(HsmType) uint8_t hsm_storage_[sizeof(HsmType)];
 
+  // MISRA C++ Rule 5-2-4 deviation: reinterpret_cast for placement-new storage.
+  // Required for in-place HSM construction without heap allocation.
   HsmType* GetHsm() noexcept {
     return reinterpret_cast<HsmType*>(hsm_storage_);
   }

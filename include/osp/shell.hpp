@@ -533,7 +533,10 @@ inline expected<void, ShellError> DebugShell::Start() {
     return expected<void, ShellError>::error(ShellError::kPortInUse);
   }
 
-  // Allocate session slots.
+  // MISRA C++ Rule 18-4-1 deviation: dynamic allocation required because
+  // max_connections is a runtime config value. ShellSession contains
+  // std::thread (non-trivially-copyable), precluding FixedVector.
+  // Allocated once at Start(), freed at Stop() -- cold path only.
   sessions_ = new Session[cfg_.max_connections];
 
   running_.store(true, std::memory_order_release);

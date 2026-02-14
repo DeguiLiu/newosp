@@ -96,8 +96,8 @@ struct FaultStatistics {
   uint64_t total_reported;
   uint64_t total_processed;
   uint64_t total_dropped;
-  uint64_t priority_reported[4];  ///< Per-priority reported counts
-  uint64_t priority_dropped[4];   ///< Per-priority dropped counts
+  std::array<uint64_t, 4> priority_reported;  ///< Per-priority reported counts
+  std::array<uint64_t, 4> priority_dropped;   ///< Per-priority dropped counts
 };
 
 // ============================================================================

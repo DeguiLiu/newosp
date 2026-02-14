@@ -808,27 +808,24 @@ class NetworkNode : public Node<PayloadVariant> {
    */
   explicit NetworkNode(const char* name, uint32_t id = 0) noexcept
       : Node<PayloadVariant>(name, id),
-        pub_count_(0),
-        sub_count_(0),
-        recv_ring_drops_(0),
         listening_(false) {
     for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
-      publishers_[i].active = false;
+      publishers_[i].active.store(false, std::memory_order_relaxed);
       publishers_[i].type_index = 0;
-      subscribers_[i].active = false;
+      subscribers_[i].active.store(false, std::memory_order_relaxed);
       subscribers_[i].type_index = 0;
     }
   }
 
   ~NetworkNode() {
     for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
-      if (publishers_[i].active) {
+      if (publishers_[i].active.load(std::memory_order_acquire)) {
         publishers_[i].transport.Close();
-        publishers_[i].active = false;
+        publishers_[i].active.store(false, std::memory_order_relaxed);
       }
-      if (subscribers_[i].active) {
+      if (subscribers_[i].active.load(std::memory_order_acquire)) {
         subscribers_[i].transport.Close();
-        subscribers_[i].active = false;
+        subscribers_[i].active.store(false, std::memory_order_relaxed);
       }
     }
     listener_.Close();
@@ -851,7 +848,7 @@ class NetworkNode : public Node<PayloadVariant> {
    */
   template <typename T>
   expected<void, TransportError> AdvertiseTo(const Endpoint& ep) noexcept {
-    if (pub_count_ >= kMaxRemoteConnections) {
+    if (pub_count_.load(std::memory_order_relaxed) >= kMaxRemoteConnections) {
       return expected<void, TransportError>::error(
           TransportError::kBufferFull);
     }
@@ -862,7 +859,7 @@ class NetworkNode : public Node<PayloadVariant> {
     // Find a free slot
     uint32_t slot = kMaxRemoteConnections;
     for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
-      if (!publishers_[i].active) {
+      if (!publishers_[i].active.load(std::memory_order_acquire)) {
         slot = i;
         break;
       }
@@ -876,8 +873,8 @@ class NetworkNode : public Node<PayloadVariant> {
     if (!r.has_value()) return r;
 
     publishers_[slot].type_index = type_idx;
-    publishers_[slot].active = true;
-    ++pub_count_;
+    publishers_[slot].active.store(true, std::memory_order_release);
+    pub_count_.fetch_add(1U, std::memory_order_relaxed);
 
     // Subscribe locally to type T: forward matching messages over transport.
     // We capture the slot index to send through the correct transport.
@@ -886,7 +883,7 @@ class NetworkNode : public Node<PayloadVariant> {
 
     auto sub_r = this->template Subscribe<T>(
         [pub_ptr, sender_id](const T& data, const MessageHeader& /*hdr*/) {
-          if (!pub_ptr->active) return;
+          if (!pub_ptr->active.load(std::memory_order_acquire)) return;
 
           uint8_t payload_buf[OSP_TRANSPORT_MAX_FRAME_SIZE];
           uint32_t len = Serializer<T>::Serialize(
@@ -899,8 +896,8 @@ class NetworkNode : public Node<PayloadVariant> {
 
     if (!sub_r.has_value()) {
       publishers_[slot].transport.Close();
-      publishers_[slot].active = false;
-      --pub_count_;
+      publishers_[slot].active.store(false, std::memory_order_release);
+      pub_count_.fetch_sub(1U, std::memory_order_relaxed);
       return expected<void, TransportError>::error(
           TransportError::kConnectionFailed);
     }
@@ -920,7 +917,7 @@ class NetworkNode : public Node<PayloadVariant> {
    */
   template <typename T>
   expected<void, TransportError> SubscribeFrom(const Endpoint& ep) noexcept {
-    if (sub_count_ >= kMaxRemoteConnections) {
+    if (sub_count_.load(std::memory_order_relaxed) >= kMaxRemoteConnections) {
       return expected<void, TransportError>::error(
           TransportError::kBufferFull);
     }
@@ -931,7 +928,7 @@ class NetworkNode : public Node<PayloadVariant> {
     // Find a free slot
     uint32_t slot = kMaxRemoteConnections;
     for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
-      if (!subscribers_[i].active) {
+      if (!subscribers_[i].active.load(std::memory_order_acquire)) {
         slot = i;
         break;
       }
@@ -945,23 +942,12 @@ class NetworkNode : public Node<PayloadVariant> {
     if (!r.has_value()) return r;
 
     subscribers_[slot].type_index = type_idx;
-    subscribers_[slot].active = true;
-    ++sub_count_;
+    subscribers_[slot].active.store(true, std::memory_order_release);
+    sub_count_.fetch_add(1U, std::memory_order_relaxed);
 
     return expected<void, TransportError>::success();
   }
 
-  /**
-   * @brief Process remote subscriber connections (call periodically).
-   *
-   * For each active remote subscriber, attempts a blocking receive of one
-   * frame, deserializes the payload, and publishes it to the local bus.
-   *
-   * NOTE: For non-blocking behavior, set sockets to non-blocking mode
-   * before calling this method.
-   *
-   * @return Number of messages processed from remote sources.
-   */
   /**
    * @brief Poll all remote subscribers and receive frames into ring buffers.
    *
@@ -976,10 +962,10 @@ class NetworkNode : public Node<PayloadVariant> {
     uint32_t buffered = 0;
 
     for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
-      if (!subscribers_[i].active) continue;
+      if (!subscribers_[i].active.load(std::memory_order_acquire)) continue;
       if (!subscribers_[i].transport.IsConnected()) {
-        subscribers_[i].active = false;
-        --sub_count_;
+        subscribers_[i].active.store(false, std::memory_order_release);
+        sub_count_.fetch_sub(1U, std::memory_order_relaxed);
         continue;
       }
 
@@ -993,7 +979,7 @@ class NetworkNode : public Node<PayloadVariant> {
         ++buffered;
       } else {
         // Ring buffer full -- frame is dropped.
-        ++recv_ring_drops_;
+        recv_ring_drops_.fetch_add(1U, std::memory_order_relaxed);
       }
     }
 
@@ -1012,7 +998,7 @@ class NetworkNode : public Node<PayloadVariant> {
     uint32_t processed = 0;
 
     for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
-      if (!subscribers_[i].active) continue;
+      if (!subscribers_[i].active.load(std::memory_order_acquire)) continue;
 
       RecvFrameSlot slot;
       while (subscribers_[i].recv_ring.Pop(slot)) {
@@ -1101,12 +1087,12 @@ class NetworkNode : public Node<PayloadVariant> {
 
     // Find a free subscriber slot
     for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
-      if (!subscribers_[i].active) {
+      if (!subscribers_[i].active.load(std::memory_order_acquire)) {
         subscribers_[i].transport.AcceptFrom(
             static_cast<TcpSocket&&>(accept_r.value()));
         subscribers_[i].type_index = 0;  // Will be determined by frame data
-        subscribers_[i].active = true;
-        ++sub_count_;
+        subscribers_[i].active.store(true, std::memory_order_release);
+        sub_count_.fetch_add(1U, std::memory_order_relaxed);
         return expected<void, TransportError>::success();
       }
     }
@@ -1122,13 +1108,13 @@ class NetworkNode : public Node<PayloadVariant> {
   bool IsListening() const noexcept { return listening_; }
 
   /** @brief Get the number of active remote publishers. */
-  uint32_t RemotePublisherCount() const noexcept { return pub_count_; }
+  uint32_t RemotePublisherCount() const noexcept { return pub_count_.load(std::memory_order_relaxed); }
 
   /** @brief Get the number of active remote subscribers. */
-  uint32_t RemoteSubscriberCount() const noexcept { return sub_count_; }
+  uint32_t RemoteSubscriberCount() const noexcept { return sub_count_.load(std::memory_order_relaxed); }
 
   /** @brief Get the number of frames dropped due to full recv_ring. */
-  uint64_t RecvRingDrops() const noexcept { return recv_ring_drops_; }
+  uint64_t RecvRingDrops() const noexcept { return recv_ring_drops_.load(std::memory_order_relaxed); }
 
  private:
   static constexpr uint32_t kMaxRemoteConnections = 8;
@@ -1136,14 +1122,14 @@ class NetworkNode : public Node<PayloadVariant> {
   struct RemotePublisher {
     TcpTransport transport;
     uint16_t type_index;
-    bool active;
+    std::atomic<bool> active{false};
   };
 
   struct RemoteSubscriber {
     TcpTransport transport;
     SpscRingbuffer<RecvFrameSlot, OSP_TRANSPORT_RECV_RING_DEPTH> recv_ring;
     uint16_t type_index;
-    bool active;
+    std::atomic<bool> active{false};
   };
 
   /**
@@ -1185,9 +1171,9 @@ class NetworkNode : public Node<PayloadVariant> {
 
   RemotePublisher publishers_[kMaxRemoteConnections];
   RemoteSubscriber subscribers_[kMaxRemoteConnections];
-  uint32_t pub_count_;
-  uint32_t sub_count_;
-  uint64_t recv_ring_drops_;
+  std::atomic<uint32_t> pub_count_{0};
+  std::atomic<uint32_t> sub_count_{0};
+  std::atomic<uint64_t> recv_ring_drops_{0};
   TcpListener listener_;
   bool listening_;
 };

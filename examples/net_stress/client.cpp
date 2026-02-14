@@ -146,6 +146,7 @@ static constexpr uint16_t kFiFileFail      = 2U;
 static osp::ThreadWatchdog<kMaxInstances + 1U>  g_watchdog;  // +1 for FCCU
 static osp::FaultCollector<8U, 64U>             g_faults;
 static uint32_t                                 g_wd_slot_ids[kMaxInstances];
+static bool                                      g_wd_registered[kMaxInstances];
 
 // File transfer thread function (watchdog heartbeat via FtCtx)
 static void FileTransferThread(uint32_t idx) noexcept {
@@ -427,6 +428,7 @@ static int cmd_watchdog(int /*argc*/, char* /*argv*/[]) {
   osp::DebugShell::Printf("  Timed out: %u\r\n", g_watchdog.TimedOutCount());
   for (uint32_t i = 0; i < g_num_clients; ++i) {
     if (!g_file_threads[i].started.load(std::memory_order_relaxed)) continue;
+    if (!g_wd_registered[i]) continue;
     bool timed_out = g_watchdog.IsTimedOut(osp::WatchdogSlotId(g_wd_slot_ids[i]));
     osp::DebugShell::Printf("  [%2u] slot=%u %s\r\n",
                              i, g_wd_slot_ids[i],
@@ -622,6 +624,7 @@ int main(int argc, char* argv[]) {
     auto wd_reg = g_watchdog.Register(wd_name, kWatchdogTimeoutMs);
     if (wd_reg.has_value()) {
       g_wd_slot_ids[i] = wd_reg.value().id.value();
+      g_wd_registered[i] = true;
       fc->heartbeat = wd_reg.value().heartbeat;
     }
 
@@ -724,9 +727,11 @@ int main(int argc, char* argv[]) {
   // Cleanup RPC clients and file transfer objects
   for (uint32_t i = 0; i < g_num_clients; ++i) {
     if (g_file_threads[i].initialized) {
-      // Unregister from watchdog
-      static_cast<void>(g_watchdog.Unregister(
-          osp::WatchdogSlotId(g_wd_slot_ids[i])));
+      // Unregister from watchdog (only if registration succeeded)
+      if (g_wd_registered[i]) {
+        static_cast<void>(g_watchdog.Unregister(
+            osp::WatchdogSlotId(g_wd_slot_ids[i])));
+      }
       FtSmOf(i).~StateMachine();
       FtCtxOf(i).~FtCtx();
       g_file_threads[i].initialized = false;

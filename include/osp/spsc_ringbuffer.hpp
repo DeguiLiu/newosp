@@ -19,6 +19,7 @@
 #include "osp/platform.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -306,7 +307,7 @@ class SpscRingbuffer {
 
   PaddedIndex head_;                                  // Producer writes
   PaddedIndex tail_;                                  // Consumer writes
-  alignas(kCacheLineSize) T data_buff_[BufferSize]{}; // Ring storage
+  alignas(kCacheLineSize) std::array<T, BufferSize> data_buff_{}; // Ring storage
 };
 
 }  // namespace osp

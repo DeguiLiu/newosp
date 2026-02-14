@@ -169,7 +169,7 @@ class FusedSubscription {
       return false;
     }
 
-    for (size_t i = 0; i < kNumTypes; ++i) {
+    for (uint32_t i = 0; i < kNumTypes; ++i) {
       if (handles_[i].IsValid()) {
         bus.Unsubscribe(handles_[i]);
         handles_[i] = SubscriptionHandle::Invalid();
@@ -348,7 +348,7 @@ class TimeSynchronizer {
       return false;
     }
 
-    for (size_t i = 0; i < kNumTypes; ++i) {
+    for (uint32_t i = 0; i < kNumTypes; ++i) {
       if (handles_[i].IsValid()) {
         bus.Unsubscribe(handles_[i]);
         handles_[i] = SubscriptionHandle::Invalid();
@@ -414,7 +414,7 @@ class TimeSynchronizer {
 
   /** @brief Drop any received data that is outside the time window. */
   void DropStaleData(uint64_t current_ts) noexcept {
-    for (size_t i = 0; i < kNumTypes; ++i) {
+    for (uint32_t i = 0; i < kNumTypes; ++i) {
       if (received_[i]) {
         uint64_t diff = (current_ts >= timestamps_[i])
                             ? (current_ts - timestamps_[i])
@@ -429,21 +429,21 @@ class TimeSynchronizer {
 
   /** @brief Try to fire the callback if all types received within window. */
   void TryFire() noexcept {
-    for (size_t i = 0; i < kNumTypes; ++i) {
+    for (uint32_t i = 0; i < kNumTypes; ++i) {
       if (!received_[i]) return;
     }
 
     // Verify all timestamps are within the window
     uint64_t min_ts = timestamps_[0];
     uint64_t max_ts = timestamps_[0];
-    for (size_t i = 1; i < kNumTypes; ++i) {
+    for (uint32_t i = 1; i < kNumTypes; ++i) {
       if (timestamps_[i] < min_ts) min_ts = timestamps_[i];
       if (timestamps_[i] > max_ts) max_ts = timestamps_[i];
     }
 
     if ((max_ts - min_ts) > window_us_) {
       // Window exceeded -- mark the oldest as stale and drop
-      for (size_t i = 0; i < kNumTypes; ++i) {
+      for (uint32_t i = 0; i < kNumTypes; ++i) {
         if (timestamps_[i] == min_ts) {
           received_[i] = false;
           timeout_count_.fetch_add(1, std::memory_order_relaxed);
@@ -460,7 +460,7 @@ class TimeSynchronizer {
     fire_count_.fetch_add(1, std::memory_order_relaxed);
 
     // Auto-reset
-    for (size_t i = 0; i < kNumTypes; ++i) {
+    for (uint32_t i = 0; i < kNumTypes; ++i) {
       received_[i] = false;
     }
   }
