@@ -42,6 +42,7 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 |--------|-------------|
 | `bus.hpp` | Lock-free MPSC message bus (`AsyncBus<PayloadVariant>`), CAS publish, topic routing |
 | `node.hpp` | Lightweight pub/sub node (`Node<PayloadVariant>`), Bus injection, FNV-1a topic hash |
+| `static_node.hpp` | Compile-time handler binding node (`StaticNode<Payload, Handler>`), zero indirect call, inlinable dispatch |
 | `worker_pool.hpp` | Multi-worker thread pool, AsyncBus + SPSC per-worker queues, AdaptiveBackoff |
 | `spsc_ringbuffer.hpp` | Lock-free wait-free SPSC ring buffer (trivially_copyable, batch ops, FakeTSO) |
 | `executor.hpp` | Scheduler (Single/Static/Pinned + RealtimeExecutor SCHED_FIFO) |
@@ -138,7 +139,7 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 ┌──────────────────────────────────────────────────────────────┐
 │                  Core Communication Layer                    │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │ bus.hpp / node.hpp                                     │  │
+│  │ bus.hpp / node.hpp / static_node.hpp                   │  │
 │  │ spsc_ringbuffer.hpp / worker_pool.hpp                  │  │
 │  │ executor.hpp / semaphore.hpp                           │  │
 │  └────────────────────────────────────────────────────────┘  │

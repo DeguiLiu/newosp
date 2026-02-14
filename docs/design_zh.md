@@ -171,6 +171,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
     |
     ├── bus.hpp        (依赖 platform: kCacheLineSize)
     ├── node.hpp       (依赖 vocabulary + bus.hpp)
+    ├── static_node.hpp (依赖 node.hpp + bus.hpp)
     ├── worker_pool.hpp (依赖 vocabulary + bus.hpp + spsc_ringbuffer.hpp)
     ├── spsc_ringbuffer.hpp (依赖 platform: kCacheLineSize)
     ├── hsm.hpp        (依赖 platform)
@@ -235,6 +236,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 | 基础层 | Shutdown | shutdown.hpp | 优雅关停 |
 | 核心通信 | AsyncBus | bus.hpp | 无锁 MPSC 消息总线 |
 | 核心通信 | Node | node.hpp | Pub/Sub 节点 |
+| 核心通信 | StaticNode | static_node.hpp | 编译期 Handler 绑定节点 (零间接调用) |
 | 核心通信 | WorkerPool | worker_pool.hpp | 多工作线程池 |
 | 核心通信 | SpscRingbuffer | spsc_ringbuffer.hpp | Lock-free SPSC 环形缓冲区 |
 | 核心通信 | Executor | executor.hpp | 调度器 (Single/Static/Pinned/Realtime) |
@@ -516,7 +518,49 @@ sensor.SpinOnce();
 
 ---
 
-### 5.3 worker_pool.hpp -- 多工作线程池
+### 5.3 static_node.hpp -- 编译期 Handler 绑定节点
+
+`Node` 的零开销替代方案。Handler 类型作为模板参数，编译器可内联分发调用、生成直接跳转表。
+
+**设计动机**: `Node` 通过 `FixedFunction` (SBO 类型擦除) 存储回调，分发时仍有函数指针间接调用。嵌入式系统中约 80% 的消息处理逻辑在编译期确定 (传感器数据总是交给同一个处理函数)，`std::function`/`FixedFunction` 的运行时灵活性完全多余。
+
+```cpp
+// Handler 协议: 为关注的消息类型定义 operator()，模板 catch-all 忽略其余类型
+struct StreamHandler {
+  ProtocolState* state;
+
+  void operator()(const StreamCommand& cmd, const osp::MessageHeader&) {
+    ++state->stream_count;  // 编译器可内联到 Bus 分发路径中
+  }
+  void operator()(const StreamData& sd, const osp::MessageHeader&) {
+    ++state->stream_count;
+  }
+  template <typename T>
+  void operator()(const T&, const osp::MessageHeader&) {}  // 无关类型: 零开销
+};
+
+// 编译期绑定，Handler 类型已知，分发可内联
+osp::StaticNode<Payload, StreamHandler> ctrl("ctrl", 3, StreamHandler{&state});
+ctrl.Start();   // 通过 fold expression 为 variant 每个类型注册订阅
+ctrl.SpinOnce();
+ctrl.Stop();    // RAII 退订
+```
+
+**与 Node 对比**:
+
+| 特性 | Node | StaticNode |
+|------|------|-----------|
+| 回调存储 | `FixedFunction` (SBO 类型擦除) | Handler 模板参数 (类型已知) |
+| 分发方式 | 函数指针间接调用 | 编译期直接调用 (可内联) |
+| 订阅灵活性 | 运行时逐个注册 | `Start()` 一次性注册所有 variant 类型 |
+| 用作 `void*` 上下文 | 可以 (timer callback 等) | 不推荐 (模板类型不便擦除) |
+| 适用场景 | 运行时动态订阅、跨编译单元 | 编译期确定的固定处理逻辑 |
+
+**实际应用**: `streaming_protocol` 示例中 3 个服务端节点 (registrar, heartbeat_monitor, stream_controller) 使用 StaticNode，客户端节点保留 Node (需作为 timer context 指针)。
+
+---
+
+### 5.4 worker_pool.hpp -- 多工作线程池
 
 基于 AsyncBus + SpscRingbuffer 的多工作线程池。
 
@@ -546,7 +590,7 @@ pool.Shutdown();
 
 ---
 
-### 5.4 spsc_ringbuffer.hpp -- Lock-free SPSC 环形缓冲区
+### 5.5 spsc_ringbuffer.hpp -- Lock-free SPSC 环形缓冲区
 
 从 [DeguiLiu/ringbuffer](https://github.com/DeguiLiu/ringbuffer) v2.0.0 适配。
 
@@ -584,7 +628,7 @@ class SpscRingbuffer;
 
 ---
 
-### 5.5 executor.hpp -- 调度器
+### 5.6 executor.hpp -- 调度器
 
 借鉴 ROS2 Executor 和 CyberRT Choreography Scheduler。
 
@@ -609,7 +653,7 @@ struct RealtimeConfig {
 
 ---
 
-### 5.6 其他核心组件
+### 5.7 其他核心组件
 
 **semaphore.hpp**: `LightSemaphore` (futex-based) / `BinarySemaphore` / `PosixSemaphore`。12 test cases。
 
@@ -1603,6 +1647,7 @@ expected<V, E> 返回
 | `OSP_BUS_MAX_CALLBACKS_PER_TYPE` | 16 | bus.hpp | 每类型最大订阅 |
 | `OSP_BUS_BATCH_SIZE` | 256 | bus.hpp | 单次批量处理上限 |
 | `OSP_MAX_NODE_SUBSCRIPTIONS` | 16 | node.hpp | 每节点最大订阅 |
+| `OSP_MAX_STATIC_NODE_SUBSCRIPTIONS` | 16 | static_node.hpp | StaticNode 最大订阅 |
 | `OSP_IO_POLLER_MAX_EVENTS` | 64 | io_poller.hpp | 单次 Wait 最大事件数 |
 | `OSP_BT_MAX_NODES` | 32 | bt.hpp | 行为树最大节点数 |
 | `OSP_BT_MAX_CHILDREN` | 8 | bt.hpp | 复合节点最大子节点数 |

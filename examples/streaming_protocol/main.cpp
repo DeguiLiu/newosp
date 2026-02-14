@@ -1,7 +1,9 @@
 // Copyright 2024 OSP-CPP Authors. All rights reserved.
 //
 // Streaming protocol demo: GB28181/RTSP-style pipeline simulation.
-// Demonstrates bus, node, timer, and log working together.
+//
+// Server-side nodes use StaticNode (compile-time handler dispatch).
+// Client node uses regular Node (dynamic callback + timer context).
 
 #include "handlers.hpp"
 #include "messages.hpp"
@@ -20,26 +22,32 @@ int main() {
   osp::log::SetLevel(osp::log::Level::kDebug);
   OSP_LOG_INFO("Proto", "=== streaming protocol demo start ===");
 
-  osp::AsyncBus<Payload>::Instance().Reset();
+  auto& bus = osp::AsyncBus<Payload>::Instance();
+  bus.Reset();
 
   ProtocolState state;
 
-  // Create nodes
-  osp::Node<Payload> registrar("registrar", kRegistrarId);
-  osp::Node<Payload> heartbeat_monitor("heartbeat_monitor", kHeartbeatId);
-  osp::Node<Payload> stream_controller("stream_controller", kStreamCtrlId);
-  osp::Node<Payload> client("client", kClientId);
+  // -- Server-side: StaticNode (compile-time dispatch, inlinable) -----------
 
-  // Setup subscriptions
-  SetupRegistrar(registrar, state);
-  SetupClient(client);
-  SetupHeartbeatMonitor(heartbeat_monitor, state);
-  SetupStreamController(stream_controller, state);
-
-  // Start all nodes
+  RegistrarNode registrar(
+      "registrar", kRegistrarId,
+      RegistrarHandler{&state, &bus});
   registrar.Start();
+
+  HeartbeatNode heartbeat_monitor(
+      "heartbeat_monitor", kHeartbeatId,
+      HeartbeatHandler{&state});
   heartbeat_monitor.Start();
+
+  StreamCtrlNode stream_controller(
+      "stream_controller", kStreamCtrlId,
+      StreamHandler{&state});
   stream_controller.Start();
+
+  // -- Client-side: regular Node (dynamic callback, timer ctx pointer) ------
+
+  osp::Node<Payload> client("client", kClientId);
+  SetupClient(client);
   client.Start();
 
   // Step 1: device registration (HIGH priority)
@@ -91,7 +99,7 @@ int main() {
   stream_controller.SpinOnce();
 
   // Statistics
-  auto bus_stats = osp::AsyncBus<Payload>::Instance().GetStatistics();
+  auto bus_stats = bus.GetStatistics();
   OSP_LOG_INFO("Proto", "=== statistics ===");
   OSP_LOG_INFO("Proto", "bus: published=%lu processed=%lu dropped=%lu",
                static_cast<unsigned long>(bus_stats.messages_published),

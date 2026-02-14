@@ -40,6 +40,7 @@
 |------|------|
 | `bus.hpp` | 无锁 MPSC 消息总线 (`AsyncBus<PayloadVariant>`)，CAS 发布，topic 路由 |
 | `node.hpp` | 轻量级发布/订阅节点 (`Node<PayloadVariant>`)，Bus 依赖注入，FNV-1a topic hash |
+| `static_node.hpp` | 编译期 Handler 绑定节点 (`StaticNode<Payload, Handler>`)，零间接调用，分发可内联 |
 | `worker_pool.hpp` | 多工作线程池，AsyncBus + SPSC 每工作线程队列，AdaptiveBackoff |
 | `spsc_ringbuffer.hpp` | 无锁 wait-free SPSC 环形缓冲 (trivially_copyable, 批量操作, FakeTSO) |
 | `executor.hpp` | 调度器 (Single/Static/Pinned + RealtimeExecutor SCHED_FIFO) |
@@ -142,7 +143,7 @@
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                        核心通信层                                        │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │ bus.hpp (MPSC消息总线) / node.hpp (Pub/Sub节点)                   │  │
+│  │ bus.hpp (MPSC消息总线) / node.hpp / static_node.hpp (Pub/Sub节点)  │  │
 │  │ worker_pool.hpp (工作线程池) / spsc_ringbuffer.hpp (SPSC环形缓冲) │  │
 │  │ executor.hpp (调度器) / semaphore.hpp (信号量)                     │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
