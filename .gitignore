@@ -23,3 +23,4 @@ build_asan/
 build_tsan/
 build_ex/
 build_test/
+*.bak

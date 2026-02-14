@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
 
-Modern C++17 header-only embedded infrastructure library for ARM-Linux, extracted and modernized from the OSP (Open Streaming Platform) codebase (~140k LOC).
+Modern C++17 header-only embedded infrastructure library for ARM-Linux. Designed from scratch for industrial embedded systems such as LiDAR, robotics, and edge computing. 38 headers, 788 tests, ASan/TSan/UBSan clean.
 
 **[中文文档](README_zh.md)**
 
@@ -93,103 +93,91 @@ Modern C++17 header-only embedded infrastructure library for ARM-Linux, extracte
 
 ## Architecture
 
-```mermaid
-graph TB
-    subgraph Application["Application Layer"]
-        APP[app.hpp<br/>post.hpp]
-        LC[lifecycle_node.hpp<br/>qos.hpp]
-    end
-
-    subgraph Service["Service & Discovery Layer"]
-        SVC[service.hpp<br/>service_hsm.hpp]
-        DISC[discovery.hpp<br/>discovery_hsm.hpp]
-        NM[node_manager.hpp<br/>node_manager_hsm.hpp]
-    end
-
-    subgraph Transport["Transport Layer"]
-        TRANS[transport.hpp<br/>shm_transport.hpp<br/>serial_transport.hpp]
-        TF[transport_factory.hpp<br/>data_fusion.hpp]
-    end
-
-    subgraph Network["Network Layer"]
-        NET[socket.hpp<br/>connection.hpp]
-        IO[io_poller.hpp<br/>net.hpp]
-    end
-
-    subgraph Core["Core Communication Layer"]
-        BUS[bus.hpp<br/>node.hpp]
-        SPSC[spsc_ringbuffer.hpp<br/>worker_pool.hpp]
-        EXEC[executor.hpp<br/>semaphore.hpp]
-    end
-
-    subgraph StateMachine["State Machine & Behavior Tree"]
-        HSM[hsm.hpp]
-        BT[bt.hpp]
-    end
-
-    subgraph Reliability["Reliability Layer"]
-        WD[watchdog.hpp]
-        FC[fault_collector.hpp]
-        SC[shell_commands.hpp]
-    end
-
-    subgraph Foundation["Foundation Layer"]
-        PLAT[platform.hpp<br/>vocabulary.hpp]
-        CFG[config.hpp<br/>log.hpp]
-        UTIL[timer.hpp<br/>shell.hpp<br/>mem_pool.hpp<br/>shutdown.hpp]
-    end
-
-    Application --> Service
-    Application --> Core
-    Service --> Transport
-    Service --> StateMachine
-    Transport --> Network
-    Transport --> Core
-    Network --> Foundation
-    Core --> StateMachine
-    Core --> Reliability
-    Core --> Foundation
-    StateMachine --> Foundation
-    Reliability --> Foundation
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Application Layer                           │
+│  ┌──────────────────────────┐  ┌──────────────────────────────┐    │
+│  │ app.hpp                  │  │ lifecycle_node.hpp           │    │
+│  │ post.hpp                 │  │ qos.hpp                      │    │
+│  └──────────────────────────┘  └──────────────────────────────┘    │
+└────────────────────────┬────────────────────┬───────────────────────┘
+                         │                    │
+                         v                    v
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Service & Discovery Layer                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
+│  │ service.hpp  │  │ discovery    │  │ node_manager.hpp         │  │
+│  │ service_hsm  │  │ discovery_hsm│  │ node_manager_hsm.hpp     │  │
+│  └──────────────┘  └──────────────┘  └──────────────────────────┘  │
+└──────────┬──────────────────┬──────────────────────────────────────┘
+           │                  │
+           v                  v
+┌──────────────────────────────────────────────────────────────┐
+│                      Transport Layer                         │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │ transport.hpp / shm_transport.hpp / serial_transport   │  │
+│  │ transport_factory.hpp / data_fusion.hpp                │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────┬──────────────────────────────────────────────────┘
+           │
+           v
+┌──────────────────────────────────────────────────────────────┐
+│                       Network Layer                          │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │ socket.hpp / connection.hpp                            │  │
+│  │ io_poller.hpp / net.hpp                                │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────┬──────────────────────────────────────────────────┘
+           │
+           v
+┌──────────────────────────────────────────────────────────────┐
+│                  Core Communication Layer                    │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │ bus.hpp / node.hpp                                     │  │
+│  │ spsc_ringbuffer.hpp / worker_pool.hpp                  │  │
+│  │ executor.hpp / semaphore.hpp                           │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────┬──────────────────┬───────────────────────────────┘
+           │                  │
+           v                  v
+┌──────────────────────┐  ┌──────────────────────────────────┐
+│ State Machine & BT   │  │    Reliability Layer             │
+│  ┌────────────────┐  │  │  ┌────────────────────────────┐  │
+│  │ hsm.hpp        │  │  │  │ watchdog.hpp               │  │
+│  │ bt.hpp         │  │  │  │ fault_collector.hpp        │  │
+│  └────────────────┘  │  │  │ shell_commands.hpp         │  │
+└──────────┬───────────┘  │  └────────────────────────────┘  │
+           │              └──────────┬───────────────────────┘
+           │                         │
+           v                         v
+┌─────────────────────────────────────────────────────────────┐
+│                      Foundation Layer                       │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ platform.hpp / vocabulary.hpp                         │  │
+│  │ config.hpp / log.hpp                                  │  │
+│  │ timer.hpp / shell.hpp / mem_pool.hpp / shutdown.hpp   │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Module Dependencies
 
-```mermaid
-flowchart LR
-    Application[Application Layer]
-    Service[Service & Discovery]
-    Transport[Transport Layer]
-    Network[Network Layer]
-    Core[Core Communication]
-    StateMachine[State Machine & BT]
-    Reliability[Reliability Layer]
-    Foundation[Foundation Layer]
+```
+Application Layer ──┬──> Service & Discovery ──┬──> Transport Layer ──> Network Layer
+                    │                          │                                │
+                    │                          └──> State Machine & BT          │
+                    │                                      │                    │
+                    └──> Core Communication ──┬──> State Machine & BT          │
+                                              │                                 │
+                                              ├──> Reliability Layer            │
+                                              │           │                     │
+                                              └───────────┴─────────────────────┴──> Foundation Layer
 
-    Application --> Service
-    Application --> Core
-
-    Service --> Transport
-    Service --> Core
-    Service --> StateMachine
-
-    Transport --> Network
-    Transport --> Core
-
-    Network --> Foundation
-
-    Core --> StateMachine
-    Core --> Reliability
-    Core --> Foundation
-
-    StateMachine --> Foundation
-    Reliability --> Foundation
-
-    shell_commands[shell_commands.hpp] --> shell
-    shell_commands --> watchdog
-    shell_commands --> fault_collector
-    shell_commands --> node_manager_hsm
-    shell_commands --> bus
+shell_commands.hpp ──┬──> shell.hpp
+                     ├──> watchdog.hpp
+                     ├──> fault_collector.hpp
+                     ├──> node_manager_hsm.hpp
+                     └──> bus.hpp
 ```
 
 ## Build
@@ -224,28 +212,64 @@ cmake --build build -j$(nproc)
 
 ## Quick Start
 
+### 1. Build
+
+```bash
+git clone https://github.com/DeguiLiu/newosp.git
+cd newosp
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DOSP_BUILD_EXAMPLES=ON -DOSP_BUILD_TESTS=ON
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+```
+
+### 2. Integrate into your project
+
+newosp is header-only. Just add the include path:
+
+```cmake
+# CMakeLists.txt
+add_subdirectory(newosp)
+target_link_libraries(your_app PRIVATE osp)
+```
+
+### 3. Hello World - Pub/Sub messaging
+
 ```cpp
-#include "osp/config.hpp"
 #include "osp/bus.hpp"
 #include "osp/node.hpp"
 #include "osp/log.hpp"
 
-// Multi-format config
-osp::MultiConfig cfg;
-cfg.LoadFile("app.yaml");
-int32_t port = cfg.GetInt("network", "port", 8080);
+#include <variant>
 
-// Type-based pub/sub messaging
-struct SensorData { float temp; };
-struct MotorCmd { int speed; };
+// Define message types
+struct SensorData { float temperature; float humidity; };
+struct MotorCmd   { uint32_t mode; float target; };
 using Payload = std::variant<SensorData, MotorCmd>;
 
-osp::Node<Payload> sensor("sensor", 1);
-sensor.Subscribe<SensorData>([](const SensorData& d, const auto& h) {
-    OSP_LOG_INFO("sensor", "temp=%.1f from sender %u", d.temp, h.sender_id);
-});
-sensor.Publish(SensorData{25.0f});
-sensor.SpinOnce();
+int main() {
+    osp::log::Init();
+
+    // Create a sensor node and subscribe to SensorData
+    osp::Node<Payload> sensor("sensor", 1);
+    sensor.Subscribe<SensorData>([](const SensorData& d, const auto&) {
+        OSP_LOG_INFO("sensor", "temp=%.1f humidity=%.1f", d.temperature, d.humidity);
+    });
+
+    // Publish a message and process it
+    sensor.Publish(SensorData{25.0f, 60.0f});
+    sensor.SpinOnce();
+
+    osp::log::Shutdown();
+    return 0;
+}
+```
+
+### 4. Run examples
+
+```bash
+./build/examples/basic_demo          # Bus/Node pub-sub
+./build/examples/serial_demo         # Serial communication with HSM + BT
+./build/examples/osp_serial_ota_demo # Industrial OTA firmware upgrade
 ```
 
 ## CI Pipeline
