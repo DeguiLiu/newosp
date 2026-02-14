@@ -28,7 +28,7 @@ endif()
 if(OSP_CONFIG_JSON)
     FetchContent_Declare(
         json
-        URL https://ghfast.top/https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.zip
+        URL https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.zip
         DOWNLOAD_EXTRACT_TIMESTAMP ON
     )
     set(JSON_BuildTests OFF CACHE INTERNAL "")
@@ -43,7 +43,7 @@ endif()
 if(OSP_CONFIG_YAML)
     FetchContent_Declare(
         fkyaml
-        URL https://ghfast.top/https://github.com/fktn-k/fkYAML/archive/refs/tags/v0.4.0.zip
+        URL https://github.com/fktn-k/fkYAML/archive/refs/tags/v0.4.0.zip
         DOWNLOAD_EXTRACT_TIMESTAMP ON
     )
     set(FK_YAML_BUILD_TEST OFF CACHE INTERNAL "")
@@ -57,7 +57,7 @@ endif()
 if(OSP_WITH_SOCKPP)
     FetchContent_Declare(
         sockpp
-        URL https://ghfast.top/https://github.com/DeguiLiu/sockpp/archive/refs/heads/master.zip
+        URL https://github.com/DeguiLiu/sockpp/archive/refs/heads/master.zip
         DOWNLOAD_EXTRACT_TIMESTAMP ON
     )
     set(SOCKPP_BUILD_SHARED OFF CACHE BOOL "" FORCE)

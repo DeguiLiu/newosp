@@ -3,7 +3,7 @@ include(FetchContent)
 set(CATCH2_VERSION v3.5.2)
 FetchContent_Declare(
     Catch2
-    URL https://ghfast.top/https://github.com/catchorg/Catch2/archive/refs/tags/${CATCH2_VERSION}.zip
+    URL https://github.com/catchorg/Catch2/archive/refs/tags/${CATCH2_VERSION}.zip
     DOWNLOAD_EXTRACT_TIMESTAMP ON
 )
 FetchContent_MakeAvailable(Catch2)
