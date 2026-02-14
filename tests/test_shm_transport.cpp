@@ -653,7 +653,7 @@ TEST_CASE("shm_transport - Cross-process SharedMemorySegment visibility",
           "[shm_transport][fork]") {
   const char* name = "xproc_seg";
 
-  auto seg_r = osp::SharedMemorySegment::Create(name, 4096);
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace(name, 4096);
   REQUIRE(seg_r.has_value());
   auto seg = static_cast<osp::SharedMemorySegment&&>(seg_r.value());
 
@@ -691,7 +691,7 @@ TEST_CASE("shm_transport - Cross-process ShmRingBuffer write then read",
   const char* name = "xproc_ring";
   using Ring = osp::ShmRingBuffer<4096, 8>;
 
-  auto seg_r = osp::SharedMemorySegment::Create(name, Ring::Size());
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace(name, Ring::Size());
   REQUIRE(seg_r.has_value());
   auto seg = static_cast<osp::SharedMemorySegment&&>(seg_r.value());
   auto* ring = Ring::InitAt(seg.Data());
@@ -741,7 +741,7 @@ TEST_CASE("shm_transport - Cross-process ShmChannel producer-consumer",
   const char* name = "xproc_chan";
   using Channel = osp::ShmChannel<4096, 16>;
 
-  auto wr = Channel::CreateWriter(name);
+  auto wr = Channel::CreateOrReplaceWriter(name);
   REQUIRE(wr.has_value());
   auto writer = static_cast<Channel&&>(wr.value());
 
@@ -791,7 +791,7 @@ TEST_CASE("shm_transport - Cross-process concurrent write and read",
   const char* name = "xproc_conc";
   using Channel = osp::ShmChannel<256, 32>;
 
-  auto wr = Channel::CreateWriter(name);
+  auto wr = Channel::CreateOrReplaceWriter(name);
   REQUIRE(wr.has_value());
   auto writer = static_cast<Channel&&>(wr.value());
 
@@ -849,7 +849,7 @@ TEST_CASE("shm_transport - Cross-process large frame transfer",
   constexpr uint32_t kSlotCount = 8;
   using Channel = osp::ShmChannel<kSlotSize, kSlotCount>;
 
-  auto wr = Channel::CreateWriter(name);
+  auto wr = Channel::CreateOrReplaceWriter(name);
   REQUIRE(wr.has_value());
   auto writer = static_cast<Channel&&>(wr.value());
 
@@ -898,7 +898,7 @@ TEST_CASE("shm_transport - Cross-process ShmChannel WaitReadable polling",
   const char* name = "xproc_wait";
   using Channel = osp::ShmChannel<256, 8>;
 
-  auto wr = Channel::CreateWriter(name);
+  auto wr = Channel::CreateOrReplaceWriter(name);
   REQUIRE(wr.has_value());
   auto writer = static_cast<Channel&&>(wr.value());
 

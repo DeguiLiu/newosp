@@ -13,8 +13,8 @@ endfunction()
 
 # --- demo executables -----------------------------------------------------
 add_osp_example(osp_basic_demo              basic_demo.cpp)
-add_osp_example(osp_protocol_demo           protocol_demo.cpp)
-add_osp_example(osp_client_demo             client_demo.cpp)
+add_osp_example(osp_protocol_demo           streaming_protocol/main.cpp)
+add_osp_example(osp_client_demo             client_gateway/main.cpp)
 add_osp_example(osp_priority_demo           priority_demo.cpp)
 add_osp_example(osp_benchmark               benchmark.cpp)
 add_osp_example(osp_serial_demo              serial_demo.cpp)

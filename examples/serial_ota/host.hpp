@@ -63,6 +63,13 @@ struct HostContext {
   bool     verify_received    = false;
   bool     verify_ok          = false;
 
+  // Retransmission
+  static constexpr uint32_t kMaxChunkRetries = 3U;
+  uint32_t chunk_retry_count = 0;
+  uint32_t total_retries     = 0;
+  uint32_t total_drops       = 0;
+  bool     data_nak_received = false;
+
   // Action phases (to avoid re-sending on BT re-tick)
   ActionPhase start_phase  = ActionPhase::kSend;
   ActionPhase end_phase    = ActionPhase::kSend;
@@ -123,12 +130,34 @@ inline osp::NodeStatus SendStart(HostContext& ctx) {
   return osp::NodeStatus::kFailure;
 }
 
-/// Send firmware chunks one per tick.
+/// Send firmware chunks one per tick, with NAK-based retransmission.
 inline osp::NodeStatus SendChunks(HostContext& ctx) {
   if (ctx.send_fn == nullptr) return osp::NodeStatus::kFailure;
 
+  // Handle NAK: rewind to device's received_size
+  if (ctx.data_nak_received) {
+    ctx.data_nak_received = false;
+    ++ctx.chunk_retry_count;
+    ++ctx.total_retries;
+    ++ctx.total_drops;
+    if (ctx.chunk_retry_count > HostContext::kMaxChunkRetries) {
+      OSP_LOG_ERROR("OTA_HOST", "Max retries (%u) at offset %u",
+                    HostContext::kMaxChunkRetries, ctx.last_received_size);
+      return osp::NodeStatus::kFailure;
+    }
+    uint32_t rewind_to = ctx.last_received_size;
+    OSP_LOG_INFO("OTA_HOST", "Rewind %u -> %u (retry %u/%u)",
+                 ctx.current_offset, rewind_to,
+                 ctx.chunk_retry_count, HostContext::kMaxChunkRetries);
+    if (ctx.current_offset > rewind_to) {
+      ctx.bytes_sent -= (ctx.current_offset - rewind_to);
+    }
+    ctx.current_offset = rewind_to;
+  }
+
   if (ctx.current_offset >= ctx.firmware_size) {
-    OSP_LOG_INFO("OTA_HOST", "All chunks sent: %u bytes", ctx.bytes_sent);
+    OSP_LOG_INFO("OTA_HOST", "All chunks sent: %u bytes (%u retries)",
+                 ctx.bytes_sent, ctx.total_retries);
     return osp::NodeStatus::kSuccess;
   }
 
@@ -153,6 +182,7 @@ inline osp::NodeStatus SendChunks(HostContext& ctx) {
   ctx.send_fn(frame_buf, n, ctx.send_ctx);
   ctx.current_offset += this_chunk;
   ctx.bytes_sent += this_chunk;
+  // chunk_retry_count is reset in OnResponse when DATA ACK kSuccess is received
 
   if ((ctx.current_offset % (ctx.chunk_size * 8U)) == 0 ||
       ctx.current_offset >= ctx.firmware_size) {
@@ -193,6 +223,17 @@ inline osp::NodeStatus SendEnd(HostContext& ctx) {
     ctx.end_phase = ActionPhase::kDone;
     OSP_LOG_INFO("OTA_HOST", "END ACK received");
     return osp::NodeStatus::kSuccess;
+  }
+
+  // END rejected (size mismatch) -- rewind chunks and retry
+  if (ctx.last_received_size < ctx.firmware_size) {
+    OSP_LOG_WARN("OTA_HOST", "END rejected: resend from offset %u",
+                 ctx.last_received_size);
+    ctx.current_offset = ctx.last_received_size;
+    ctx.end_phase = ActionPhase::kSend;
+    ctx.ack_received = false;
+    ctx.data_nak_received = false;
+    return osp::NodeStatus::kRunning;
   }
   OSP_LOG_ERROR("OTA_HOST", "END ACK failed: status=%u", ctx.last_status);
   return osp::NodeStatus::kFailure;
@@ -297,6 +338,22 @@ class OtaHost final {
         OSP_LOG_DEBUG("OTA_HOST", "VERIFY resp: status=%u crc=0x%04X",
                       resp.status, resp.calc_crc);
       }
+    } else if (base_cmd == ota_cmd::kData) {
+      // Data chunk ACK: check status for retransmission
+      if (frame.data_len >= sizeof(OtaAckResp)) {
+        OtaAckResp ack;
+        std::memcpy(&ack, frame.data, sizeof(ack));
+        if (ack.status != static_cast<uint8_t>(Status::kSuccess)) {
+          // Device rejected the chunk -- rewind to received_size
+          ctx_.last_received_size = ack.received_size;
+          ctx_.data_nak_received = true;
+          OSP_LOG_DEBUG("OTA_HOST", "Data NAK: status=%u received=%u",
+                        ack.status, ack.received_size);
+        } else {
+          // Chunk confirmed -- reset retry count for this offset
+          ctx_.chunk_retry_count = 0;
+        }
+      }
     } else {
       if (frame.data_len >= sizeof(OtaAckResp)) {
         OtaAckResp ack;
@@ -321,6 +378,8 @@ class OtaHost final {
     return tree_.LastStatus() == osp::NodeStatus::kFailure;
   }
   osp::NodeStatus GetStatus() const noexcept { return tree_.LastStatus(); }
+  uint32_t GetTotalRetries() const noexcept { return ctx_.total_retries; }
+  uint32_t GetTotalDrops() const noexcept { return ctx_.total_drops; }
 
  private:
   HostContext ctx_;

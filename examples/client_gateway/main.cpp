@@ -1,133 +1,50 @@
 // Copyright (c) 2024 liudegui. MIT License.
 //
-// client_demo.cpp -- Client management demo: WorkerPool + multi-node patterns.
+// Client gateway demo: WorkerPool + multi-node patterns.
 // Simulates a gateway, a parallel data processor, and a heartbeat monitor.
+
+#include "handlers.hpp"
+#include "messages.hpp"
 
 #include "osp/bus.hpp"
 #include "osp/log.hpp"
-#include "osp/node.hpp"
 #include "osp/shutdown.hpp"
 #include "osp/worker_pool.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <thread>
-#include <variant>
-
-// ============================================================================
-// Message Definitions
-// ============================================================================
-
-struct ClientConnect {
-  uint32_t client_id;
-  char ip[16];
-  uint16_t port;
-};
-
-struct ClientDisconnect {
-  uint32_t client_id;
-  uint8_t reason;
-};
-
-struct ClientData {
-  uint32_t client_id;
-  uint16_t data_len;
-  uint8_t data[512];
-};
-
-struct ClientHeartbeat {
-  uint32_t client_id;
-  uint32_t rtt_us;
-};
-
-struct ProcessResult {
-  uint32_t client_id;
-  uint8_t status;
-  uint32_t processed_bytes;
-};
-
-using Payload = std::variant<ClientConnect, ClientDisconnect, ClientData,
-                             ClientHeartbeat, ProcessResult>;
-
-// ============================================================================
-// Global Counters
-// ============================================================================
-
-static std::atomic<uint32_t> g_connected{0};
-static std::atomic<uint32_t> g_disconnected{0};
-static std::atomic<uint32_t> g_data_processed{0};
-static std::atomic<uint64_t> g_bytes_processed{0};
-static std::atomic<uint32_t> g_heartbeats{0};
-
-// ============================================================================
-// WorkerPool Handlers (free functions, -fno-rtti compatible)
-// ============================================================================
-
-static void HandleClientData(const ClientData& msg,
-                             const osp::MessageHeader& hdr) {
-  std::this_thread::sleep_for(std::chrono::microseconds(msg.data_len));
-  g_data_processed.fetch_add(1, std::memory_order_relaxed);
-  g_bytes_processed.fetch_add(msg.data_len, std::memory_order_relaxed);
-  OSP_LOG_DEBUG("proc", "processed %u B from client %u (msg %lu)",
-                msg.data_len, msg.client_id,
-                static_cast<unsigned long>(hdr.msg_id));
-}
-
-static void HandleProcessResult(const ProcessResult& msg,
-                                const osp::MessageHeader& /*hdr*/) {
-  OSP_LOG_INFO("proc", "result: client %u status=%u bytes=%u",
-               msg.client_id, msg.status, msg.processed_bytes);
-}
 
 static constexpr uint32_t kNumClients = 4;
 static constexpr uint32_t kMsgsPerClient = 8;
 
-// ============================================================================
-// Main
-// ============================================================================
-
 int main() {
   osp::log::Init();
   osp::log::SetLevel(osp::log::Level::kDebug);
-  OSP_LOG_INFO("main", "=== Client Management Demo ===");
+  OSP_LOG_INFO("main", "=== Client Gateway Demo ===");
 
-  // WorkerPoolConfig: 2 workers, 1024 queue depth (simulated defaults).
   constexpr uint32_t kWorkers = 2;
   constexpr uint32_t kQueueDepth = 1024;
   OSP_LOG_INFO("main", "config: workers=%u queue=%u", kWorkers, kQueueDepth);
 
   osp::AsyncBus<Payload>::Instance().Reset();
 
+  // Stack-allocated stats, passed by reference (no global singleton).
+  GatewayStats stats;
+
   // -- WorkerPool for parallel data processing --
   osp::WorkerPoolConfig pool_cfg;
   pool_cfg.name = "processor";
   pool_cfg.worker_num = kWorkers;
   osp::WorkerPool<Payload> pool(pool_cfg);
-  pool.RegisterHandler<ClientData>(&HandleClientData);
-  pool.RegisterHandler<ProcessResult>(&HandleProcessResult);
+  RegisterPoolHandlers(pool, stats);
 
-  // -- Gateway node: connect/disconnect --
+  // -- Gateway and monitor nodes --
   osp::Node<Payload> gateway("gateway", 1);
-  gateway.Subscribe<ClientConnect>(
-      [](const ClientConnect& m, const osp::MessageHeader&) {
-        g_connected.fetch_add(1, std::memory_order_relaxed);
-        OSP_LOG_INFO("gw", "client %u from %s:%u", m.client_id, m.ip, m.port);
-      });
-  gateway.Subscribe<ClientDisconnect>(
-      [](const ClientDisconnect& m, const osp::MessageHeader&) {
-        g_disconnected.fetch_add(1, std::memory_order_relaxed);
-        OSP_LOG_INFO("gw", "client %u left (reason=%u)", m.client_id, m.reason);
-      });
-
-  // -- Monitor node: heartbeat tracking --
   osp::Node<Payload> monitor("monitor", 3);
-  monitor.Subscribe<ClientHeartbeat>(
-      [](const ClientHeartbeat& m, const osp::MessageHeader&) {
-        g_heartbeats.fetch_add(1, std::memory_order_relaxed);
-        OSP_LOG_DEBUG("mon", "hb client %u rtt=%u us", m.client_id, m.rtt_us);
-      });
+  SetupGateway(gateway, stats);
+  SetupMonitor(monitor, stats);
 
   gateway.Start();
   monitor.Start();
@@ -177,7 +94,7 @@ int main() {
     msg.client_id = id;
     msg.status = 0;
     msg.processed_bytes = static_cast<uint32_t>(
-        g_bytes_processed.load(std::memory_order_relaxed) / kNumClients);
+        stats.bytes_processed.load(std::memory_order_relaxed) / kNumClients);
     gateway.Publish(msg);
   }
   pool.Resume();
@@ -204,11 +121,11 @@ int main() {
   auto bs = osp::AsyncBus<Payload>::Instance().GetStatistics();
   OSP_LOG_INFO("main", "=== Statistics ===");
   OSP_LOG_INFO("main", "  connected=%u disconnected=%u",
-               g_connected.load(), g_disconnected.load());
+               stats.connected.load(), stats.disconnected.load());
   OSP_LOG_INFO("main", "  data_processed=%u bytes=%lu heartbeats=%u",
-               g_data_processed.load(),
-               static_cast<unsigned long>(g_bytes_processed.load()),
-               g_heartbeats.load());
+               stats.data_processed.load(),
+               static_cast<unsigned long>(stats.bytes_processed.load()),
+               stats.heartbeats.load());
   OSP_LOG_INFO("main", "  bus: published=%lu dropped=%lu",
                static_cast<unsigned long>(bs.messages_published),
                static_cast<unsigned long>(bs.messages_dropped));

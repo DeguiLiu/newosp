@@ -429,40 +429,32 @@ TEST_CASE("WorkerPool multiple workers", "[worker_pool]") {
   pool.Shutdown();
 }
 
-TEST_CASE("SpscQueue basic operations", "[worker_pool][spsc]") {
+TEST_CASE("SpscRingbuffer basic operations", "[worker_pool][spsc]") {
   SECTION("push and pop") {
-    osp::SpscQueue<int> q(4U);
-    REQUIRE(q.Capacity() == 4U);  // 4 is already power of 2
-    REQUIRE(q.Empty());
+    osp::SpscRingbuffer<int, 4U> q;
+    REQUIRE(q.Capacity() == 4U);
+    REQUIRE(q.IsEmpty());
     REQUIRE(q.Size() == 0U);
 
-    REQUIRE(q.TryPush(10));
-    REQUIRE(q.TryPush(20));
-    REQUIRE_FALSE(q.Empty());
+    REQUIRE(q.Push(10));
+    REQUIRE(q.Push(20));
+    REQUIRE_FALSE(q.IsEmpty());
     REQUIRE(q.Size() == 2U);
 
     int val = 0;
-    REQUIRE(q.TryPop(val));
+    REQUIRE(q.Pop(val));
     REQUIRE(val == 10);
-    REQUIRE(q.TryPop(val));
+    REQUIRE(q.Pop(val));
     REQUIRE(val == 20);
-    REQUIRE(q.Empty());
-    REQUIRE_FALSE(q.TryPop(val));
+    REQUIRE(q.IsEmpty());
+    REQUIRE_FALSE(q.Pop(val));
   }
 
   SECTION("queue full rejects push") {
-    osp::SpscQueue<int> q(2U);
+    osp::SpscRingbuffer<int, 2U> q;
     REQUIRE(q.Capacity() == 2U);
-    REQUIRE(q.TryPush(1));
-    REQUIRE(q.TryPush(2));
-    REQUIRE_FALSE(q.TryPush(3));  // full
-  }
-
-  SECTION("capacity rounds up to power of 2") {
-    osp::SpscQueue<int> q(3U);
-    REQUIRE(q.Capacity() == 4U);
-
-    osp::SpscQueue<int> q2(5U);
-    REQUIRE(q2.Capacity() == 8U);
+    REQUIRE(q.Push(1));
+    REQUIRE(q.Push(2));
+    REQUIRE_FALSE(q.Push(3));  // full
   }
 }

@@ -25,7 +25,7 @@ TEST_CASE("ThreadWatchdog: Register and Unregister", "[watchdog]") {
   REQUIRE(result.has_value());
   REQUIRE(wd.ActiveCount() == 1);
 
-  auto unreg = wd.Unregister(result.value());
+  auto unreg = wd.Unregister(result.value().id);
   REQUIRE(unreg.has_value());
   REQUIRE(wd.ActiveCount() == 0);
 }
@@ -41,9 +41,9 @@ TEST_CASE("ThreadWatchdog: Register returns unique IDs", "[watchdog]") {
   REQUIRE(id2.has_value());
   REQUIRE(id3.has_value());
 
-  REQUIRE(id1.value().value() != id2.value().value());
-  REQUIRE(id2.value().value() != id3.value().value());
-  REQUIRE(id1.value().value() != id3.value().value());
+  REQUIRE(id1.value().id.value() != id2.value().id.value());
+  REQUIRE(id2.value().id.value() != id3.value().id.value());
+  REQUIRE(id1.value().id.value() != id3.value().id.value());
 
   REQUIRE(wd.ActiveCount() == 3);
 }
@@ -92,10 +92,10 @@ TEST_CASE("ThreadWatchdog: Double Unregister returns kNotRegistered", "[watchdog
   auto id = wd.Register("TestThread", 1000);
   REQUIRE(id.has_value());
 
-  auto unreg1 = wd.Unregister(id.value());
+  auto unreg1 = wd.Unregister(id.value().id);
   REQUIRE(unreg1.has_value());
 
-  auto unreg2 = wd.Unregister(id.value());
+  auto unreg2 = wd.Unregister(id.value().id);
   REQUIRE(!unreg2.has_value());
   REQUIRE(unreg2.get_error() == osp::WatchdogError::kNotRegistered);
 }
@@ -107,7 +107,7 @@ TEST_CASE("ThreadWatchdog: Feed updates last_feed timestamp", "[watchdog]") {
   REQUIRE(id.has_value());
 
   // Feed immediately
-  wd.Feed(id.value());
+  wd.Feed(id.value().id);
 
   // Sleep less than timeout
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -154,7 +154,7 @@ TEST_CASE("ThreadWatchdog: Check does not false-positive", "[watchdog]") {
   REQUIRE(id.has_value());
 
   // Feed to reset timestamp
-  wd.Feed(id.value());
+  wd.Feed(id.value().id);
 
   // Sleep less than timeout
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -195,7 +195,7 @@ TEST_CASE("ThreadWatchdog: timeout callback fires", "[watchdog]") {
   wd.Check();
 
   REQUIRE(callback_fired.load(std::memory_order_acquire));
-  REQUIRE(callback_slot_id.load(std::memory_order_acquire) == id.value().value());
+  REQUIRE(callback_slot_id.load(std::memory_order_acquire) == id.value().id.value());
   REQUIRE(callback_name == "TimeoutThread");
 }
 
@@ -222,7 +222,7 @@ TEST_CASE("ThreadWatchdog: recovery callback fires", "[watchdog]") {
   REQUIRE(timeout_fired.load(std::memory_order_acquire));
 
   // Feed to recover
-  wd.Feed(id.value());
+  wd.Feed(id.value().id);
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
   wd.Check();
 
@@ -241,7 +241,7 @@ TEST_CASE("ThreadWatchdog: TimedOutCount tracks correctly", "[watchdog]") {
   REQUIRE(id3.has_value());
 
   // Feed id3 to keep it alive
-  wd.Feed(id3.value());
+  wd.Feed(id3.value().id);
 
   // Let id1 and id2 timeout
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -262,15 +262,15 @@ TEST_CASE("ThreadWatchdog: IsTimedOut per-slot query", "[watchdog]") {
   REQUIRE(id2.has_value());
 
   // Feed id2 to keep it alive
-  wd.Feed(id2.value());
+  wd.Feed(id2.value().id);
 
   // Let id1 timeout
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   wd.Check();
 
-  REQUIRE(wd.IsTimedOut(id1.value()));
-  REQUIRE(!wd.IsTimedOut(id2.value()));
+  REQUIRE(wd.IsTimedOut(id1.value().id));
+  REQUIRE(!wd.IsTimedOut(id2.value().id));
 }
 
 // ============================================================================
@@ -338,7 +338,7 @@ TEST_CASE("ThreadWatchdog: concurrent Feed from multiple threads", "[watchdog]")
   for (int i = 0; i < 4; ++i) {
     auto id = wd.Register("WorkerThread", 200);
     REQUIRE(id.has_value());
-    ids.push_back(id.value());
+    ids.push_back(id.value().id);
   }
 
   std::atomic<bool> running{true};
@@ -372,7 +372,7 @@ TEST_CASE("ThreadWatchdog: detect hung thread", "[watchdog]") {
   for (int i = 0; i < 4; ++i) {
     auto id = wd.Register("WorkerThread", 100);
     REQUIRE(id.has_value());
-    ids.push_back(id.value());
+    ids.push_back(id.value().id);
   }
 
   std::atomic<bool> running{true};
@@ -414,7 +414,7 @@ TEST_CASE("ThreadWatchdog: concurrent Register/Unregister stress", "[watchdog]")
         auto id = wd.Register("StressThread", 1000);
         if (id.has_value()) {
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
-          auto unreg = wd.Unregister(id.value());
+          auto unreg = wd.Unregister(id.value().id);
           if (!unreg.has_value()) {
             error_count.fetch_add(1, std::memory_order_relaxed);
           }
@@ -500,7 +500,7 @@ TEST_CASE("ThreadWatchdog: slot reuse after Unregister", "[watchdog]") {
   REQUIRE(wd.ActiveCount() == 2);
 
   // Unregister first slot
-  auto unreg = wd.Unregister(id1.value());
+  auto unreg = wd.Unregister(id1.value().id);
   REQUIRE(unreg.has_value());
   REQUIRE(wd.ActiveCount() == 1);
 
@@ -525,13 +525,102 @@ TEST_CASE("ThreadWatchdog: Feed after Unregister is safe", "[watchdog]") {
   auto id = wd.Register("TestThread", 1000);
   REQUIRE(id.has_value());
 
-  auto unreg = wd.Unregister(id.value());
+  auto unreg = wd.Unregister(id.value().id);
   REQUIRE(unreg.has_value());
 
   // Feed with old ID should not crash
-  wd.Feed(id.value());
+  wd.Feed(id.value().id);
 
   // Should still work normally
   uint32_t timed_out = wd.Check();
   REQUIRE(timed_out == 0);
+}
+
+// ============================================================================
+// AutoCheck Tests
+// ============================================================================
+
+TEST_CASE("ThreadWatchdog: StartAutoCheck detects timeout without manual Check",
+          "[watchdog]") {
+  osp::ThreadWatchdog<8> wd;
+
+  std::atomic<uint32_t> timeout_count{0};
+  wd.SetOnTimeout([](uint32_t, const char*, void* ctx) {
+    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
+  }, &timeout_count);
+
+  auto reg = wd.Register("test_thread", 50);  // 50ms timeout
+  REQUIRE(reg.has_value());
+  reg.value().heartbeat->Beat();
+
+  // Start auto-check with 20ms interval
+  wd.StartAutoCheck(20);
+
+  // Let the thread time out (don't beat)
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+  REQUIRE(timeout_count.load() >= 1U);
+
+  wd.StopAutoCheck();
+  (void)wd.Unregister(reg.value().id);
+}
+
+TEST_CASE("ThreadWatchdog: StartAutoCheck is idempotent", "[watchdog]") {
+  osp::ThreadWatchdog<8> wd;
+
+  wd.StartAutoCheck(50);
+  wd.StartAutoCheck(50);  // second call is no-op
+
+  wd.StopAutoCheck();
+  wd.StopAutoCheck();  // second call is no-op
+}
+
+TEST_CASE("ThreadWatchdog: StopAutoCheck without StartAutoCheck is safe",
+          "[watchdog]") {
+  osp::ThreadWatchdog<8> wd;
+  wd.StopAutoCheck();  // no-op, should not crash
+}
+
+TEST_CASE("ThreadWatchdog: AutoCheck recovery detection", "[watchdog]") {
+  osp::ThreadWatchdog<8> wd;
+
+  std::atomic<uint32_t> timeout_count{0};
+  std::atomic<uint32_t> recover_count{0};
+  wd.SetOnTimeout([](uint32_t, const char*, void* ctx) {
+    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
+  }, &timeout_count);
+  wd.SetOnRecovered([](uint32_t, const char*, void* ctx) {
+    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
+  }, &recover_count);
+
+  auto reg = wd.Register("recoverable", 50);
+  REQUIRE(reg.has_value());
+  auto* hb = reg.value().heartbeat;
+  hb->Beat();
+
+  wd.StartAutoCheck(20);
+
+  // Let it time out
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  REQUIRE(timeout_count.load() >= 1U);
+
+  // Resume beating -> should recover
+  hb->Beat();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  REQUIRE(recover_count.load() >= 1U);
+
+  wd.StopAutoCheck();
+  (void)wd.Unregister(reg.value().id);
+}
+
+TEST_CASE("ThreadWatchdog: Destructor stops auto-check thread", "[watchdog]") {
+  // Verify no leak / hang when destructor runs with active auto-check
+  {
+    osp::ThreadWatchdog<4> wd;
+    wd.StartAutoCheck(10);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // ~ThreadWatchdog calls StopAutoCheck()
+  }
+  // If we get here, destructor didn't hang
+  REQUIRE(true);
 }

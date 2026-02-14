@@ -378,6 +378,9 @@ class NodeManager {
     }
   }
 
+  /** @brief Set heartbeat for external watchdog monitoring. */
+  void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
+
  private:
   NodeManagerConfig config_;
   std::atomic<bool> running_;
@@ -386,6 +389,7 @@ class NodeManager {
   NodeEntry nodes_[MaxNodes];
   mutable std::mutex mutex_;
   std::thread heartbeat_thread_;
+  ThreadHeartbeat* heartbeat_{nullptr};
 
   TimerScheduler<>* scheduler_;
   TimerTaskId timer_task_id_{0};
@@ -410,6 +414,7 @@ class NodeManager {
 
   void HeartbeatLoop() noexcept {
     while (running_.load()) {
+      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       const uint64_t start_us = SteadyNowUs();
 
       {

@@ -21,6 +21,7 @@
 #define OSP_BUS_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/vocabulary.hpp"
 
 #include <array>
 #include <atomic>
@@ -187,17 +188,6 @@ struct BusStatisticsSnapshot {
   uint64_t messages_dropped;
   uint64_t messages_processed;
   uint64_t admission_rechecks;
-};
-
-// ============================================================================
-// Backpressure Level
-// ============================================================================
-
-enum class BackpressureLevel : uint8_t {
-  kNormal = 0,    /**< < 75% full */
-  kWarning = 1,   /**< 75-90% full */
-  kCritical = 2,  /**< 90-100% full */
-  kFull = 3       /**< 100% full */
 };
 
 // ============================================================================

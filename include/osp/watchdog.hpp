@@ -3,43 +3,45 @@
  * @brief Thread watchdog component for monitoring thread liveness.
  *
  * Provides a lightweight watchdog mechanism to detect unresponsive threads.
- * Threads register with the watchdog and periodically "feed" it to signal
- * they are alive. If a thread fails to feed within its timeout period,
+ * Threads register with the watchdog and receive a ThreadHeartbeat* to
+ * periodically signal liveness. If a thread fails to beat within its timeout,
  * the watchdog invokes a timeout callback.
  *
  * Design:
  * - Zero heap allocation, fixed-capacity slot array.
- * - Feed() is lock-free (hot path) - just atomic store.
+ * - Beat() is lock-free (hot path) - just atomic store via ThreadHeartbeat.
  * - Check() uses mutex for slot iteration (cold path, called from timer).
  * - Callbacks executed outside mutex (collect-release-execute pattern).
  * - Compatible with -fno-exceptions -fno-rtti.
+ * - No circular dependency: modules only need platform.hpp for ThreadHeartbeat.
+ *
+ * Dependency direction:
+ *   platform.hpp (ThreadHeartbeat)  <--  all modules (Beat only)
+ *   platform.hpp (ThreadHeartbeat)  <--  watchdog.hpp (Check/Register)
+ *   watchdog.hpp  <--  application layer (wiring)
  *
  * Typical usage:
  *
+ *   // Application layer wires watchdog to modules:
  *   osp::ThreadWatchdog<32> wd;
  *   wd.SetOnTimeout([](uint32_t id, const char* name, void* ctx) {
  *     fprintf(stderr, "Thread %s timed out!\n", name);
  *   }, nullptr);
  *
- *   // In worker thread:
- *   auto slot = wd.Register("WorkerThread", 5000);  // 5s timeout
- *   if (slot.has_value()) {
+ *   // Module thread function (only needs platform.hpp):
+ *   void WorkerLoop(osp::ThreadHeartbeat* hb) {
  *     while (running) {
+ *       if (hb) hb->Beat();  // single atomic store
  *       // ... do work ...
- *       wd.Feed(slot.value());  // Signal alive
  *     }
- *     wd.Unregister(slot.value());
  *   }
  *
- *   // In main thread or timer callback:
- *   wd.Check();  // Scan for timeouts
+ *   // Register and wire:
+ *   auto [id, hb] = wd.Register("worker", 5000);
+ *   // pass hb to module, start thread...
  *
- * Integration with TimerScheduler:
- *
- *   osp::TimerScheduler<8> timer;
- *   osp::ThreadWatchdog<32> wd;
- *   timer.Add(1000, &osp::ThreadWatchdog<32>::CheckTick, &wd);
- *   timer.Start();
+ *   // Periodic check (from TimerScheduler or main loop):
+ *   wd.Check();
  */
 
 #ifndef OSP_WATCHDOG_HPP_
@@ -49,8 +51,10 @@
 #include "osp/vocabulary.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <thread>
 
 namespace osp {
 
@@ -65,14 +69,10 @@ using WatchdogSlotId = NewType<uint32_t, WatchdogSlotIdTag>;
 // WatchdogError - Error codes for watchdog operations
 // ============================================================================
 
-/**
- * @brief Error codes returned by watchdog operations.
- */
 enum class WatchdogError : uint8_t {
   kSlotsFull = 0,         ///< All watchdog slots are occupied.
   kInvalidTimeout,        ///< Timeout value is zero or invalid.
   kNotRegistered,         ///< Slot ID not found or already unregistered.
-  kAlreadyRegistered      ///< Thread already registered (reserved).
 };
 
 // ============================================================================
@@ -80,11 +80,15 @@ enum class WatchdogError : uint8_t {
 // ============================================================================
 
 /**
- * @brief Monitors thread liveness via periodic feed operations.
+ * @brief Monitors thread liveness via periodic heartbeat signals.
  *
- * Threads register with a timeout period and must call Feed() at least
- * once per period. Check() scans all registered threads and invokes
- * callbacks for timed-out or recovered threads.
+ * Register() returns a ThreadHeartbeat* that the monitored thread calls
+ * Beat() on. Check() scans all registered slots and invokes callbacks
+ * for timed-out or recovered threads.
+ *
+ * ThreadHeartbeat lives in platform.hpp, so monitored modules do NOT need
+ * to include watchdog.hpp -- they only need platform.hpp (already included
+ * by all osp modules).
  *
  * @tparam MaxThreads  Maximum number of concurrent monitored threads.
  */
@@ -95,37 +99,25 @@ class ThreadWatchdog final {
   // Callback Types
   // --------------------------------------------------------------------------
 
-  /**
-   * @brief Callback invoked when a thread times out.
-   *
-   * @param slot_id  The slot ID of the timed-out thread.
-   * @param name     The thread name (null-terminated, max 31 chars).
-   * @param ctx      User-supplied context pointer.
-   */
   using TimeoutCallback = void (*)(uint32_t slot_id, const char* name, void* ctx);
-
-  /**
-   * @brief Callback invoked when a previously timed-out thread recovers.
-   *
-   * @param slot_id  The slot ID of the recovered thread.
-   * @param name     The thread name (null-terminated, max 31 chars).
-   * @param ctx      User-supplied context pointer.
-   */
   using RecoverCallback = void (*)(uint32_t slot_id, const char* name, void* ctx);
+
+  // --------------------------------------------------------------------------
+  // Registration Result
+  // --------------------------------------------------------------------------
+
+  /** @brief Successful registration result: slot ID + heartbeat pointer. */
+  struct RegResult {
+    WatchdogSlotId id;
+    ThreadHeartbeat* heartbeat;  ///< Pointer to slot's heartbeat (stable).
+  };
 
   // --------------------------------------------------------------------------
   // Construction / Destruction
   // --------------------------------------------------------------------------
 
-  /**
-   * @brief Construct a watchdog. Zero heap allocation.
-   */
   ThreadWatchdog() noexcept = default;
-
-  /**
-   * @brief Destructor. Does not automatically unregister threads.
-   */
-  ~ThreadWatchdog() = default;
+  ~ThreadWatchdog() { StopAutoCheck(); }
 
   ThreadWatchdog(const ThreadWatchdog&) = delete;
   ThreadWatchdog& operator=(const ThreadWatchdog&) = delete;
@@ -139,22 +131,19 @@ class ThreadWatchdog final {
   /**
    * @brief Register a thread for watchdog monitoring.
    *
-   * Finds a free slot, marks it active, and records the timeout period.
-   * The thread must call Feed() at least once per timeout_ms milliseconds.
+   * Returns a RegResult containing the slot ID and a stable ThreadHeartbeat*
+   * that the monitored thread should call Beat() on in its main loop.
    *
    * Thread-safe (acquires internal mutex).
    *
    * @param name        Thread name (max 31 chars, truncated if longer).
    * @param timeout_ms  Timeout period in milliseconds (must be > 0).
-   *
-   * @return WatchdogSlotId on success, or WatchdogError on failure:
-   *         - kInvalidTimeout if timeout_ms == 0.
-   *         - kSlotsFull      if all slots are occupied.
+   * @return RegResult on success, or WatchdogError on failure.
    */
-  expected<WatchdogSlotId, WatchdogError> Register(const char* name,
-                                                     uint32_t timeout_ms) noexcept {
+  expected<RegResult, WatchdogError> Register(const char* name,
+                                              uint32_t timeout_ms) noexcept {
     if (timeout_ms == 0U) {
-      return expected<WatchdogSlotId, WatchdogError>::error(
+      return expected<RegResult, WatchdogError>::error(
           WatchdogError::kInvalidTimeout);
     }
 
@@ -164,28 +153,25 @@ class ThreadWatchdog final {
       if (!slots_[i].active.load(std::memory_order_relaxed)) {
         slots_[i].name.assign(TruncateToCapacity, name);
         slots_[i].timeout_us = static_cast<uint64_t>(timeout_ms) * 1000ULL;
-        slots_[i].last_feed_us.store(SteadyNowUs(), std::memory_order_relaxed);
+        slots_[i].heartbeat.Beat();  // Initialize with current time
         slots_[i].timed_out = false;
         slots_[i].active.store(true, std::memory_order_release);
-        return expected<WatchdogSlotId, WatchdogError>::success(
-            WatchdogSlotId(i));
+        return expected<RegResult, WatchdogError>::success(
+            RegResult{WatchdogSlotId(i), &slots_[i].heartbeat});
       }
     }
 
-    return expected<WatchdogSlotId, WatchdogError>::error(
+    return expected<RegResult, WatchdogError>::error(
         WatchdogError::kSlotsFull);
   }
 
   /**
    * @brief Unregister a thread from watchdog monitoring.
    *
-   * Marks the slot inactive and makes it available for reuse.
-   *
    * Thread-safe (acquires internal mutex).
    *
-   * @param id  The slot ID returned by Register().
-   *
-   * @return Success, or WatchdogError::kNotRegistered if id is invalid.
+   * @param id  The slot ID from Register().
+   * @return Success, or WatchdogError::kNotRegistered if invalid.
    */
   expected<void, WatchdogError> Unregister(WatchdogSlotId id) noexcept {
     const uint32_t idx = id.value();
@@ -205,43 +191,27 @@ class ThreadWatchdog final {
     return expected<void, WatchdogError>::success();
   }
 
-  // --------------------------------------------------------------------------
-  // Feed (HOT PATH - lock-free)
-  // --------------------------------------------------------------------------
-
   /**
-   * @brief Signal that the thread is alive.
+   * @brief Feed a slot by ID (convenience, for callers that have the ID).
    *
-   * Updates the last feed timestamp for the given slot. This is the hot path
-   * and must be as fast as possible - just an atomic store with relaxed
-   * ordering.
-   *
-   * Lock-free, no mutex, no branches (except bounds check).
-   *
-   * @param id  The slot ID returned by Register().
+   * Equivalent to calling Beat() on the slot's ThreadHeartbeat.
+   * Lock-free hot path.
    */
   void Feed(WatchdogSlotId id) noexcept {
     const uint32_t idx = id.value();
     if (OSP_LIKELY(idx < MaxThreads)) {
-      slots_[idx].last_feed_us.store(SteadyNowUs(), std::memory_order_relaxed);
+      slots_[idx].heartbeat.Beat();
     }
   }
 
   // --------------------------------------------------------------------------
-  // Check (COLD PATH - called from timer)
+  // Check (COLD PATH - called from timer or main loop)
   // --------------------------------------------------------------------------
 
   /**
    * @brief Scan all registered threads and invoke callbacks for timeouts.
    *
-   * Iterates active slots, compares current time vs last feed time + timeout.
-   * If a thread has timed out and wasn't already marked timed_out, invokes
-   * on_timeout_. If a thread was timed_out but has now fed, invokes
-   * on_recovered_.
-   *
-   * Callbacks are executed outside the mutex (collect-release-execute pattern).
-   *
-   * Thread-safe (acquires internal mutex for slot iteration).
+   * Callbacks are executed outside the mutex (collect-release-execute).
    *
    * @return Number of currently timed-out threads.
    */
@@ -261,7 +231,7 @@ class ThreadWatchdog final {
 
     const uint64_t now = SteadyNowUs();
 
-    // Phase 1: Collect callbacks under lock
+    // Phase 1: Collect under lock
     {
       std::lock_guard<std::mutex> lock(mutex_);
 
@@ -270,13 +240,11 @@ class ThreadWatchdog final {
           continue;
         }
 
-        const uint64_t last_feed = slots_[i].last_feed_us.load(
-            std::memory_order_relaxed);
-        const uint64_t deadline = last_feed + slots_[i].timeout_us;
-        const bool is_timed_out = (now > deadline);
+        const uint64_t last_beat = slots_[i].heartbeat.LastBeatUs();
+        const bool is_timed_out = (now > last_beat) &&
+            ((now - last_beat) > slots_[i].timeout_us);
 
         if (is_timed_out && !slots_[i].timed_out) {
-          // Newly timed out
           slots_[i].timed_out = true;
           if (on_timeout_ != nullptr) {
             timeout_pending[timeout_count].fn = on_timeout_;
@@ -286,7 +254,6 @@ class ThreadWatchdog final {
             ++timeout_count;
           }
         } else if (!is_timed_out && slots_[i].timed_out) {
-          // Recovered
           slots_[i].timed_out = false;
           if (on_recovered_ != nullptr) {
             recover_pending[recover_count].fn = on_recovered_;
@@ -302,15 +269,13 @@ class ThreadWatchdog final {
         }
       }
     }
-    // mutex_ released here
 
-    // Phase 2: Execute callbacks outside the lock
+    // Phase 2: Execute callbacks outside lock
     for (uint32_t i = 0U; i < timeout_count; ++i) {
       timeout_pending[i].fn(timeout_pending[i].slot_id,
                             timeout_pending[i].name.c_str(),
                             timeout_pending[i].ctx);
     }
-
     for (uint32_t i = 0U; i < recover_count; ++i) {
       recover_pending[i].fn(recover_pending[i].slot_id,
                             recover_pending[i].name.c_str(),
@@ -324,23 +289,11 @@ class ThreadWatchdog final {
   // Callback Configuration
   // --------------------------------------------------------------------------
 
-  /**
-   * @brief Set the timeout callback.
-   *
-   * @param fn   Callback function pointer (may be nullptr to disable).
-   * @param ctx  User context forwarded to fn.
-   */
   void SetOnTimeout(TimeoutCallback fn, void* ctx = nullptr) noexcept {
     on_timeout_ = fn;
     timeout_ctx_ = ctx;
   }
 
-  /**
-   * @brief Set the recovery callback.
-   *
-   * @param fn   Callback function pointer (may be nullptr to disable).
-   * @param ctx  User context forwarded to fn.
-   */
   void SetOnRecovered(RecoverCallback fn, void* ctx = nullptr) noexcept {
     on_recovered_ = fn;
     recover_ctx_ = ctx;
@@ -350,55 +303,25 @@ class ThreadWatchdog final {
   // Query
   // --------------------------------------------------------------------------
 
-  /**
-   * @brief Check if a specific slot is currently timed out.
-   *
-   * Thread-safe (acquires internal mutex).
-   *
-   * @param id  The slot ID returned by Register().
-   *
-   * @return true if the slot is active and timed out, false otherwise.
-   */
   bool IsTimedOut(WatchdogSlotId id) const noexcept {
     const uint32_t idx = id.value();
-    if (idx >= MaxThreads) {
-      return false;
-    }
-
+    if (idx >= MaxThreads) return false;
     std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!slots_[idx].active.load(std::memory_order_acquire)) {
-      return false;
-    }
-
+    if (!slots_[idx].active.load(std::memory_order_acquire)) return false;
     return slots_[idx].timed_out;
   }
 
-  /**
-   * @brief Count the number of currently active (registered) threads.
-   *
-   * Thread-safe (acquires internal mutex).
-   */
   uint32_t ActiveCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-
     uint32_t count = 0U;
     for (uint32_t i = 0U; i < MaxThreads; ++i) {
-      if (slots_[i].active.load(std::memory_order_acquire)) {
-        ++count;
-      }
+      if (slots_[i].active.load(std::memory_order_acquire)) ++count;
     }
     return count;
   }
 
-  /**
-   * @brief Count the number of currently timed-out threads.
-   *
-   * Thread-safe (acquires internal mutex).
-   */
   uint32_t TimedOutCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-
     uint32_t count = 0U;
     for (uint32_t i = 0U; i < MaxThreads; ++i) {
       if (slots_[i].active.load(std::memory_order_acquire) &&
@@ -409,6 +332,9 @@ class ThreadWatchdog final {
     return count;
   }
 
+  /** @brief Compile-time capacity. */
+  static constexpr uint32_t Capacity() noexcept { return MaxThreads; }
+
   // --------------------------------------------------------------------------
   // TimerScheduler Integration
   // --------------------------------------------------------------------------
@@ -417,67 +343,87 @@ class ThreadWatchdog final {
    * @brief Static callback for TimerScheduler integration.
    *
    * Usage:
-   *   osp::TimerScheduler<8> timer;
-   *   osp::ThreadWatchdog<32> wd;
    *   timer.Add(1000, &osp::ThreadWatchdog<32>::CheckTick, &wd);
-   *
-   * @param ctx  Pointer to ThreadWatchdog instance.
    */
   static void CheckTick(void* ctx) noexcept {
     OSP_ASSERT(ctx != nullptr);
     static_cast<ThreadWatchdog*>(ctx)->Check();
   }
 
- private:
   // --------------------------------------------------------------------------
-  // Internal Types
+  // Self-Driven Check (optional fallback for TimerScheduler single-point failure)
   // --------------------------------------------------------------------------
 
   /**
-   * @brief Represents a single watchdog slot.
+   * @brief Start an internal thread that calls Check() periodically.
+   *
+   * Provides a fallback when TimerScheduler (the primary Check() driver)
+   * may itself become unresponsive. Only one auto-check thread is created;
+   * calling StartAutoCheck() again is a no-op.
+   *
+   * The auto-check thread is intentionally simple (sleep + Check loop)
+   * and does NOT register itself with the watchdog to avoid circular
+   * dependency.
+   *
+   * @param interval_ms  Check interval in milliseconds (must be > 0).
    */
+  void StartAutoCheck(uint32_t interval_ms) noexcept {
+    if (interval_ms == 0U) {
+      return;
+    }
+    bool expected = false;
+    if (!auto_check_running_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+      return;  // Already running
+    }
+    auto_check_thread_ = std::thread([this, interval_ms]() {
+      while (auto_check_running_.load(std::memory_order_acquire)) {
+        Check();
+        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+      }
+    });
+  }
+
+  /**
+   * @brief Stop the internal auto-check thread.
+   *
+   * Blocks until the thread exits. Safe to call if StartAutoCheck()
+   * was never called (no-op).
+   */
+  void StopAutoCheck() noexcept {
+    auto_check_running_.store(false, std::memory_order_release);
+    if (auto_check_thread_.joinable()) {
+      auto_check_thread_.join();
+    }
+  }
+
+ private:
   struct Slot {
-    std::atomic<bool> active{false};           ///< Slot is in use.
-    std::atomic<uint64_t> last_feed_us{0};     ///< Last feed timestamp (us).
-    uint64_t timeout_us{0};                    ///< Timeout period (us).
-    bool timed_out{false};                     ///< Currently timed out flag.
-    FixedString<32> name;                      ///< Thread name.
+    std::atomic<bool> active{false};
+    ThreadHeartbeat heartbeat;            ///< Heartbeat signal (in platform.hpp).
+    uint64_t timeout_us{0};
+    bool timed_out{false};                ///< Protected by mutex_.
+    FixedString<32> name;
   };
 
-  // --------------------------------------------------------------------------
-  // Data Members
-  // --------------------------------------------------------------------------
-
-  Slot slots_[MaxThreads]{};                   ///< Embedded slot array.
-  mutable std::mutex mutex_;                   ///< Guards slot iteration.
-  TimeoutCallback on_timeout_ = nullptr;       ///< Timeout callback.
-  void* timeout_ctx_ = nullptr;                ///< Timeout callback context.
-  RecoverCallback on_recovered_ = nullptr;     ///< Recovery callback.
-  void* recover_ctx_ = nullptr;                ///< Recovery callback context.
+  Slot slots_[MaxThreads]{};
+  mutable std::mutex mutex_;
+  TimeoutCallback on_timeout_{nullptr};
+  void* timeout_ctx_{nullptr};
+  RecoverCallback on_recovered_{nullptr};
+  void* recover_ctx_{nullptr};
+  std::atomic<bool> auto_check_running_{false};
+  std::thread auto_check_thread_;
 };
 
 // ============================================================================
-// WatchdogGuard - RAII watchdog registration
+// WatchdogGuard - RAII watchdog registration (for application layer)
 // ============================================================================
 
 /**
  * @brief RAII wrapper for automatic watchdog registration/unregistration.
  *
- * Registers with the watchdog on construction and unregisters on destruction.
- * Provides a Feed() method for periodic liveness signaling.
- *
- * Non-copyable, non-movable.
- *
- * Typical usage:
- *
- *   osp::ThreadWatchdog<32> wd;
- *   {
- *     osp::WatchdogGuard<32> guard(&wd, "WorkerThread", 5000);
- *     while (running) {
- *       // ... do work ...
- *       guard.Feed();
- *     }
- *   }  // Automatic unregister
+ * Handles nullptr watchdog gracefully (no-op).
  *
  * @tparam MaxThreads  Must match the ThreadWatchdog template parameter.
  */
@@ -487,24 +433,20 @@ class WatchdogGuard final {
   /**
    * @brief Construct and register with the watchdog.
    *
-   * @param wd          Non-owning pointer to ThreadWatchdog instance.
-   * @param name        Thread name (max 31 chars).
-   * @param timeout_ms  Timeout period in milliseconds.
+   * If wd is nullptr, the guard is a no-op (IsValid() returns false).
    */
-  WatchdogGuard(ThreadWatchdog<MaxThreads>* wd, const char* name,
-                uint32_t timeout_ms) noexcept
-      : wd_(wd), id_(WatchdogSlotId(0)), valid_(false) {
-    OSP_ASSERT(wd_ != nullptr);
+  explicit WatchdogGuard(ThreadWatchdog<MaxThreads>* wd, const char* name,
+                         uint32_t timeout_ms) noexcept
+      : wd_(wd), id_(WatchdogSlotId(0)), hb_(nullptr), valid_(false) {
+    if (wd_ == nullptr) return;
     auto result = wd_->Register(name, timeout_ms);
     if (result.has_value()) {
-      id_ = result.value();
+      id_ = result.value().id;
+      hb_ = result.value().heartbeat;
       valid_ = true;
     }
   }
 
-  /**
-   * @brief Destructor. Unregisters from the watchdog if valid.
-   */
   ~WatchdogGuard() {
     if (valid_) {
       (void)wd_->Unregister(id_);
@@ -516,28 +458,20 @@ class WatchdogGuard final {
   WatchdogGuard(WatchdogGuard&&) = delete;
   WatchdogGuard& operator=(WatchdogGuard&&) = delete;
 
-  /**
-   * @brief Signal that the thread is alive.
-   *
-   * Forwards to ThreadWatchdog::Feed() if the guard is valid.
-   */
+  /** @brief Signal liveness (forwards to ThreadHeartbeat::Beat). */
   void Feed() noexcept {
-    if (valid_) {
-      wd_->Feed(id_);
+    if (hb_ != nullptr) {
+      hb_->Beat();
     }
   }
 
-  /**
-   * @brief Check if the guard successfully registered.
-   *
-   * @return true if registration succeeded, false otherwise.
-   */
   bool IsValid() const noexcept { return valid_; }
 
  private:
-  ThreadWatchdog<MaxThreads>* wd_;  ///< Non-owning watchdog pointer.
-  WatchdogSlotId id_;               ///< Assigned slot ID.
-  bool valid_;                      ///< Registration succeeded flag.
+  ThreadWatchdog<MaxThreads>* wd_;
+  WatchdogSlotId id_;
+  ThreadHeartbeat* hb_;
+  bool valid_;
 };
 
 }  // namespace osp

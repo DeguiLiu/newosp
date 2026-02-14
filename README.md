@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
 
-Modern C++14/17 header-only embedded infrastructure library for ARM-Linux, extracted and modernized from the OSP (Open Streaming Platform) codebase (~140k LOC).
+Modern C++17 header-only embedded infrastructure library for ARM-Linux, extracted and modernized from the OSP (Open Streaming Platform) codebase (~140k LOC).
 
 **[中文文档](README_zh.md)**
 
@@ -16,7 +16,7 @@ Modern C++14/17 header-only embedded infrastructure library for ARM-Linux, extra
 - **Lock-free messaging**: MPSC ring buffer bus with priority-based admission control
 - **Template-based design patterns**: Tag dispatch, variadic templates, CRTP, compile-time composition
 
-## Modules
+## Modules (37 headers)
 
 ### Foundation Layer
 
@@ -24,6 +24,7 @@ Modern C++14/17 header-only embedded infrastructure library for ARM-Linux, extra
 |--------|-------------|
 | `platform.hpp` | Platform/architecture detection, compiler hints, `OSP_ASSERT` macro |
 | `vocabulary.hpp` | `expected`, `optional`, `FixedVector`, `FixedString`, `FixedFunction`, `function_ref`, `not_null`, `NewType`, `ScopeGuard` |
+| `spsc_ringbuffer.hpp` | Lock-free wait-free SPSC ring buffer (trivially_copyable, batch ops, FakeTSO for single-core MCU) |
 | `config.hpp` | Multi-format config parser (INI/JSON/YAML) with template-based backend dispatch |
 | `log.hpp` | Logging macros with compile-time level filtering (stderr backend) |
 
@@ -35,10 +36,18 @@ Modern C++14/17 header-only embedded infrastructure library for ARM-Linux, extra
 | `shell.hpp` | Remote debug shell (telnet) with TAB completion, command history, `OSP_SHELL_CMD` registration |
 | `mem_pool.hpp` | Fixed-block memory pool (`FixedPool<BlockSize, MaxBlocks>`) with embedded free list |
 | `shutdown.hpp` | Async-signal-safe graceful shutdown with LIFO callbacks and `pipe(2)` wakeup |
+| `watchdog.hpp` | Software watchdog (SteadyNowUs-based, configurable timeout/action) |
+| `fault_collector.hpp` | Fault collection and reporting (FaultReporter POD injection, ring buffer storage) |
 | `bus.hpp` | Lock-free MPSC message bus (`AsyncBus<PayloadVariant>`) with type-based routing |
 | `node.hpp` | Lightweight pub/sub node abstraction (`Node<PayloadVariant>`) inspired by ROS2/CyberRT |
 | `worker_pool.hpp` | Multi-worker thread pool built on AsyncBus with SPSC per-worker queues |
 | `executor.hpp` | Scheduler (Single/Static/Pinned + Realtime SCHED_FIFO/DEADLINE) |
+| `semaphore.hpp` | Lightweight semaphore (futex-based) |
+
+### State Machine & Behavior Tree
+
+| Module | Description |
+|--------|-------------|
 | `hsm.hpp` | Hierarchical state machine (LCA-based transitions, nested states) |
 | `bt.hpp` | Behavior tree (Sequence/Fallback/Parallel composite nodes) |
 
@@ -49,43 +58,57 @@ Modern C++14/17 header-only embedded infrastructure library for ARM-Linux, extra
 | `socket.hpp` | TCP/UDP RAII wrapper (based on sockpp) |
 | `connection.hpp` | Connection pool management (auto-reconnect, heartbeat) |
 | `io_poller.hpp` | epoll event loop (edge-triggered + timeout) |
+| `net.hpp` | Network layer wrapper (address resolution, socket options) |
+
+### Transport Layer
+
+| Module | Description |
+|--------|-------------|
 | `transport.hpp` | Transparent network transport (TCP/UDP frame protocol) |
-| `semaphore.hpp` | Lightweight semaphore (futex-based) |
 | `shm_transport.hpp` | Shared memory IPC (lock-free SPSC ring buffer) |
+| `serial_transport.hpp` | Industrial serial transport (CRC-CCITT, PTY testing, IEC 61508) |
+| `transport_factory.hpp` | Automatic transport selection (inproc/shm/tcp) |
 | `data_fusion.hpp` | Multi-source data fusion (time alignment, interpolation) |
-| `discovery.hpp` | Node discovery (UDP multicast + static config) |
+
+### Service & Discovery Layer
+
+| Module | Description |
+|--------|-------------|
 | `service.hpp` | RPC service (request-response pattern) |
+| `service_hsm.hpp` | HSM-driven service lifecycle (Idle/Listening/Active/Error) |
+| `discovery.hpp` | Node discovery (UDP multicast + static config) |
+| `discovery_hsm.hpp` | HSM-driven discovery process (Idle/Announcing/Stable/Degraded) |
 | `node_manager.hpp` | Node management + heartbeat monitoring |
 | `node_manager_hsm.hpp` | HSM-driven node connection management |
 
-### Advanced Features
+### Application Layer
 
 | Module | Description |
 |--------|-------------|
 | `lifecycle_node.hpp` | Lifecycle node (Unconfigured → Inactive → Active → Finalized) |
 | `qos.hpp` | QoS configuration (Reliability/History/Deadline/Lifespan) |
-| `serial_transport.hpp` | Industrial serial transport (CRC-CCITT, PTY testing, IEC 61508) |
 | `app.hpp` | Application/Instance two-tier model (compatible with original OSP) |
 | `post.hpp` | Unified posting (local/remote/broadcast + sync messages) |
-| `transport_factory.hpp` | Automatic transport selection (inproc/shm/tcp) |
-| `net.hpp` | Network layer wrapper (address resolution, socket options) |
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Application: App/Instance, LifecycleNode, QoS                  │
+│  Application: App/Instance, LifecycleNode, QoS, Post            │
 ├─────────────────────────────────────────────────────────────────┤
-│  Service: Service (RPC), Discovery, NodeManager                 │
+│  Service: Service (RPC), ServiceHSM, Discovery, DiscoveryHSM    │
+│           NodeManager, NodeManagerHSM                            │
 ├─────────────────────────────────────────────────────────────────┤
 │  Transport: Transport (TCP/UDP), ShmTransport, SerialTransport  │
-│             TransportFactory (inproc/shm/tcp auto-selection)    │
+│             TransportFactory (inproc/shm/tcp), DataFusion       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Network: Socket, Connection, IoPoller (epoll), Net             │
 ├─────────────────────────────────────────────────────────────────┤
-│  Messaging: AsyncBus (MPSC), Node (Pub/Sub), Post (unified)     │
+│  Messaging: AsyncBus (MPSC), Node (Pub/Sub), SpscRingbuffer     │
 ├─────────────────────────────────────────────────────────────────┤
 │  Scheduling: Executor (Realtime), WorkerPool, HSM, BT           │
+├─────────────────────────────────────────────────────────────────┤
+│  Reliability: Watchdog, FaultCollector                          │
 ├─────────────────────────────────────────────────────────────────┤
 │  Foundation: Config, Log, Timer, Shell, MemPool, Shutdown       │
 │              Platform, Vocabulary (expected/optional/Fixed*)     │
@@ -177,8 +200,18 @@ All dependencies are fetched automatically via CMake FetchContent:
 
 ## Examples and Tests
 
-- Example programs: `examples/` directory, see [examples/README.md](examples/README.md)
-- Unit tests: `tests/` directory, 328+ test cases, see [tests/README.md](tests/README.md)
+- **Examples**: 13 single-file demos + 5 multi-file applications (18 total)
+  - Single-file: `basic_demo`, `benchmark`, `bt_patrol_demo`, `client_demo`, `codegen_demo`, `hsm_bt_combo_demo`, `hsm_protocol_demo`, `node_manager_hsm_demo`, `priority_demo`, `protocol_demo`, `realtime_executor_demo`, `serial_demo`, `worker_pool_demo`
+  - Multi-file apps: `client_gateway`, `net_stress`, `serial_ota`, `shm_ipc`, `streaming_protocol`
+  - See [docs/examples_zh.md](docs/examples_zh.md) for detailed guide
+- **Unit tests**: 758 test cases covering all modules
+  - See [tests/README.md](tests/README.md) for test documentation
+
+## Documentation
+
+- Design document: [docs/design_zh.md](docs/design_zh.md)
+- Changelog: [docs/changelog_zh.md](docs/changelog_zh.md)
+- Examples guide: [docs/examples_zh.md](docs/examples_zh.md)
 
 ## Design Patterns
 

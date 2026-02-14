@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
 
-现代 C++17 纯头文件嵌入式基础设施库，面向 ARM-Linux 平台，从 OSP (Open Streaming Platform) 代码库 (~140k LOC) 提取并现代化重构。35 个头文件，575 测试用例，ASan/TSan/UBSan 全部通过。
+现代 C++17 纯头文件嵌入式基础设施库，面向 ARM-Linux 平台，从 OSP (Open Streaming Platform) 代码库 (~140k LOC) 提取并现代化重构。37 个头文件，758 测试用例，ASan/TSan/UBSan 全部通过。
 
 ## 特性
 
@@ -20,8 +20,9 @@
 
 | 模块 | 说明 |
 |------|------|
-| `platform.hpp` | 平台/架构检测、编译器提示、`OSP_ASSERT` 宏 |
+| `platform.hpp` | 平台/架构检测、编译器提示、`OSP_ASSERT` 宏、`SteadyNowUs` 时基 |
 | `vocabulary.hpp` | `expected`、`optional`、`FixedVector`、`FixedString`、`FixedFunction`、`function_ref`、`not_null`、`NewType`、`ScopeGuard` |
+| `spsc_ringbuffer.hpp` | 无锁 wait-free SPSC 环形缓冲区 (trivially_copyable, 批量操作, 单核 MCU FakeTSO) |
 | `config.hpp` | 多格式配置解析器 (INI/JSON/YAML)，基于模板的后端分发 |
 | `log.hpp` | 日志宏，编译期级别过滤 (stderr 后端) |
 
@@ -33,13 +34,20 @@
 | `shell.hpp` | 远程调试 Shell (telnet)，支持 TAB 补全、命令历史、`OSP_SHELL_CMD` 注册 |
 | `mem_pool.hpp` | 固定块内存池 (`FixedPool<BlockSize, MaxBlocks>`)，嵌入式空闲链表 |
 | `shutdown.hpp` | 异步信号安全的优雅关停，LIFO 回调链 + `pipe(2)` 唤醒 |
+| `watchdog.hpp` | 软件看门狗 (SteadyNowUs 时基, 可配置超时/动作) |
+| `fault_collector.hpp` | 故障收集与上报 (FaultReporter POD 注入, 环形缓冲存储) |
 | `bus.hpp` | 无锁 MPSC 消息总线 (`AsyncBus<PayloadVariant>`)，基于类型的路由 |
 | `node.hpp` | 轻量级发布/订阅节点抽象 (`Node<PayloadVariant>`)，灵感来自 ROS2/CyberRT |
 | `worker_pool.hpp` | 多工作线程池，基于 AsyncBus + SPSC 每工作线程队列 |
 | `executor.hpp` | 调度器 (Single/Static/Pinned + Realtime SCHED_FIFO/DEADLINE) |
+| `semaphore.hpp` | 轻量信号量 (futex-based LightSemaphore/PosixSemaphore) |
+
+### 状态机与行为树
+
+| 模块 | 说明 |
+|------|------|
 | `hsm.hpp` | 层次状态机 (LCA-based transitions, 嵌套状态) |
 | `bt.hpp` | 行为树 (Sequence/Fallback/Parallel 组合节点) |
-| `semaphore.hpp` | 轻量信号量 (futex-based LightSemaphore/PosixSemaphore) |
 
 ### 网络层
 
@@ -60,16 +68,16 @@
 | `transport_factory.hpp` | 自动传输选择 (inproc/shm/tcp, FixedString 配置) |
 | `data_fusion.hpp` | 多源数据融合 (时间对齐、插值) |
 
-### 服务层
+### 服务与发现层
 
 | 模块 | 说明 |
 |------|------|
 | `service.hpp` | RPC 服务 (请求-响应模式, ServiceRegistry FixedVector) |
+| `service_hsm.hpp` | HSM 驱动的服务生命周期 (Idle/Listening/Active/Error) |
 | `discovery.hpp` | 节点发现 (UDP 多播 + 静态配置, FixedString) |
+| `discovery_hsm.hpp` | HSM 驱动的节点发现流程 (Idle/Announcing/Stable/Degraded) |
 | `node_manager.hpp` | 节点管理 + 心跳监控 (FixedString remote_host) |
 | `node_manager_hsm.hpp` | HSM 驱动的节点连接管理 (Connected/Suspect/Disconnected) |
-| `service_hsm.hpp` | HSM 驱动的服务生命周期 (Idle/Listening/Active/Error) |
-| `discovery_hsm.hpp` | HSM 驱动的节点发现流程 (Idle/Announcing/Stable/Degraded) |
 
 ### 应用层
 
@@ -84,24 +92,26 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  应用层: App/Instance(HSM), LifecycleNode(HSM), QoS            │
+│  应用层: App/Instance(HSM), LifecycleNode(HSM), QoS, Post      │
 ├─────────────────────────────────────────────────────────────────┤
 │  服务层: Service(RPC), Discovery, NodeManager                   │
-│          ServiceRegistry(FixedVector), NodeEntry(FixedString)   │
+│          ServiceHSM, DiscoveryHSM, NodeManagerHSM               │
 ├─────────────────────────────────────────────────────────────────┤
 │  传输层: Transport(TCP/UDP), ShmTransport, SerialTransport      │
-│          TransportFactory(FixedString), Endpoint(FixedString)   │
+│          TransportFactory, DataFusion                           │
 ├─────────────────────────────────────────────────────────────────┤
 │  网络层: Socket, Connection, IoPoller(epoll), Net               │
 ├─────────────────────────────────────────────────────────────────┤
 │  消息层: AsyncBus(MPSC), Node(Pub/Sub), Post(FixedVector)      │
 ├─────────────────────────────────────────────────────────────────┤
-│  调度层: Executor(Realtime), WorkerPool                         │
+│  调度层: Executor(Realtime), WorkerPool(SpscRingbuffer)         │
+├─────────────────────────────────────────────────────────────────┤
+│  可靠性: Watchdog, FaultCollector(FaultReporter)                │
 ├─────────────────────────────────────────────────────────────────┤
 │  核心层: HSM(层次状态机), BT(行为树), Semaphore                 │
 ├─────────────────────────────────────────────────────────────────┤
-│  基础层: Config, Log, Timer, Shell, MemPool, Shutdown           │
-│          Platform(SteadyNowUs), Vocabulary(FixedString/Vector)  │
+│  基础层: Platform, Vocabulary, SpscRingbuffer, Config, Log      │
+│          Timer, Shell, MemPool, Shutdown                        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -191,9 +201,15 @@ sensor.SpinOnce();
 
 ## 示例和测试
 
-- 示例程序: `examples/` 目录 (12 个示例)，参见 [examples/README.md](examples/README.md)
-- 单元测试: `tests/` 目录，575 测试用例，参见 [tests/README.md](tests/README.md)
+- 示例程序: `examples/` 目录 (18 个示例: 13 单文件 + 5 多文件应用)，参见 [examples/README.md](examples/README.md)
+- 单元测试: `tests/` 目录，758 测试用例，参见 [tests/README.md](tests/README.md)
 - 代码生成: `tools/ospgen.py` (YAML → C++ 头文件)，参见 `defs/` 目录
+
+## 文档
+
+- 设计文档: [docs/design_zh.md](docs/design_zh.md) (架构设计)
+- 变更日志: [docs/changelog_zh.md](docs/changelog_zh.md) (P0 调整 + Phase 实施记录)
+- 示例指南: [docs/examples_zh.md](docs/examples_zh.md) (示例���途与架构映射)
 
 ## 设计模式
 

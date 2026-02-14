@@ -11,6 +11,7 @@
 #ifndef OSP_DISCOVERY_HSM_HPP_
 #define OSP_DISCOVERY_HSM_HPP_
 
+#include "osp/fault_collector.hpp"
 #include "osp/hsm.hpp"
 #include "osp/platform.hpp"
 
@@ -46,6 +47,12 @@ struct DiscoveryHsmContext {
   DiscoveryCallbackFn on_degraded;
   void* callback_ctx;
 
+  // Optional fault reporting (nullptr = disabled)
+  FaultReporter fault_reporter;
+
+  // Fault index for discovery degradation
+  static constexpr uint16_t kFaultNetworkDegraded = 0U;
+
   // State indices for RequestTransition from within handlers
   StateMachine<DiscoveryHsmContext, 8>* sm;
   int32_t idx_idle;
@@ -58,6 +65,7 @@ struct DiscoveryHsmContext {
   DiscoveryHsmContext() noexcept
       : discovered_count(0), lost_count(0), stable_threshold(1),
         on_stable(nullptr), on_degraded(nullptr), callback_ctx(nullptr),
+        fault_reporter(),
         sm(nullptr), idx_idle(-1), idx_announcing(-1), idx_discovering(-1),
         idx_stable(-1), idx_degraded(-1), idx_stopped(-1) {}
 };
@@ -168,6 +176,9 @@ inline void OnEnterDiscStable(DiscoveryHsmContext& ctx) {
 
 // Entry action for Degraded state
 inline void OnEnterDiscDegraded(DiscoveryHsmContext& ctx) {
+  ctx.fault_reporter.Report(
+      DiscoveryHsmContext::kFaultNetworkDegraded,
+      ctx.lost_count, FaultPriority::kMedium);
   if (ctx.on_degraded != nullptr) {
     ctx.on_degraded(ctx.callback_ctx);
   }
@@ -266,6 +277,13 @@ class HsmDiscovery {
     std::lock_guard<std::mutex> lock(mutex_);
     context_.on_degraded = fn;
     context_.callback_ctx = ctx;
+  }
+
+  /// @brief Wire optional fault reporter for automatic degradation reporting.
+  /// @param reporter FaultReporter with fn + ctx (nullptr fn = disabled).
+  void SetFaultReporter(FaultReporter reporter) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    context_.fault_reporter = reporter;
   }
 
   // ==========================================================================
