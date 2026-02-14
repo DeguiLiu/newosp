@@ -14,12 +14,11 @@
 // ============================================================================
 
 struct TestInstance : public osp::Instance {
-  static int create_count;
   int last_event = -1;
   uint32_t last_len = 0;
   int msg_count = 0;
 
-  void OnMessage(uint16_t event, const void* data, uint32_t len) override {
+  void OnMessage(uint16_t event, const void* data, uint32_t len) {
     last_event = event;
     last_len = len;
     ++msg_count;
@@ -27,12 +26,7 @@ struct TestInstance : public osp::Instance {
   }
 };
 
-int TestInstance::create_count = 0;
 
-static osp::Instance* TestInstanceFactory() {
-  ++TestInstance::create_count;
-  return new TestInstance();
-}
 
 // ============================================================================
 // IID encoding/decoding
@@ -63,7 +57,7 @@ TEST_CASE("app - Special instance IDs", "[app]") {
 // ============================================================================
 
 TEST_CASE("app - Application construction", "[app]") {
-  osp::Application<16> app(5, "test_app");
+  osp::Application<TestInstance, 16> app(5, "test_app");
   REQUIRE(app.AppId() == 5);
   REQUIRE(std::strcmp(app.Name(), "test_app") == 0);
   REQUIRE(app.InstanceCount() == 0);
@@ -74,33 +68,19 @@ TEST_CASE("app - Application construction", "[app]") {
 // Instance creation
 // ============================================================================
 
-TEST_CASE("app - CreateInstance with factory", "[app]") {
-  TestInstance::create_count = 0;
-  osp::Application<8> app(1, "app1");
-  app.SetFactory(TestInstanceFactory);
-
+TEST_CASE("app - CreateInstance via ObjectPool", "[app]") {
+  osp::Application<TestInstance, 8> app(1, "app1");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
   REQUIRE(r.value() >= 1);
   REQUIRE(app.InstanceCount() == 1);
-  REQUIRE(TestInstance::create_count == 1);
-
-  osp::Instance* inst = app.GetInstance(r.value());
+  auto* inst = app.GetInstance(r.value());
   REQUIRE(inst != nullptr);
   REQUIRE(inst->InsId() == r.value());
 }
 
-TEST_CASE("app - CreateInstance without factory fails", "[app]") {
-  osp::Application<8> app(2, "app2");
-  auto r = app.CreateInstance();
-  REQUIRE(!r.has_value());
-  REQUIRE(r.get_error() == osp::AppError::kFactoryNotSet);
-}
-
 TEST_CASE("app - Instance pool full", "[app]") {
-  osp::Application<2> app(3, "small");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 2> app(3, "small");
   auto r1 = app.CreateInstance();
   REQUIRE(r1.has_value());
   auto r2 = app.CreateInstance();
@@ -115,9 +95,7 @@ TEST_CASE("app - Instance pool full", "[app]") {
 // ============================================================================
 
 TEST_CASE("app - DestroyInstance", "[app]") {
-  osp::Application<8> app(4, "app4");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 8> app(4, "app4");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
   REQUIRE(app.InstanceCount() == 1);
@@ -129,7 +107,7 @@ TEST_CASE("app - DestroyInstance", "[app]") {
 }
 
 TEST_CASE("app - DestroyInstance invalid id", "[app]") {
-  osp::Application<8> app(5, "app5");
+  osp::Application<TestInstance, 8> app(5, "app5");
   auto r = app.DestroyInstance(0);
   REQUIRE(!r.has_value());
   REQUIRE(r.get_error() == osp::AppError::kInvalidId);
@@ -143,9 +121,7 @@ TEST_CASE("app - DestroyInstance invalid id", "[app]") {
 // ============================================================================
 
 TEST_CASE("app - Post and ProcessOne", "[app]") {
-  osp::Application<8> app(6, "app6");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 8> app(6, "app6");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
 
@@ -156,7 +132,7 @@ TEST_CASE("app - Post and ProcessOne", "[app]") {
   REQUIRE(app.ProcessOne());
   REQUIRE(app.PendingMessages() == 0);
 
-  auto* inst = static_cast<TestInstance*>(app.GetInstance(r.value()));
+  auto* inst = app.GetInstance(r.value());
   REQUIRE(inst != nullptr);
   REQUIRE(inst->last_event == 100);
   REQUIRE(inst->last_len == sizeof(payload));
@@ -164,9 +140,7 @@ TEST_CASE("app - Post and ProcessOne", "[app]") {
 }
 
 TEST_CASE("app - Broadcast to all instances", "[app]") {
-  osp::Application<8> app(7, "app7");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 8> app(7, "app7");
   auto r1 = app.CreateInstance();
   auto r2 = app.CreateInstance();
   auto r3 = app.CreateInstance();
@@ -186,9 +160,7 @@ TEST_CASE("app - Broadcast to all instances", "[app]") {
 }
 
 TEST_CASE("app - Instance state management", "[app]") {
-  osp::Application<8> app(8, "app8");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 8> app(8, "app8");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
 
@@ -201,9 +173,7 @@ TEST_CASE("app - Instance state management", "[app]") {
 }
 
 TEST_CASE("app - ProcessAll drains queue", "[app]") {
-  osp::Application<8> app(9, "app9");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 8> app(9, "app9");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
 
@@ -216,14 +186,12 @@ TEST_CASE("app - ProcessAll drains queue", "[app]") {
   REQUIRE(processed == 5);
   REQUIRE(app.PendingMessages() == 0);
 
-  auto* inst = static_cast<TestInstance*>(app.GetInstance(r.value()));
+  auto* inst = app.GetInstance(r.value());
   REQUIRE(inst->msg_count == 5);
 }
 
 TEST_CASE("app - GetInstance returns correct pointer", "[app]") {
-  osp::Application<8> app(10, "app10");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 8> app(10, "app10");
   auto r1 = app.CreateInstance();
   auto r2 = app.CreateInstance();
   REQUIRE(r1.has_value());
@@ -242,7 +210,7 @@ struct DataCapture : public osp::Instance {
   uint8_t captured[512];
   uint32_t captured_len = 0;
 
-  void OnMessage(uint16_t event, const void* data, uint32_t len) override {
+  void OnMessage(uint16_t event, const void* data, uint32_t len) {
     (void)event;
     captured_len = len;
     if (data != nullptr && len > 0 && len <= sizeof(captured)) {
@@ -250,8 +218,6 @@ struct DataCapture : public osp::Instance {
     }
   }
 };
-
-static osp::Instance* DataCaptureFactory() { return new DataCapture(); }
 
 TEST_CASE("app - AppMessage inline small data", "[app]") {
   osp::AppMessage msg{};
@@ -321,9 +287,7 @@ TEST_CASE("app - AppMessage size and alignment", "[app]") {
 }
 
 TEST_CASE("app - Post and process large message via pointer", "[app]") {
-  osp::Application<4> app(50, "large_msg");
-  app.SetFactory(DataCaptureFactory);
-
+  osp::Application<DataCapture, 4> app(50, "large_msg");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
 
@@ -336,16 +300,14 @@ TEST_CASE("app - Post and process large message via pointer", "[app]") {
   REQUIRE(app.Post(r.value(), 99, large, sizeof(large)));
   REQUIRE(app.ProcessOne());
 
-  auto* inst = static_cast<DataCapture*>(app.GetInstance(r.value()));
+  auto* inst = app.GetInstance(r.value());
   REQUIRE(inst != nullptr);
   REQUIRE(inst->captured_len == sizeof(large));
   REQUIRE(std::memcmp(inst->captured, large, sizeof(large)) == 0);
 }
 
 TEST_CASE("app - Post and process small message inline", "[app]") {
-  osp::Application<4> app(51, "small_msg");
-  app.SetFactory(DataCaptureFactory);
-
+  osp::Application<DataCapture, 4> app(51, "small_msg");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
 
@@ -353,7 +315,7 @@ TEST_CASE("app - Post and process small message inline", "[app]") {
   REQUIRE(app.Post(r.value(), 77, &val, sizeof(val)));
   REQUIRE(app.ProcessOne());
 
-  auto* inst = static_cast<DataCapture*>(app.GetInstance(r.value()));
+  auto* inst = app.GetInstance(r.value());
   REQUIRE(inst != nullptr);
   REQUIRE(inst->captured_len == sizeof(val));
 
@@ -367,9 +329,7 @@ TEST_CASE("app - Post and process small message inline", "[app]") {
 // ============================================================================
 
 TEST_CASE("app - Instance starts in Created state", "[app][hsm]") {
-  osp::Application<4> app(60, "hsm_test");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(60, "hsm_test");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
   auto* inst = app.GetInstance(r.value());
@@ -381,9 +341,7 @@ TEST_CASE("app - Instance starts in Created state", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance Initialize lifecycle", "[app][hsm]") {
-  osp::Application<4> app(61, "hsm_init");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(61, "hsm_init");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
   auto* inst = app.GetInstance(r.value());
@@ -396,9 +354,7 @@ TEST_CASE("app - Instance Initialize lifecycle", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance Suspend and Resume", "[app][hsm]") {
-  osp::Application<4> app(62, "hsm_susp");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(62, "hsm_susp");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
   inst->Initialize();
@@ -416,9 +372,7 @@ TEST_CASE("app - Instance Suspend and Resume", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance MarkError recoverable", "[app][hsm]") {
-  osp::Application<4> app(63, "hsm_err");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(63, "hsm_err");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
   inst->Initialize();
@@ -431,9 +385,7 @@ TEST_CASE("app - Instance MarkError recoverable", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance MarkError fatal", "[app][hsm]") {
-  osp::Application<4> app(64, "hsm_fatal");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(64, "hsm_fatal");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
   inst->Initialize();
@@ -446,9 +398,7 @@ TEST_CASE("app - Instance MarkError fatal", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance Recover from error", "[app][hsm]") {
-  osp::Application<4> app(65, "hsm_recov");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(65, "hsm_recov");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
   inst->Initialize();
@@ -463,9 +413,7 @@ TEST_CASE("app - Instance Recover from error", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance Recover from fatal does nothing", "[app][hsm]") {
-  osp::Application<4> app(66, "hsm_no_recov");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(66, "hsm_no_recov");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
   inst->Initialize();
@@ -479,9 +427,7 @@ TEST_CASE("app - Instance Recover from fatal does nothing", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance Destroy from any state", "[app][hsm]") {
-  osp::Application<4> app(67, "hsm_destroy");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(67, "hsm_destroy");
   SECTION("Destroy from Created") {
     auto r = app.CreateInstance();
     auto* inst = app.GetInstance(r.value());
@@ -508,29 +454,24 @@ TEST_CASE("app - Instance Destroy from any state", "[app][hsm]") {
   }
 }
 
-TEST_CASE("app - Instance DispatchMessage transitions through Processing", "[app][hsm]") {
-  osp::Application<4> app(68, "hsm_msg");
-  app.SetFactory(TestInstanceFactory);
-
+TEST_CASE("app - Post+ProcessOne transitions through Processing", "[app][hsm]") {
+  osp::Application<TestInstance, 4> app(68, "hsm_msg");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
   inst->Initialize();
 
-  // DispatchMessage: Idle -> Processing -> (OnMessage) -> Idle
   uint32_t payload = 99;
-  inst->DispatchMessage(42, &payload, sizeof(payload));
+  REQUIRE(app.Post(r.value(), 42, &payload, sizeof(payload)));
+  REQUIRE(app.ProcessOne());
 
-  auto* ti = static_cast<TestInstance*>(inst);
-  REQUIRE(ti->last_event == 42);
-  REQUIRE(ti->msg_count == 1);
-  // After DispatchMessage completes, should be back in Idle
+
+  REQUIRE(inst->last_event == 42);
+  REQUIRE(inst->msg_count == 1);
   REQUIRE(inst->DetailedState() == osp::InstanceDetailedState::kIdle);
 }
 
 TEST_CASE("app - Instance coarse state mapping", "[app][hsm]") {
-  osp::Application<4> app(69, "hsm_coarse");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(69, "hsm_coarse");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
 
@@ -560,9 +501,7 @@ TEST_CASE("app - Instance coarse state mapping", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance legacy SetState still works", "[app][hsm]") {
-  osp::Application<4> app(70, "hsm_legacy");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(70, "hsm_legacy");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
 
@@ -579,9 +518,7 @@ TEST_CASE("app - Instance legacy SetState still works", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance MarkError from Created", "[app][hsm]") {
-  osp::Application<4> app(71, "hsm_err_created");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(71, "hsm_err_created");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
 
@@ -592,9 +529,7 @@ TEST_CASE("app - Instance MarkError from Created", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance Suspend from non-Ready is ignored", "[app][hsm]") {
-  osp::Application<4> app(72, "hsm_susp_noop");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(72, "hsm_susp_noop");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
 
@@ -604,9 +539,7 @@ TEST_CASE("app - Instance Suspend from non-Ready is ignored", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance Resume from non-Suspended is ignored", "[app][hsm]") {
-  osp::Application<4> app(73, "hsm_resume_noop");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(73, "hsm_resume_noop");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
   inst->Initialize();
@@ -617,9 +550,7 @@ TEST_CASE("app - Instance Resume from non-Suspended is ignored", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance HsmContext access", "[app][hsm]") {
-  osp::Application<4> app(74, "hsm_ctx");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(74, "hsm_ctx");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
 
@@ -633,9 +564,7 @@ TEST_CASE("app - Instance HsmContext access", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance IsInState hierarchy check", "[app][hsm]") {
-  osp::Application<4> app(75, "hsm_isin");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(75, "hsm_isin");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
   const auto& ctx = inst->HsmContext();
@@ -650,9 +579,7 @@ TEST_CASE("app - Instance IsInState hierarchy check", "[app][hsm]") {
 }
 
 TEST_CASE("app - Instance full lifecycle round-trip", "[app][hsm]") {
-  osp::Application<4> app(76, "hsm_full");
-  app.SetFactory(TestInstanceFactory);
-
+  osp::Application<TestInstance, 4> app(76, "hsm_full");
   auto r = app.CreateInstance();
   auto* inst = app.GetInstance(r.value());
 

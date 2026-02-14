@@ -115,20 +115,20 @@ class AppRegistry {
 // RegisterApp helper
 // ============================================================================
 
-template <uint16_t MaxInstances>
-bool RegisterApp(Application<MaxInstances>& app) noexcept {
+template <typename InstanceImpl, uint16_t MaxInstances>
+bool RegisterApp(Application<InstanceImpl, MaxInstances>& app) noexcept {
   return AppRegistry::Instance().Register(
       app.AppId(), &app,
       [](void* ptr, uint16_t ins_id, uint16_t event,
          const void* data, uint32_t len,
          ResponseChannel* response_ch) -> bool {
-        auto* a = static_cast<Application<MaxInstances>*>(ptr);
+        auto* a = static_cast<Application<InstanceImpl, MaxInstances>*>(ptr);
         return a->Post(ins_id, event, data, len, response_ch);
       });
 }
 
-template <uint16_t MaxInstances>
-bool UnregisterApp(Application<MaxInstances>& app) noexcept {
+template <typename InstanceImpl, uint16_t MaxInstances>
+bool UnregisterApp(Application<InstanceImpl, MaxInstances>& app) noexcept {
   return AppRegistry::Instance().Unregister(app.AppId());
 }
 

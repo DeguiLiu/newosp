@@ -971,7 +971,13 @@ Idle ──(Start)──> Announcing ──(NodeFound)──> Discovering
 
 ### 9.1 app.hpp -- 应用-实例模型
 
-兼容原始 OSP 的 CApp/CInstance 两层架构。
+兼容原始 OSP 的 CApp/CInstance 两层架构，采用编译期分发替代虚函数。
+
+设计决策:
+- Instance 基类无 virtual: OnMessage() 为非虚空实现，派生类通过名称隐藏 (name hiding) 覆盖
+- Application 模板参数化: `Application<InstanceImpl, MaxInstances>` 编译期绑定具体类型
+- ObjectPool 零堆分配: 所有 Instance 内存由 `ObjectPool<InstanceImpl, MaxInstances>` 管理
+- HSM 消息分发: `BeginMessage()`/`EndMessage()` public wrapper 驱动 Processing 状态转换
 
 ```cpp
 // 全局实例 ID 编解码
@@ -979,20 +985,23 @@ constexpr uint32_t MakeIID(uint16_t app_id, uint16_t ins_id);
 constexpr uint16_t GetAppId(uint32_t iid);
 constexpr uint16_t GetInsId(uint32_t iid);
 
-// 实例基类 (HSM 驱动, 11 状态层次结构)
+// 实例基类 (HSM 驱动, 11 状态, 非虚)
 class Instance {
-  virtual void OnMessage(uint16_t event, const void* data, uint32_t len) = 0;
+  void OnMessage(uint16_t event, const void* data, uint32_t len) noexcept; // 非虚, 派生类隐藏
+  void BeginMessage() noexcept;   // HSM: Idle -> Processing
+  void EndMessage() noexcept;     // HSM: Processing -> Idle
+  void Initialize() noexcept;     // HSM: Created -> Idle
   uint16_t CurState() const noexcept;
-  void SetState(uint16_t state) noexcept;
 };
 
-// 应用 (管理实例池 + 消息队列)
-template <uint16_t MaxInstances = 256>
+// 应用 (ObjectPool 管理实例, 零堆分配)
+template <typename InstanceImpl, uint16_t MaxInstances = 64>
 class Application {
-  expected<uint16_t, AppError> CreateInstance();
+  static_assert(std::is_base_of<Instance, InstanceImpl>::value, "...");
+  expected<uint16_t, AppError> CreateInstance();   // ObjectPool::Create()
+  expected<void, AppError> DestroyInstance(uint16_t ins_id); // ObjectPool::Destroy()
   bool Post(uint16_t ins_id, uint16_t event, const void* data, uint32_t len);
-  void Run();
-  void Stop();
+  bool ProcessOne() noexcept;  // BeginMessage -> OnMessage -> EndMessage
 };
 ```
 
@@ -1408,7 +1417,7 @@ expected<V, E> 返回
 | SerialTransport (per port) | ~2 KB | 0 | 0 |
 | MulticastDiscovery | ~2 KB | ~1 KB | 1 |
 | Service/Client (per service) | ~512 B | 0 | 0 |
-| Application<256> | ~8 KB | 0 | 1 |
+| Application<Impl, 64> | ~8 KB + sizeof(Impl)*64 | 0 | 1 |
 | NodeManager (64 nodes) | ~4 KB | ~2 KB | 2 |
 | NodeManagerHsm (64 nodes) | ~8 KB | 0 | 1 |
 | QosProfile (per topic) | ~16 B | 0 | 0 |
@@ -1490,9 +1499,9 @@ expected<V, E> 返回
 | eventfd 轻量通知 | Linux kernel | ShmChannel 消费者唤醒 |
 | Service/Client RPC | ROS2 rclcpp | service.hpp 请求-响应 |
 | UDP 多播发现 | ROS2 DDS | discovery.hpp 节点自动发现 |
-| HSM 驱动实例生命周期 | hsm-cpp + 原始 OSP | app.hpp Instance 11 状态 |
+| HSM 驱动实例生命周期 | hsm-cpp + 原始 OSP | app.hpp Instance 11 状态, BeginMessage/EndMessage |
 | HSM 驱动生命周期节点 | ROS2 Lifecycle + hsm-cpp | lifecycle_node.hpp 16 状态 |
-| App-Instance 两层模型 | 原始 OSP | app.hpp 应用-实例架构 |
+| App-Instance 两层模型 | 原始 OSP | app.hpp 编译期分发 + ObjectPool 零堆分配 |
 | 全局实例 ID (IID) | 原始 OSP | post.hpp MAKEIID 寻址 |
 | NATIVE_SYNC 串口 | CSerialPort | serial_transport.hpp |
 | 帧同步状态机 + CRC16 | 工业通信协议 | serial_transport.hpp |
@@ -1556,7 +1565,7 @@ expected<V, E> 返回
 | data_fusion | 继承 Bus 订阅线程安全性 |
 | discovery | 内部线程安全; 回调在发现线程执行 |
 | service | handler 在服务线程执行; Client::Call 可跨线程 |
-| app | Application::Post 线程安全; Instance::OnMessage 单线程 |
+| app | Application::Post 线程安全 (mutex); ProcessOne 单消费者; Instance::OnMessage 单线程 |
 | post | OspPost 线程安全; OspSendAndWait 阻塞调用线程 |
 | node_manager | 内部 mutex 保护; 回调在心跳线程执行 |
 | node_manager_hsm | mutex 保护; 每连接独立 HSM 单线程 Dispatch |

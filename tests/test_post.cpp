@@ -19,15 +19,13 @@ struct PostTestInstance : public osp::Instance {
   uint32_t last_len = 0;
   int msg_count = 0;
 
-  void OnMessage(uint16_t event, const void* data, uint32_t len) override {
+  void OnMessage(uint16_t event, const void* data, uint32_t len) {
     last_event = event;
     last_len = len;
     ++msg_count;
     (void)data;
   }
 };
-
-static osp::Instance* PostTestFactory() { return new PostTestInstance(); }
 
 // ============================================================================
 // Test Instance that replies (for OspSendAndWait)
@@ -36,18 +34,16 @@ static osp::Instance* PostTestFactory() { return new PostTestInstance(); }
 struct ReplyTestInstance : public osp::Instance {
   int last_event = -1;
 
-  void OnMessage(uint16_t event, const void* data, uint32_t len) override {
+  void OnMessage(uint16_t event, const void* data, uint32_t len) {
     last_event = event;
 
     if (HasPendingReply()) {
       if (data != nullptr && len >= sizeof(uint32_t)) {
-        // Echo back request value + 1
         uint32_t req_val;
         std::memcpy(&req_val, data, sizeof(req_val));
         uint32_t response = req_val + 1;
         Reply(&response, sizeof(response));
       } else {
-        // Reply with event * 10
         uint32_t response = static_cast<uint32_t>(event) * 10;
         Reply(&response, sizeof(response));
       }
@@ -55,22 +51,17 @@ struct ReplyTestInstance : public osp::Instance {
   }
 };
 
-static osp::Instance* ReplyTestFactory() { return new ReplyTestInstance(); }
-
 // ============================================================================
 // Test Instance that does NOT reply (for timeout testing)
 // ============================================================================
 
 struct NoReplyInstance : public osp::Instance {
-  void OnMessage(uint16_t event, const void* data, uint32_t len) override {
+  void OnMessage(uint16_t event, const void* data, uint32_t len) {
     (void)event;
     (void)data;
     (void)len;
-    // Intentionally does not call Reply()
   }
 };
-
-static osp::Instance* NoReplyFactory() { return new NoReplyInstance(); }
 
 // ============================================================================
 // AppRegistry basics
@@ -81,7 +72,7 @@ TEST_CASE("post - AppRegistry register and unregister", "[post]") {
   reg.Reset();
   REQUIRE(reg.Count() == 0);
 
-  osp::Application<8> app(1, "reg_app");
+  osp::Application<PostTestInstance, 8> app(1, "reg_app");
   REQUIRE(osp::RegisterApp(app));
   REQUIRE(reg.Count() == 1);
 
@@ -115,8 +106,7 @@ TEST_CASE("post - OspPost local delivery", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  osp::Application<8> app(10, "post_app");
-  app.SetFactory(PostTestFactory);
+  osp::Application<PostTestInstance, 8> app(10, "post_app");
   osp::RegisterApp(app);
 
   auto r = app.CreateInstance();
@@ -127,7 +117,7 @@ TEST_CASE("post - OspPost local delivery", "[post]") {
   REQUIRE(osp::OspPost(dst, 42, &payload, sizeof(payload)));
 
   REQUIRE(app.ProcessOne());
-  auto* inst = static_cast<PostTestInstance*>(app.GetInstance(r.value()));
+  auto* inst = app.GetInstance(r.value());
   REQUIRE(inst != nullptr);
   REQUIRE(inst->last_event == 42);
   REQUIRE(inst->last_len == sizeof(payload));
@@ -147,8 +137,7 @@ TEST_CASE("post - OspPost broadcast via kInsEach", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  osp::Application<8> app(20, "bcast_app");
-  app.SetFactory(PostTestFactory);
+  osp::Application<PostTestInstance, 8> app(20, "bcast_app");
   osp::RegisterApp(app);
 
   auto r1 = app.CreateInstance();
@@ -161,7 +150,7 @@ TEST_CASE("post - OspPost broadcast via kInsEach", "[post]") {
   app.ProcessAll();
 
   for (uint16_t id : {r1.value(), r2.value()}) {
-    auto* inst = static_cast<PostTestInstance*>(app.GetInstance(id));
+    auto* inst = app.GetInstance(id);
     REQUIRE(inst != nullptr);
     REQUIRE(inst->last_event == 300);
   }
@@ -185,8 +174,7 @@ TEST_CASE("post - OspSendAndWait with reply data", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  osp::Application<8> app(30, "saw_app");
-  app.SetFactory(ReplyTestFactory);
+  osp::Application<ReplyTestInstance, 8> app(30, "saw_app");
   osp::RegisterApp(app);
 
   auto r = app.CreateInstance();
@@ -196,7 +184,6 @@ TEST_CASE("post - OspSendAndWait with reply data", "[post]") {
   uint32_t req_val = 42;
   uint32_t ack_val = 0;
 
-  // Process in a background thread (OspSendAndWait blocks until reply)
   std::thread processor([&app]() {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     app.ProcessOne();
@@ -210,7 +197,7 @@ TEST_CASE("post - OspSendAndWait with reply data", "[post]") {
 
   REQUIRE(result.has_value());
   REQUIRE(result.value() == sizeof(uint32_t));
-  REQUIRE(ack_val == 43);  // req_val + 1
+  REQUIRE(ack_val == 43);
 
   osp::UnregisterApp(app);
 }
@@ -219,8 +206,7 @@ TEST_CASE("post - OspSendAndWait no request data", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  osp::Application<8> app(31, "saw_nodata");
-  app.SetFactory(ReplyTestFactory);
+  osp::Application<ReplyTestInstance, 8> app(31, "saw_nodata");
   osp::RegisterApp(app);
 
   auto r = app.CreateInstance();
@@ -241,7 +227,7 @@ TEST_CASE("post - OspSendAndWait no request data", "[post]") {
 
   REQUIRE(result.has_value());
   REQUIRE(result.value() == sizeof(uint32_t));
-  REQUIRE(ack_val == 70);  // event(7) * 10
+  REQUIRE(ack_val == 70);
 
   osp::UnregisterApp(app);
 }
@@ -250,8 +236,7 @@ TEST_CASE("post - OspSendAndWait timeout when no reply", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  osp::Application<8> app(32, "saw_timeout");
-  app.SetFactory(NoReplyFactory);
+  osp::Application<NoReplyInstance, 8> app(32, "saw_timeout");
   osp::RegisterApp(app);
 
   auto r = app.CreateInstance();
@@ -260,7 +245,6 @@ TEST_CASE("post - OspSendAndWait timeout when no reply", "[post]") {
   uint32_t dst = osp::MakeIID(32, r.value());
   uint32_t ack_val = 0;
 
-  // Process in background - handler does NOT reply
   std::thread processor([&app]() {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     app.ProcessOne();
@@ -299,8 +283,7 @@ TEST_CASE("post - OspSendAndWait small ack buffer truncates", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  osp::Application<8> app(33, "saw_trunc");
-  app.SetFactory(ReplyTestFactory);
+  osp::Application<ReplyTestInstance, 8> app(33, "saw_trunc");
   osp::RegisterApp(app);
 
   auto r = app.CreateInstance();
@@ -308,7 +291,7 @@ TEST_CASE("post - OspSendAndWait small ack buffer truncates", "[post]") {
 
   uint32_t dst = osp::MakeIID(33, r.value());
   uint32_t req_val = 100;
-  uint16_t small_buf = 0;  // Only 2 bytes, response is 4 bytes
+  uint16_t small_buf = 0;
 
   std::thread processor([&app]() {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -322,7 +305,7 @@ TEST_CASE("post - OspSendAndWait small ack buffer truncates", "[post]") {
   processor.join();
 
   REQUIRE(result.has_value());
-  REQUIRE(result.value() == sizeof(uint16_t));  // truncated to buffer size
+  REQUIRE(result.value() == sizeof(uint16_t));
 
   osp::UnregisterApp(app);
 }
@@ -342,10 +325,8 @@ TEST_CASE("post - Multiple apps routing", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  osp::Application<4> app1(40, "multi1");
-  osp::Application<4> app2(41, "multi2");
-  app1.SetFactory(PostTestFactory);
-  app2.SetFactory(PostTestFactory);
+  osp::Application<PostTestInstance, 4> app1(40, "multi1");
+  osp::Application<PostTestInstance, 4> app2(41, "multi2");
 
   osp::RegisterApp(app1);
   osp::RegisterApp(app2);
@@ -361,8 +342,8 @@ TEST_CASE("post - Multiple apps routing", "[post]") {
   REQUIRE(osp::OspPost(dst, 500, nullptr, 0));
   app2.ProcessAll();
 
-  auto* inst1 = static_cast<PostTestInstance*>(app1.GetInstance(r1.value()));
-  auto* inst2 = static_cast<PostTestInstance*>(app2.GetInstance(r2.value()));
+  auto* inst1 = app1.GetInstance(r1.value());
+  auto* inst2 = app2.GetInstance(r2.value());
   REQUIRE(inst1->msg_count == 0);
   REQUIRE(inst2->last_event == 500);
 
