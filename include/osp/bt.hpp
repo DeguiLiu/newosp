@@ -25,6 +25,7 @@
 #include "osp/platform.hpp"
 
 #include <cstdint>
+#include <array>
 
 // ============================================================================
 // Configuration
@@ -507,11 +508,11 @@ class BehaviorTree final {
 
   Context& ctx_;
   const char* name_;
-  BtNode<Context> nodes_[MaxNodes];
+  std::array<BtNode<Context>, MaxNodes> nodes_;
   uint32_t node_count_;
   int32_t root_index_;
   NodeStatus last_status_;
-  uint32_t repeat_counters_[MaxNodes];  ///< Per-node state for Repeat
+  std::array<uint32_t, MaxNodes> repeat_counters_;  ///< Per-node state for Repeat
 };
 
 }  // namespace osp

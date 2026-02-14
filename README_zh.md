@@ -305,6 +305,7 @@ sensor.SpinOnce();
 - **示例程序**: `examples/` 目录，15 个示例 (13 个单文件 + 2 个多文件应用)
   - 单文件示例: `basic_demo.cpp`, `protocol_demo.cpp`, `client_demo.cpp`, `priority_demo.cpp`, `benchmark.cpp`, `serial_demo.cpp`, `realtime_executor_demo.cpp`, `node_manager_hsm_demo.cpp`, `hsm_bt_combo_demo.cpp`, `bt_patrol_demo.cpp`, `hsm_protocol_demo.cpp`, `watchdog_demo.cpp`, `fault_collector_demo.cpp`
   - 多文件应用: `shm_ipc/` (共享内存 IPC 演示), `client_gateway/` (多节点客户端网关)
+  - 性能基准: `examples/benchmarks/` (串口、TCP、SHM、Bus 大 payload 吞吐测试)
   - 详见 [docs/examples_zh.md](docs/examples_zh.md)
 
 - **单元测试**: `tests/` 目录，758 测试用例，ASan/TSan/UBSan 全部通过
@@ -321,6 +322,8 @@ sensor.SpinOnce();
 - [Shell 命令设计](docs/design_shell_commands_zh.md) - 内置诊断命令规划
 - [串口集成设计](docs/cserialport_integration_analysis.md) - CSerialPort 集成方案
 - [代码生成设计](docs/design_codegen_zh.md) - ospgen YAML → C++ 代码生成
+- [性能基准报告](docs/benchmark_report_zh.md) - 吞吐、延迟、内存占用实测数据
+- [激光雷达性能评估](docs/performance_analysis_lidar_zh.md) - 工业激光雷达场景适配分析
 - [变更日志](docs/changelog_zh.md) - P0 调整 + Phase 实施记录
 - [示例指南](docs/examples_zh.md) - 示例用途与架构映射
 

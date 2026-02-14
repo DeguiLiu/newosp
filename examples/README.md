@@ -44,6 +44,7 @@ Complete application examples with dedicated subdirectories and design documenta
 | [`serial_ota/`](serial_ota/) | Industrial serial OTA firmware upgrade: HSM+BT, CRC, noise simulation, ACK retransmission | HSM, BT, Timer, Bus, WorkerPool, SpscRingbuffer, Shell + 6 more | High |
 | [`shm_ipc/`](shm_ipc/) | Cross-process shared memory video streaming: producer-consumer, HSM back-pressure | ShmChannel, HSM, MemPool, Timer, Watchdog, FaultCollector, Shell + 5 more | High |
 | [`net_stress/`](net_stress/) | TCP network stress test: 3-process (server/client/monitor), RPC echo + file transfer | Service, HSM, Bus, Node, Timer, Shell + 6 more | High |
+| [`benchmarks/`](benchmarks/) | Transport and messaging throughput benchmarks | SerialTransport, TcpTransport, ShmRingBuffer, AsyncBus | - |
 
 ## Single-File Demo Details
 

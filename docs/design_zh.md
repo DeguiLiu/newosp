@@ -1493,6 +1493,8 @@ expected<V, E> 返回
 | LightSemaphore | <128 B | 0 | 0 |
 | TransportFactory | 0 (无状态) | 0 | 0 |
 
+> 实测性能数据 (吞吐、延迟、sizeof、运行时 RSS) 见 [benchmark_report_zh.md](benchmark_report_zh.md)
+
 ---
 
 ## 13. 编码规范与质量保障

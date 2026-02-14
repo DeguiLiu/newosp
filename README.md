@@ -280,6 +280,7 @@ All dependencies are fetched automatically via CMake FetchContent:
 - **Examples**: 13 single-file demos + 2 multi-file applications (15 total)
   - Single-file: `basic_demo`, `benchmark`, `bt_patrol_demo`, `client_demo`, `hsm_bt_combo_demo`, `hsm_protocol_demo`, `node_manager_hsm_demo`, `priority_demo`, `protocol_demo`, `realtime_executor_demo`, `serial_demo`, `worker_pool_demo`, `codegen_demo`
   - Multi-file apps: `shm_ipc` (shared memory IPC demo), `client_gateway` (multi-node client gateway)
+  - Benchmarks: `examples/benchmarks/` (serial, TCP, SHM, Bus payload throughput)
   - See [docs/examples_zh.md](docs/examples_zh.md) for detailed guide
 - **Unit tests**: 758 test cases covering all modules (ASan/TSan/UBSan all passing)
   - See [tests/README.md](tests/README.md) for test documentation
@@ -292,6 +293,8 @@ All dependencies are fetched automatically via CMake FetchContent:
 - Shell commands design: [docs/design_shell_commands_zh.md](docs/design_shell_commands_zh.md)
 - Serial integration design: [docs/cserialport_integration_analysis.md](docs/cserialport_integration_analysis.md)
 - Codegen design: [docs/design_codegen_zh.md](docs/design_codegen_zh.md)
+- Benchmark report: [docs/benchmark_report_zh.md](docs/benchmark_report_zh.md)
+- LiDAR performance analysis: [docs/performance_analysis_lidar_zh.md](docs/performance_analysis_lidar_zh.md)
 - Changelog: [docs/changelog_zh.md](docs/changelog_zh.md)
 - Examples guide: [docs/examples_zh.md](docs/examples_zh.md)
 

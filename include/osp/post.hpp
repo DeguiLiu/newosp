@@ -44,6 +44,11 @@ enum class PostError : uint8_t {
 #define OSP_POST_MAX_APPS 64U
 #endif
 
+// Thread-safety contract:
+//   - Register/Unregister: call during init/shutdown phase only
+//   - PostLocal/OspPost:   safe to call from any thread (delegates to
+//     Application::Post which is mutex-protected)
+//   - No internal mutex — relies on phase-based access pattern.
 class AppRegistry {
  public:
   using PostFn = bool (*)(void* app, uint16_t ins_id, uint16_t event,

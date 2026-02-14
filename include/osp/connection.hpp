@@ -12,6 +12,7 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -290,7 +291,7 @@ class ConnectionPool {
     bool active;
   };
 
-  Slot slots_[MaxConnections];
+  std::array<Slot, MaxConnections> slots_;
   uint32_t count_;
   uint32_t next_id_;
 

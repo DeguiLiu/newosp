@@ -20,6 +20,7 @@
 #define OSP_HSM_HPP_
 
 #include "osp/platform.hpp"
+#include <array>
 
 #ifndef OSP_HSM_MAX_DEPTH
 #define OSP_HSM_MAX_DEPTH 32
@@ -427,7 +428,7 @@ class StateMachine final {
   uint32_t state_count_;
   bool started_;
   int32_t pending_target_;
-  StateConfig<Context> states_[MaxStates];
+  std::array<StateConfig<Context>, MaxStates> states_;
 };
 
 }  // namespace osp
