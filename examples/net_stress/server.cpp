@@ -261,14 +261,27 @@ OSP_SHELL_CMD(cmd_quit, "Shutdown server");
 // ============================================================================
 
 int main(int argc, char* argv[]) {
-  uint16_t hs_port   = net_stress::kHandshakePort;
-  uint16_t echo_port = net_stress::kEchoPort;
-  uint16_t file_port = net_stress::kFilePort;
-  uint16_t shell_port = net_stress::kServerShellPort;
+  // --- Load INI config (--config path or default net_stress.ini) ---
+  net_stress::NetStressConfig cfg;
+  const char* ini_path = net_stress::FindConfigArg(argc, argv);
+  net_stress::LoadConfig(ini_path ? ini_path : "net_stress.ini", cfg);
 
-  if (argc >= 2) hs_port = static_cast<uint16_t>(std::atoi(argv[1]));
-  if (argc >= 3) echo_port = static_cast<uint16_t>(std::atoi(argv[2]));
-  if (argc >= 4) file_port = static_cast<uint16_t>(std::atoi(argv[3]));
+  uint16_t hs_port    = cfg.server_hs_port;
+  uint16_t echo_port  = cfg.server_echo_port;
+  uint16_t file_port  = cfg.server_file_port;
+  uint16_t shell_port = cfg.server_shell_port;
+
+  // Command-line positional overrides (skip --config pairs)
+  {
+    int pos = 1;
+    for (int i = 1; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--config") == 0) { ++i; continue; }
+      if (pos == 1) hs_port = static_cast<uint16_t>(std::atoi(argv[i]));
+      else if (pos == 2) echo_port = static_cast<uint16_t>(std::atoi(argv[i]));
+      else if (pos == 3) file_port = static_cast<uint16_t>(std::atoi(argv[i]));
+      ++pos;
+    }
+  }
 
   OSP_LOG_INFO("SERVER", "=== Net Stress Server ===");
   OSP_LOG_INFO("SERVER", "Handshake: %u, Echo: %u, File: %u, Shell: %u",

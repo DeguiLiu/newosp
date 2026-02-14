@@ -69,6 +69,7 @@ graph TB
 | `expected` | `osp/vocabulary.hpp` | 无异常错误处理 | S, C, M |
 | `ScopeGuard` | `osp/vocabulary.hpp` | RAII 清理 (placement new 对象) | S, C, M |
 | `log` | `osp/log.hpp` | 结构化日志 | S, C, M |
+| `Config<IniBackend>` | `osp/config.hpp` | INI 配置文件加载 | S, C, M |
 
 S = Server, C = Client, M = Monitor
 
@@ -234,20 +235,63 @@ FileTransferThread
 cmake -B build -DOSP_BUILD_EXAMPLES=ON -DOSP_WITH_SOCKPP=ON
 cmake --build build -j$(nproc)
 
-# 终端 1: 启动 server
-./build/examples/net_stress/osp_net_stress_server
+# 终端 1: 启动 server (自动加载当前目录 net_stress.ini)
+cd examples/net_stress
+../../build/examples/net_stress/osp_net_stress_server
 
 # 终端 2: 启动 client (4 实例, 1s 间隔, 1KB 负载)
-./build/examples/net_stress/osp_net_stress_client 127.0.0.1 4 1000 1
+../../build/examples/net_stress/osp_net_stress_client 127.0.0.1
 
 # 终端 3: 启动 monitor
-./build/examples/net_stress/osp_net_stress_monitor 127.0.0.1
+../../build/examples/net_stress/osp_net_stress_monitor 127.0.0.1
 
 # 终端 4: telnet 调试
 telnet localhost 9600   # server
 telnet localhost 9601   # client
 telnet localhost 9602   # monitor
 ```
+
+### 使用自定义配置文件
+
+```bash
+# --config 指定 INI 文件路径，命令行位置参数可覆盖 INI 中的值
+./osp_net_stress_server --config /path/to/custom.ini
+./osp_net_stress_client --config /path/to/custom.ini 192.168.1.100 8
+./osp_net_stress_monitor --config /path/to/custom.ini 192.168.1.100
+```
+
+配置加载优先级: 命令行位置参数 > INI 文件 > 编译期默认值。
+找不到 INI 文件时输出 WARN 日志并使用默认值，不影响启动。
+
+## INI 配置文件 (net_stress.ini)
+
+```ini
+[server]
+handshake_port = 20000
+echo_port      = 20001
+file_port      = 20002
+shell_port     = 9600
+
+[client]
+num_clients    = 4
+interval_ms    = 1000
+payload_len    = 1024
+shell_port     = 9601
+
+[monitor]
+probe_interval_ms = 2000
+shell_port        = 9602
+
+[network]
+connect_timeout_ms = 3000
+max_clients        = 64
+```
+
+配置通过 `osp::Config<osp::IniBackend>` 加载，演示了 newosp 配置模块的完整用法:
+- `LoadFile()` 加载 INI 文件
+- `GetPort()` 读取端口号 (uint16_t)
+- `GetInt()` 读取整数参数
+- 缺失的 key 自动使用 `protocol.hpp` 中的编译期默认值
 
 ## 参数配置
 
@@ -268,7 +312,8 @@ telnet localhost 9602   # monitor
 
 | 文件 | 说明 | 代码量 |
 |------|------|--------|
-| `protocol.hpp` | 协议定义: RPC 消息 + Bus 消息 + 工具函数 | ~200 行 |
+| `net_stress.ini` | INI 配置文件: 端口、客户端数、间隔、超时等 | ~30 行 |
+| `protocol.hpp` | 协议定义: RPC 消息 + Bus 消息 + 配置加载 + 工具函数 | ~280 行 |
 | `client_sm.hpp` | 客户端连接 HSM (7 状态) + Handshake/Echo 辅助函数 | ~325 行 |
 | `file_transfer.hpp` | 文件传输 HSM (8 状态) + 模拟丢包 + 重传逻辑 | ~350 行 |
 | `server.cpp` | RPC 服务端 + Shell + Timer | ~350 行 |

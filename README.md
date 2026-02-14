@@ -2,21 +2,26 @@
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
 
-Modern C++17 header-only embedded infrastructure library for ARM-Linux, extracted and modernized from the OSP (Open Streaming Platform) codebase (~140k LOC).
+Modern C++17 header-only embedded infrastructure library for embedded Linux platforms. Designed for industrial embedded systems such as sensors, robotics, and edge computing.
 
 **[中文文档](README_zh.md)**
 
 ## Features
 
-- **Zero global state**: All state encapsulated in objects (RAII)
-- **Stack-first allocation**: Fixed-capacity containers, zero heap in hot paths
-- **`-fno-exceptions -fno-rtti` compatible**: Designed for embedded ARM-Linux
-- **Type-safe error handling**: `expected<V,E>` and `optional<T>` vocabulary types
-- **Header-only**: Single CMake INTERFACE library, C++17 standard
-- **Lock-free messaging**: MPSC ring buffer bus with priority-based admission control
-- **Template-based design patterns**: Tag dispatch, variadic templates, CRTP, compile-time composition
+- **Header-only**: Single CMake INTERFACE library, C++17 standard, zero mandatory external dependencies
+- **Zero global state**: All state encapsulated in objects (RAII), supports multiple parallel instances
+- **Stack-first allocation**: Fixed-capacity containers (`FixedVector`/`FixedString`/`FixedFunction`), zero heap in hot paths
+- **`-fno-exceptions -fno-rtti` compatible**: Designed for resource-constrained embedded Linux environments
+- **Type-safe error handling**: `expected<V,E>` and `optional<T>` vocabulary types, replacing exceptions
+- **Lock-free messaging**: MPSC/SPSC ring buffers, CAS publish, priority-based admission control
+- **Multiple transport backends**: TCP/UDP/Unix Domain Socket/shared memory/serial, `transport_factory` auto-selection
+- **Real-time scheduling**: `RealtimeExecutor` with SCHED_FIFO, mlockall, CPU affinity binding
+- **HSM + Behavior Tree**: Zero-heap HSM (LCA transitions) and cache-friendly BT (flat array storage)
+- **Service discovery & RPC**: UDP multicast discovery, request-response RPC, async client
+- **Reliability infrastructure**: Software watchdog, fault collector, lifecycle nodes, QoS configuration
+- **Template-based design patterns**: Tag dispatch, variadic templates, CRTP, compile-time composition over virtual-function OOP
 
-## Modules (37 headers)
+## Modules (38 headers)
 
 ### Foundation Layer (8)
 
@@ -54,14 +59,14 @@ Modern C++17 header-only embedded infrastructure library for ARM-Linux, extracte
 
 | Module | Description |
 |--------|-------------|
-| `socket.hpp` | TCP/UDP RAII wrapper (sockpp) |
+| `socket.hpp` | TCP/UDP/Unix Domain Socket RAII wrapper (sockpp) |
 | `io_poller.hpp` | epoll event loop (edge-triggered + timeout) |
 | `connection.hpp` | Connection pool management (auto-reconnect, heartbeat) |
 | `transport.hpp` | Network transport (v0/v1 frame protocol, SequenceTracker) |
 | `shm_transport.hpp` | Shared memory IPC (lock-free SPSC, ARM memory ordering, CreateOrReplace crash recovery) |
 | `serial_transport.hpp` | Industrial serial transport (CRC-CCITT, PTY testing, IEC 61508) |
 | `net.hpp` | Network layer wrapper (address resolution, socket options) |
-| `transport_factory.hpp` | Automatic transport selection (inproc/shm/tcp) |
+| `transport_factory.hpp` | Automatic transport selection (inproc/shm/tcp/unix) |
 
 ### Service & Discovery Layer (6)
 
@@ -83,7 +88,7 @@ Modern C++17 header-only embedded infrastructure library for ARM-Linux, extracte
 | `qos.hpp` | QoS configuration (Reliability/History/Deadline/Lifespan) |
 | `lifecycle_node.hpp` | Lifecycle node (Unconfigured/Inactive/Active/Finalized, HSM-driven) |
 
-### Reliability Layer (2)
+### Reliability Layer (3)
 
 | Module | Description |
 |--------|-------------|
@@ -93,103 +98,91 @@ Modern C++17 header-only embedded infrastructure library for ARM-Linux, extracte
 
 ## Architecture
 
-```mermaid
-graph TB
-    subgraph Application["Application Layer"]
-        APP[app.hpp<br/>post.hpp]
-        LC[lifecycle_node.hpp<br/>qos.hpp]
-    end
-
-    subgraph Service["Service & Discovery Layer"]
-        SVC[service.hpp<br/>service_hsm.hpp]
-        DISC[discovery.hpp<br/>discovery_hsm.hpp]
-        NM[node_manager.hpp<br/>node_manager_hsm.hpp]
-    end
-
-    subgraph Transport["Transport Layer"]
-        TRANS[transport.hpp<br/>shm_transport.hpp<br/>serial_transport.hpp]
-        TF[transport_factory.hpp<br/>data_fusion.hpp]
-    end
-
-    subgraph Network["Network Layer"]
-        NET[socket.hpp<br/>connection.hpp]
-        IO[io_poller.hpp<br/>net.hpp]
-    end
-
-    subgraph Core["Core Communication Layer"]
-        BUS[bus.hpp<br/>node.hpp]
-        SPSC[spsc_ringbuffer.hpp<br/>worker_pool.hpp]
-        EXEC[executor.hpp<br/>semaphore.hpp]
-    end
-
-    subgraph StateMachine["State Machine & Behavior Tree"]
-        HSM[hsm.hpp]
-        BT[bt.hpp]
-    end
-
-    subgraph Reliability["Reliability Layer"]
-        WD[watchdog.hpp]
-        FC[fault_collector.hpp]
-        SC[shell_commands.hpp]
-    end
-
-    subgraph Foundation["Foundation Layer"]
-        PLAT[platform.hpp<br/>vocabulary.hpp]
-        CFG[config.hpp<br/>log.hpp]
-        UTIL[timer.hpp<br/>shell.hpp<br/>mem_pool.hpp<br/>shutdown.hpp]
-    end
-
-    Application --> Service
-    Application --> Core
-    Service --> Transport
-    Service --> StateMachine
-    Transport --> Network
-    Transport --> Core
-    Network --> Foundation
-    Core --> StateMachine
-    Core --> Reliability
-    Core --> Foundation
-    StateMachine --> Foundation
-    Reliability --> Foundation
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Application Layer                           │
+│  ┌──────────────────────────┐  ┌──────────────────────────────┐    │
+│  │ app.hpp                  │  │ lifecycle_node.hpp           │    │
+│  │ post.hpp                 │  │ qos.hpp                      │    │
+│  └──────────────────────────┘  └──────────────────────────────┘    │
+└────────────────────────┬────────────────────┬───────────────────────┘
+                         │                    │
+                         v                    v
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Service & Discovery Layer                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
+│  │ service.hpp  │  │ discovery    │  │ node_manager.hpp         │  │
+│  │ service_hsm  │  │ discovery_hsm│  │ node_manager_hsm.hpp     │  │
+│  └──────────────┘  └──────────────┘  └──────────────────────────┘  │
+└──────────┬──────────────────┬──────────────────────────────────────┘
+           │                  │
+           v                  v
+┌──────────────────────────────────────────────────────────────┐
+│                      Transport Layer                         │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │ transport.hpp / shm_transport.hpp / serial_transport   │  │
+│  │ transport_factory.hpp / data_fusion.hpp                │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────┬──────────────────────────────────────────────────┘
+           │
+           v
+┌──────────────────────────────────────────────────────────────┐
+│                       Network Layer                          │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │ socket.hpp (TCP/UDP/Unix) / connection.hpp                            │  │
+│  │ io_poller.hpp / net.hpp                                │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────┬──────────────────────────────────────────────────┘
+           │
+           v
+┌──────────────────────────────────────────────────────────────┐
+│                  Core Communication Layer                    │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │ bus.hpp / node.hpp                                     │  │
+│  │ spsc_ringbuffer.hpp / worker_pool.hpp                  │  │
+│  │ executor.hpp / semaphore.hpp                           │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────┬──────────────────┬───────────────────────────────┘
+           │                  │
+           v                  v
+┌──────────────────────┐  ┌──────────────────────────────────┐
+│ State Machine & BT   │  │    Reliability Layer             │
+│  ┌────────────────┐  │  │  ┌────────────────────────────┐  │
+│  │ hsm.hpp        │  │  │  │ watchdog.hpp               │  │
+│  │ bt.hpp         │  │  │  │ fault_collector.hpp        │  │
+│  └────────────────┘  │  │  │ shell_commands.hpp         │  │
+└──────────┬───────────┘  │  └────────────────────────────┘  │
+           │              └──────────┬───────────────────────┘
+           │                         │
+           v                         v
+┌─────────────────────────────────────────────────────────────┐
+│                      Foundation Layer                       │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ platform.hpp / vocabulary.hpp                         │  │
+│  │ config.hpp / log.hpp                                  │  │
+│  │ timer.hpp / shell.hpp / mem_pool.hpp / shutdown.hpp   │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Module Dependencies
 
-```mermaid
-flowchart LR
-    Application[Application Layer]
-    Service[Service & Discovery]
-    Transport[Transport Layer]
-    Network[Network Layer]
-    Core[Core Communication]
-    StateMachine[State Machine & BT]
-    Reliability[Reliability Layer]
-    Foundation[Foundation Layer]
+```
+Application Layer ──┬──> Service & Discovery ──┬──> Transport Layer ──> Network Layer
+                    │                          │                                │
+                    │                          └──> State Machine & BT          │
+                    │                                      │                    │
+                    └──> Core Communication ──┬──> State Machine & BT          │
+                                              │                                 │
+                                              ├──> Reliability Layer            │
+                                              │           │                     │
+                                              └───────────┴─────────────────────┴──> Foundation Layer
 
-    Application --> Service
-    Application --> Core
-
-    Service --> Transport
-    Service --> Core
-    Service --> StateMachine
-
-    Transport --> Network
-    Transport --> Core
-
-    Network --> Foundation
-
-    Core --> StateMachine
-    Core --> Reliability
-    Core --> Foundation
-
-    StateMachine --> Foundation
-    Reliability --> Foundation
-
-    shell_commands[shell_commands.hpp] --> shell
-    shell_commands --> watchdog
-    shell_commands --> fault_collector
-    shell_commands --> node_manager_hsm
-    shell_commands --> bus
+shell_commands.hpp ──┬──> shell.hpp
+                     ├──> watchdog.hpp
+                     ├──> fault_collector.hpp
+                     ├──> node_manager_hsm.hpp
+                     └──> bus.hpp
 ```
 
 ## Build
@@ -216,7 +209,7 @@ cmake --build build -j$(nproc)
 |--------|---------|-------------|
 | `OSP_BUILD_TESTS` | ON | Build test suite (Catch2 v3.5.2) |
 | `OSP_BUILD_EXAMPLES` | OFF | Build example programs |
-| `OSP_CONFIG_INI` | ON | Enable INI config backend (inih) |
+| `OSP_CONFIG_INI` | ON | Enable INI config backend (inicpp) |
 | `OSP_CONFIG_JSON` | OFF | Enable JSON config backend (nlohmann/json) |
 | `OSP_CONFIG_YAML` | OFF | Enable YAML config backend (fkYAML) |
 | `OSP_NO_EXCEPTIONS` | OFF | Disable exceptions (`-fno-exceptions`) |
@@ -224,28 +217,64 @@ cmake --build build -j$(nproc)
 
 ## Quick Start
 
+### 1. Build
+
+```bash
+git clone https://github.com/DeguiLiu/newosp.git
+cd newosp
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DOSP_BUILD_EXAMPLES=ON -DOSP_BUILD_TESTS=ON
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+```
+
+### 2. Integrate into your project
+
+newosp is header-only. Just add the include path:
+
+```cmake
+# CMakeLists.txt
+add_subdirectory(newosp)
+target_link_libraries(your_app PRIVATE osp)
+```
+
+### 3. Hello World - Pub/Sub messaging
+
 ```cpp
-#include "osp/config.hpp"
 #include "osp/bus.hpp"
 #include "osp/node.hpp"
 #include "osp/log.hpp"
 
-// Multi-format config
-osp::MultiConfig cfg;
-cfg.LoadFile("app.yaml");
-int32_t port = cfg.GetInt("network", "port", 8080);
+#include <variant>
 
-// Type-based pub/sub messaging
-struct SensorData { float temp; };
-struct MotorCmd { int speed; };
+// Define message types
+struct SensorData { float temperature; float humidity; };
+struct MotorCmd   { uint32_t mode; float target; };
 using Payload = std::variant<SensorData, MotorCmd>;
 
-osp::Node<Payload> sensor("sensor", 1);
-sensor.Subscribe<SensorData>([](const SensorData& d, const auto& h) {
-    OSP_LOG_INFO("sensor", "temp=%.1f from sender %u", d.temp, h.sender_id);
-});
-sensor.Publish(SensorData{25.0f});
-sensor.SpinOnce();
+int main() {
+    osp::log::Init();
+
+    // Create a sensor node and subscribe to SensorData
+    osp::Node<Payload> sensor("sensor", 1);
+    sensor.Subscribe<SensorData>([](const SensorData& d, const auto&) {
+        OSP_LOG_INFO("sensor", "temp=%.1f humidity=%.1f", d.temperature, d.humidity);
+    });
+
+    // Publish a message and process it
+    sensor.Publish(SensorData{25.0f, 60.0f});
+    sensor.SpinOnce();
+
+    osp::log::Shutdown();
+    return 0;
+}
+```
+
+### 4. Run examples
+
+```bash
+./build/examples/basic_demo          # Bus/Node pub-sub
+./build/examples/serial_demo         # Serial communication with HSM + BT
+./build/examples/osp_serial_ota_demo # Industrial OTA firmware upgrade
 ```
 
 ## CI Pipeline
@@ -261,7 +290,7 @@ sensor.SpinOnce();
 
 - CMake >= 3.14
 - C++17 compiler (GCC >= 7, Clang >= 5)
-- Linux (ARM-Linux embedded platform)
+- Linux (embedded Linux platform)
 
 ## Third-party Dependencies
 
@@ -269,7 +298,6 @@ All dependencies are fetched automatically via CMake FetchContent:
 
 | Library | Version | Usage | Condition |
 |---------|---------|-------|-----------|
-| [inih](https://github.com/benhoyt/inih) | r58 | INI config parsing | `OSP_CONFIG_INI=ON` |
 | [nlohmann/json](https://github.com/nlohmann/json) | v3.11.3 | JSON config parsing | `OSP_CONFIG_JSON=ON` |
 | [fkYAML](https://github.com/fktn-k/fkYAML) | v0.4.0 | YAML config parsing | `OSP_CONFIG_YAML=ON` |
 | [sockpp](https://github.com/fpagliughi/sockpp) | v1.0.0 | TCP/UDP socket wrapper | `OSP_WITH_SOCKPP=ON` |
@@ -277,11 +305,12 @@ All dependencies are fetched automatically via CMake FetchContent:
 
 ## Examples and Tests
 
-- **Examples**: 13 single-file demos + 2 multi-file applications (15 total)
+- **Examples**: 13 single-file demos + 5 multi-file applications (18+ total)
   - Single-file: `basic_demo`, `benchmark`, `bt_patrol_demo`, `client_demo`, `hsm_bt_combo_demo`, `hsm_protocol_demo`, `node_manager_hsm_demo`, `priority_demo`, `protocol_demo`, `realtime_executor_demo`, `serial_demo`, `worker_pool_demo`, `codegen_demo`
-  - Multi-file apps: `shm_ipc` (shared memory IPC demo), `client_gateway` (multi-node client gateway)
+  - Multi-file apps: `client_gateway/` (multi-node client gateway), `shm_ipc/` (shared memory IPC), `streaming_protocol/` (streaming protocol), `serial_ota/` (serial OTA firmware upgrade), `net_stress/` (network stress test)
+  - Benchmarks: `examples/benchmarks/` (serial, TCP, SHM, Bus payload throughput)
   - See [docs/examples_zh.md](docs/examples_zh.md) for detailed guide
-- **Unit tests**: 758 test cases covering all modules (ASan/TSan/UBSan all passing)
+- **Unit tests**: Covering all modules
   - See [tests/README.md](tests/README.md) for test documentation
 
 ## Documentation
@@ -292,6 +321,8 @@ All dependencies are fetched automatically via CMake FetchContent:
 - Shell commands design: [docs/design_shell_commands_zh.md](docs/design_shell_commands_zh.md)
 - Serial integration design: [docs/cserialport_integration_analysis.md](docs/cserialport_integration_analysis.md)
 - Codegen design: [docs/design_codegen_zh.md](docs/design_codegen_zh.md)
+- Benchmark report: [docs/benchmark_report_zh.md](docs/benchmark_report_zh.md)
+- LiDAR performance analysis: [docs/performance_analysis_lidar_zh.md](docs/performance_analysis_lidar_zh.md)
 - Changelog: [docs/changelog_zh.md](docs/changelog_zh.md)
 - Examples guide: [docs/examples_zh.md](docs/examples_zh.md)
 
@@ -308,4 +339,4 @@ This library uses template-based modern C++ patterns instead of traditional virt
 
 ## License
 
-Apache-2.0
+MIT — see [LICENSE](LICENSE)

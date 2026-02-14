@@ -1,4 +1,28 @@
 /**
+ * MIT License
+ *
+ * Copyright (c) 2024 liudegui
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+/**
  * @file bt.hpp
  * @brief Lightweight header-only behavior tree library for embedded systems.
  *
@@ -25,6 +49,7 @@
 #include "osp/platform.hpp"
 
 #include <cstdint>
+#include <array>
 
 // ============================================================================
 // Configuration
@@ -507,11 +532,11 @@ class BehaviorTree final {
 
   Context& ctx_;
   const char* name_;
-  BtNode<Context> nodes_[MaxNodes];
+  std::array<BtNode<Context>, MaxNodes> nodes_;
   uint32_t node_count_;
   int32_t root_index_;
   NodeStatus last_status_;
-  uint32_t repeat_counters_[MaxNodes];  ///< Per-node state for Repeat
+  std::array<uint32_t, MaxNodes> repeat_counters_;  ///< Per-node state for Repeat
 };
 
 }  // namespace osp

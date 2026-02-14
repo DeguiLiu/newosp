@@ -3,7 +3,7 @@ include(FetchContent)
 set(CATCH2_VERSION v3.5.2)
 FetchContent_Declare(
     Catch2
-    URL https://ghfast.top/https://github.com/catchorg/Catch2/archive/refs/tags/${CATCH2_VERSION}.zip
+    URL ${OSP_GITHUB_MIRROR}https://github.com/catchorg/Catch2/archive/refs/tags/${CATCH2_VERSION}.zip
     DOWNLOAD_EXTRACT_TIMESTAMP ON
 )
 FetchContent_MakeAvailable(Catch2)
@@ -15,7 +15,6 @@ find_package(Threads REQUIRED)
 set(OSP_TEST_CORE_SOURCES
     test_platform.cpp
     test_vocabulary.cpp
-    test_config.cpp
     test_log.cpp
     test_timer.cpp
     test_shell.cpp
@@ -45,8 +44,10 @@ set(OSP_TEST_CORE_SOURCES
     test_shell_commands.cpp
 )
 
-# Network test sources (depend on sockpp, incompatible with -fno-exceptions)
+# Network test sources (depend on sockpp or use exceptions, incompatible with -fno-exceptions)
 set(OSP_TEST_NET_SOURCES
+    test_config.cpp
+    test_inicpp.cpp
     test_socket.cpp
     test_connection.cpp
     test_transport.cpp
@@ -71,4 +72,7 @@ else()
     endif()
 endif()
 
-catch_discover_tests(osp_tests)
+# Catch2 SKIP() returns exit code 4; tell CTest to treat it as SKIP, not FAIL
+catch_discover_tests(osp_tests
+    PROPERTIES SKIP_RETURN_CODE 4
+)

@@ -1,4 +1,28 @@
 /**
+ * MIT License
+ *
+ * Copyright (c) 2024 liudegui
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+/**
  * @file io_poller.hpp
  * @brief Unified I/O event poller abstraction over epoll (Linux) and kqueue (macOS).
  *
@@ -12,6 +36,7 @@
 #include "osp/vocabulary.hpp"
 
 #include <cstdint>
+#include <array>
 #include <unistd.h>
 
 #if defined(OSP_PLATFORM_LINUX)
@@ -103,11 +128,11 @@ class IoPoller {
   expected<uint32_t, PollerError> Wait(int32_t timeout_ms = -1);
 
   /** @brief Access results from the last Wait() call with internal buffer. */
-  const PollResult* Results() const noexcept { return results_; }
+  const PollResult* Results() const noexcept { return results_.data(); }
 
  private:
   int32_t poller_fd_;
-  PollResult results_[OSP_IO_POLLER_MAX_EVENTS];
+  std::array<PollResult, OSP_IO_POLLER_MAX_EVENTS> results_;
   uint32_t result_count_;
 };
 
@@ -232,7 +257,7 @@ inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results,
 }
 
 inline expected<uint32_t, PollerError> IoPoller::Wait(int timeout_ms) {
-  auto r = Wait(results_, OSP_IO_POLLER_MAX_EVENTS, timeout_ms);
+  auto r = Wait(results_.data(), OSP_IO_POLLER_MAX_EVENTS, timeout_ms);
   if (r.has_value()) {
     result_count_ = r.value();
   }
@@ -274,7 +299,7 @@ inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
 }
 
 inline expected<void, PollerError> IoPoller::Add(int fd, uint8_t events) {
-  struct kevent changes[2];
+  std::array<struct kevent, 2> changes{};
   int32_t nchanges = 0;
   if (events & static_cast<uint8_t>(IoEvent::kReadable)) {
     EV_SET(&changes[nchanges], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0,
@@ -298,7 +323,7 @@ inline expected<void, PollerError> IoPoller::Add(int fd, uint8_t events) {
 
 inline expected<void, PollerError> IoPoller::Modify(int fd, uint8_t events) {
   // kqueue: re-add with new filters (idempotent) and delete unwanted
-  struct kevent changes[4];
+  std::array<struct kevent, 4> changes{};
   int32_t nchanges = 0;
 
   if (events & static_cast<uint8_t>(IoEvent::kReadable)) {
@@ -324,7 +349,7 @@ inline expected<void, PollerError> IoPoller::Modify(int fd, uint8_t events) {
 }
 
 inline expected<void, PollerError> IoPoller::Remove(int32_t fd) {
-  struct kevent changes[2];
+  std::array<struct kevent, 2> changes{};
   // Attempt to remove both filters; ignore errors from filters not registered
   EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
   EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
@@ -391,7 +416,7 @@ inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results,
 }
 
 inline expected<uint32_t, PollerError> IoPoller::Wait(int timeout_ms) {
-  auto r = Wait(results_, OSP_IO_POLLER_MAX_EVENTS, timeout_ms);
+  auto r = Wait(results_.data(), OSP_IO_POLLER_MAX_EVENTS, timeout_ms);
   if (r.has_value()) {
     result_count_ = r.value();
   }

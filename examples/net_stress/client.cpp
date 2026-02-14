@@ -473,22 +473,39 @@ OSP_SHELL_CMD(cmd_quit, "Quit client");
 // ============================================================================
 
 int main(int argc, char* argv[]) {
-  if (argc < 2) {
-    std::printf("Usage: %s <server_ip> [num_clients] [interval_ms] "
-                "[payload_kb]\n", argv[0]);
+  // --- Load INI config (--config path or default net_stress.ini) ---
+  NetStressConfig cfg;
+  const char* ini_path = FindConfigArg(argc, argv);
+  LoadConfig(ini_path ? ini_path : "net_stress.ini", cfg);
+
+  // Build positional args (skip --config pairs)
+  const char* pos_args[16] = {};
+  int pos_count = 0;
+  for (int i = 1; i < argc && pos_count < 16; ++i) {
+    if (std::strcmp(argv[i], "--config") == 0) { ++i; continue; }
+    pos_args[pos_count++] = argv[i];
+  }
+
+  if (pos_count < 1) {
+    std::printf("Usage: %s [--config net_stress.ini] <server_ip> "
+                "[num_clients] [interval_ms] [payload_kb]\n", argv[0]);
     std::printf("  server_ip:   Server IP address\n");
-    std::printf("  num_clients: Number of client instances (default 4)\n");
-    std::printf("  interval_ms: Echo interval in ms (default 1000)\n");
-    std::printf("  payload_kb:  Payload size in KB (default 1)\n");
+    std::printf("  num_clients: Number of client instances (default %u)\n",
+                cfg.client_num);
+    std::printf("  interval_ms: Echo interval in ms (default %u)\n",
+                cfg.client_interval_ms);
+    std::printf("  payload_kb:  Payload size in KB (default %u)\n",
+                cfg.client_payload_len / 1024U);
     return 1;
   }
 
-  const char* server_ip = argv[1];
-  if (argc >= 3) g_num_clients = static_cast<uint32_t>(std::atoi(argv[2]));
-  uint32_t interval_ms = kDefaultIntervalMs;
-  if (argc >= 4) interval_ms = static_cast<uint32_t>(std::atoi(argv[3]));
-  uint32_t payload_len = kDefaultPayloadLen;
-  if (argc >= 5) payload_len = static_cast<uint32_t>(std::atoi(argv[4])) * 1024U;
+  const char* server_ip = pos_args[0];
+  g_num_clients = cfg.client_num;
+  if (pos_count >= 2) g_num_clients = static_cast<uint32_t>(std::atoi(pos_args[1]));
+  uint32_t interval_ms = cfg.client_interval_ms;
+  if (pos_count >= 3) interval_ms = static_cast<uint32_t>(std::atoi(pos_args[2]));
+  uint32_t payload_len = cfg.client_payload_len;
+  if (pos_count >= 4) payload_len = static_cast<uint32_t>(std::atoi(pos_args[3])) * 1024U;
 
   if (g_num_clients > kMaxInstances) g_num_clients = kMaxInstances;
   if (payload_len > kMaxPayloadBytes) payload_len = kMaxPayloadBytes;
@@ -638,12 +655,12 @@ int main(int argc, char* argv[]) {
 
   // --- Debug Shell ---
   osp::DebugShell::Config shell_cfg;
-  shell_cfg.port = kClientShellPort;
+  shell_cfg.port = cfg.client_shell_port;
   osp::DebugShell shell(shell_cfg);
   auto shell_r = shell.Start();
   if (shell_r) {
     OSP_LOG_INFO("CLIENT", "Debug shell: telnet localhost %u",
-                 kClientShellPort);
+                 cfg.client_shell_port);
     OSP_LOG_INFO("CLIENT", "  Commands: cmd_p, cmd_s, cmd_stop, "
                  "cmd_detail, cmd_bus, cmd_file, cmd_watchdog, "
                  "cmd_faults, cmd_quit");

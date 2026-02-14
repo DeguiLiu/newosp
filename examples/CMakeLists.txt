@@ -41,3 +41,6 @@ add_subdirectory(shm_ipc)
 
 # --- Net stress demo (subdirectory) ----------------------------------------
 add_subdirectory(net_stress)
+
+# --- Inicpp demo (embedded ini library) ---
+add_osp_example(osp_inicpp_demo inicpp_demo.cpp)

@@ -895,6 +895,15 @@ TEST_CASE("shm_transport - Cross-process large frame transfer",
 
 TEST_CASE("shm_transport - Cross-process ShmChannel WaitReadable polling",
           "[shm_transport][fork]") {
+  // TSan instruments fork'd children differently; shared memory timing
+  // becomes unreliable, causing spurious Read failures.  Skip under TSan.
+#if defined(__SANITIZE_THREAD__)
+  SKIP("Skipped under ThreadSanitizer (fork + shm timing unreliable)");
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+  SKIP("Skipped under ThreadSanitizer (fork + shm timing unreliable)");
+#endif
+#endif
   const char* name = "xproc_wait";
   using Channel = osp::ShmChannel<256, 8>;
 

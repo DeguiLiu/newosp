@@ -4,6 +4,20 @@
 
 ---
 
+## 最新变更
+
+### 2026-02-14: inicpp 集成优化
+
+**变更内容**:
+- 移除 `examples/inicpp/` 子目录 (已有顶层 `inicpp_demo.cpp`)
+- 合并 `docs/inicpp_api_zh.md` 到 `docs/api/api_foundation_core_zh.md` (新增第 4 节)
+- 统一 API 文档结构: inicpp 作为基础层模块与其他模块并列
+- 修正 `examples/inicpp_demo.cpp` 头文件引用: `#include "osp/inicpp.h"` → `#include "osp/inicpp.hpp"`
+
+**影响模块**: examples/CMakeLists.txt, docs/api/api_foundation_core_zh.md, examples/inicpp_demo.cpp
+
+---
+
 ## 1. P0 架构调整记录
 
 本节列出当前架构设计中已识别的 7 项 P0 优先级调整项，这些调整针对工业级嵌入式场景的关键需求，将在后续实施阶段逐步落地。

@@ -14,7 +14,7 @@
  *   parsecfg INI                     -> command-line args (simplified)
  *
  * newosp vocabulary types used:
- *   FixedString, FixedVector, expected, ScopeGuard
+ *   FixedString, FixedVector, expected, ScopeGuard, Config
  */
 
 #ifndef NET_STRESS_PROTOCOL_HPP_
@@ -24,6 +24,9 @@
 #include <cstring>
 #include <ctime>
 #include <variant>
+
+#include "osp/config.hpp"
+#include "osp/log.hpp"
 
 namespace net_stress {
 
@@ -190,6 +193,80 @@ inline bool VerifyPattern(const uint8_t* buf, uint32_t len,
     if (buf[i] != static_cast<uint8_t>((seq + i) & 0xFFU)) return false;
   }
   return true;
+}
+
+// ============================================================================
+// INI Configuration Loading
+// ============================================================================
+
+/// Parsed configuration from net_stress.ini.
+struct NetStressConfig {
+  // [server]
+  uint16_t server_hs_port     = kHandshakePort;
+  uint16_t server_echo_port   = kEchoPort;
+  uint16_t server_file_port   = kFilePort;
+  uint16_t server_shell_port  = kServerShellPort;
+  // [client]
+  uint32_t client_num         = 4U;
+  uint32_t client_interval_ms = kDefaultIntervalMs;
+  uint32_t client_payload_len = kDefaultPayloadLen;
+  uint16_t client_shell_port  = kClientShellPort;
+  // [monitor]
+  uint32_t monitor_probe_ms   = 2000U;
+  uint16_t monitor_shell_port = kMonitorShellPort;
+  // [network]
+  uint32_t connect_timeout_ms = kConnectTimeoutMs;
+  uint32_t max_clients        = kMaxClients;
+};
+
+/// Try to load config from INI file. Returns true if file was loaded.
+/// Missing keys keep their default values from NetStressConfig.
+inline bool LoadConfig(const char* path, NetStressConfig& cfg) {
+  osp::Config<osp::IniBackend> ini;
+  auto r = ini.LoadFile(path);
+  if (!r.has_value()) {
+    OSP_LOG_WARN("CONFIG", "Cannot load '%s', using defaults", path);
+    return false;
+  }
+  OSP_LOG_INFO("CONFIG", "Loaded configuration from '%s'", path);
+
+  // [server]
+  cfg.server_hs_port    = ini.GetPort("server", "handshake_port", cfg.server_hs_port);
+  cfg.server_echo_port  = ini.GetPort("server", "echo_port", cfg.server_echo_port);
+  cfg.server_file_port  = ini.GetPort("server", "file_port", cfg.server_file_port);
+  cfg.server_shell_port = ini.GetPort("server", "shell_port", cfg.server_shell_port);
+
+  // [client]
+  cfg.client_num         = static_cast<uint32_t>(
+      ini.GetInt("client", "num_clients", static_cast<int32_t>(cfg.client_num)));
+  cfg.client_interval_ms = static_cast<uint32_t>(
+      ini.GetInt("client", "interval_ms", static_cast<int32_t>(cfg.client_interval_ms)));
+  cfg.client_payload_len = static_cast<uint32_t>(
+      ini.GetInt("client", "payload_len", static_cast<int32_t>(cfg.client_payload_len)));
+  cfg.client_shell_port  = ini.GetPort("client", "shell_port", cfg.client_shell_port);
+
+  // [monitor]
+  cfg.monitor_probe_ms   = static_cast<uint32_t>(
+      ini.GetInt("monitor", "probe_interval_ms", static_cast<int32_t>(cfg.monitor_probe_ms)));
+  cfg.monitor_shell_port = ini.GetPort("monitor", "shell_port", cfg.monitor_shell_port);
+
+  // [network]
+  cfg.connect_timeout_ms = static_cast<uint32_t>(
+      ini.GetInt("network", "connect_timeout_ms", static_cast<int32_t>(cfg.connect_timeout_ms)));
+  cfg.max_clients        = static_cast<uint32_t>(
+      ini.GetInt("network", "max_clients", static_cast<int32_t>(cfg.max_clients)));
+
+  return true;
+}
+
+/// Scan argv for "--config <path>" and return the path, or nullptr.
+inline const char* FindConfigArg(int argc, char* argv[]) {
+  for (int i = 1; i < argc - 1; ++i) {
+    if (std::strcmp(argv[i], "--config") == 0) {
+      return argv[i + 1];
+    }
+  }
+  return nullptr;
 }
 
 }  // namespace net_stress

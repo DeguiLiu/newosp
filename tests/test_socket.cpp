@@ -311,6 +311,9 @@ TEST_CASE("socket - UnixListener Create succeeds", "[socket][unix]") {
 TEST_CASE("socket - Unix domain echo round-trip", "[socket][unix]") {
   const char* path = "/tmp/osp_test_echo.sock";
 
+  // Cleanup any leftover socket file
+  ::unlink(path);
+
   // Setup listener
   auto addr_r = osp::UnixAddress::FromPath(path);
   REQUIRE(addr_r.has_value());
@@ -325,23 +328,30 @@ TEST_CASE("socket - Unix domain echo round-trip", "[socket][unix]") {
   auto listen_r = listener.Listen();
   REQUIRE(listen_r.has_value());
 
-  // Client thread
-  std::thread client([&addr]() {
+  // Client thread - create own address to avoid data race on addr
+  std::atomic<bool> client_ok{false};
+  std::thread client([path, &client_ok]() {
+    auto client_addr_r = osp::UnixAddress::FromPath(path);
+    if (!client_addr_r.has_value()) return;
+
     auto sock_r = osp::UnixSocket::Create();
-    REQUIRE(sock_r.has_value());
+    if (!sock_r.has_value()) return;
     auto& sock = sock_r.value();
 
-    auto conn_r = sock.Connect(addr);
-    REQUIRE(conn_r.has_value());
+    auto conn_r = sock.Connect(client_addr_r.value());
+    if (!conn_r.has_value()) return;
 
     const char msg[] = "hello unix";
     auto send_r = sock.Send(msg, sizeof(msg));
-    REQUIRE(send_r.has_value());
+    if (!send_r.has_value()) return;
 
     char buf[64] = {};
     auto recv_r = sock.Recv(buf, sizeof(buf));
-    REQUIRE(recv_r.has_value());
-    REQUIRE(std::strcmp(buf, "hello unix") == 0);
+    if (!recv_r.has_value()) return;
+
+    if (std::strcmp(buf, "hello unix") == 0) {
+      client_ok.store(true, std::memory_order_release);
+    }
   });
 
   // Server: accept, echo back
@@ -358,6 +368,7 @@ TEST_CASE("socket - Unix domain echo round-trip", "[socket][unix]") {
   REQUIRE(send_r.has_value());
 
   client.join();
+  REQUIRE(client_ok.load(std::memory_order_acquire));
 
   // Cleanup
   ::unlink(path);

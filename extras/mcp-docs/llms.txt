@@ -1,0 +1,387 @@
+# newosp
+
+> C++17 header-only infrastructure library for industrial embedded systems (ARM-Linux)
+
+newosp is a modern C++17 header-only library designed for ARM-Linux industrial embedded platforms (laser LiDAR, robotics, edge computing). It provides zero-heap-allocation, lock-free/minimal-lock, cache-friendly components with RAII resource management.
+
+**Key Features:**
+- 788+ test cases, ASan/TSan/UBSan clean
+- Compatible with `-fno-exceptions -fno-rtti`
+- Lock-free MPSC message bus, wait-free SPSC ring buffer
+- HSM (Hierarchical State Machine) and Behavior Tree
+- Multi-transport support (TCP/UDP/SHM/Serial)
+- ROS2-inspired Pub/Sub nodes and lifecycle management
+- Thread watchdog and fault collector for reliability
+
+**Repository:** https://github.com/DeguiLiu/newosp
+
+---
+
+## Module Overview
+
+### Foundation Layer
+
+**platform.hpp** - Platform detection and compiler hints
+- Macros: `OSP_PLATFORM_LINUX/MACOS/WINDOWS`, `OSP_ARCH_ARM/X86`
+- Constants: `kCacheLineSize` (64 bytes)
+- Hints: `OSP_LIKELY(x)`, `OSP_UNLIKELY(x)`, `OSP_ASSERT(cond)`
+- Time: `SteadyNowUs()`, `SteadyNowNs()` - monotonic clock
+- Thread heartbeat: `ThreadHeartbeat` struct for watchdog integration
+
+**vocabulary.hpp** - Zero-heap vocabulary types
+- Error handling: `expected<V,E>`, `optional<T>`, `and_then()`, `or_else()`
+- Fixed containers: `FixedVector<T,Cap>`, `FixedString<Cap>`, `FixedFunction<Sig,BufSize>`
+- Type safety: `not_null<T>`, `NewType<T,Tag>`, `ScopeGuard`, `OSP_SCOPE_EXIT(...)`
+- Error enums: `ConfigError`, `TimerError`, `ShellError`, `MemPoolError`
+
+**config.hpp** - Multi-format configuration parser
+- Backends: INI (inih), JSON (nlohmann/json), YAML (fkYAML)
+- API: `LoadFile()`, `GetInt()`, `GetString()`, `FindBool()` → `optional<T>`
+- Tag dispatch + template specialization for compile-time backend selection
+
+**log.hpp** - Lightweight thread-safe logging
+- Levels: `kDebug < kInfo < kWarn < kError < kFatal < kOff`
+- Macros: `OSP_LOG_INFO(tag, fmt, ...)`, `OSP_LOG_ERROR(tag, fmt, ...)`
+- Compile-time filtering: `OSP_LOG_MIN_LEVEL`
+- Stack-only buffers (544B), zero heap allocation
+
+**timer.hpp** - Periodic task scheduler
+- API: `Add(period_ms, callback, ctx)` → `expected<TimerTaskId, TimerError>`
+- Background thread driven by `std::chrono::steady_clock`
+- Pre-allocated task slots, automatic catch-up for missed periods
+
+**shell.hpp** - Remote debug shell (telnet)
+- Command registration: `OSP_SHELL_CMD(name, desc) { ... }`
+- Features: TAB completion, command history, multi-session support
+- Meyer's singleton registry (max 64 commands)
+- Thread-local session routing for `DebugShell::Printf()`
+
+**mem_pool.hpp** - Fixed-block memory pool
+- Low-level: `FixedPool<BlockSize, MaxBlocks>` - raw block allocation
+- High-level: `ObjectPool<T, MaxObjects>` - type-safe wrapper with placement new
+- API: `CreateChecked(args...)` → `expected<T*, MemPoolError>`, `Destroy(ptr)`
+- O(1) alloc/free, embedded free-list, mutex-protected
+
+**shutdown.hpp** - Graceful shutdown manager
+- Signal handling: `SIGINT/SIGTERM` → async-signal-safe pipe wakeup
+- API: `Register(callback)`, `InstallSignalHandlers()`, `WaitForShutdown()`
+- LIFO callback execution (nested cleanup order)
+
+---
+
+### Core Communication Layer
+
+**bus.hpp** - Lock-free MPSC message bus
+- Template: `AsyncBus<PayloadVariant, QueueDepth=4096, BatchSize=256>`
+- Lock-free publish: CAS-based sequence number allocation
+- Priority admission: LOW (60%), MEDIUM (80%), HIGH (99%) thresholds
+- Batch processing: `ProcessBatch()` up to BatchSize messages per round
+- Backpressure: Normal/Warning/Critical/Full levels
+- Type routing: `std::variant` + compile-time index dispatch
+- Topic routing: FNV-1a 32-bit hash for same-type different-topic messages
+- Cache-line separation: producer/consumer counters on different cache lines
+
+**node.hpp** - Lightweight Pub/Sub node
+- API: `Subscribe<T>(callback)`, `Publish(msg)`, `Publish(msg, topic)`, `SpinOnce()`
+- Bus injection: `Node(name, id, bus_ref)` - supports multiple bus instances
+- Routing: Type-first (compile-time), topic-aware (FNV-1a hash) for disambiguation
+- RAII: Automatic unsubscribe on destruction
+- Lightweight publisher: `Publisher<T>` for fire-and-forget publishing
+
+**worker_pool.hpp** - Multi-threaded worker pool
+- Architecture: MPSC bus (entry) + SPSC ring per worker (dispatch)
+- API: `RegisterHandler<T>(callback)`, `Submit(msg)`, `Start()`, `Shutdown()`
+- Dispatcher thread: round-robin distribution to workers
+- Graceful drain: `FlushAndPause()`, `Resume()`
+- Linux affinity: CPU pinning + thread priority support
+
+**spsc_ringbuffer.hpp** - Lock-free SPSC ring buffer
+- Template: `SpscRingbuffer<T, BufferSize=16, FakeTSO=false, IndexT=size_t>`
+- Wait-free: Single producer, single consumer
+- Batch operations: `PushBatch()`, `PopBatch()` with wrap-around handling
+- Zero-copy: `Peek()` → pointer, `At(n)` random access, `Discard(n)` skip
+- Memory ordering: `acquire/release` (ARM) or `relaxed` (FakeTSO for x86/single-core)
+- Cache-line aligned: head/tail on separate cache lines to avoid false sharing
+
+**executor.hpp** - Task scheduler
+- Modes: `SingleThreadExecutor`, `StaticExecutor`, `PinnedExecutor`, `RealtimeExecutor`
+- Realtime config: `sched_policy` (SCHED_FIFO/RR), `sched_priority` (1-99), `lock_memory` (mlockall), `cpu_affinity`
+- API: `AddNode(node)`, `Spin()`, `SpinOnce()`, `Stop()`
+
+**semaphore.hpp** - Semaphore primitives
+- Types: `LightSemaphore` (futex-based), `BinarySemaphore`, `PosixSemaphore`
+- API: `Wait()`, `TryWait()`, `Post()`, `GetValue()`
+
+**data_fusion.hpp** - Multi-source data fusion
+- Inspired by CyberRT DataFusion
+- API: `FusedSubscription<MsgTypes...>` - triggers callback when all types received
+- Use case: Sensor fusion (camera + LiDAR + IMU alignment)
+
+---
+
+### State Machine & Behavior Tree
+
+**hsm.hpp** - Hierarchical State Machine
+- Integrated from hsm-cpp
+- Template: `StateMachine<Context, MaxStates>`
+- Features: LCA-based entry/exit path, guard conditions, event bubbling to parent
+- API: `Dispatch(event)`, `CurrentState()`, `IsInState(state)`
+- Single-threaded dispatch, handlers non-reentrant
+
+**bt.hpp** - Behavior Tree
+- Integrated from bt-cpp
+- Nodes: Sequence, Selector, Decorator, Action, Condition
+- Flat array storage, index-based references (cache-friendly)
+- Compile-time limits: `OSP_BT_MAX_NODES` (32), `OSP_BT_MAX_CHILDREN` (8)
+- Async task integration: leaf nodes submit to WorkerPool
+
+---
+
+### Network & Transport Layer
+
+**socket.hpp** - RAII socket wrapper
+- Classes: `TcpSocket`, `UdpSocket`, `TcpListener`
+- API: `Connect(host, port)` → `expected<TcpSocket, SocketError>`
+- Methods: `Send(data, len)`, `Recv(buf, len)`, `Close()`
+- RAII: Automatic fd cleanup on destruction
+
+**io_poller.hpp** - I/O multiplexing
+- Backends: epoll (Linux), kqueue (macOS)
+- API: `Add(fd, events, ctx)`, `Wait(events, max, timeout_ms)` → event count
+- Max events per wait: `OSP_IO_POLLER_MAX_EVENTS` (64)
+
+**connection.hpp** - Connection pool
+- Template: `ConnectionPool<MaxConns>`
+- API: `Add(conn)`, `Remove(id)`, `ForEach(callback)`
+- Mutex-protected, fixed capacity
+
+**transport.hpp** - Transparent network transport
+- Frame format v1 (26 bytes): magic(4) + len(4) + type(2) + sender(4) + seq_num(4) + timestamp_ns(8) + payload
+- Sequence tracking: `SequenceTracker` detects packet loss/reorder/duplicate
+- API: `NetworkNode<Payload>` - extends Node with remote pub/sub
+- Methods: `AdvertiseTo<T>(endpoints)`, `Publish(msg)` - local + remote broadcast
+
+**shm_transport.hpp** - Shared memory IPC
+- Classes: `SharedMemorySegment`, `ShmRingBuffer<SlotSize, SlotCount>`, `ShmChannel<SlotSize, SlotCount>`
+- Lock-free SPSC ring in shared memory (`/dev/shm/osp_shm_*`)
+- ARM memory ordering: explicit `acquire/release` fences
+- Crash recovery: `CreateOrReplace()` - unlink stale segments
+- Notification: eventfd for consumer wakeup
+
+**serial_transport.hpp** - Industrial serial communication
+- Integrated CSerialPort (NATIVE_SYNC mode)
+- Frame format: magic(4) + len(4) + type(2) + sender(4) + payload + crc16(2)
+- Frame sync FSM: WaitMagic → WaitHeader → WaitPayload → WaitCrc
+- SPSC ring buffer: `SpscRingbuffer<uint8_t, 4096>` decouples I/O from parsing
+- CRC-CCITT validation, IoPoller integration
+
+**net.hpp** - Network layer wrapper
+- Integrates sockpp library (conditional: `OSP_HAS_SOCKPP`)
+- Classes: `TcpClient`, `TcpServer`, `UdpPeer`
+- Provides `osp::expected` error handling over sockpp
+
+**transport_factory.hpp** - Automatic transport selection
+- API: `Detect(config)` → `TransportType` (kInproc/kShm/kTcp/kUdp/kSerial)
+- Rules: localhost → SHM, remote → TCP/UDP, serial port → Serial
+
+---
+
+### Service & Discovery Layer
+
+**discovery.hpp** - Node discovery
+- Modes: Static config, UDP multicast auto-discovery
+- API: `Announce(node_name, endpoint)`, `SetOnNodeJoin(callback)`, `SetOnNodeLeave(callback)`
+- Topic-aware: `TopicAwareDiscovery` - discover by topic name
+
+**service.hpp** - RPC service
+- Classes: `Service<Request, Response>`, `Client<Request, Response>`, `AsyncClient<Request, Response>`
+- API: `Service::SetHandler(callback)`, `Client::Call(req, timeout_ms)` → `expected<Response, ServiceError>`
+- Registry: `ServiceRegistry` - service name → endpoint mapping
+
+**node_manager.hpp** - Node connection manager
+- API: `CreateListener(port)`, `Connect(host, port)`, `OnDisconnect(callback)`
+- Heartbeat: Periodic ping/pong, timeout detection (configurable interval/count)
+- Thread-safe: mutex-protected connection pool
+
+**node_manager_hsm.hpp** - HSM-driven node management
+- Per-connection HSM: Connected → Suspect (heartbeat timeout) → Disconnected
+- Fault reporting: Timeout (kHigh), Disconnected (kCritical)
+- API: `RegisterNode(node_id, name)`, `OnHeartbeat(node_id)`, `ForEachNode(callback)`
+
+**service_hsm.hpp** - HSM-driven service lifecycle
+- States: Idle → Listening → Active → Error/ShuttingDown
+- Optional fault reporting: Error state → `kFaultServiceError` (kHigh)
+- API: `Start(endpoint)`, `Stop()`, `CurrentState()`
+
+**discovery_hsm.hpp** - HSM-driven discovery flow
+- States: Idle → Announcing → Discovering → Stable/Degraded
+- Fault reporting: Degraded → `kFaultNetworkDegraded` (kMedium)
+- API: `Start()`, `OnNodeFound()`, `OnNodeLost()`, `CurrentState()`
+
+---
+
+### Application Layer
+
+**app.hpp** - Application-Instance model
+- IID encoding: `MakeIID(app_id, ins_id)` → `(app_id << 16) | ins_id`
+- Classes: `Instance` (HSM-driven, 11 states), `Application<InstanceImpl, MaxInstances>`
+- Instance API: `OnMessage(event, data, len)` - non-virtual, name hiding for override
+- Application API: `CreateInstance()` → `expected<ins_id, AppError>`, `Post(ins_id, event, data, len)`
+- Zero heap: `ObjectPool<InstanceImpl, MaxInstances>` manages all instances
+
+**post.hpp** - Unified message delivery
+- API: `OspPost(dst_iid, event, data, len, dst_node=0)` - auto-routing (local/IPC/remote)
+- Sync RPC: `OspSendAndWait(dst_iid, event, data, len, ack_buf, ack_buf_size, dst_node, timeout_ms)`
+- Registry: `AppRegistry` - `FixedVector<AppEntry, N>` for app registration
+
+**qos.hpp** - Quality of Service profiles
+- Fields: `reliability` (BestEffort/Reliable), `history` (KeepLast/KeepAll), `depth`, `deadline_ms`, `lifespan_ms`
+- Presets: `kQosSensorData`, `kQosControlCommand`, `kQosSystemStatus`
+- Transport selection: Reliable → TCP/Serial+ACK, BestEffort → UDP/Serial-only-CRC
+
+**lifecycle_node.hpp** - Lifecycle node management
+- HSM hierarchy (16 states): Unconfigured → Inactive → Active → Finalized
+- Substates: Active (Running/Degraded), Error (Recoverable/Fatal)
+- API: `Configure()`, `Activate()`, `Deactivate()`, `Cleanup()`, `Shutdown()`
+- Virtual hooks: `on_configure()`, `on_activate()`, `on_deactivate()`, `on_cleanup()`, `on_shutdown()`, `on_error()`
+- Fault reporting: configure/activate failure (kHigh), cleanup failure (kMedium)
+
+---
+
+### Reliability Components
+
+**watchdog.hpp** - Thread watchdog
+- Template: `ThreadWatchdog<MaxThreads=32>`
+- API: `Register(name, timeout_ms)` → `expected<RegResult, WatchdogError>` (includes `ThreadHeartbeat*`)
+- Monitoring: `Check()` → timeout count, `SetOnTimeout(callback)`, `SetOnRecovered(callback)`
+- Auto-check: `StartAutoCheck(interval_ms)` - backup thread for self-monitoring
+- RAII: `WatchdogGuard` - auto register/unregister
+- Integration: Modules call `heartbeat->Beat()` in hot path
+
+**fault_collector.hpp** - Fault collection and handling
+- Template: `FaultCollector<MaxFaults=64, QueueDepth=256, HookBufSize=32>`
+- 4-priority queues: kCritical/kHigh/kMedium/kLow (independent MPSC ring buffers)
+- Admission control: 60%/80%/99% thresholds, kCritical never dropped
+- API: `ReportFault(index, detail, priority)`, `RegisterHook(index, callback)`, `Start()`, `Stop()`
+- Hook decisions: kHandled, kEscalate, kDefer, kShutdown
+- Active bitmap: `atomic<uint64_t>` + popcount for O(1) query
+- Watchdog integration: `SetConsumerHeartbeat(ThreadHeartbeat*)`
+
+**shell_commands.hpp** - Diagnostic shell commands bridge
+- Zero-intrusion: Modules don't depend on shell.hpp
+- Registration functions: `RegisterWatchdog(wd)`, `RegisterFaults(fc)`, `RegisterBusStats(bus)`, etc.
+- Commands: `osp_watchdog`, `osp_faults`, `osp_bus`, `osp_pool`, `osp_transport`, `osp_serial`, `osp_nodes`, `osp_service`, `osp_discovery`, `osp_lifecycle`, `osp_qos`, `osp_mempool`
+- Implementation: Template functions + static local variables capture object pointers
+
+---
+
+## Detailed Documentation
+
+- **Design Document:** [/docs/design_zh.md](/docs/design_zh.md) - Full architecture, API reference, resource budget
+- **Benchmark Report:** [/docs/benchmark_report_zh.md](/docs/benchmark_report_zh.md) - Performance metrics (throughput, latency, memory)
+- **Examples:** [/examples/README.md](/examples/README.md) - 15+ demos and multi-file applications
+- **Tests:** [/tests/README.md](/tests/README.md) - 788+ test cases, sanitizer coverage
+
+---
+
+## Quick Start
+
+```cpp
+#include "osp/bus.hpp"
+#include "osp/node.hpp"
+#include "osp/log.hpp"
+
+struct SensorData { float temperature; };
+using Payload = std::variant<SensorData>;
+
+int main() {
+  osp::log::SetLevel(osp::log::Level::kInfo);
+
+  osp::AsyncBus<Payload> bus;
+  osp::Node<Payload> sensor("sensor", 1, bus);
+
+  sensor.Subscribe<SensorData>([](const SensorData& data, const osp::MessageHeader& hdr) {
+    OSP_LOG_INFO("app", "Received temp=%.1f from sender %u", data.temperature, hdr.sender_id);
+  });
+
+  sensor.Publish(SensorData{25.0f});
+  sensor.SpinOnce();
+
+  return 0;
+}
+```
+
+---
+
+## Build & Test
+
+```bash
+# Clone repository
+git clone https://github.com/DeguiLiu/newosp.git
+cd newosp
+
+# Build with tests
+cmake -B build -DOSP_BUILD_TESTS=ON -DOSP_BUILD_EXAMPLES=ON
+cmake --build build
+
+# Run tests
+cd build && ctest --output-on-failure
+
+# Run with sanitizers
+cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DOSP_BUILD_TESTS=ON \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
+cmake --build build-asan && cd build-asan && ctest
+```
+
+---
+
+## Design Principles
+
+- **Zero global state:** All state encapsulated in objects, RAII lifecycle management
+- **Stack-first allocation:** Fixed-capacity containers, hot path forbids heap allocation
+- **Lock-free or minimal locking:** MPSC lock-free bus, SPSC wait-free queue, SharedMutex for read-heavy
+- **Compile-time dispatch:** Template specialization, tag dispatch, `if constexpr` over virtual functions
+- **Type safety:** `expected<V,E>` error handling, `NewType<T,Tag>` strong typing, `std::variant` message routing
+- **Embedded-friendly:** Compatible with `-fno-exceptions -fno-rtti`, fixed-width integers, cache-line alignment
+
+---
+
+## Resource Budget (Typical Configuration)
+
+| Component | Static Memory | Heap | Threads |
+|-----------|---------------|------|---------|
+| AsyncBus<4096> | ~320 KB | 0 | 0 |
+| WorkerPool(4) | ~64 KB | ~16 KB | 5 |
+| TimerScheduler(16) | ~1 KB | ~1 KB | 1 |
+| ThreadWatchdog<32> | ~2 KB | 0 | 0-1 |
+| FaultCollector<64,256> | ~36 KB | 0 | 1 |
+| ShmChannel<4096,256> | ~1 MB (shared) | 0 | 0 |
+| DebugShell(2 conn) | ~1 KB | ~4 KB | 3 |
+
+---
+
+## Thread Safety Summary
+
+- **Lock-free:** AsyncBus (MPSC publish), SpscRingbuffer (SPSC), ShmRingBuffer (SPSC)
+- **Mutex-protected:** TimerScheduler, MemPool, ConnectionPool, NodeManager
+- **Single-threaded:** HSM/BT dispatch, Executor spin, IoPoller event loop
+- **Thread-safe publish:** Node::Publish(), WorkerPool::Submit()
+- **Consumer thread:** Node::SpinOnce(), WorkerPool dispatcher, FaultCollector consumer
+
+---
+
+## License
+
+MIT License - Copyright (c) 2024 liudegui
+
+---
+
+## Contact & Contribution
+
+- **GitHub:** https://github.com/DeguiLiu/newosp
+- **Issues:** https://github.com/DeguiLiu/newosp/issues
+- **Pull Requests:** Welcome! Please follow Google C++ Style Guide and ensure tests pass.
+
+---
+
+*Generated for LLM context indexing - see https://llmstxt.org*
