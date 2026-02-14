@@ -32,10 +32,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# Default: look for docs next to this script
-DEFAULT_DOCS_DIR = SCRIPT_DIR
-# Fallback: newosp project root
-NEWOSP_ROOT = SCRIPT_DIR.parent.parent
+# .ai/ is directly under newosp project root; allow override via env var
+NEWOSP_ROOT = Path(os.environ.get("NEWOSP_ROOT", str(SCRIPT_DIR.parent)))
 INCLUDE_DIR = NEWOSP_ROOT / "include" / "osp"
 DESIGN_DOC = NEWOSP_ROOT / "docs" / "design_zh.md"
 
