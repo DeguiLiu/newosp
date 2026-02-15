@@ -191,7 +191,8 @@ vocabulary.hpp  ────────────────  (依赖 platfo
     ├── qos.hpp            (依赖 platform)
     |
     ├── watchdog.hpp       (依赖 platform: ThreadHeartbeat)
-    └── fault_collector.hpp (依赖 platform + vocabulary)
+    ├── fault_collector.hpp (依赖 platform + vocabulary)
+    └── system_monitor.hpp (依赖 platform)
 ```
 
 ### 3.3 数据流
@@ -265,6 +266,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 | 可靠性 | Watchdog | watchdog.hpp | 线程看门狗 |
 | 可靠性 | FaultCollector | fault_collector.hpp | 故障收集器 |
 | 可靠性 | ShellCommands | shell_commands.hpp | 内置诊断 Shell 命令桥接 |
+| 可靠性 | SystemMonitor | system_monitor.hpp | 系统健康监控 |
 
 ---
 
@@ -1507,6 +1509,119 @@ inline void RegisterWatchdog(WatchdogType& wd) {
 | node_manager_hsm.hpp | `HsmNodeInfo` + `ForEachNode(Fn)` | 遍历活跃节点快照 |
 
 **资源开销**: 每个 Register 函数 1 个 static 指针 (8B)，每个命令占用 GlobalCmdRegistry 1 个 slot，运行时仅在 telnet 执行命令时触发。
+
+---
+
+### 10.6 system_monitor.hpp -- 系统健康监控
+
+Linux 专用系统健康监控模块，通过 /proc 和 /sys 文件系统采集 CPU、内存、磁盘、温度指标。
+
+**设计要点**:
+
+| 特性 | 实现 |
+|------|------|
+| 数据采集 | POSIX open/read/close 解析 /proc/stat, /proc/meminfo, /sys/class/thermal |
+| CPU 利用率 | jiffies 差分计算 (需两次采样) |
+| 告警模式 | 状态变化检测 (StateCrossed)，仅在跨越阈值时触发 |
+| 回调类型 | 函数指针 `AlertCallback = void(*)(const SystemSnapshot&, const char*, void*)` |
+| 磁盘监控 | statvfs() 系统调用，模板参数 MaxDiskPaths (默认 4) |
+| 零堆分配 | 栈缓冲区解析，POD 快照结构体 |
+| Timer 集成 | 静态 `SampleTick(void*)` 方法 |
+
+**数据结构**:
+
+```
+CpuSnapshot     -- total/user/system/iowait 百分比 + 温度 (milli-Celsius)
+MemorySnapshot  -- total/available/used (kB) + 百分比
+DiskSnapshot    -- total/available (bytes) + 百分比
+SystemSnapshot  -- CpuSnapshot + MemorySnapshot + timestamp_us
+AlertThresholds -- cpu/temp/memory/disk 阈值配置
+```
+
+**典型用法**:
+
+```cpp
+osp::SystemMonitor<4> monitor;
+
+// 配置阈值
+osp::AlertThresholds thresholds;
+thresholds.cpu_percent = 85;
+thresholds.memory_percent = 90;
+monitor.SetThresholds(thresholds);
+
+// 设置告警回调
+monitor.SetAlertCallback([](const osp::SystemSnapshot& snap,
+                            const char* msg, void*) {
+  fprintf(stderr, "ALERT: %s\n", msg);
+}, nullptr);
+
+// 添加磁盘监控路径
+monitor.AddDiskPath("/");
+monitor.AddDiskPath("/tmp");
+
+// 定时采样 (1 秒间隔)
+scheduler.AddTimer(1000, osp::SystemMonitor<4>::SampleTick, &monitor);
+```
+
+**与 guardian 项目的关系**: 从 guardian 守护进程的 SystemCheck 模块提炼而来，去除了产品硬编码和全局状态，改为模板化 header-only 设计，符合 newosp 零堆分配和函数指针回调的架构风格。
+
+---
+
+### 10.7 process.hpp -- 进程管理
+
+Linux 专用进程管理模块，提供进程发现、控制、子进程 spawn 和管道输出捕获。
+
+**设计要点**:
+
+| 特性 | 实现 |
+|------|------|
+| 进程发现 | /proc/[pid]/comm 精确匹配 + /proc/[pid]/cmdline basename 回退 |
+| 进程控制 | SIGSTOP/SIGCONT/SIGKILL + 重试机制 |
+| 状态检查 | /proc/[pid]/status 解析 State 字段 (R/S/D/T/Z) |
+| 子进程 spawn | fork + execvp, setsid 信号隔离, 信号重置 |
+| 管道捕获 | stdout/stderr 独立或合并捕获, 非阻塞读取 |
+| 超时等待 | waitpid + WNOHANG 轮询, 可配置超时 |
+| RAII | Subprocess 析构自动 kill + waitpid, PipeGuard/DirGuard |
+| 零 std::regex | 手写 /proc 解析, 无正则引擎开销 |
+| 便捷接口 | RunCommand() 一行调用捕获命令输出 |
+
+**核心类型**:
+
+```
+ProcessResult    -- kSuccess/kNotFound/kFailed/kWaitError
+SubprocessConfig -- argv, working_dir, capture_stdout/stderr, merge_stderr
+WaitResult       -- exited, exit_code, signaled, term_signal, timed_out
+Subprocess       -- RAII 子进程句柄 (Start/Wait/Signal/ReadStdout/ReadStderr)
+```
+
+**典型用法**:
+
+```cpp
+// 1. 查找并冻结进程
+pid_t pid;
+osp::FindPidByName("my_daemon", pid);
+osp::FreezeProcess(pid);
+// ... 资源调度 ...
+osp::ResumeProcess(pid);
+
+// 2. 子进程 spawn + 输出捕获
+const char* argv[] = {"ls", "-la", nullptr};
+osp::Subprocess proc;
+osp::SubprocessConfig cfg;
+cfg.argv = argv;
+cfg.capture_stdout = true;
+proc.Start(cfg);
+std::string output = proc.ReadAllStdout();
+auto wr = proc.Wait();
+
+// 3. 一行命令执行
+std::string out; int code;
+osp::RunCommand(argv, out, code);
+```
+
+**TOCTOU 说明**: FindPidByName 返回的 PID 可能在查找后失效 (进程退出或 PID 复用)。Linux 5.1+ 可用 pidfd_open(2) 消除此竞态，当前版本通过文档标注提醒调用者。
+
+**灵感来源**: reproc (跨平台子进程库)、subprocess.h (单头文件 C 库)、TinyProcessLibrary。
 
 ---
 
