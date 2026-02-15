@@ -490,3 +490,134 @@ TEST_CASE("Bus concurrent publish from multiple threads", "[bus]") {
   int total = kNumThreads * kMsgsPerThread;
   REQUIRE(received.load() >= total * 95 / 100);
 }
+
+// ============================================================================
+// ProcessBatchWith tests
+// ============================================================================
+
+TEST_CASE("ProcessBatchWith basic dispatch", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  struct CountVisitor {
+    uint32_t sensor_count = 0;
+    uint32_t motor_count = 0;
+    uint32_t alarm_count = 0;
+
+    void operator()(const SensorData& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {
+      ++sensor_count;
+    }
+    void operator()(const MotorCmd& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {
+      ++motor_count;
+    }
+    void operator()(const AlarmEvent& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {
+      ++alarm_count;
+    }
+  };
+
+  REQUIRE(bus.Publish(SensorData{25.5f, 1}, 0));
+  REQUIRE(bus.Publish(MotorCmd{100}, 0));
+  REQUIRE(bus.Publish(SensorData{30.0f, 2}, 0));
+  REQUIRE(bus.Publish(MotorCmd{-50}, 0));
+
+  CountVisitor visitor;
+  uint32_t processed = bus.ProcessBatchWith(visitor);
+
+  REQUIRE(processed == 4);
+  REQUIRE(visitor.sensor_count == 2);
+  REQUIRE(visitor.motor_count == 2);
+  REQUIRE(visitor.alarm_count == 0);
+}
+
+TEST_CASE("ProcessBatchWith processes all messages", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  constexpr uint32_t kCount = 10;
+  for (uint32_t i = 0; i < kCount; ++i) {
+    REQUIRE(bus.Publish(SensorData{static_cast<float>(i), i}, 0));
+  }
+
+  uint32_t total_processed = 0;
+  struct SinkVisitor {
+    uint32_t count = 0;
+    void operator()(const SensorData& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {
+      ++count;
+    }
+    void operator()(const MotorCmd& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {}
+    void operator()(const AlarmEvent& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {}
+  };
+
+  SinkVisitor visitor;
+  // ProcessBatchWith may process up to kBatchSize per call, so loop
+  while (bus.Depth() > 0) {
+    total_processed += bus.ProcessBatchWith(visitor);
+  }
+
+  REQUIRE(total_processed == kCount);
+  REQUIRE(visitor.count == kCount);
+}
+
+TEST_CASE("ProcessBatchWith stats update", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  REQUIRE(bus.Publish(SensorData{1.0f, 1}, 0));
+  REQUIRE(bus.Publish(MotorCmd{50}, 0));
+  REQUIRE(bus.Publish(AlarmEvent{99}, 0));
+
+  struct NopVisitor {
+    void operator()(const SensorData& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {}
+    void operator()(const MotorCmd& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {}
+    void operator()(const AlarmEvent& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {}
+  };
+
+  auto stats_before = bus.GetStatistics();
+  uint64_t processed_before = stats_before.messages_processed;
+
+  NopVisitor visitor;
+  uint32_t ret = bus.ProcessBatchWith(visitor);
+
+  auto stats_after = bus.GetStatistics();
+  REQUIRE(ret == 3);
+  REQUIRE(stats_after.messages_processed == processed_before + 3);
+}
+
+TEST_CASE("ProcessBatchWith empty queue", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  // Queue is empty after fixture reset
+  REQUIRE(bus.Depth() == 0);
+
+  struct TrackVisitor {
+    uint32_t call_count = 0;
+    void operator()(const SensorData& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {
+      ++call_count;
+    }
+    void operator()(const MotorCmd& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {
+      ++call_count;
+    }
+    void operator()(const AlarmEvent& /*d*/,
+                    const osp::MessageHeader& /*h*/) noexcept {
+      ++call_count;
+    }
+  };
+
+  TrackVisitor visitor;
+  uint32_t processed = bus.ProcessBatchWith(visitor);
+
+  REQUIRE(processed == 0);
+  REQUIRE(visitor.call_count == 0);
+}

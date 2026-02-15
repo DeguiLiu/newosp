@@ -1,6 +1,9 @@
+**中文** | [English](README.md)
+
 # newosp
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 现代 C++17 纯头文件嵌入式基础设施库，面向嵌入式Linux 平台，专为工业嵌入式系统 (传感器、机器人、边缘计算) 设计。
 
@@ -38,9 +41,9 @@
 
 | 模块 | 说明 |
 |------|------|
-| `bus.hpp` | 无锁 MPSC 消息总线 (`AsyncBus<PayloadVariant>`)，CAS 发布，topic 路由 |
+| `bus.hpp` | 无锁 MPSC 消息总线 (`AsyncBus<PayloadVariant>`)，CAS 发布，topic 路由，`ProcessBatchWith` 访问者分发 |
 | `node.hpp` | 轻量级发布/订阅节点 (`Node<PayloadVariant>`)，Bus 依赖注入，FNV-1a topic hash |
-| `static_node.hpp` | 编译期 Handler 绑定节点 (`StaticNode<Payload, Handler>`)，零间接调用，分发可内联 |
+| `static_node.hpp` | 编译期 Handler 绑定节点 (`StaticNode<Payload, Handler>`)，双模式分发 (直接/回调)，直接模式 15x 加速 |
 | `worker_pool.hpp` | 多工作线程池，AsyncBus + SPSC 每工作线程队列，AdaptiveBackoff |
 | `spsc_ringbuffer.hpp` | 无锁 wait-free SPSC 环形缓冲 (trivially_copyable, 批量操作, FakeTSO) |
 | `executor.hpp` | 调度器 (Single/Static/Pinned + RealtimeExecutor SCHED_FIFO) |
