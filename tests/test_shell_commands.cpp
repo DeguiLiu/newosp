@@ -20,8 +20,11 @@
 #include "osp/serial_transport.hpp"
 
 // Minimal payload for bus/node tests
+// NOTE: structs must be >= 8 bytes to avoid GCC 14 wide-read optimization
+// triggering ASan stack-buffer-overflow (8-byte memcpy on smaller struct).
 struct TestMsg {
   uint32_t value;
+  uint32_t reserved = 0;
 };
 using TestPayload = std::variant<TestMsg>;
 

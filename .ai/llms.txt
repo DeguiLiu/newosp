@@ -5,7 +5,7 @@
 newosp is a modern C++17 header-only library designed for ARM-Linux industrial embedded platforms (laser LiDAR, robotics, edge computing). It provides zero-heap-allocation, lock-free/minimal-lock, cache-friendly components with RAII resource management.
 
 **Key Features:**
-- 788+ test cases, ASan/TSan/UBSan clean
+- 987+ test cases, ASan/TSan/UBSan clean
 - Compatible with `-fno-exceptions -fno-rtti`
 - Lock-free MPSC message bus, wait-free SPSC ring buffer
 - HSM (Hierarchical State Machine) and Behavior Tree
@@ -76,6 +76,7 @@ newosp is a modern C++17 header-only library designed for ARM-Linux industrial e
 - Lock-free publish: CAS-based sequence number allocation
 - Priority admission: LOW (60%), MEDIUM (80%), HIGH (99%) thresholds
 - Batch processing: `ProcessBatch()` up to BatchSize messages per round
+- Visitor dispatch: `ProcessBatchWith<Visitor>()` bypasses callback table, uses std::visit for zero-overhead direct dispatch
 - Backpressure: Normal/Warning/Critical/Full levels
 - Type routing: `std::variant` + compile-time index dispatch
 - Topic routing: FNV-1a 32-bit hash for same-type different-topic messages
@@ -87,6 +88,14 @@ newosp is a modern C++17 header-only library designed for ARM-Linux industrial e
 - Routing: Type-first (compile-time), topic-aware (FNV-1a hash) for disambiguation
 - RAII: Automatic unsubscribe on destruction
 - Lightweight publisher: `Publisher<T>` for fire-and-forget publishing
+
+**static_node.hpp** - Compile-time handler binding node
+- Template: `StaticNode<PayloadVariant, Handler>` - compile-time handler binding
+- Dual-mode dispatch: callback mode (`Start()`) or direct dispatch (no `Start()`, uses `ProcessBatchWith`)
+- Direct mode: ~2ns/msg, 15x faster than callback mode
+- Handler protocol: `void operator()(const T&, const MessageHeader&)` per type
+- Template catch-all: `template<typename T> void operator()(const T&, const MessageHeader&) {}` for ignored types
+- API: `Start()`, `Stop()`, `SpinOnce()`, `Publish<T>(msg)`, `GetHandler()`
 
 **worker_pool.hpp** - Multi-threaded worker pool
 - Architecture: MPSC bus (entry) + SPSC ring per worker (dispatch)
@@ -280,7 +289,7 @@ newosp is a modern C++17 header-only library designed for ARM-Linux industrial e
 - **Design Document:** [/docs/design_zh.md](/docs/design_zh.md) - Full architecture, API reference, resource budget
 - **Benchmark Report:** [/docs/benchmark_report_zh.md](/docs/benchmark_report_zh.md) - Performance metrics (throughput, latency, memory)
 - **Examples:** [/examples/README.md](/examples/README.md) - 15+ demos and multi-file applications
-- **Tests:** [/tests/README.md](/tests/README.md) - 788+ test cases, sanitizer coverage
+- **Tests:** [/tests/README.md](/tests/README.md) - 987+ test cases, sanitizer coverage
 
 ---
 

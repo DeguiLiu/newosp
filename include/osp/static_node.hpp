@@ -273,10 +273,26 @@ class StaticNode {
 
   /**
    * @brief Process pending messages from the bus.
+   *
+   * Two dispatch modes depending on whether Start() was called:
+   *
+   * - **Callback mode** (after Start()): Uses ProcessBatch() which goes
+   *   through the Bus callback table. Compatible with multiple subscribers
+   *   on the same bus.
+   *
+   * - **Direct dispatch mode** (without Start()): Uses ProcessBatchWith()
+   *   which bypasses the callback table entirely. std::visit dispatches
+   *   directly to the Handler, enabling compiler inlining. Only valid
+   *   for single-consumer scenarios (MPSC constraint).
+   *
    * @return Number of messages processed.
    */
   uint32_t SpinOnce() noexcept {
-    return bus_ptr_->ProcessBatch();
+    if (started_) {
+      return bus_ptr_->ProcessBatch();
+    }
+    // Direct dispatch: bypass callback table, std::visit inlined
+    return bus_ptr_->ProcessBatchWith(handler_);
   }
 
   // ======================== Publisher Factory ========================

@@ -14,17 +14,22 @@
 #include <variant>
 
 // --- Test message types ---
+// NOTE: structs must be >= 8 bytes to avoid GCC 14 wide-read optimization
+// triggering ASan stack-buffer-overflow (8-byte memcpy on smaller struct).
 
 struct SensorA {
   uint32_t value;
+  uint32_t reserved = 0;
 };
 
 struct SensorB {
   float reading;
+  uint32_t reserved = 0;
 };
 
 struct SensorC {
   int16_t status;
+  uint8_t reserved[6] = {};
 };
 
 using TestPayload = std::variant<SensorA, SensorB, SensorC>;

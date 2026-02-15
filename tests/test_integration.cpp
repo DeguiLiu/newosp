@@ -41,6 +41,7 @@ struct IntegData {
 
 struct IntegEvent {
   uint32_t code;
+  uint32_t reserved = 0;
 };
 
 using IntegPayload = std::variant<IntegCmd, IntegData, IntegEvent>;

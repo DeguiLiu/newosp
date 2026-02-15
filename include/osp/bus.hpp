@@ -603,6 +603,62 @@ class AsyncBus {
     return processed;
   }
 
+  /**
+   * @brief Process messages with compile-time visitor dispatch.
+   *
+   * Bypasses callback table and FixedFunction indirection entirely.
+   * Uses std::visit to dispatch directly to the visitor, enabling
+   * compiler inlining of handler bodies.
+   *
+   * IMPORTANT: This is an ALTERNATIVE to ProcessBatch(), not additive.
+   * Both consume from the same ring buffer (MPSC single-consumer).
+   *
+   * Visitor protocol: void operator()(const T&, const MessageHeader&)
+   * for each type T in PayloadVariant.
+   *
+   * @tparam Visitor Callable with operator() for each variant alternative.
+   * @return Number of messages processed.
+   */
+  template <typename Visitor>
+  uint32_t ProcessBatchWith(Visitor&& visitor) noexcept {
+    uint32_t processed = 0;
+    uint32_t cons_pos = consumer_pos_.load(std::memory_order_relaxed);
+
+    for (uint32_t i = 0; i < kBatchSize; ++i) {
+      RingBufferNode& node = ring_buffer_[cons_pos & kBufferMask];
+
+      uint32_t expected_seq = cons_pos + 1;
+      uint32_t seq = node.sequence.load(std::memory_order_acquire);
+
+      if (seq != expected_seq) break;
+
+#ifdef __GNUC__
+      if (i + 1 < kBatchSize) {
+        __builtin_prefetch(
+            &ring_buffer_[(cons_pos + 1) & kBufferMask], 0, 1);
+      }
+#endif
+
+      // Direct dispatch: no callback table, no FixedFunction, no lock
+      const auto& hdr = node.envelope.header;
+      std::visit([&visitor, &hdr](const auto& data) {
+        visitor(data, hdr);
+      }, node.envelope.payload);
+
+      node.sequence.store(cons_pos + kQueueDepth,
+                          std::memory_order_release);
+      ++cons_pos;
+      ++processed;
+    }
+
+    if (processed > 0) {
+      consumer_pos_.store(cons_pos, std::memory_order_relaxed);
+      stats_.messages_processed.fetch_add(processed,
+                                          std::memory_order_relaxed);
+    }
+    return processed;
+  }
+
   // ======================== Query API ========================
 
   /** @brief Current number of pending messages in the queue. */

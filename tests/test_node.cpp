@@ -11,18 +11,23 @@
 #include <cstring>
 #include <variant>
 
-// --- Test message types (same as bus tests) ---
+// --- Test message types ---
+// NOTE: structs must be >= 8 bytes to avoid GCC 14 wide-read optimization
+// triggering ASan stack-buffer-overflow (8-byte memcpy on smaller struct).
 
 struct Heartbeat {
   uint32_t seq;
+  uint32_t reserved = 0;
 };
 
 struct Command {
   int32_t action;
+  uint32_t flags = 0;
 };
 
 struct Status {
   uint8_t code;
+  uint8_t reserved[7] = {};
 };
 
 using NodePayload = std::variant<Heartbeat, Command, Status>;

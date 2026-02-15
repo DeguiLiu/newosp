@@ -1,10 +1,11 @@
+[中文](README_zh.md) | **English**
+
 # newosp
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Modern C++17 header-only embedded infrastructure library for embedded Linux platforms. Designed for industrial embedded systems such as sensors, robotics, and edge computing.
-
-**[中文文档](README_zh.md)**
 
 ## Features
 
@@ -40,9 +41,9 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 
 | Module | Description |
 |--------|-------------|
-| `bus.hpp` | Lock-free MPSC message bus (`AsyncBus<PayloadVariant>`), CAS publish, topic routing |
+| `bus.hpp` | Lock-free MPSC message bus (`AsyncBus<PayloadVariant>`), CAS publish, topic routing, `ProcessBatchWith` visitor dispatch |
 | `node.hpp` | Lightweight pub/sub node (`Node<PayloadVariant>`), Bus injection, FNV-1a topic hash |
-| `static_node.hpp` | Compile-time handler binding node (`StaticNode<Payload, Handler>`), zero indirect call, inlinable dispatch |
+| `static_node.hpp` | Compile-time handler binding node (`StaticNode<Payload, Handler>`), dual-mode dispatch (direct/callback), 15x speedup in direct mode |
 | `worker_pool.hpp` | Multi-worker thread pool, AsyncBus + SPSC per-worker queues, AdaptiveBackoff |
 | `spsc_ringbuffer.hpp` | Lock-free wait-free SPSC ring buffer (trivially_copyable, batch ops, FakeTSO) |
 | `executor.hpp` | Scheduler (Single/Static/Pinned + RealtimeExecutor SCHED_FIFO) |

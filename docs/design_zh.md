@@ -456,6 +456,7 @@ using HighBus = AsyncBus<Payload, 4096, 256>;   // ~320KB (高吞吐)
 | 无锁发布 | CAS 循环抢占生产者位置 |
 | 优先级准入控制 | LOW 60% / MEDIUM 80% / HIGH 99% 阈值 |
 | 批量处理 | `ProcessBatch()` 每轮最多 BatchSize 条消息 |
+| 编译期访问者分发 | `ProcessBatchWith<Visitor>` 绕过回调表直接 `std::visit`，可内联 |
 | 背压感知 | Normal/Warning/Critical/Full 四级 |
 | 缓存行分离 | 生产者/消费者计数器分属不同缓存行 |
 | 零堆分配回调 | `FixedFunction` SBO 替代 `std::function`，编译期拒绝超限捕获 |
@@ -524,6 +525,15 @@ sensor.SpinOnce();
 
 **设计动机**: `Node` 通过 `FixedFunction` (SBO 类型擦除) 存储回调，分发时仍有函数指针间接调用。嵌入式系统中约 80% 的消息处理逻辑在编译期确定 (传感器数据总是交给同一个处理函数)，`std::function`/`FixedFunction` 的运行时灵活性完全多余。
 
+**双模式分发**:
+
+StaticNode 的 `SpinOnce()` 根据是否调用 `Start()` 自动选择分发模式:
+
+| 模式 | 触发条件 | 分发路径 | 适用场景 |
+|------|---------|---------|---------|
+| 回调模式 | 调用 `Start()` | `ProcessBatch()` -> 回调表 -> FixedFunction | 多订阅者共享同一 Bus |
+| 直接分发 | 不调用 `Start()` | `ProcessBatchWith(handler_)` -> `std::visit` | 单消费者 (MPSC) |
+
 ```cpp
 // Handler 协议: 为关注的消息类型定义 operator()，模板 catch-all 忽略其余类型
 struct StreamHandler {
@@ -539,12 +549,33 @@ struct StreamHandler {
   void operator()(const T&, const osp::MessageHeader&) {}  // 无关类型: 零开销
 };
 
-// 编译期绑定，Handler 类型已知，分发可内联
+// 直接分发模式 (推荐: 零开销，15x 快于回调模式)
 osp::StaticNode<Payload, StreamHandler> ctrl("ctrl", 3, StreamHandler{&state});
-ctrl.Start();   // 通过 fold expression 为 variant 每个类型注册订阅
-ctrl.SpinOnce();
-ctrl.Stop();    // RAII 退订
+ctrl.SpinOnce();  // 不调用 Start()，自动使用 ProcessBatchWith
+
+// 回调模式 (兼容多订阅者)
+osp::StaticNode<Payload, StreamHandler> ctrl2("ctrl2", 4, StreamHandler{&state});
+ctrl2.Start();     // 注册到回调表
+ctrl2.SpinOnce();  // 使用 ProcessBatch
+ctrl2.Stop();      // RAII 退订
 ```
+
+**消除的开销 (直接分发 vs 回调模式)**:
+
+| 开销项 | 回调模式 (ProcessBatch) | 直接分发 (ProcessBatchWith) |
+|--------|:---:|:---:|
+| SharedSpinLock 读锁 | 有 | **无** |
+| callback_table_ 遍历 | 有 | **无** |
+| FixedFunction 间接调用 | 有 | **无** |
+| `std::visit` 编译期跳转表 | 无 | 有 (可内联) |
+
+**性能对比** (1000 SmallMsg, P50):
+
+| 模式 | ns/msg | 加速比 |
+|------|-------:|-------:|
+| Direct (ProcessBatchWith) | ~2 | **15x** |
+| Callback (ProcessBatch) | ~30 | 1x |
+| Node (FixedFunction) | ~29 | ~1x |
 
 **与 Node 对比**:
 
@@ -553,10 +584,11 @@ ctrl.Stop();    // RAII 退订
 | 回调存储 | `FixedFunction` (SBO 类型擦除) | Handler 模板参数 (类型已知) |
 | 分发方式 | 函数指针间接调用 | 编译期直接调用 (可内联) |
 | 订阅灵活性 | 运行时逐个注册 | `Start()` 一次性注册所有 variant 类型 |
+| 零开销直接分发 | 不支持 | `ProcessBatchWith` (不调用 Start) |
 | 用作 `void*` 上下文 | 可以 (timer callback 等) | 不推荐 (模板类型不便擦除) |
 | 适用场景 | 运行时动态订阅、跨编译单元 | 编译期确定的固定处理逻辑 |
 
-**实际应用**: `streaming_protocol` 示例中 3 个服务端节点 (registrar, heartbeat_monitor, stream_controller) 使用 StaticNode，客户端节点保留 Node (需作为 timer context 指针)。
+**实际应用**: `streaming_protocol` 示例中 3 个服务端节点 (registrar, heartbeat_monitor, stream_controller) 使用 StaticNode 直接分发模式，客户端节点保留 Node (需作为 timer context 指针)。
 
 ---
 

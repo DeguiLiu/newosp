@@ -18,8 +18,11 @@
 // Test message types
 // ============================================================================
 
+// NOTE: structs must be >= 8 bytes to avoid GCC 14 wide-read optimization
+// triggering ASan stack-buffer-overflow (8-byte memcpy on smaller struct).
 struct TestMsg {
   int value;
+  uint32_t reserved = 0;
 };
 
 using TestPayload = std::variant<TestMsg>;

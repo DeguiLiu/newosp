@@ -13,17 +13,22 @@
 #include <variant>
 
 // --- Test message types ---
+// NOTE: structs must be >= 8 bytes to avoid GCC 14 wide-read optimization
+// triggering ASan stack-buffer-overflow (8-byte memcpy on 4-byte struct).
 
 struct SensorData {
   float temp;
+  uint32_t seq = 0;
 };
 
 struct MotorCmd {
   int32_t speed;
+  uint32_t flags = 0;
 };
 
 struct StatusMsg {
   uint8_t code;
+  uint8_t reserved[7] = {};
 };
 
 using TestPayload = std::variant<SensorData, MotorCmd, StatusMsg>;
@@ -243,8 +248,8 @@ TEST_CASE("StaticNode - no topic filter receives all", "[static_node]") {
 
 TEST_CASE("StaticNode - bus injection", "[static_node]") {
   // Use a separate variant type to get a distinct bus singleton
-  struct InjSensor { float val; };
-  struct InjMotor { int32_t spd; };
+  struct InjSensor { float val; uint32_t pad_ = 0; };
+  struct InjMotor { int32_t spd; uint32_t pad_ = 0; };
   using InjPayload = std::variant<InjSensor, InjMotor>;
   using InjBus = osp::AsyncBus<InjPayload>;
 
@@ -282,8 +287,8 @@ TEST_CASE("StaticNode - bus injection", "[static_node]") {
 
 TEST_CASE("StaticNode - bus injection with topic", "[static_node]") {
   // Use a separate variant type to get a distinct bus singleton
-  struct InjSensor2 { float val; };
-  struct InjMotor2 { int32_t spd; };
+  struct InjSensor2 { float val; uint32_t pad_ = 0; };
+  struct InjMotor2 { int32_t spd; uint32_t pad_ = 0; };
   using InjPayload2 = std::variant<InjSensor2, InjMotor2>;
   using InjBus2 = osp::AsyncBus<InjPayload2>;
 
@@ -566,4 +571,176 @@ TEST_CASE("StaticNode - sender ID tracking", "[static_node]") {
   TestBus::Instance().Publish(TestPayload(SensorData{2.0f}), 20);
   TestBus::Instance().ProcessBatch();
   REQUIRE(receiver.GetHandler().last_sender_id == 20);
+}
+
+// ============================================================================
+// Direct Dispatch (ProcessBatchWith) Tests
+// ============================================================================
+
+TEST_CASE("StaticNode direct dispatch without Start", "[static_node]") {
+  StaticNodeBusFixture fix;
+
+  osp::StaticNode<TestPayload, CountingHandler> node(
+      "direct_no_start", 7, CountingHandler{});
+
+  // Do NOT call Start() - node should use direct dispatch mode
+  REQUIRE(!node.IsStarted());
+  REQUIRE(node.SubscriptionCount() == 0);
+
+  // Publish messages via bus directly (not via node.Publish)
+  TestBus::Instance().Publish(TestPayload(SensorData{11.0f}), 3);
+  TestBus::Instance().Publish(TestPayload(MotorCmd{200}), 4);
+
+  // SpinOnce should use ProcessBatchWith (direct dispatch)
+  uint32_t processed = node.SpinOnce();
+  REQUIRE(processed == 2);
+
+  auto& handler = node.GetHandler();
+  REQUIRE(handler.sensor_count == 1);
+  REQUIRE(handler.motor_count == 1);
+  REQUIRE(handler.last_temp == 11.0f);
+  REQUIRE(handler.last_speed == 200);
+
+  // Confirm node state unchanged - still not started
+  REQUIRE(!node.IsStarted());
+  REQUIRE(node.SubscriptionCount() == 0);
+}
+
+TEST_CASE("StaticNode direct dispatch message delivery", "[static_node]") {
+  StaticNodeBusFixture fix;
+
+  osp::StaticNode<TestPayload, CountingHandler> node(
+      "direct_delivery", 10, CountingHandler{});
+
+  // No Start() - direct dispatch mode
+
+  // Publish one of each type via bus
+  TestBus::Instance().Publish(TestPayload(SensorData{36.6f}), 1);
+  TestBus::Instance().Publish(TestPayload(MotorCmd{-500}), 2);
+  TestBus::Instance().Publish(TestPayload(StatusMsg{0xAB}), 3);
+
+  node.SpinOnce();
+
+  auto& handler = node.GetHandler();
+  REQUIRE(handler.sensor_count == 1);
+  REQUIRE(handler.motor_count == 1);
+  REQUIRE(handler.status_count == 1);
+  REQUIRE(handler.last_temp == 36.6f);
+  REQUIRE(handler.last_speed == -500);
+  REQUIRE(handler.last_code == 0xAB);
+  // last_sender_id should be from the last processed message
+  REQUIRE(handler.last_sender_id == 3);
+}
+
+TEST_CASE("StaticNode direct dispatch handler state", "[static_node]") {
+  StaticNodeBusFixture fix;
+
+  osp::StaticNode<TestPayload, CountingHandler> node(
+      "direct_state", 1, CountingHandler{});
+
+  // No Start() - direct dispatch mode
+
+  // Publish 5 SensorData messages
+  TestBus::Instance().Publish(TestPayload(SensorData{10.0f}), 1);
+  TestBus::Instance().Publish(TestPayload(SensorData{20.0f}), 1);
+  TestBus::Instance().Publish(TestPayload(SensorData{30.0f}), 1);
+  TestBus::Instance().Publish(TestPayload(SensorData{40.0f}), 1);
+  TestBus::Instance().Publish(TestPayload(SensorData{50.0f}), 1);
+
+  node.SpinOnce();
+
+  auto& handler = node.GetHandler();
+  REQUIRE(handler.sensor_count == 5);
+  REQUIRE(handler.last_temp == 50.0f);
+  REQUIRE(handler.motor_count == 0);
+  REQUIRE(handler.status_count == 0);
+}
+
+TEST_CASE("StaticNode direct vs callback mode parity", "[static_node]") {
+  // Use separate variant types so each mode has its own bus instance
+  struct ParitySensor { float temp; uint32_t pad_ = 0; };
+  struct ParityMotor { int32_t speed; uint32_t pad_ = 0; };
+  struct ParityStatus { uint8_t code; uint8_t pad_[7] = {}; };
+
+  using DirectPayload = std::variant<ParitySensor, ParityMotor, ParityStatus>;
+  using DirectBus = osp::AsyncBus<DirectPayload>;
+
+  struct ParityHandler {
+    int32_t sensor_count = 0;
+    int32_t motor_count = 0;
+    int32_t status_count = 0;
+    float last_temp = 0.0f;
+    int32_t last_speed = 0;
+    uint8_t last_code = 0;
+    uint32_t last_sender_id = 0;
+
+    void operator()(const ParitySensor& d,
+                    const osp::MessageHeader& h) noexcept {
+      ++sensor_count;
+      last_temp = d.temp;
+      last_sender_id = h.sender_id;
+    }
+    void operator()(const ParityMotor& c,
+                    const osp::MessageHeader& h) noexcept {
+      ++motor_count;
+      last_speed = c.speed;
+      last_sender_id = h.sender_id;
+    }
+    void operator()(const ParityStatus& s,
+                    const osp::MessageHeader& h) noexcept {
+      ++status_count;
+      last_code = s.code;
+      last_sender_id = h.sender_id;
+    }
+  };
+
+  DirectBus::Instance().Reset();
+
+  // --- Callback mode (with Start) ---
+  osp::StaticNode<DirectPayload, ParityHandler> callback_node(
+      "callback_mode", 5, ParityHandler{});
+  callback_node.Start();
+
+  DirectBus::Instance().Publish(DirectPayload(ParitySensor{25.5f}), 10);
+  DirectBus::Instance().Publish(DirectPayload(ParityMotor{300}), 20);
+  DirectBus::Instance().Publish(DirectPayload(ParityStatus{0x42}), 30);
+
+  callback_node.SpinOnce();
+
+  auto& cb_handler = callback_node.GetHandler();
+
+  // Save callback mode results
+  int32_t cb_sensor = cb_handler.sensor_count;
+  int32_t cb_motor = cb_handler.motor_count;
+  int32_t cb_status = cb_handler.status_count;
+  float cb_temp = cb_handler.last_temp;
+  int32_t cb_speed = cb_handler.last_speed;
+  uint8_t cb_code = cb_handler.last_code;
+
+  // Clean up callback node and reset bus
+  callback_node.Stop();
+  DirectBus::Instance().Reset();
+
+  // --- Direct mode (without Start) ---
+  osp::StaticNode<DirectPayload, ParityHandler> direct_node(
+      "direct_mode", 5, ParityHandler{});
+  // No Start() call - uses direct dispatch
+
+  DirectBus::Instance().Publish(DirectPayload(ParitySensor{25.5f}), 10);
+  DirectBus::Instance().Publish(DirectPayload(ParityMotor{300}), 20);
+  DirectBus::Instance().Publish(DirectPayload(ParityStatus{0x42}), 30);
+
+  direct_node.SpinOnce();
+
+  auto& dir_handler = direct_node.GetHandler();
+
+  // Verify both modes produce identical handler state
+  REQUIRE(dir_handler.sensor_count == cb_sensor);
+  REQUIRE(dir_handler.motor_count == cb_motor);
+  REQUIRE(dir_handler.status_count == cb_status);
+  REQUIRE(dir_handler.last_temp == cb_temp);
+  REQUIRE(dir_handler.last_speed == cb_speed);
+  REQUIRE(dir_handler.last_code == cb_code);
+
+  DirectBus::Instance().Reset();
 }

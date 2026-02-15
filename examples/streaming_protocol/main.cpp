@@ -27,22 +27,19 @@ int main() {
 
   ProtocolState state;
 
-  // -- Server-side: StaticNode (compile-time dispatch, inlinable) -----------
+  // -- Server-side: StaticNode (direct dispatch, zero overhead, inlinable) --
 
   RegistrarNode registrar(
       "registrar", kRegistrarId,
       RegistrarHandler{&state, &bus});
-  registrar.Start();
 
   HeartbeatNode heartbeat_monitor(
       "heartbeat_monitor", kHeartbeatId,
       HeartbeatHandler{&state});
-  heartbeat_monitor.Start();
 
   StreamCtrlNode stream_controller(
       "stream_controller", kStreamCtrlId,
       StreamHandler{&state});
-  stream_controller.Start();
 
   // -- Client-side: regular Node (dynamic callback, timer ctx pointer) ------
 

@@ -5,7 +5,7 @@
 
 **Repository:** https://github.com/DeguiLiu/newosp
 **Version:** v0.1.0
-**Test Coverage:** 788+ test cases, ASan/TSan/UBSan clean
+**Test Coverage:** 987+ test cases, ASan/TSan/UBSan clean
 
 ---
 
@@ -656,6 +656,10 @@ namespace osp {
     
     // Process batch (single consumer)
     uint32_t ProcessBatch();
+
+    // Visitor dispatch (zero-overhead, bypasses callback table)
+    template <typename Visitor>
+    uint32_t ProcessBatchWith(Visitor&& visitor);
     
     // Statistics
     struct Stats {
@@ -804,6 +808,86 @@ sensor.Publish(SensorData{18.0f}, "env/temperature");
 
 // Process
 sensor.SpinOnce();
+```
+
+---
+
+## static_node.hpp
+
+**Purpose:** Compile-time handler binding node with dual-mode dispatch (callback or direct visitor).
+
+**Dependencies:** vocabulary.hpp, bus.hpp
+
+### Static Node
+
+```cpp
+namespace osp {
+  // Compile-time handler binding node
+  // Handler must implement: void operator()(const T&, const MessageHeader&) per message type
+  // Template catch-all: template<typename T> void operator()(const T&, const MessageHeader&) {} for ignored types
+  template <typename PayloadVariant, typename Handler>
+  class StaticNode {
+   public:
+    StaticNode(const char* name, uint32_t id, AsyncBus<PayloadVariant>& bus, Handler handler = Handler{});
+
+    // Callback mode: Start() registers handler as bus callback
+    void Start();
+    void Stop();
+
+    // Process messages (single consumer)
+    void SpinOnce();
+
+    // Publish message
+    template <typename T>
+    bool Publish(const T& payload,
+                 MessagePriority priority = MessagePriority::kMedium);
+
+    // Access handler instance
+    Handler& GetHandler() noexcept;
+    const Handler& GetHandler() const noexcept;
+
+    const char* Name() const noexcept;
+    uint32_t Id() const noexcept;
+  };
+}
+```
+
+**Dual-Mode Dispatch:**
+- **Callback mode:** Call `Start()` to register handler as bus callback, then `SpinOnce()` processes via callback table
+- **Direct mode:** Skip `Start()`, call `bus.ProcessBatchWith<Handler>()` directly -- uses `std::visit` for zero-overhead dispatch
+
+**Performance:**
+- Direct mode: ~2ns/msg, 15x faster than callback mode
+- Zero indirect call overhead in direct mode (compiler can inline visitor)
+
+**Thread Safety:**
+- `Publish()`: Thread-safe (delegates to AsyncBus)
+- `SpinOnce()`: Single consumer only
+
+**Example:**
+
+```cpp
+struct MyHandler {
+  void operator()(const SensorData& data, const osp::MessageHeader& hdr) {
+    OSP_LOG_INFO("handler", "temp=%.1f from %u", data.temperature, hdr.sender_id);
+  }
+  void operator()(const MotorCmd& cmd, const osp::MessageHeader& hdr) {
+    OSP_LOG_INFO("handler", "motor speed=%d", cmd.speed);
+  }
+  // Catch-all for ignored types
+  template <typename T>
+  void operator()(const T&, const osp::MessageHeader&) {}
+};
+
+osp::AsyncBus<Payload> bus;
+osp::StaticNode<Payload, MyHandler> node("static", 1, bus);
+
+// Callback mode
+node.Start();
+node.SpinOnce();
+
+// Or direct mode (faster)
+bus.ProcessBatchWith(node.GetHandler());
 ```
 
 ---

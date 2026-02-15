@@ -9,12 +9,16 @@
 #include <variant>
 
 // Test payload types
+// NOTE: structs must be >= 8 bytes to avoid GCC 14 wide-read optimization
+// triggering ASan stack-buffer-overflow (8-byte memcpy on smaller struct).
 struct SensorData {
   float temperature;
+  uint32_t reserved = 0;
 };
 
 struct MotorCmd {
   int speed;
+  uint32_t reserved = 0;
 };
 
 using TestPayload = std::variant<SensorData, MotorCmd>;

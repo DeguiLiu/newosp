@@ -17,12 +17,16 @@
 // Test types
 // ============================================================================
 
+// NOTE: structs must be >= 8 bytes to avoid GCC 14 wide-read optimization
+// triggering ASan stack-buffer-overflow (8-byte memcpy on smaller struct).
 struct TaskA {
   int id;
+  uint32_t reserved = 0;
 };
 
 struct TaskB {
   float value;
+  uint32_t reserved = 0;
 };
 
 using TestPayload = std::variant<TaskA, TaskB>;

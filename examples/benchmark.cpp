@@ -2,6 +2,7 @@
 //
 // Measures throughput, latency, and overhead for:
 // - AsyncBus (publish/subscribe)
+// - StaticNode (direct dispatch vs callback dispatch)
 // - ShmRingBuffer (shared memory SPSC)
 // - Transport (frame encode/decode)
 // - MemPool (allocation/deallocation)
@@ -11,6 +12,7 @@
 #include "osp/bus.hpp"
 #include "osp/node.hpp"
 #include "osp/platform.hpp"
+#include "osp/static_node.hpp"
 #include "osp/shm_transport.hpp"
 #include "osp/transport.hpp"
 #include "osp/mem_pool.hpp"
@@ -751,6 +753,158 @@ static void BenchWorkerPool() {
   printf("  Throughput: %.3f M tasks/s\n", mops);
 }
 
+// -- StaticNode direct dispatch vs callback dispatch -------------------------
+
+struct DispatchHandler {
+  uint32_t count = 0;
+
+  void operator()(const SmallMsg& /*d*/,
+                  const osp::MessageHeader& /*h*/) noexcept {
+    ++count;
+  }
+  void operator()(const MediumMsg& /*d*/,
+                  const osp::MessageHeader& /*h*/) noexcept {
+    ++count;
+  }
+  void operator()(const LargeMsg& /*d*/,
+                  const osp::MessageHeader& /*h*/) noexcept {
+    ++count;
+  }
+};
+
+static void BenchStaticNodeDispatch() {
+  printf("\n=== StaticNode Dispatch: Direct vs Callback ===\n");
+
+  static constexpr uint32_t kRounds = 20;
+  static constexpr uint32_t kMsgsPerRound = 1000;
+
+  std::vector<uint64_t> direct_ns;
+  std::vector<uint64_t> callback_ns;
+  std::vector<uint64_t> node_ns;
+  direct_ns.reserve(kRounds);
+  callback_ns.reserve(kRounds);
+  node_ns.reserve(kRounds);
+
+  auto& bus = Bus::Instance();
+
+  // --- Direct dispatch (ProcessBatchWith, no Start) ---
+  for (uint32_t r = 0; r < kRounds; ++r) {
+    bus.Reset();
+    osp::StaticNode<BenchPayload, DispatchHandler> sn(
+        "direct", 1, DispatchHandler{});
+    // No Start() -- direct dispatch mode
+
+    SmallMsg msg{};
+    for (uint32_t i = 0; i < kMsgsPerRound; ++i) {
+      msg.id = i;
+      bus.Publish(BenchPayload{msg}, 1);
+    }
+
+    auto t0 = Clock::now();
+    while (bus.Depth() > 0) {
+      sn.SpinOnce();
+    }
+    auto t1 = Clock::now();
+    direct_ns.push_back(ElapsedNs(t0, t1));
+  }
+
+  // --- Callback dispatch (Start + ProcessBatch) ---
+  for (uint32_t r = 0; r < kRounds; ++r) {
+    bus.Reset();
+    osp::StaticNode<BenchPayload, DispatchHandler> sn(
+        "callback", 1, DispatchHandler{});
+    sn.Start();
+
+    SmallMsg msg{};
+    for (uint32_t i = 0; i < kMsgsPerRound; ++i) {
+      msg.id = i;
+      bus.Publish(BenchPayload{msg}, 1);
+    }
+
+    auto t0 = Clock::now();
+    while (bus.Depth() > 0) {
+      sn.SpinOnce();
+    }
+    auto t1 = Clock::now();
+    callback_ns.push_back(ElapsedNs(t0, t1));
+    sn.Stop();
+  }
+
+  // --- Regular Node (FixedFunction callback) ---
+  for (uint32_t r = 0; r < kRounds; ++r) {
+    bus.Reset();
+    uint32_t count = 0;
+    osp::Node<BenchPayload> n("node", 1);
+    n.Subscribe<SmallMsg>(
+        [&count](const SmallMsg&, const osp::MessageHeader&) {
+          ++count;
+        });
+    n.Subscribe<MediumMsg>(
+        [&count](const MediumMsg&, const osp::MessageHeader&) {
+          ++count;
+        });
+    n.Subscribe<LargeMsg>(
+        [&count](const LargeMsg&, const osp::MessageHeader&) {
+          ++count;
+        });
+
+    SmallMsg msg{};
+    for (uint32_t i = 0; i < kMsgsPerRound; ++i) {
+      msg.id = i;
+      bus.Publish(BenchPayload{msg}, 1);
+    }
+
+    auto t0 = Clock::now();
+    while (bus.Depth() > 0) {
+      bus.ProcessBatch();
+    }
+    auto t1 = Clock::now();
+    node_ns.push_back(ElapsedNs(t0, t1));
+  }
+
+  // --- Results ---
+  uint64_t d_p50 = Percentile(direct_ns, 50.0);
+  uint64_t d_p99 = Percentile(direct_ns, 99.0);
+  uint64_t c_p50 = Percentile(callback_ns, 50.0);
+  uint64_t c_p99 = Percentile(callback_ns, 99.0);
+  uint64_t n_p50 = Percentile(node_ns, 50.0);
+  uint64_t n_p99 = Percentile(node_ns, 99.0);
+
+  double d_per_msg = static_cast<double>(d_p50) / kMsgsPerRound;
+  double c_per_msg = static_cast<double>(c_p50) / kMsgsPerRound;
+  double n_per_msg = static_cast<double>(n_p50) / kMsgsPerRound;
+
+  printf("  %-20s  %8s  %8s  %10s\n",
+         "Mode", "P50(us)", "P99(us)", "ns/msg");
+  printf("  --------------------------------------------------\n");
+  printf("  %-20s  %8.1f  %8.1f  %10.1f\n",
+         "Direct (visit)",
+         static_cast<double>(d_p50) / 1e3,
+         static_cast<double>(d_p99) / 1e3,
+         d_per_msg);
+  printf("  %-20s  %8.1f  %8.1f  %10.1f\n",
+         "Callback (Start+PB)",
+         static_cast<double>(c_p50) / 1e3,
+         static_cast<double>(c_p99) / 1e3,
+         c_per_msg);
+  printf("  %-20s  %8.1f  %8.1f  %10.1f\n",
+         "Node (FixedFunction)",
+         static_cast<double>(n_p50) / 1e3,
+         static_cast<double>(n_p99) / 1e3,
+         n_per_msg);
+
+  if (c_per_msg > 0) {
+    double speedup = c_per_msg / d_per_msg;
+    printf("\n  Direct vs Callback speedup: %.2fx\n", speedup);
+  }
+  if (n_per_msg > 0) {
+    double speedup = n_per_msg / d_per_msg;
+    printf("  Direct vs Node speedup:     %.2fx\n", speedup);
+  }
+
+  bus.Reset();
+}
+
 // -- Main --------------------------------------------------------------------
 int main() {
   printf("newosp Component Benchmark\n");
@@ -760,6 +914,7 @@ int main() {
   BenchLatency(bus);
   BenchBackpressure(bus);
   bus.Reset();
+  BenchStaticNodeDispatch();
 #if defined(OSP_PLATFORM_LINUX)
   BenchShmRingBuffer();
 #endif
