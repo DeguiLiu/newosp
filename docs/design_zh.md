@@ -356,19 +356,37 @@ OSP_LOG_INFO("sensor", "temp=%.1f from %u", t, id);
 
 ### 4.5 timer.hpp -- 定时调度器
 
-后台线程驱动的周期任务调度。
+后台线程驱动的周期/单次任务调度，支持策略化时基。
 
 ```cpp
-osp::TimerScheduler scheduler(16);  // 最多 16 个任务
-auto r = scheduler.Add(1000, heartbeat_fn, ctx);  // expected<TimerTaskId, TimerError>
-scheduler.Start();
-scheduler.Remove(r.value());
-scheduler.Stop();
+// 默认: SteadyTickSource (steady_clock)
+osp::TimerScheduler<16> sched;
+auto r = sched.Add(1000, heartbeat_fn, ctx);  // expected<TimerTaskId, TimerError>
+sched.Start();
+sched.Remove(r.value());
+sched.Stop();
+
+// ManualTickSource: 外部 tick 驱动 (硬件定时器/确定性测试)
+osp::ManualTickSource::SetTickPeriodNs(1000000);  // 1ms/tick
+osp::TimerScheduler<8, osp::ManualTickSource> tick_sched;
+tick_sched.Add(100, my_callback);  // 100ms 周期
+osp::ManualTickSource::Tick();     // ISR 或测试循环中推进
+
+// NsToNextTask: 精确休眠计算 (借鉴 ztask)
+uint64_t ns = sched.NsToNextTask();  // UINT64_MAX=无任务, 0=已过期
 ```
 
-- `std::chrono::steady_clock` 单调时钟
+**TickSource 策略** (编译期模板参数):
+
+| 策略 | 时钟源 | 适用场景 |
+|------|--------|----------|
+| `SteadyTickSource` (默认) | `steady_clock` | 生产环境 |
+| `ManualTickSource` | 外部 `Tick()` 驱动 | 硬件定时器 ISR / 确定性测试 / 仿真 |
+
 - 预分配任务槽数组，自动追赶错过的周期
 - `TimerTaskId` 基于 `NewType<uint32_t, Tag>` 强类型 ID
+- `NsToNextTask()`: 返回距下一任务触发的纳秒数，用于精确休眠/低功耗
+- `PreciseSleep()`: Linux 使用 `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` 无漂移休眠
 
 ---
 
@@ -667,9 +685,28 @@ class SpscRingbuffer;
 | 模式 | 说明 |
 |------|------|
 | `SingleThreadExecutor` | 单线程轮询所有节点 |
-| `StaticExecutor` | 固定节点-线程映射 (确定性调度) |
-| `PinnedExecutor` | 每节点绑定 CPU 核心 + 实时优先级 |
-| `RealtimeExecutor` | SCHED_FIFO + mlockall + 优先级队列 |
+| `StaticExecutor<PV, Sleep>` | 固定节点-线程映射 (确定性调度) |
+| `PinnedExecutor<PV, Sleep>` | 每节点绑定 CPU 核心 + 实时优先级 |
+| `RealtimeExecutor<PV, Sleep>` | SCHED_FIFO + mlockall + 优先级队列 |
+
+**SleepStrategy 策略** (编译期模板参数，默认 `YieldSleepStrategy` 保持向后兼容):
+
+| 策略 | 空闲行为 | 适用场景 |
+|------|----------|----------|
+| `YieldSleepStrategy` (默认) | `std::this_thread::yield()` | 通用工作负载 |
+| `PreciseSleepStrategy` | `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` | 嵌入式低功耗、周期性任务 |
+
+```cpp
+// 向后兼容: 默认 yield
+osp::StaticExecutor<Payload> exec;
+
+// 精确休眠: 1ms 默认, 100us~10ms 范围
+osp::PreciseSleepStrategy sleep(1000000ULL, 100000ULL, 10000000ULL);
+osp::StaticExecutor<Payload, osp::PreciseSleepStrategy> exec(sleep);
+
+// 支持外部设置唤醒点
+sleep.SetNextWakeup(osp::SteadyNowNs() + 10000000ULL);  // 10ms 后唤醒
+```
 
 **实时调度配置**:
 

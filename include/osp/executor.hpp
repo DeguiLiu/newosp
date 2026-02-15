@@ -60,6 +60,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <time.h>
 #endif
 
 namespace osp {
@@ -71,6 +72,118 @@ namespace osp {
 #ifndef OSP_EXECUTOR_MAX_NODES
 #define OSP_EXECUTOR_MAX_NODES 16U
 #endif
+
+// ============================================================================
+// Sleep Strategies
+// ============================================================================
+
+/**
+ * @brief Default sleep strategy: yield on idle (backward compatible).
+ *
+ * This strategy uses std::this_thread::yield() when no messages are available,
+ * which is suitable for general-purpose workloads but may cause CPU spinning
+ * on embedded systems.
+ */
+struct YieldSleepStrategy {
+  /** @brief Called when the executor is idle (no messages processed). */
+  void OnIdle() noexcept {
+    std::this_thread::yield();
+  }
+
+  /** @brief Called when the executor is busy (messages processed). */
+  void OnBusy() noexcept {
+    // No-op: busy processing, no sleep needed
+  }
+};
+
+/**
+ * @brief Precise sleep strategy: uses clock_nanosleep (Linux) or sleep_for.
+ *
+ * This strategy sleeps for a configurable duration when idle, reducing CPU
+ * usage on embedded systems. On Linux, it uses clock_nanosleep with absolute
+ * time for precise wakeup. On other platforms, it falls back to sleep_for.
+ *
+ * Usage:
+ *   PreciseSleepStrategy sleep(1000000ULL);  // 1ms default sleep
+ *   sleep.SetNextWakeup(SteadyNowNs() + 10000000ULL);  // wake in 10ms
+ *   sleep.OnIdle();  // sleep until wakeup time
+ */
+struct PreciseSleepStrategy {
+  /**
+   * @brief Construct with configurable sleep parameters.
+   *
+   * @param default_sleep_ns Default sleep duration in nanoseconds (default 1ms).
+   * @param min_sleep_ns Minimum sleep duration in nanoseconds (default 100us).
+   * @param max_sleep_ns Maximum sleep duration in nanoseconds (default 10ms).
+   */
+  explicit PreciseSleepStrategy(
+      uint64_t default_sleep_ns = 1000000ULL,   // 1ms
+      uint64_t min_sleep_ns = 100000ULL,        // 100us
+      uint64_t max_sleep_ns = 10000000ULL       // 10ms
+  ) noexcept
+      : default_sleep_ns_(default_sleep_ns),
+        min_sleep_ns_(min_sleep_ns),
+        max_sleep_ns_(max_sleep_ns),
+        next_wakeup_ns_(0) {}
+
+  /**
+   * @brief Set the next absolute wakeup time in nanoseconds.
+   *
+   * If set, OnIdle() will sleep until this time. If not set or already passed,
+   * OnIdle() will use the default sleep duration.
+   *
+   * @param abs_ns Absolute wakeup time in nanoseconds (from SteadyNowNs()).
+   */
+  void SetNextWakeup(uint64_t abs_ns) noexcept {
+    next_wakeup_ns_ = abs_ns;
+  }
+
+  /**
+   * @brief Sleep when idle, either until next_wakeup_ns or for default duration.
+   */
+  void OnIdle() noexcept {
+    const uint64_t now_ns = SteadyNowNs();
+    uint64_t sleep_ns = default_sleep_ns_;
+
+    // If a wakeup time is set and in the future, calculate sleep duration
+    if (next_wakeup_ns_ > now_ns) {
+      sleep_ns = next_wakeup_ns_ - now_ns;
+      next_wakeup_ns_ = 0;  // Reset after use
+    }
+
+    // Clamp to [min, max] range
+    if (sleep_ns < min_sleep_ns_) {
+      sleep_ns = min_sleep_ns_;
+    } else if (sleep_ns > max_sleep_ns_) {
+      sleep_ns = max_sleep_ns_;
+    }
+
+#if defined(OSP_PLATFORM_LINUX)
+    // Use clock_nanosleep with absolute time for precise wakeup
+    struct timespec ts;
+    const uint64_t target_ns = now_ns + sleep_ns;
+    ts.tv_sec = static_cast<time_t>(target_ns / 1000000000ULL);
+    ts.tv_nsec = static_cast<long>(target_ns % 1000000000ULL);
+    (void)clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+#else
+    // Fallback: use std::this_thread::sleep_for
+    std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+#endif
+  }
+
+  /**
+   * @brief Reset state when busy (messages processed).
+   */
+  void OnBusy() noexcept {
+    next_wakeup_ns_ = 0;  // Clear any pending wakeup
+  }
+
+ private:
+  uint64_t default_sleep_ns_;
+  uint64_t min_sleep_ns_;
+  uint64_t max_sleep_ns_;
+  uint64_t next_wakeup_ns_;
+};
 
 // ============================================================================
 // SingleThreadExecutor<PayloadVariant>
@@ -216,13 +329,21 @@ class SingleThreadExecutor {
  * background thread separate from the main application thread.
  *
  * @tparam PayloadVariant A std::variant<...> of user-defined message types.
+ * @tparam SleepStrategy Strategy for idle sleep (default: YieldSleepStrategy).
  */
-template <typename PayloadVariant>
+template <typename PayloadVariant, typename SleepStrategy = YieldSleepStrategy>
 class StaticExecutor {
  public:
   using BusType = AsyncBus<PayloadVariant>;
 
-  StaticExecutor() noexcept : node_count_(0), running_(false) {
+  StaticExecutor() noexcept : node_count_(0), running_(false), sleep_() {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  explicit StaticExecutor(const SleepStrategy& sleep) noexcept
+      : node_count_(0), running_(false), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -323,15 +444,17 @@ class StaticExecutor {
   /**
    * @brief Main dispatch loop for the background thread.
    *
-   * Continuously processes pending messages. Yields when the bus is empty
-   * to avoid busy-spinning.
+   * Continuously processes pending messages. Uses the configured SleepStrategy
+   * when the bus is empty to avoid busy-spinning.
    */
   void DispatchLoop() noexcept {
     while (running_.load(std::memory_order_relaxed)) {
       if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
-        std::this_thread::yield();
+        sleep_.OnIdle();
+      } else {
+        sleep_.OnBusy();
       }
     }
   }
@@ -341,6 +464,7 @@ class StaticExecutor {
   std::atomic<bool> running_;
   std::thread dispatch_thread_;
   ThreadHeartbeat* heartbeat_{nullptr};
+  SleepStrategy sleep_;
 };
 
 // ============================================================================
@@ -356,8 +480,9 @@ class StaticExecutor {
  * with a log warning.
  *
  * @tparam PayloadVariant A std::variant<...> of user-defined message types.
+ * @tparam SleepStrategy Strategy for idle sleep (default: YieldSleepStrategy).
  */
-template <typename PayloadVariant>
+template <typename PayloadVariant, typename SleepStrategy = YieldSleepStrategy>
 class PinnedExecutor {
  public:
   using BusType = AsyncBus<PayloadVariant>;
@@ -367,7 +492,19 @@ class PinnedExecutor {
    * @param cpu_core The CPU core index to pin the dispatcher thread to.
    */
   explicit PinnedExecutor(int32_t cpu_core) noexcept
-      : node_count_(0), running_(false), cpu_core_(cpu_core) {
+      : node_count_(0), running_(false), cpu_core_(cpu_core), sleep_() {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct a pinned executor with custom sleep strategy.
+   * @param cpu_core The CPU core index to pin the dispatcher thread to.
+   * @param sleep Sleep strategy instance.
+   */
+  PinnedExecutor(int32_t cpu_core, const SleepStrategy& sleep) noexcept
+      : node_count_(0), running_(false), cpu_core_(cpu_core), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -452,7 +589,9 @@ class PinnedExecutor {
       if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
-        std::this_thread::yield();
+        sleep_.OnIdle();
+      } else {
+        sleep_.OnBusy();
       }
     }
   }
@@ -495,6 +634,7 @@ class PinnedExecutor {
   std::thread dispatch_thread_;
   int32_t cpu_core_;
   ThreadHeartbeat* heartbeat_{nullptr};
+  SleepStrategy sleep_;
 };
 
 // ============================================================================
@@ -528,8 +668,9 @@ struct RealtimeConfig {
  * On non-Linux: falls back to normal thread with warnings logged to stderr.
  *
  * @tparam PayloadVariant A std::variant<...> of user-defined message types.
+ * @tparam SleepStrategy Strategy for idle sleep (default: YieldSleepStrategy).
  */
-template <typename PayloadVariant>
+template <typename PayloadVariant, typename SleepStrategy = YieldSleepStrategy>
 class RealtimeExecutor {
  public:
   using BusType = AsyncBus<PayloadVariant>;
@@ -539,7 +680,19 @@ class RealtimeExecutor {
    * @param cfg Realtime configuration (scheduling, affinity, memory locking).
    */
   explicit RealtimeExecutor(const RealtimeConfig& cfg) noexcept
-      : node_count_(0), running_(false), config_(cfg) {
+      : node_count_(0), running_(false), config_(cfg), sleep_() {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct a realtime executor with custom sleep strategy.
+   * @param cfg Realtime configuration (scheduling, affinity, memory locking).
+   * @param sleep Sleep strategy instance.
+   */
+  RealtimeExecutor(const RealtimeConfig& cfg, const SleepStrategy& sleep) noexcept
+      : node_count_(0), running_(false), config_(cfg), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -674,7 +827,9 @@ class RealtimeExecutor {
       if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
-        std::this_thread::yield();
+        sleep_.OnIdle();
+      } else {
+        sleep_.OnBusy();
       }
     }
   }
@@ -743,6 +898,7 @@ class RealtimeExecutor {
   std::thread dispatch_thread_;
   RealtimeConfig config_;
   ThreadHeartbeat* heartbeat_{nullptr};
+  SleepStrategy sleep_;
 #if defined(OSP_PLATFORM_LINUX)
   pthread_t rt_thread_{};
   bool use_pthread_{false};

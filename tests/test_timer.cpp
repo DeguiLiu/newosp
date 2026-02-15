@@ -1396,3 +1396,208 @@ TEST_CASE("TimerScheduler: Add with nullptr fn returns error or fires safely", "
 
   REQUIRE(counter.load() > 0);
 }
+
+// ============================================================================
+// TickSource Strategy Tests (Phase 4: Pluggable Time Sources)
+// ============================================================================
+
+TEST_CASE("SteadyTickSource::NowNs is monotonic", "[timer][ticksource]") {
+  uint64_t t1 = osp::SteadyTickSource::NowNs();
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  uint64_t t2 = osp::SteadyTickSource::NowNs();
+  REQUIRE(t2 > t1);
+  REQUIRE((t2 - t1) >= 10000000ULL);  // At least 10ms
+}
+
+TEST_CASE("ManualTickSource basic operations", "[timer][ticksource]") {
+  osp::ManualTickSource::Reset();
+  REQUIRE(osp::ManualTickSource::GetTicks() == 0);
+  REQUIRE(osp::ManualTickSource::NowNs() == 0);
+
+  // Default tick period is 1ms
+  osp::ManualTickSource::Tick();
+  REQUIRE(osp::ManualTickSource::GetTicks() == 1);
+  REQUIRE(osp::ManualTickSource::NowNs() == 1000000ULL);
+
+  osp::ManualTickSource::Tick();
+  REQUIRE(osp::ManualTickSource::GetTicks() == 2);
+  REQUIRE(osp::ManualTickSource::NowNs() == 2000000ULL);
+}
+
+TEST_CASE("ManualTickSource custom tick period", "[timer][ticksource]") {
+  osp::ManualTickSource::Reset();
+  osp::ManualTickSource::SetTickPeriodNs(500000ULL);  // 0.5ms per tick
+
+  osp::ManualTickSource::Tick();
+  REQUIRE(osp::ManualTickSource::GetTicks() == 1);
+  REQUIRE(osp::ManualTickSource::NowNs() == 500000ULL);
+
+  osp::ManualTickSource::Tick();
+  REQUIRE(osp::ManualTickSource::GetTicks() == 2);
+  REQUIRE(osp::ManualTickSource::NowNs() == 1000000ULL);
+
+  // Reset to default for other tests
+  osp::ManualTickSource::SetTickPeriodNs(1000000ULL);
+}
+
+TEST_CASE("TimerScheduler<ManualTickSource> deterministic periodic", "[timer][ticksource]") {
+  osp::ManualTickSource::Reset();
+  osp::ManualTickSource::SetTickPeriodNs(1000000ULL);  // 1ms/tick
+
+  std::atomic<int> counter{0};
+  osp::TimerScheduler<4, osp::ManualTickSource> sched;
+
+  // Add 10ms periodic timer
+  auto r = sched.Add(10, [](void* ctx) {
+    auto* c = static_cast<std::atomic<int>*>(ctx);
+    c->fetch_add(1);
+  }, &counter);
+  REQUIRE(r.has_value());
+
+  sched.Start();
+
+  // Advance time by 25ms (25 ticks) — should fire 2 times (at 10ms, 20ms)
+  for (int i = 0; i < 25; ++i) {
+    osp::ManualTickSource::Tick();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));  // Give scheduler time
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));  // Let scheduler catch up
+  sched.Stop();
+
+  REQUIRE(counter.load() == 2);
+}
+
+TEST_CASE("TimerScheduler<ManualTickSource> one-shot fires once", "[timer][ticksource][oneshot]") {
+  osp::ManualTickSource::Reset();
+  osp::ManualTickSource::SetTickPeriodNs(1000000ULL);  // 1ms/tick
+
+  std::atomic<int> counter{0};
+  osp::TimerScheduler<4, osp::ManualTickSource> sched;
+
+  // Add 15ms one-shot
+  auto r = sched.AddOneShot(15, [](void* ctx) {
+    auto* c = static_cast<std::atomic<int>*>(ctx);
+    c->fetch_add(1);
+  }, &counter);
+  REQUIRE(r.has_value());
+
+  sched.Start();
+
+  // Advance time by 30ms (30 ticks) — should fire exactly once at 15ms
+  for (int i = 0; i < 30; ++i) {
+    osp::ManualTickSource::Tick();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  sched.Stop();
+
+  REQUIRE(counter.load() == 1);
+  REQUIRE(sched.TaskCount() == 0);  // One-shot should be deactivated
+}
+
+TEST_CASE("TimerScheduler NsToNextTask no tasks", "[timer][ticksource]") {
+  osp::TimerScheduler<4> sched;
+  REQUIRE(sched.NsToNextTask() == UINT64_MAX);
+}
+
+TEST_CASE("TimerScheduler NsToNextTask with active tasks", "[timer][ticksource]") {
+  osp::ManualTickSource::Reset();
+  osp::ManualTickSource::SetTickPeriodNs(1000000ULL);  // 1ms/tick
+
+  osp::TimerScheduler<4, osp::ManualTickSource> sched;
+
+  // Add 100ms periodic timer
+  auto r = sched.Add(100, [](void*) {});
+  REQUIRE(r.has_value());
+
+  // Should be ~100ms until next fire
+  uint64_t ns = sched.NsToNextTask();
+  REQUIRE(ns >= 99000000ULL);
+  REQUIRE(ns <= 101000000ULL);
+
+  // Advance time by 50ms
+  for (int i = 0; i < 50; ++i) {
+    osp::ManualTickSource::Tick();
+  }
+
+  // Should be ~50ms until next fire
+  ns = sched.NsToNextTask();
+  REQUIRE(ns >= 49000000ULL);
+  REQUIRE(ns <= 51000000ULL);
+}
+
+TEST_CASE("TimerScheduler NsToNextTask overdue returns 0", "[timer][ticksource]") {
+  osp::ManualTickSource::Reset();
+  osp::ManualTickSource::SetTickPeriodNs(1000000ULL);  // 1ms/tick
+
+  osp::TimerScheduler<4, osp::ManualTickSource> sched;
+
+  // Add 10ms one-shot
+  auto r = sched.AddOneShot(10, [](void*) {});
+  REQUIRE(r.has_value());
+
+  // Advance time by 20ms (past fire time)
+  for (int i = 0; i < 20; ++i) {
+    osp::ManualTickSource::Tick();
+  }
+
+  // Should return 0 (overdue)
+  REQUIRE(sched.NsToNextTask() == 0);
+}
+
+TEST_CASE("TimerScheduler NsToNextTask multiple tasks returns minimum", "[timer][ticksource]") {
+  osp::ManualTickSource::Reset();
+  osp::ManualTickSource::SetTickPeriodNs(1000000ULL);  // 1ms/tick
+
+  osp::TimerScheduler<8, osp::ManualTickSource> sched;
+
+  // Add tasks with different periods
+  sched.Add(100, [](void*) {});  // 100ms
+  sched.Add(50, [](void*) {});   // 50ms (soonest)
+  sched.Add(200, [](void*) {});  // 200ms
+
+  // Should return ~50ms (minimum)
+  uint64_t ns = sched.NsToNextTask();
+  REQUIRE(ns >= 49000000ULL);
+  REQUIRE(ns <= 51000000ULL);
+}
+
+TEST_CASE("TimerScheduler<SteadyTickSource> backward compatibility", "[timer][ticksource]") {
+  // Default template parameter should be SteadyTickSource
+  std::atomic<int> counter{0};
+  osp::TimerScheduler<4> sched;  // No explicit TickSource
+
+  auto r = sched.Add(10, [](void* ctx) {
+    auto* c = static_cast<std::atomic<int>*>(ctx);
+    c->fetch_add(1);
+  }, &counter);
+  REQUIRE(r.has_value());
+
+  sched.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  sched.Stop();
+
+  REQUIRE(counter.load() > 0);
+}
+
+TEST_CASE("ManualTickSource thread-safe concurrent Tick", "[timer][ticksource]") {
+  osp::ManualTickSource::Reset();
+
+  std::thread threads[4];
+  for (int t = 0; t < 4; ++t) {
+    threads[t] = std::thread([]() {
+      for (int i = 0; i < 100; ++i) {
+        osp::ManualTickSource::Tick();
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  // Should have exactly 400 ticks
+  REQUIRE(osp::ManualTickSource::GetTicks() == 400);
+}

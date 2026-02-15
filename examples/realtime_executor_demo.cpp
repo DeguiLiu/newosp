@@ -7,6 +7,7 @@
  *   - Periodic sensor data publishing with QoS profiles
  *   - Control node subscribing and processing commands
  *   - SingleThreadExecutor managing multiple lifecycle nodes
+ *   - TickTimer demo: ManualTickSource vs SteadyTickSource
  */
 
 #include "osp/bus.hpp"
@@ -14,6 +15,7 @@
 #include "osp/lifecycle_node.hpp"
 #include "osp/node.hpp"
 #include "osp/qos.hpp"
+#include "osp/timer.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -277,5 +279,228 @@ int main() {
   control_node.Shutdown();
 
   std::printf("=== Demo Complete ===\n");
+
+  // -------------------------------------------------------------------------
+  // TickTimer Demo: ManualTickSource vs SteadyTickSource
+  // -------------------------------------------------------------------------
+  std::printf("\n=== TickTimer Demo: Pluggable Time Sources ===\n\n");
+
+  // Demo 1: SteadyTickSource (default, wall-clock based)
+  {
+    std::printf("--- Demo 1: SteadyTickSource (wall-clock) ---\n");
+    std::atomic<int> counter{0};
+    osp::TimerScheduler<4> sched;  // Default: SteadyTickSource
+
+    sched.Add(20, [](void* ctx) {
+      auto* c = static_cast<std::atomic<int>*>(ctx);
+      int count = c->fetch_add(1) + 1;
+      std::printf("  [SteadyTimer] Fire #%d\n", count);
+    }, &counter);
+
+    std::printf("Starting scheduler with 20ms periodic timer...\n");
+    sched.Start();
+
+    // Query NsToNextTask
+    uint64_t ns = sched.NsToNextTask();
+    std::printf("  NsToNextTask: %lu ns (~%lu ms)\n",
+                static_cast<unsigned long>(ns),
+                static_cast<unsigned long>(ns / 1000000ULL));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    sched.Stop();
+    std::printf("  Total fires: %d\n\n", counter.load());
+  }
+
+  // Demo 2: ManualTickSource (deterministic, tick-driven)
+  {
+    std::printf("--- Demo 2: ManualTickSource (tick-driven) ---\n");
+    osp::ManualTickSource::Reset();
+    osp::ManualTickSource::SetTickPeriodNs(1000000ULL);  // 1ms per tick
+
+    std::atomic<int> counter{0};
+    osp::TimerScheduler<4, osp::ManualTickSource> sched;
+
+    sched.Add(10, [](void* ctx) {
+      auto* c = static_cast<std::atomic<int>*>(ctx);
+      int count = c->fetch_add(1) + 1;
+      std::printf("  [ManualTimer] Fire #%d at tick %lu\n",
+                  count,
+                  static_cast<unsigned long>(osp::ManualTickSource::GetTicks()));
+    }, &counter);
+
+    std::printf("Starting scheduler with 10ms periodic timer (tick-driven)...\n");
+    sched.Start();
+
+    // Manually advance time by 35 ticks (35ms) — should fire 3 times
+    std::printf("  Advancing time by 35 ticks (35ms)...\n");
+    for (int i = 0; i < 35; ++i) {
+      osp::ManualTickSource::Tick();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));  // Give scheduler time
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));  // Let scheduler catch up
+    sched.Stop();
+    std::printf("  Total fires: %d (expected 3)\n\n", counter.load());
+  }
+
+  // Demo 3: NsToNextTask for precise sleep
+  {
+    std::printf("--- Demo 3: NsToNextTask for Precise Sleep ---\n");
+    osp::ManualTickSource::Reset();
+    osp::ManualTickSource::SetTickPeriodNs(1000000ULL);  // 1ms per tick
+
+    osp::TimerScheduler<4, osp::ManualTickSource> sched;
+
+    sched.Add(50, [](void*) {});   // 50ms
+    sched.Add(100, [](void*) {});  // 100ms
+
+    std::printf("Added tasks: 50ms, 100ms\n");
+    uint64_t ns = sched.NsToNextTask();
+    std::printf("  NsToNextTask: %lu ns (~%lu ms)\n",
+                static_cast<unsigned long>(ns),
+                static_cast<unsigned long>(ns / 1000000ULL));
+
+    // Advance time by 30ms
+    for (int i = 0; i < 30; ++i) {
+      osp::ManualTickSource::Tick();
+    }
+
+    ns = sched.NsToNextTask();
+    std::printf("After 30ms:\n");
+    std::printf("  NsToNextTask: %lu ns (~%lu ms, expected ~20ms)\n",
+                static_cast<unsigned long>(ns),
+                static_cast<unsigned long>(ns / 1000000ULL));
+
+    // Advance past first task
+    for (int i = 0; i < 25; ++i) {
+      osp::ManualTickSource::Tick();
+    }
+
+    ns = sched.NsToNextTask();
+    std::printf("After 55ms (past first task):\n");
+    std::printf("  NsToNextTask: %lu ns (~%lu ms, expected ~45ms)\n\n",
+                static_cast<unsigned long>(ns),
+                static_cast<unsigned long>(ns / 1000000ULL));
+  }
+
+  std::printf("=== TickTimer Demo Complete ===\n");
+
+  // -------------------------------------------------------------------------
+  // PreciseSleepStrategy Demo: Reduce CPU usage with precise sleep
+  // -------------------------------------------------------------------------
+  std::printf("\n=== PreciseSleepStrategy Demo: Precise Sleep for Embedded Systems ===\n\n");
+
+  // Reset bus for clean state
+  Bus::Instance().Reset();
+
+  // Create sensor node that publishes at 100Hz (10ms period)
+  osp::Node<Payload> imu_sensor("imu_sensor", 10);
+  osp::Node<Payload> processor("processor", 11);
+
+  std::atomic<uint32_t> imu_recv_count{0};
+  auto imu_sub = processor.Subscribe<SensorData>([&](const SensorData& data, const auto&) {
+    imu_recv_count.fetch_add(1, std::memory_order_relaxed);
+    std::printf("  [Processor] Received IMU data: temp=%.1f, pressure=%.1f\n",
+                static_cast<double>(data.temperature),
+                static_cast<double>(data.pressure));
+  });
+
+  if (!imu_sub.has_value()) {
+    std::printf("ERROR: Failed to subscribe to IMU data\n");
+    return 1;
+  }
+
+  // Demo 1: Default YieldSleepStrategy (backward compatible)
+  {
+    std::printf("--- Demo 1: YieldSleepStrategy (default, CPU spinning) ---\n");
+    osp::StaticExecutor<Payload> exec;  // Default: YieldSleepStrategy
+    exec.AddNode(imu_sensor);
+    exec.AddNode(processor);
+
+    exec.Start();
+
+    // Simulate 100Hz sensor publishing
+    for (int i = 0; i < 5; ++i) {
+      SensorData data{25.0f + static_cast<float>(i), 1013.0f, GetTimestampUs()};
+      imu_sensor.Publish(data);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    exec.Stop();
+
+    std::printf("  Received: %u messages\n",
+                imu_recv_count.load(std::memory_order_relaxed));
+    std::printf("  Note: Executor uses yield(), may cause CPU spinning\n\n");
+  }
+
+  // Reset counter
+  imu_recv_count.store(0, std::memory_order_relaxed);
+  Bus::Instance().Reset();
+
+  // Demo 2: PreciseSleepStrategy with 1ms default sleep
+  {
+    std::printf("--- Demo 2: PreciseSleepStrategy (1ms sleep, reduced CPU) ---\n");
+    osp::PreciseSleepStrategy sleep(1000000ULL);  // 1ms default sleep
+    osp::StaticExecutor<Payload, osp::PreciseSleepStrategy> exec(sleep);
+    exec.AddNode(imu_sensor);
+    exec.AddNode(processor);
+
+    exec.Start();
+
+    // Simulate 100Hz sensor publishing
+    for (int i = 0; i < 5; ++i) {
+      SensorData data{25.0f + static_cast<float>(i), 1013.0f, GetTimestampUs()};
+      imu_sensor.Publish(data);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    exec.Stop();
+
+    std::printf("  Received: %u messages\n",
+                imu_recv_count.load(std::memory_order_relaxed));
+    std::printf("  Note: Executor sleeps 1ms when idle, reducing CPU usage\n\n");
+  }
+
+  // Reset counter
+  imu_recv_count.store(0, std::memory_order_relaxed);
+  Bus::Instance().Reset();
+
+  // Demo 3: RealtimeExecutor with PreciseSleepStrategy
+  {
+    std::printf("--- Demo 3: RealtimeExecutor + PreciseSleepStrategy ---\n");
+    osp::RealtimeConfig cfg;
+    cfg.cpu_affinity = 0;  // Pin to core 0
+    osp::PreciseSleepStrategy sleep(500000ULL);  // 500us default sleep
+    osp::RealtimeExecutor<Payload, osp::PreciseSleepStrategy> exec(cfg, sleep);
+    exec.AddNode(imu_sensor);
+    exec.AddNode(processor);
+
+    exec.Start();
+
+    // Simulate 100Hz sensor publishing
+    for (int i = 0; i < 5; ++i) {
+      SensorData data{25.0f + static_cast<float>(i), 1013.0f, GetTimestampUs()};
+      imu_sensor.Publish(data);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    exec.Stop();
+
+    std::printf("  Received: %u messages\n",
+                imu_recv_count.load(std::memory_order_relaxed));
+    std::printf("  Note: Realtime executor with 500us sleep, CPU pinned to core 0\n\n");
+  }
+
+  std::printf("=== PreciseSleepStrategy Demo Complete ===\n");
+  std::printf("\nKey Takeaways:\n");
+  std::printf("  - YieldSleepStrategy: backward compatible, may cause CPU spinning\n");
+  std::printf("  - PreciseSleepStrategy: reduces CPU usage on embedded systems\n");
+  std::printf("  - Configurable sleep duration (default 1ms, min 100us, max 10ms)\n");
+  std::printf("  - Linux: uses clock_nanosleep for precise wakeup\n");
+  std::printf("  - Other platforms: falls back to std::this_thread::sleep_for\n\n");
+
   return 0;
 }

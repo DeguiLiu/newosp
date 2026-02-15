@@ -59,6 +59,81 @@
 namespace osp {
 
 // ============================================================================
+// TickSource Strategies - Pluggable time sources for TimerScheduler
+// ============================================================================
+
+/**
+ * @brief Default tick source using std::chrono::steady_clock.
+ *
+ * Provides monotonic wall-clock time via SteadyNowNs() from platform.hpp.
+ * Suitable for production use on platforms with reliable steady_clock.
+ */
+struct SteadyTickSource {
+  static uint64_t NowNs() noexcept {
+    return SteadyNowNs();  // platform.hpp
+  }
+};
+
+/**
+ * @brief Manual tick source driven by external calls (e.g., hardware timer ISR).
+ *
+ * Inspired by ztask's tick-based timing model. Suitable for:
+ * - Embedded systems with hardware timer interrupts
+ * - Deterministic testing (no wall-clock dependency)
+ * - Simulation environments
+ *
+ * Usage:
+ *   ManualTickSource::SetTickPeriodNs(1000000);  // 1ms per tick
+ *   TimerScheduler<8, ManualTickSource> sched;
+ *   // In ISR or test loop:
+ *   ManualTickSource::Tick();
+ *
+ * Thread-safe: Tick() uses atomic fetch_add, NowNs() uses atomic load.
+ */
+class ManualTickSource {
+ public:
+  /**
+   * @brief Get current time in nanoseconds (ticks * tick_period_ns).
+   */
+  static uint64_t NowNs() noexcept {
+    return ticks_.load(std::memory_order_acquire) * tick_period_ns_;
+  }
+
+  /**
+   * @brief Advance tick counter by 1 (called from ISR or test driver).
+   */
+  static void Tick() noexcept {
+    ticks_.fetch_add(1U, std::memory_order_release);
+  }
+
+  /**
+   * @brief Set the duration of each tick in nanoseconds.
+   * @param ns  Tick period (default 1ms = 1000000ns).
+   */
+  static void SetTickPeriodNs(uint64_t ns) noexcept {
+    tick_period_ns_ = ns;
+  }
+
+  /**
+   * @brief Reset tick counter to zero (for test isolation).
+   */
+  static void Reset() noexcept {
+    ticks_.store(0U, std::memory_order_release);
+  }
+
+  /**
+   * @brief Get raw tick count.
+   */
+  static uint64_t GetTicks() noexcept {
+    return ticks_.load(std::memory_order_acquire);
+  }
+
+ private:
+  static inline std::atomic<uint64_t> ticks_{0U};
+  static inline uint64_t tick_period_ns_{1000000ULL};  // Default: 1ms/tick
+};
+
+// ============================================================================
 // TimerTaskFn - Callback type for timer tasks
 // ============================================================================
 
@@ -97,11 +172,21 @@ using TimerTaskFn = void (*)(void* ctx);
  *   // ... do other work ...
  *   sched.Stop();
  *
+ * With ManualTickSource (for testing or hardware timer-driven systems):
+ *
+ *   ManualTickSource::SetTickPeriodNs(1000000);  // 1ms/tick
+ *   TimerScheduler<8, ManualTickSource> sched;
+ *   sched.Add(100, my_callback);
+ *   sched.Start();
+ *   // In ISR or test loop:
+ *   ManualTickSource::Tick();
+ *
  * Non-copyable, non-movable.
  *
- * @tparam MaxTasks  Maximum concurrent timer tasks (compile-time capacity).
+ * @tparam MaxTasks   Maximum concurrent timer tasks (compile-time capacity).
+ * @tparam TickSource Time source strategy (default: SteadyTickSource).
  */
-template <uint32_t MaxTasks = 16>
+template <uint32_t MaxTasks = 16, typename TickSource = SteadyTickSource>
 class TimerScheduler final {
  public:
   // --------------------------------------------------------------------------
@@ -168,7 +253,7 @@ class TimerScheduler final {
         slots_[i].fn = fn;
         slots_[i].ctx = ctx;
         slots_[i].period_ns = period_ns;
-        slots_[i].next_fire_ns = SteadyNowNs() + period_ns;
+        slots_[i].next_fire_ns = TickSource::NowNs() + period_ns;
         slots_[i].id = next_id_++;
         slots_[i].active = true;
         slots_[i].one_shot = false;
@@ -216,7 +301,7 @@ class TimerScheduler final {
         slots_[i].fn = fn;
         slots_[i].ctx = ctx;
         slots_[i].period_ns = delay_ns;
-        slots_[i].next_fire_ns = SteadyNowNs() + delay_ns;
+        slots_[i].next_fire_ns = TickSource::NowNs() + delay_ns;
         slots_[i].id = next_id_++;
         slots_[i].active = true;
         slots_[i].one_shot = true;
@@ -317,6 +402,33 @@ class TimerScheduler final {
    */
   void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
 
+  /**
+   * @brief Return nanoseconds until the next task fires.
+   *
+   * Inspired by ztask's zt_ticks_to_next_task(). Useful for:
+   * - Precise sleep calculation in external event loops
+   * - Power management (sleep until next task)
+   * - Debugging/monitoring scheduler state
+   *
+   * @return Nanoseconds until next task fires, or:
+   *         - UINT64_MAX if no active tasks
+   *         - 0 if at least one task is already overdue
+   *
+   * Thread-safe (acquires internal mutex).
+   */
+  uint64_t NsToNextTask() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t min_remaining = UINT64_MAX;
+    const uint64_t now = TickSource::NowNs();
+    for (uint32_t i = 0U; i < MaxTasks; ++i) {
+      if (!slots_[i].active) continue;
+      if (slots_[i].next_fire_ns <= now) return 0U;
+      uint64_t remaining = slots_[i].next_fire_ns - now;
+      if (remaining < min_remaining) min_remaining = remaining;
+    }
+    return min_remaining;
+  }
+
  private:
   // --------------------------------------------------------------------------
   // Internal Types
@@ -350,6 +462,7 @@ class TimerScheduler final {
   static constexpr uint64_t kNsPerMs = 1000000ULL;           ///< ns per ms
   static constexpr uint64_t kDefaultSleepNs = 10000000ULL;  ///< 10ms default sleep
   static constexpr uint64_t kMinSleepNs = 1000000ULL;       ///< 1ms minimum sleep
+  static constexpr uint64_t kMaxSleepNs = 10000000ULL;      ///< 10ms maximum sleep
 
   // --------------------------------------------------------------------------
   // Data Members
@@ -388,7 +501,7 @@ class TimerScheduler final {
       // Phase 1: Collect expired tasks under lock
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        const uint64_t now = SteadyNowNs();
+        const uint64_t now = TickSource::NowNs();
 
         for (uint32_t i = 0U; i < MaxTasks; ++i) {
           if (!slots_[i].active) {
@@ -416,13 +529,15 @@ class TimerScheduler final {
           }
 
           // Compute remaining time for sleep calculation
-          const uint64_t after = SteadyNowNs();
-          const uint64_t remaining =
-              (slots_[i].next_fire_ns > after)
-                  ? (slots_[i].next_fire_ns - after)
-                  : 0U;
-          if (remaining < min_remaining) {
-            min_remaining = remaining;
+          if (slots_[i].active) {
+            const uint64_t after = TickSource::NowNs();
+            const uint64_t remaining =
+                (slots_[i].next_fire_ns > after)
+                    ? (slots_[i].next_fire_ns - after)
+                    : 0U;
+            if (remaining < min_remaining) {
+              min_remaining = remaining;
+            }
           }
         }
       }
@@ -433,15 +548,38 @@ class TimerScheduler final {
         pending[i].fn(pending[i].ctx);
       }
 
-      // Sleep for half the minimum remaining time, clamped to [1ms, 10ms].
+      // Phase 3: Precise sleep until next task
       uint64_t sleep_ns = (min_remaining == UINT64_MAX)
                               ? kDefaultSleepNs
-                              : (min_remaining / 2);
-      if (sleep_ns < kMinSleepNs) {
-        sleep_ns = kMinSleepNs;
+                              : min_remaining;
+      if (sleep_ns > kMaxSleepNs) {
+        sleep_ns = kMaxSleepNs;
       }
-      std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+      if (sleep_ns >= kMinSleepNs) {
+        PreciseSleep(sleep_ns);
+      }
     }
+  }
+
+  /**
+   * @brief Precise sleep using clock_nanosleep (Linux) or std::this_thread::sleep_for.
+   *
+   * On Linux, uses CLOCK_MONOTONIC with TIMER_ABSTIME for drift-free sleep.
+   * Falls back to relative sleep on other platforms.
+   */
+  static void PreciseSleep(uint64_t ns) noexcept {
+#if defined(OSP_PLATFORM_LINUX)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_nsec += static_cast<long>(ns);
+    while (ts.tv_nsec >= 1000000000L) {
+      ts.tv_sec += 1;
+      ts.tv_nsec -= 1000000000L;
+    }
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+#else
+    std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
+#endif
   }
 };
 
