@@ -44,3 +44,6 @@ add_subdirectory(net_stress)
 
 # --- Inicpp demo (embedded ini library) ---
 add_osp_example(osp_inicpp_demo inicpp_demo.cpp)
+
+# --- System monitor demo (subdirectory, YAML config) -------------------------
+add_subdirectory(system_monitor)

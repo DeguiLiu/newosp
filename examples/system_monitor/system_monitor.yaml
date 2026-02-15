@@ -1,0 +1,20 @@
+# newosp SystemMonitor configuration
+# Usage: osp_system_monitor_demo [config_file]
+
+thresholds:
+  cpu_percent: 80
+  cpu_temp_celsius: 80
+  memory_percent: 85
+  disk_percent: 90
+
+disk_paths:
+  path_0: /
+  path_1: /tmp
+
+sampling:
+  interval_ms: 1000
+  count: 5
+
+logging:
+  level: info
+  alert_to_stderr: true

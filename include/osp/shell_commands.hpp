@@ -421,6 +421,42 @@ inline void RegisterQos(const QosType& profile,
 // Foundation Layer
 // ============================================================================
 
+/// Register osp_sysmon command (SystemMonitor).
+template <typename MonitorType>
+inline void RegisterSystemMonitor(MonitorType& mon) {
+  static MonitorType* s_mon = &mon;
+  static auto cmd = [](int /*argc*/, char* /*argv*/[]) -> int {
+    auto snap = s_mon->LastSnapshot();
+    DebugShell::Printf("[osp_sysmon] SystemMonitor\r\n");
+    DebugShell::Printf("  CPU:  total=%" PRIu32 "%%  user=%" PRIu32
+                       "%%  sys=%" PRIu32 "%%  iowait=%" PRIu32 "%%\r\n",
+                       snap.cpu.total_percent, snap.cpu.user_percent,
+                       snap.cpu.system_percent, snap.cpu.iowait_percent);
+    if (snap.cpu.temperature_mc >= 0) {
+      DebugShell::Printf("  Temp: %d.%d C\r\n",
+                         snap.cpu.temperature_mc / 1000,
+                         (snap.cpu.temperature_mc % 1000) / 100);
+    } else {
+      DebugShell::Printf("  Temp: N/A\r\n");
+    }
+    DebugShell::Printf("  Mem:  total=%" PRIu64 "kB  avail=%" PRIu64
+                       "kB  used=%" PRIu32 "%%\r\n",
+                       snap.memory.total_kb, snap.memory.available_kb,
+                       snap.memory.used_percent);
+    uint32_t disk_count = s_mon->DiskPathCount();
+    for (uint32_t i = 0U; i < disk_count; ++i) {
+      const auto& ds = s_mon->GetDiskSnapshot(i);
+      DebugShell::Printf("  Disk[%" PRIu32 "]: total=%" PRIu64
+                         "B  avail=%" PRIu64 "B  used=%" PRIu32 "%%\r\n",
+                         i, ds.total_bytes, ds.available_bytes,
+                         ds.used_percent);
+    }
+    return 0;
+  };
+  osp::detail::GlobalCmdRegistry::Instance().Register(
+      "osp_sysmon", +cmd, "Show system health monitor status");
+}
+
 /// Register osp_mempool command.
 template <typename PoolType>
 inline void RegisterMemPool(PoolType& pool, const char* label = "pool") {
