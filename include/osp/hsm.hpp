@@ -133,7 +133,7 @@ struct StateConfig {
  *
  * The state machine provides:
  * - Build phase: AddState / SetInitialState / Start
- * - Runtime: Dispatch / RequestTransition
+ * - Runtime: Dispatch / RequestTransition / ForceTransition
  * - Query: CurrentState / CurrentStateName / IsInState
  *
  * Event dispatch uses hierarchical bubbling: if the current state's handler
@@ -276,6 +276,38 @@ class StateMachine final {
   TransitionResult RequestTransition(int32_t target) noexcept {
     pending_target_ = target;
     return TransitionResult::kTransition;
+  }
+
+  /**
+   * @brief Force a transition to the target state from outside a handler.
+   *
+   * Unlike RequestTransition() (which must be called from within a handler),
+   * ForceTransition() can be called from external code to imperatively move
+   * the state machine to a specific state. This is useful for:
+   * - Recovery from persistent state after a crash/reboot
+   * - External supervisory control (e.g., watchdog timeout forcing rollback)
+   * - Test scaffolding
+   *
+   * The transition follows the standard LCA algorithm: exit actions fire
+   * from the current state up to the LCA, then entry actions fire from
+   * the LCA down to the target.
+   *
+   * @param target Index of the target state (must be valid).
+   * @return true if the transition was executed, false if the machine is
+   *         not started or the target index is invalid.
+   *
+   * @warning Must NOT be called from within a handler during Dispatch().
+   *          Doing so would cause nested transitions and undefined behavior.
+   */
+  bool ForceTransition(int32_t target) noexcept {
+    if (!started_) {
+      return false;
+    }
+    if (target < 0 || static_cast<uint32_t>(target) >= state_count_) {
+      return false;
+    }
+    TransitionTo(target);
+    return true;
   }
 
   // --- Query ---

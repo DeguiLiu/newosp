@@ -699,3 +699,136 @@ TEST_CASE("hsm - entry exit action ordering in hierarchy", "[hsm]") {
   REQUIRE(found_a2_entry);
   REQUIRE(a1_exit_pos < a2_entry_pos);
 }
+
+// ============================================================================
+// ForceTransition tests
+// ============================================================================
+
+TEST_CASE("hsm - ForceTransition basic transition", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  BuildSimpleSM(sm);
+  sm.SetInitialState(s_a);
+  sm.Start();
+
+  REQUIRE(sm.CurrentState() == s_a);
+  ctx.log.clear();
+
+  // Force transition from A to B without dispatching an event
+  bool ok = sm.ForceTransition(s_b);
+  REQUIRE(ok);
+  REQUIRE(sm.CurrentState() == s_b);
+
+  // Should have exit A, entry B (within same parent root)
+  bool found_a_exit = false;
+  bool found_b_entry = false;
+  for (const auto& entry : ctx.log) {
+    if (entry == "A:exit") found_a_exit = true;
+    if (entry == "B:entry") found_b_entry = true;
+  }
+  REQUIRE(found_a_exit);
+  REQUIRE(found_b_entry);
+}
+
+TEST_CASE("hsm - ForceTransition hierarchical exit/entry", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  BuildDeepSM(sm);
+  sm.SetInitialState(s_a1);
+  sm.Start();
+
+  REQUIRE(sm.CurrentState() == s_a1);
+  ctx.log.clear();
+
+  // Force transition from A1 (child of A) to B1 (child of B)
+  // Exit path: A1 -> A (up to root, not including root)
+  // Entry path: B -> B1 (from root down, not including root)
+  bool ok = sm.ForceTransition(s_b1);
+  REQUIRE(ok);
+  REQUIRE(sm.CurrentState() == s_b1);
+
+  bool found_a1_exit = false;
+  bool found_a_exit = false;
+  bool found_b_entry = false;
+  bool found_b1_entry = false;
+  size_t a1_exit_pos = 0, a_exit_pos = 0;
+  size_t b_entry_pos = 0, b1_entry_pos = 0;
+
+  for (size_t i = 0; i < ctx.log.size(); ++i) {
+    if (ctx.log[i] == "A1:exit") { found_a1_exit = true; a1_exit_pos = i; }
+    if (ctx.log[i] == "A:exit") { found_a_exit = true; a_exit_pos = i; }
+    if (ctx.log[i] == "B:entry") { found_b_entry = true; b_entry_pos = i; }
+    if (ctx.log[i] == "B1:entry") { found_b1_entry = true; b1_entry_pos = i; }
+  }
+
+  REQUIRE(found_a1_exit);
+  REQUIRE(found_a_exit);
+  REQUIRE(found_b_entry);
+  REQUIRE(found_b1_entry);
+
+  // Exit order: A1 before A (bottom-up)
+  REQUIRE(a1_exit_pos < a_exit_pos);
+  // Entry order: B before B1 (top-down)
+  REQUIRE(b_entry_pos < b1_entry_pos);
+  // Exit before entry
+  REQUIRE(a_exit_pos < b_entry_pos);
+}
+
+TEST_CASE("hsm - ForceTransition returns false when not started", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  BuildSimpleSM(sm);
+  sm.SetInitialState(s_a);
+  // NOT calling sm.Start()
+
+  bool ok = sm.ForceTransition(s_b);
+  REQUIRE_FALSE(ok);
+}
+
+TEST_CASE("hsm - ForceTransition returns false for invalid target", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  BuildSimpleSM(sm);
+  sm.SetInitialState(s_a);
+  sm.Start();
+
+  // Negative index
+  REQUIRE_FALSE(sm.ForceTransition(-1));
+  // Out of range index
+  REQUIRE_FALSE(sm.ForceTransition(100));
+  // Current state should be unchanged
+  REQUIRE(sm.CurrentState() == s_a);
+}
+
+TEST_CASE("hsm - ForceTransition self-transition", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  BuildSimpleSM(sm);
+  sm.SetInitialState(s_a);
+  sm.Start();
+  ctx.log.clear();
+
+  // Force self-transition: exit A then re-enter A
+  bool ok = sm.ForceTransition(s_a);
+  REQUIRE(ok);
+  REQUIRE(sm.CurrentState() == s_a);
+
+  bool found_a_exit = false;
+  bool found_a_entry = false;
+  for (const auto& entry : ctx.log) {
+    if (entry == "A:exit") found_a_exit = true;
+    if (entry == "A:entry") found_a_entry = true;
+  }
+  REQUIRE(found_a_exit);
+  REQUIRE(found_a_entry);
+}

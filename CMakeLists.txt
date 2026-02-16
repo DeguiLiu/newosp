@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(newosp VERSION 0.4.2 LANGUAGES C CXX)
+project(newosp VERSION 0.4.3 LANGUAGES C CXX)
 
 include(FetchContent)
 

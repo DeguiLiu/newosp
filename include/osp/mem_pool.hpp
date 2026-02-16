@@ -248,9 +248,9 @@ class FixedPool {
   /// @brief Pointer ownership check without locking (for internal use and
   ///        const-correct public API).
   bool OwnsPointerUnlocked(const void* ptr) const {
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: pointer arithmetic for alignment
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     auto addr = reinterpret_cast<uintptr_t>(ptr);
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: pointer arithmetic for alignment
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     auto base = reinterpret_cast<uintptr_t>(storage_);
     if (addr < base || addr >= base + sizeof(storage_)) {
       return false;

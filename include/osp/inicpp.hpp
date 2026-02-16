@@ -48,6 +48,23 @@
 #include <string_view>
 #endif
 
+// When exceptions are disabled (-fno-exceptions), replace throw with assert+return.
+#if defined(__cpp_exceptions)
+#define INICPP_THROW(exception_type, msg) throw exception_type(msg)
+#define INICPP_THROW_SS(exception_type, ss) throw exception_type((ss).str())
+#else
+#define INICPP_THROW(exception_type, msg) \
+  do {                                    \
+    assert(false && (msg)); /* NOLINT */  \
+    return;                               \
+  } while (0)
+#define INICPP_THROW_SS(exception_type, ss)    \
+  do {                                         \
+    assert(false && "ini error"); /* NOLINT */ \
+    return;                                    \
+  } while (0)
+#endif
+
 namespace osp {
 namespace ini {
 /************************************************
@@ -135,7 +152,7 @@ struct Convert<bool> {
     else if (str == "FALSE")
       result = false;
     else
-      throw std::invalid_argument("field is not a bool");
+      INICPP_THROW(std::invalid_argument, "field is not a bool");
   }
 
   void Encode(const bool value, std::string& result) { result = value ? "true" : "false"; }
@@ -166,7 +183,7 @@ struct Convert<short> {
   void Decode(const std::string& value, short& result) {
     long tmp;
     if (!StrToLong(value, tmp))
-      throw std::invalid_argument("field is not a short");
+      INICPP_THROW(std::invalid_argument, "field is not a short");
     result = static_cast<short>(tmp);
   }
 
@@ -182,7 +199,7 @@ struct Convert<unsigned short> {
   void Decode(const std::string& value, unsigned short& result) {
     unsigned long tmp;
     if (!StrToULong(value, tmp))
-      throw std::invalid_argument("field is not an unsigned short");
+      INICPP_THROW(std::invalid_argument, "field is not an unsigned short");
     result = static_cast<unsigned short>(tmp);
   }
 
@@ -198,7 +215,7 @@ struct Convert<int> {
   void Decode(const std::string& value, int& result) {
     long tmp;
     if (!StrToLong(value, tmp))
-      throw std::invalid_argument("field is not an int");
+      INICPP_THROW(std::invalid_argument, "field is not an int");
     result = static_cast<int>(tmp);
   }
 
@@ -214,7 +231,7 @@ struct Convert<unsigned int> {
   void Decode(const std::string& value, unsigned int& result) {
     unsigned long tmp;
     if (!StrToULong(value, tmp))
-      throw std::invalid_argument("field is not an unsigned int");
+      INICPP_THROW(std::invalid_argument, "field is not an unsigned int");
     result = static_cast<unsigned int>(tmp);
   }
 
@@ -229,7 +246,7 @@ template <>
 struct Convert<long> {
   void Decode(const std::string& value, long& result) {
     if (!StrToLong(value, result))
-      throw std::invalid_argument("field is not a long");
+      INICPP_THROW(std::invalid_argument, "field is not a long");
   }
 
   void Encode(const long value, std::string& result) {
@@ -243,7 +260,7 @@ template <>
 struct Convert<unsigned long> {
   void Decode(const std::string& value, unsigned long& result) {
     if (!StrToULong(value, result))
-      throw std::invalid_argument("field is not an unsigned long");
+      INICPP_THROW(std::invalid_argument, "field is not an unsigned long");
   }
 
   void Encode(const unsigned long value, std::string& result) {
@@ -514,13 +531,13 @@ class IniFileBase : public std::map<std::string, IniSectionBase<Comparator>, Com
         if (pos == std::string::npos) {
           std::stringstream ss;
           ss << "l." << line_no << ": ini parsing failed, section not closed";
-          throw std::logic_error(ss.str());
+          INICPP_THROW_SS(std::logic_error, ss);
         }
         // check if the section name is empty
         if (pos == 1) {
           std::stringstream ss;
           ss << "l." << line_no << ": ini parsing failed, section is empty";
-          throw std::logic_error(ss.str());
+          INICPP_THROW_SS(std::logic_error, ss);
         }
 
         // retrieve section name
@@ -538,7 +555,7 @@ class IniFileBase : public std::map<std::string, IniSectionBase<Comparator>, Com
           ss << "l." << line_no
              << ": ini parsing failed, field has no section"
                 " or ini file in use by another application";
-          throw std::logic_error(ss.str());
+          INICPP_THROW_SS(std::logic_error, ss);
         }
 
         // find key value separator
@@ -553,7 +570,7 @@ class IniFileBase : public std::map<std::string, IniSectionBase<Comparator>, Com
           ss << "l." << line_no << ": ini parsing failed, no '" << field_sep_ << "' found";
           if (multi_line_values_)
             ss << ", and not a multi-line value continuation";
-          throw std::logic_error(ss.str());
+          INICPP_THROW_SS(std::logic_error, ss);
         } else {
           // retrieve field name and value
           std::string name = line.substr(0, pos);
@@ -561,7 +578,7 @@ class IniFileBase : public std::map<std::string, IniSectionBase<Comparator>, Com
           if (!overwrite_duplicate_fields_ && current_section->count(name) != 0) {
             std::stringstream ss;
             ss << "l." << line_no << ": ini parsing failed, duplicate field found";
-            throw std::logic_error(ss.str());
+            INICPP_THROW_SS(std::logic_error, ss);
           }
           std::string value = line.substr(pos + 1, std::string::npos);
           Trim(value);

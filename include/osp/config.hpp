@@ -209,6 +209,24 @@ class ConfigStore {
 
   uint32_t EntryCount() const noexcept { return count_; }
 
+  // --- Runtime Mutation (in-memory only, volatile) ---
+
+  /// Set or update a config entry.  Upsert semantics: updates existing entry
+  /// if section+key match, otherwise inserts a new entry.
+  /// @return true on success, false if store is full and key is new.
+  bool SetString(const char* section, const char* key, const char* value) { return AddEntry(section, key, value); }
+
+  // --- Iteration ---
+
+  /// Iterate all entries.  Visitor signature: void(const char* section,
+  /// const char* key, const char* value).
+  template <typename Fn>
+  void ForEach(Fn&& visitor) const {
+    for (uint32_t i = 0; i < count_; ++i) {
+      visitor(entries_[i].section, entries_[i].key, entries_[i].value);
+    }
+  }
+
  protected:
   static constexpr uint32_t kMaxEntries = 128;
   static constexpr uint32_t kMaxKeyLen = 64;
@@ -332,7 +350,9 @@ struct ConfigParser<IniBackend> {
       }
       std::fclose(f);
     }
+#if defined(__cpp_exceptions)
     try {
+#endif
       ini::IniFile ini_file;
       ini_file.Load(path);
 
@@ -352,13 +372,17 @@ struct ConfigParser<IniBackend> {
         }
       }
       return expected<void, ConfigError>::success();
+#if defined(__cpp_exceptions)
     } catch (const std::exception&) {
       return expected<void, ConfigError>::error(ConfigError::kParseError);
     }
+#endif
   }
 
   static expected<void, ConfigError> ParseBuffer(ConfigStore& store, const char* data, uint32_t) {
+#if defined(__cpp_exceptions)
     try {
+#endif
       ini::IniFile ini_file;
       std::string data_str(data);
       ini_file.Decode(data_str);
@@ -379,9 +403,11 @@ struct ConfigParser<IniBackend> {
         }
       }
       return expected<void, ConfigError>::success();
+#if defined(__cpp_exceptions)
     } catch (const std::exception&) {
       return expected<void, ConfigError>::error(ConfigError::kParseError);
     }
+#endif
   }
 };
 #endif

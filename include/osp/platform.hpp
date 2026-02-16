@@ -102,10 +102,12 @@ static constexpr size_t kCacheLineSize = 64;
 #define OSP_LIKELY(x) __builtin_expect(!!(x), 1)
 #define OSP_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #define OSP_UNUSED __attribute__((unused))
+#define OSP_PRINTF_FMT(a, b) __attribute__((format(printf, a, b)))
 #else
 #define OSP_LIKELY(x) (x)
 #define OSP_UNLIKELY(x) (x)
 #define OSP_UNUSED
+#define OSP_PRINTF_FMT(a, b)
 #endif
 
 // ============================================================================

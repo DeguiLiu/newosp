@@ -47,7 +47,10 @@
 
 // Module headers for type access in diagnostic lambdas
 #include "osp/bus.hpp"
+#include "osp/config.hpp"
 #include "osp/fault_collector.hpp"
+#include "osp/lifecycle_node.hpp"
+#include "osp/log.hpp"
 #include "osp/node_manager_hsm.hpp"
 #include "osp/watchdog.hpp"
 
@@ -154,11 +157,12 @@ inline void RegisterFaults(FaultCollectorType& fc) {
 // Communication Layer (optional)
 // ============================================================================
 
-/// Register osp_bus command.
+/// Register osp_bus command (status + reset).
 template <typename BusType>
 inline void RegisterBusStats(BusType& bus) {
   static BusType* s_bus = &bus;
-  static auto cmd = [](int /*argc*/, char* /*argv*/[]) -> int {
+
+  static auto show_status = [](int /*argc*/, char* /*argv*/[]) -> int {
     auto stats = s_bus->GetStatistics();
     auto bp = s_bus->GetBackpressureLevel();
     ShellPrintf("[osp_bus] AsyncBus Statistics\r\n");
@@ -169,7 +173,23 @@ inline void RegisterBusStats(BusType& bus) {
     ShellPrintf("  backpressure:  %s\r\n", detail::BackpressureName(bp));
     return 0;
   };
-  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_bus", +cmd, "Show AsyncBus statistics");
+
+  static auto sub_status = [](int argc, char* argv[]) -> int { return (+show_status)(argc, argv); };
+
+  static auto sub_reset = [](int /*argc*/, char* /*argv*/[]) -> int {
+    s_bus->ResetStatistics();
+    ShellPrintf("[osp_bus] Statistics reset.\r\n");
+    return 0;
+  };
+
+  static const ShellSubCmd kSubs[] = {
+      {"status", nullptr, "Show bus statistics", +sub_status},
+      {"reset", nullptr, "Reset all counters", +sub_reset},
+  };
+
+  static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 2U, +show_status); };
+
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_bus", +cmd, "AsyncBus statistics and control");
 }
 
 /// Register osp_pool command.
@@ -319,9 +339,9 @@ inline void RegisterDiscoveryHsm(DiscoveryHsmType& disc) {
 template <typename LifecycleNodeType>
 inline void RegisterLifecycle(LifecycleNodeType& node) {
   static LifecycleNodeType* s_node = &node;
-  static auto cmd = [](int /*argc*/, char* /*argv*/[]) -> int {
+
+  static auto show_status = [](int /*argc*/, char* /*argv*/[]) -> int {
     ShellPrintf("[osp_lifecycle] LifecycleNode\r\n");
-    // GetState() returns LifecycleState enum (0-3)
     auto state = s_node->GetState();
     const char* coarse = "Unknown";
     switch (static_cast<uint8_t>(state)) {
@@ -343,7 +363,59 @@ inline void RegisterLifecycle(LifecycleNodeType& node) {
     ShellPrintf("  state: %s (%s)\r\n", coarse, s_node->DetailedStateName());
     return 0;
   };
-  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_lifecycle", +cmd, "Show lifecycle node state");
+
+  static auto lifecycle_error_name = [](LifecycleError err) -> const char* {
+    switch (err) {
+      case LifecycleError::kInvalidTransition:
+        return "InvalidTransition";
+      case LifecycleError::kCallbackFailed:
+        return "CallbackFailed";
+      case LifecycleError::kAlreadyFinalized:
+        return "AlreadyFinalized";
+      default:
+        return "Unknown";
+    }
+  };
+
+  static auto try_transition = [](const char* name, expected<void, LifecycleError> result) -> int {
+    if (result.has_value()) {
+      ShellPrintf("[osp_lifecycle] %s OK.\r\n", name);
+      return 0;
+    }
+    ShellPrintf("[osp_lifecycle] %s failed: %s\r\n", name, lifecycle_error_name(result.get_error()));
+    return -1;
+  };
+
+  static auto sub_status = [](int argc, char* argv[]) -> int { return (+show_status)(argc, argv); };
+  static auto sub_configure = [](int /*argc*/, char* /*argv*/[]) -> int {
+    return try_transition("Configure", s_node->Configure());
+  };
+  static auto sub_activate = [](int /*argc*/, char* /*argv*/[]) -> int {
+    return try_transition("Activate", s_node->Activate());
+  };
+  static auto sub_deactivate = [](int /*argc*/, char* /*argv*/[]) -> int {
+    return try_transition("Deactivate", s_node->Deactivate());
+  };
+  static auto sub_cleanup = [](int /*argc*/, char* /*argv*/[]) -> int {
+    return try_transition("Cleanup", s_node->Cleanup());
+  };
+  static auto sub_shutdown = [](int /*argc*/, char* /*argv*/[]) -> int {
+    return try_transition("Shutdown", s_node->Shutdown());
+  };
+
+  static const ShellSubCmd kSubs[] = {
+      {"status", nullptr, "Show current state", +sub_status},
+      {"configure", nullptr, "Transition: configure", +sub_configure},
+      {"activate", nullptr, "Transition: activate", +sub_activate},
+      {"deactivate", nullptr, "Transition: deactivate", +sub_deactivate},
+      {"cleanup", nullptr, "Transition: cleanup", +sub_cleanup},
+      {"shutdown", nullptr, "Transition: shutdown", +sub_shutdown},
+  };
+
+  static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 6U, +show_status); };
+
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_lifecycle", +cmd,
+                                                            "Lifecycle node state and transitions");
 }
 
 /// Register osp_qos command (prints a QoS profile).
@@ -427,6 +499,126 @@ inline void RegisterMemPool(PoolType& pool, const char* label = "pool") {
     return 0;
   };
   (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_mempool", +cmd, "Show memory pool usage");
+}
+
+// ============================================================================
+// Runtime Control Commands
+// ============================================================================
+
+/// Register osp_log command.
+/// Subcommands: status | level <0-5|debug|info|warn|error|fatal|off>
+inline void RegisterLog() {
+  static auto show_status = [](int /*argc*/, char* /*argv*/[]) -> int {
+    auto lvl = log::GetLevel();
+    ShellPrintf("[osp_log] level: %s (%" PRIu8 ")\r\n", log::detail::LevelTag(lvl), static_cast<uint8_t>(lvl));
+    return 0;
+  };
+
+  static auto sub_status = [](int argc, char* argv[]) -> int { return (+show_status)(argc, argv); };
+
+  static auto sub_level = [](int argc, char* argv[]) -> int {
+    if (!ShellArgCheck(argc, 2, "osp_log level <0-5|debug|info|...>")) {
+      return -1;
+    }
+    // Try numeric first.
+    auto num = ShellParseUint(argv[1]);
+    if (num.has_value()) {
+      if (num.value() > 5U) {
+        ShellPrintf("Invalid level: %" PRIu32 " (0-5)\r\n", num.value());
+        return -1;
+      }
+      log::SetLevel(static_cast<log::Level>(static_cast<uint8_t>(num.value())));
+      ShellPrintf("[osp_log] level set to %s\r\n", log::detail::LevelTag(log::GetLevel()));
+      return 0;
+    }
+    // Try name match (case-insensitive).
+    static const struct {
+      const char* name;
+      log::Level level;
+    } kNames[] = {
+        {"debug", log::Level::kDebug}, {"info", log::Level::kInfo},   {"warn", log::Level::kWarn},
+        {"error", log::Level::kError}, {"fatal", log::Level::kFatal}, {"off", log::Level::kOff},
+    };
+    for (const auto& n : kNames) {
+      if (osp::detail::ShellStrCaseEq(argv[1], n.name)) {
+        log::SetLevel(n.level);
+        ShellPrintf("[osp_log] level set to %s\r\n", log::detail::LevelTag(log::GetLevel()));
+        return 0;
+      }
+    }
+    ShellPrintf("Unknown level: %s\r\n", argv[1]);
+    return -1;
+  };
+
+  static const ShellSubCmd kSubs[] = {
+      {"status", nullptr, "Show current log level", +sub_status},
+      {"level", "<0-5|debug|info|warn|error|fatal|off>", "Set log level", +sub_level},
+  };
+
+  static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 2U, +show_status); };
+
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_log", +cmd, "Log level display and control");
+}
+
+/// Register osp_config command.
+/// Subcommands: list [section] | get <section> <key> | set <section> <key> <value>
+template <typename ConfigType>
+inline void RegisterConfig(ConfigType& cfg) {
+  static ConfigType* s_cfg = &cfg;
+
+  static auto show_list = [](int argc, char* argv[]) -> int {
+    const char* filter = (argc >= 2) ? argv[1] : nullptr;
+    if (filter != nullptr) {
+      ShellPrintf("[osp_config] entries in [%s]:\r\n", filter);
+    } else {
+      ShellPrintf("[osp_config] all entries (%" PRIu32 "):\r\n", s_cfg->EntryCount());
+    }
+    s_cfg->ForEach([&](const char* section, const char* key, const char* value) {
+      if (filter != nullptr && !osp::detail::ShellStrCaseEq(section, filter)) {
+        return;
+      }
+      ShellPrintf("  [%s] %s = %s\r\n", section, key, value);
+    });
+    return 0;
+  };
+
+  static auto sub_list = [](int argc, char* argv[]) -> int { return (+show_list)(argc, argv); };
+
+  static auto sub_get = [](int argc, char* argv[]) -> int {
+    if (!ShellArgCheck(argc, 3, "osp_config get <section> <key>")) {
+      return -1;
+    }
+    const char* val = s_cfg->GetString(argv[1], argv[2], nullptr);
+    if (val == nullptr) {
+      ShellPrintf("[%s] %s: not found\r\n", argv[1], argv[2]);
+      return -1;
+    }
+    ShellPrintf("[%s] %s = %s\r\n", argv[1], argv[2], val);
+    return 0;
+  };
+
+  static auto sub_set = [](int argc, char* argv[]) -> int {
+    if (!ShellArgCheck(argc, 4, "osp_config set <section> <key> <value>")) {
+      return -1;
+    }
+    bool ok = s_cfg->SetString(argv[1], argv[2], argv[3]);
+    if (ok) {
+      ShellPrintf("[%s] %s = %s (set)\r\n", argv[1], argv[2], argv[3]);
+    } else {
+      ShellPrintf("Failed: config store full.\r\n");
+    }
+    return ok ? 0 : -1;
+  };
+
+  static const ShellSubCmd kSubs[] = {
+      {"list", "[section]", "List config entries", +sub_list},
+      {"get", "<section> <key>", "Get a config value", +sub_get},
+      {"set", "<section> <key> <value>", "Set a config value (in-memory)", +sub_set},
+  };
+
+  static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 3U, +show_list); };
+
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_config", +cmd, "Runtime config view and modification");
 }
 
 }  // namespace shell_cmd

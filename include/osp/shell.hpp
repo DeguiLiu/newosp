@@ -50,6 +50,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <atomic>
@@ -568,6 +569,90 @@ inline int ShellSplit(char* cmd, uint32_t length, char* argv[kMaxArgs]) {
   return argc;
 }
 
+}  // namespace detail
+
+// ============================================================================
+// Shell Argument Parsing Utilities
+// ============================================================================
+
+/// @brief Subcommand descriptor for dispatch table.
+struct ShellSubCmd {
+  const char* name;       ///< Subcommand name (e.g. "status", "set").
+  const char* args_desc;  ///< Argument hint (e.g. "<level>"), nullptr if none.
+  const char* help;       ///< One-line help text.
+  ShellCmdFn handler;     ///< Subcommand handler.
+};
+
+/// @brief Parse a string as int32_t (base 10).
+/// Rejects null, empty, trailing non-digit characters, and overflow.
+[[nodiscard]] inline optional<int32_t> ShellParseInt(const char* str) noexcept {
+  if (str == nullptr || *str == '\0')
+    return {};
+  char* end = nullptr;
+  errno = 0;
+  long val = std::strtol(str, &end, 10);
+  if (end == str || *end != '\0')
+    return {};
+  if (errno == ERANGE)
+    return {};
+  if (val < INT32_MIN || val > INT32_MAX)
+    return {};
+  return {static_cast<int32_t>(val)};
+}
+
+/// @brief Parse a string as uint32_t (base 10).
+/// Rejects null, empty, leading '-', trailing non-digit characters.
+[[nodiscard]] inline optional<uint32_t> ShellParseUint(const char* str) noexcept {
+  if (str == nullptr || *str == '\0' || *str == '-')
+    return {};
+  char* end = nullptr;
+  errno = 0;
+  unsigned long val = std::strtoul(str, &end, 10);
+  if (end == str || *end != '\0')
+    return {};
+  if (errno == ERANGE)
+    return {};
+  if (val > UINT32_MAX)
+    return {};
+  return {static_cast<uint32_t>(val)};
+}
+
+namespace detail {
+
+inline bool ShellStrCaseEq(const char* a, const char* b) noexcept {
+  while (*a != '\0' && *b != '\0') {
+    char la = (*a >= 'A' && *a <= 'Z') ? static_cast<char>(*a + 32) : *a;
+    char lb = (*b >= 'A' && *b <= 'Z') ? static_cast<char>(*b + 32) : *b;
+    if (la != lb)
+      return false;
+    ++a;
+    ++b;
+  }
+  return *a == *b;
+}
+
+}  // namespace detail
+
+/// @brief Parse a string as bool.
+/// Accepts: true/1/yes/on (case-insensitive) -> true,
+///          false/0/no/off -> false.
+/// Returns empty optional for unrecognized input.
+[[nodiscard]] inline optional<bool> ShellParseBool(const char* str) noexcept {
+  if (str == nullptr || *str == '\0')
+    return {};
+  if (detail::ShellStrCaseEq(str, "true") || detail::ShellStrCaseEq(str, "1") || detail::ShellStrCaseEq(str, "yes") ||
+      detail::ShellStrCaseEq(str, "on")) {
+    return {true};
+  }
+  if (detail::ShellStrCaseEq(str, "false") || detail::ShellStrCaseEq(str, "0") || detail::ShellStrCaseEq(str, "no") ||
+      detail::ShellStrCaseEq(str, "off")) {
+    return {false};
+  }
+  return {};
+}
+
+namespace detail {
+
 // ============================================================================
 // Tab completion helper
 // ============================================================================
@@ -836,11 +921,7 @@ static const bool kHelpRegistered OSP_UNUSED = RegisterHelpOnce();
  * @param fmt printf-style format string.
  * @return Number of bytes written, or -1 on error.
  */
-inline int ShellPrintf(const char* fmt, ...)
-#if defined(__GNUC__) || defined(__clang__)
-    __attribute__((format(printf, 1, 2)))
-#endif
-    ;
+inline int ShellPrintf(const char* fmt, ...) OSP_PRINTF_FMT(1, 2);
 
 inline int ShellPrintf(const char* fmt, ...) {
   detail::ShellSession* sess = detail::CurrentSession();
@@ -859,6 +940,64 @@ inline int ShellPrintf(const char* fmt, ...) {
     ssize_t sent = sess->write_fn(sess->write_fd, buf, static_cast<size_t>(to_send));
     return static_cast<int>(sent);
   }
+  return -1;
+}
+
+// ============================================================================
+// Shell Argument Dispatch Utilities (require ShellPrintf)
+// ============================================================================
+
+/// @brief Check argc meets minimum, print usage hint if not.
+/// @return true if argc >= min_argc.
+[[nodiscard]] inline bool ShellArgCheck(int argc, int min_argc, const char* usage) noexcept {
+  if (argc >= min_argc)
+    return true;
+  ShellPrintf("Usage: %s\r\n", usage);
+  return false;
+}
+
+/// @brief Print subcommand help table for a parent command.
+inline void ShellPrintSubHelp(const char* parent, const ShellSubCmd* table, uint32_t count) noexcept {
+  ShellPrintf("Usage: %s <subcommand>\r\n", parent);
+  for (uint32_t i = 0; i < count; ++i) {
+    ShellPrintf("  %-12s", table[i].name);
+    if (table[i].args_desc != nullptr) {
+      ShellPrintf(" %s", table[i].args_desc);
+    }
+    if (table[i].help != nullptr) {
+      ShellPrintf("  - %s", table[i].help);
+    }
+    ShellPrintf("\r\n");
+  }
+}
+
+/// @brief Dispatch argc/argv to a subcommand table.
+///
+/// Behavior:
+/// - argc <= 1 (no subcommand): call @p default_fn if non-null, else help.
+/// - argv[1] == "help": print formatted subcommand table.
+/// - argv[1] matches entry: call handler(argc-1, argv+1).
+/// - No match: print error and suggest "help".
+///
+/// @return Handler return value, or -1 on error.
+inline int ShellDispatch(int argc, char* argv[], const ShellSubCmd* table, uint32_t count,
+                         ShellCmdFn default_fn = nullptr) noexcept {
+  if (argc <= 1) {
+    if (default_fn != nullptr)
+      return default_fn(argc, argv);
+    ShellPrintSubHelp(argv[0], table, count);
+    return 0;
+  }
+  if (std::strcmp(argv[1], "help") == 0) {
+    ShellPrintSubHelp(argv[0], table, count);
+    return 0;
+  }
+  for (uint32_t i = 0; i < count; ++i) {
+    if (std::strcmp(argv[1], table[i].name) == 0) {
+      return table[i].handler(argc - 1, argv + 1);
+    }
+  }
+  ShellPrintf("Unknown subcommand: %s (try '%s help')\r\n", argv[1], argv[0]);
   return -1;
 }
 
@@ -943,11 +1082,7 @@ class DebugShell final {
    * @param fmt printf-style format string.
    * @return Number of bytes written, or -1 on error.
    */
-  static inline int Printf(const char* fmt, ...)
-#if defined(__GNUC__) || defined(__clang__)
-      __attribute__((format(printf, 1, 2)))
-#endif
-      ;
+  static inline int Printf(const char* fmt, ...) OSP_PRINTF_FMT(1, 2);
 
   /// @brief Check whether the shell is currently running.
   [[nodiscard]] bool IsRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
