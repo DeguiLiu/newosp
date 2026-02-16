@@ -72,10 +72,12 @@ TEST_CASE("AsyncLog: basic async write and drain", "[async_log]") {
   osp::log::StartAsync(cfg);
   REQUIRE(osp::log::IsAsyncEnabled());
 
-  // Log several messages (these are DEBUG/INFO/WARN -- async path).
+  // Log several messages (these are INFO/WARN -- async path).
+  // NOTE: Avoid OSP_LOG_DEBUG here -- compiled out when OSP_LOG_MIN_LEVEL > 0
+  // (Release builds), causing the entry count to be wrong.
   OSP_LOG_INFO("Test", "hello %d", 42);
-  OSP_LOG_DEBUG("Test", "debug msg");
   OSP_LOG_WARN("Test", "warn msg");
+  OSP_LOG_INFO("Test", "second info msg");
 
   REQUIRE(WaitForEntries(3));
 

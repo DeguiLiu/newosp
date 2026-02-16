@@ -57,6 +57,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -79,6 +80,11 @@
 
 #ifndef OSP_ASYNC_LOG_MAX_THREADS
 #define OSP_ASYNC_LOG_MAX_THREADS 8U
+#endif
+
+/// @brief Interval (seconds) between drop-stats reports to stderr (0=disable).
+#ifndef OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S
+#define OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S 10U
 #endif
 
 namespace osp {
@@ -389,6 +395,11 @@ inline void WriterLoop() noexcept {
   static constexpr uint32_t kBatchSize = 32U;
   LogEntry batch[kBatchSize];
 
+  // Drop-stats reporting state.
+  uint64_t last_reported_drops = 0;
+  auto next_report_time = std::chrono::steady_clock::now() +
+      std::chrono::seconds(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S);
+
   while (!ctx.shutdown.load(std::memory_order_acquire)) {
     uint32_t total_popped = 0;
 
@@ -412,6 +423,31 @@ inline void WriterLoop() noexcept {
     } else {
       backoff.Wait();
     }
+
+    // --- Periodic drop-stats report (sync ERROR to stderr) ---
+    if (OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S > 0) {
+      auto now = std::chrono::steady_clock::now();
+      if (now >= next_report_time) {
+        uint64_t cur_drops = ctx.entries_dropped.load(
+            std::memory_order_relaxed);
+        uint64_t cur_written = ctx.entries_written.load(
+            std::memory_order_relaxed);
+        uint64_t new_drops = cur_drops - last_reported_drops;
+        if (new_drops > 0) {
+          // Report via sync stderr (always visible, crash-safe).
+          (void)std::fprintf(stderr,
+              "[AsyncLog] WARN: %" PRIu64 " entries dropped in last %us"
+              " (total: written=%" PRIu64 " dropped=%" PRIu64
+              " fallbacks=%" PRIu64 ")\n",
+              new_drops, OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S,
+              cur_written, cur_drops,
+              ctx.sync_fallbacks.load(std::memory_order_relaxed));
+        }
+        last_reported_drops = cur_drops;
+        next_report_time = now +
+            std::chrono::seconds(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S);
+      }
+    }
   }
 
   // Final drain: multiple rounds until all buffers empty.
@@ -427,6 +463,23 @@ inline void WriterLoop() noexcept {
       }
     }
     if (drained == 0) break;
+  }
+
+  // Final drop-stats report on shutdown.
+  {
+    uint64_t final_drops = ctx.entries_dropped.load(
+        std::memory_order_relaxed);
+    uint64_t unreported = final_drops - last_reported_drops;
+    if (unreported > 0) {
+      (void)std::fprintf(stderr,
+          "[AsyncLog] WARN: %" PRIu64 " entries dropped since last report"
+          " (total: written=%" PRIu64 " dropped=%" PRIu64
+          " fallbacks=%" PRIu64 ")\n",
+          unreported,
+          ctx.entries_written.load(std::memory_order_relaxed),
+          final_drops,
+          ctx.sync_fallbacks.load(std::memory_order_relaxed));
+    }
   }
 }
 
