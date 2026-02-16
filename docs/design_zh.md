@@ -1,7 +1,7 @@
 # newosp 架构设计文档
 
-> 版本: 2.0
-> 日期: 2026-02-14
+> 版本: 2.1
+> 日期: 2026-02-17
 > 状态: 活跃演进中
 
 ---
@@ -48,8 +48,8 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 
 - **语言**: C++17 (兼容 `-fno-exceptions -fno-rtti`)
 - **构建**: CMake >= 3.14, FetchContent 自动管理依赖
-- **测试**: Catch2 v3.5.2, 1114 test cases (26085 assertions), ASan/TSan/UBSan clean
-- **代码规范**: Google C++ Style (clang-format), cpplint, MISRA C++
+- **测试**: Catch2 v3.5.2, 1153 test cases, ASan/TSan/UBSan clean
+- **代码规范**: Google C++ Style (clang-format v21), cpplint, clang-tidy, MISRA C++
 - **CI**: GitHub Actions (Ubuntu, GCC x Debug/Release, Sanitizers)
 
 ---
@@ -1943,7 +1943,7 @@ expected<V, E> 返回
 | build-and-test | Ubuntu, Debug + Release |
 | build-with-options | `-fno-exceptions -fno-rtti` 兼容性 |
 | sanitizers | ASan, TSan, UBSan |
-| code-quality | clang-format + cpplint |
+| code-quality | clang-format (v21) + cpplint + clang-tidy |
 
 ### 13.4 测试策略
 
@@ -1951,7 +1951,7 @@ expected<V, E> 返回
 - 每模块独立测试文件: `test_<module>.cpp`
 - 覆盖目标: 基础 API + 边界条件 + 多线程场景
 - Sanitizer 验证: 所有测试在 ASan/TSan/UBSan 下通过
-- 当前: 1114 test cases (全模块), 723 test cases (无网络模式)
+- 当前: 1153 test cases (全模块), 798 test cases (无异常模式)
 - 构建模式: 正常模式 (全模块) / 无网络模式 (`-DOSP_WITH_NETWORK=OFF`) / 无异常模式 (`-DOSP_NO_EXCEPTIONS=ON`)
 
 ---

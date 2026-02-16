@@ -25,7 +25,7 @@
 
 ## 模块
 
-### 基础层 (9 个)
+### 基础层 (10 个)
 
 | 模块 | 说明 |
 |------|------|
@@ -35,11 +35,12 @@
 | `log.hpp` | 日志宏，编译期级别过滤 (stderr 后端) |
 | `async_log.hpp` | 异步日志后端 (Per-Thread SPSC, 分级路由, 背压丢弃上报, 自动启停) |
 | `timer.hpp` | 基于 `std::chrono::steady_clock` 的定时任务调度器 |
-| `shell.hpp` | 远程调试 Shell (telnet)，支持 TAB 补全、命令历史、`OSP_SHELL_CMD` 注册 |
+| `shell.hpp` | 远程调试 Shell (telnet/console/UART)，IAC/ESC 过滤、命令历史、认证、`OSP_SHELL_CMD` 注册 |
+| `inicpp.hpp` | INI 文件解析器 (fork 自 inifile-cpp，兼容 `-fno-exceptions`) |
 | `mem_pool.hpp` | 固定块内存池 (`FixedPool<BlockSize, MaxBlocks>`)，嵌入式空闲链表 |
 | `shutdown.hpp` | 异步信号安全的优雅关停，LIFO 回调链 + `pipe(2)` 唤醒 |
 
-### 核心通信层 (7 个)
+### 核心通信层 (8 个)
 
 | 模块 | 说明 |
 |------|------|
@@ -56,7 +57,7 @@
 
 | 模块 | 说明 |
 |------|------|
-| `hsm.hpp` | 层次状态机 (LCA 转换、guard 条件、零堆分配) |
+| `hsm.hpp` | 层次状态机 (LCA 转换、guard 条件、ForceTransition 外部恢复、零堆分配) |
 | `bt.hpp` | 行为树 (Sequence/Fallback/Parallel，扁平数组存储，缓存友好) |
 
 ### 网络与传输层 (8 个)
@@ -92,13 +93,15 @@
 | `qos.hpp` | QoS 服务质量配置 (Reliability/History/Deadline/Lifespan) |
 | `lifecycle_node.hpp` | 生命周期节点 (Unconfigured/Inactive/Active/Finalized, HSM 驱动) |
 
-### 可靠性层 (3 个)
+### 可靠性与系统层 (5 个)
 
 | 模块 | 说明 |
 |------|------|
 | `watchdog.hpp` | 软件看门狗 (截止时间监控、超时回调) |
 | `fault_collector.hpp` | 故障收集与上报 (FaultReporter POD 注入, 环形缓冲) |
 | `shell_commands.hpp` | 内置诊断 Shell 命令桥接 (零侵入, 15 个 Register 函数) |
+| `process.hpp` | 进程管理 (Subprocess spawn/pipe/wait, FindPidByName, Freeze/Resume/Kill) |
+| `system_monitor.hpp` | Linux 系统健康监控 (CPU、内存、磁盘、温度) |
 
 ## 架构
 
@@ -334,7 +337,7 @@ int main() {
 | **build-and-test** | Ubuntu, Debug + Release |
 | **build-with-options** | `-fno-exceptions -fno-rtti` 兼容性验证 |
 | **sanitizers** | AddressSanitizer、ThreadSanitizer、UBSan |
-| **code-quality** | clang-format、cpplint |
+| **code-quality** | clang-format (v21)、cpplint、clang-tidy |
 
 ## 环境要求
 

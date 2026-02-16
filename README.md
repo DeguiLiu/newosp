@@ -23,9 +23,9 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 - **Reliability infrastructure**: Software watchdog, fault collector, lifecycle nodes, QoS configuration
 - **Template-based design patterns**: Tag dispatch, variadic templates, CRTP, compile-time composition over virtual-function OOP
 
-## Modules (39 headers)
+## Modules (43 headers)
 
-### Foundation Layer (9)
+### Foundation Layer (10)
 
 | Module | Description |
 |--------|-------------|
@@ -35,11 +35,12 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 | `log.hpp` | Logging macros, compile-time level filtering (stderr backend) |
 | `async_log.hpp` | Async logging backend (Per-Thread SPSC, severity routing, drop-stats reporting, auto-start) |
 | `timer.hpp` | Timer task scheduler based on `std::chrono::steady_clock` |
-| `shell.hpp` | Remote debug shell (telnet), TAB completion, command history |
+| `shell.hpp` | Remote debug shell (telnet/console/UART), IAC/ESC filtering, command history, auth |
+| `inicpp.hpp` | INI file parser (forked from inifile-cpp, `-fno-exceptions` compatible) |
 | `mem_pool.hpp` | Fixed-block memory pool (`FixedPool<BlockSize, MaxBlocks>`), embedded free list |
 | `shutdown.hpp` | Async-signal-safe graceful shutdown, LIFO callbacks, `pipe(2)` wakeup |
 
-### Core Communication Layer (7)
+### Core Communication Layer (8)
 
 | Module | Description |
 |--------|-------------|
@@ -56,7 +57,7 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 
 | Module | Description |
 |--------|-------------|
-| `hsm.hpp` | Hierarchical state machine (LCA transitions, guard conditions, zero heap) |
+| `hsm.hpp` | Hierarchical state machine (LCA transitions, guard conditions, ForceTransition, zero heap) |
 | `bt.hpp` | Behavior tree (Sequence/Fallback/Parallel, flat array storage, cache-friendly) |
 
 ### Network & Transport Layer (8)
@@ -92,13 +93,15 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 | `qos.hpp` | QoS configuration (Reliability/History/Deadline/Lifespan) |
 | `lifecycle_node.hpp` | Lifecycle node (Unconfigured/Inactive/Active/Finalized, HSM-driven) |
 
-### Reliability Layer (3)
+### Reliability & System Layer (5)
 
 | Module | Description |
 |--------|-------------|
 | `watchdog.hpp` | Software watchdog (deadline monitoring, timeout callbacks) |
 | `fault_collector.hpp` | Fault collection and reporting (FaultReporter POD injection, ring buffer) |
 | `shell_commands.hpp` | Built-in diagnostic shell command bridge (zero-intrusion, 15 Register functions) |
+| `process.hpp` | Process management (Subprocess spawn/pipe/wait, FindPidByName, Freeze/Resume/Kill) |
+| `system_monitor.hpp` | Linux system health monitoring (CPU, memory, disk, temperature) |
 
 ## Architecture
 
@@ -292,7 +295,7 @@ int main() {
 | **build-and-test** | Ubuntu, Debug + Release |
 | **build-with-options** | `-fno-exceptions -fno-rtti` compatibility |
 | **sanitizers** | AddressSanitizer, ThreadSanitizer, UBSan |
-| **code-quality** | clang-format, cpplint |
+| **code-quality** | clang-format (v21), cpplint, clang-tidy |
 
 ## Requirements
 

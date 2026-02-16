@@ -6,6 +6,38 @@
 
 ## 最新变更
 
+### 2026-02-17: v0.4.3 发布
+
+**变更内容** (从 15 笔 commit 合并为 4 笔):
+
+1. **条件编译与网络增强**
+   - `OSP_HAS_NETWORK` 条件编译 + `poll()` 回退，提升可移植性
+   - TCP `send()`/`recv()` 区分 `EAGAIN` 与致命错误
+   - 更新 shell 模块设计文档
+
+2. **代码生成 v2 + SHM 大页支持**
+   - ospgen v2: standalone enum class、sizeof 断言、event-message 编译期绑定、Validate()、Dump()
+   - streaming_protocol 示例使用 ospgen 生成代码
+   - `OSP_SHM_HUGE_PAGES` 编译期标志支持 `MAP_HUGETLB`
+
+3. **CI 三层质量门禁**
+   - clang-tidy 静态分析 (`.clang-tidy` 配置)
+   - clang-format v21 格式化全部 `include/` 头文件
+   - CI 固定 `clang-format==21.1.8` (pip) 确保一致性
+   - CPPLINT.cfg 自动发现 (项目根目录符号链接)
+   - 三步 CI 流水线: clang-format -> cpplint -> clang-tidy
+
+4. **功能增强与 -fno-exceptions 支持**
+   - HSM: `ForceTransition()` 外部状态恢复
+   - Shell: 参数解析、运行时控制命令 (start/stop/status)
+   - inicpp.hpp: `INICPP_THROW` 宏支持 `-fno-exceptions`
+   - config.hpp: `#if defined(__cpp_exceptions)` 条件编译
+   - platform.hpp: `OSP_PRINTF_FMT` 宏
+
+**统计**: 1153 tests (正常模式), 798 tests (-fno-exceptions 模式), 43 个头文件
+
+---
+
 ### 2026-02-14: inicpp 集成优化
 
 **变更内容**:
