@@ -38,7 +38,7 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
-#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+#if OSP_HAS_NETWORK
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -955,8 +955,8 @@ class AsyncClient {
   std::thread worker_thread_;
 };
 
-#endif  // defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
-
 }  // namespace osp
+
+#endif  // OSP_HAS_NETWORK
 
 #endif  // OSP_SERVICE_HPP_

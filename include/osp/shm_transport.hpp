@@ -42,6 +42,8 @@
 #include <cstring>
 #include <utility>
 
+#if OSP_HAS_NETWORK
+
 #if defined(OSP_PLATFORM_LINUX)
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -715,5 +717,7 @@ class ShmChannel final {
 #endif  // OSP_PLATFORM_LINUX
 
 }  // namespace osp
+
+#endif  // OSP_HAS_NETWORK
 
 #endif  // OSP_SHM_TRANSPORT_HPP_

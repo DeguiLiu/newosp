@@ -47,6 +47,8 @@
 #include <type_traits>
 #include <variant>
 
+#if OSP_HAS_NETWORK
+
 namespace osp {
 
 // ============================================================================
@@ -1205,5 +1207,7 @@ class NetworkNode : public Node<PayloadVariant> {
 #endif  // defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
 
 }  // namespace osp
+
+#endif  // OSP_HAS_NETWORK
 
 #endif  // OSP_TRANSPORT_HPP_

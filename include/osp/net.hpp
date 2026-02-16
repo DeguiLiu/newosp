@@ -35,6 +35,10 @@
 #ifndef OSP_NET_HPP_
 #define OSP_NET_HPP_
 
+#include "osp/platform.hpp"
+
+#if OSP_HAS_NETWORK
+
 #ifdef OSP_HAS_SOCKPP
 
 #include "osp/vocabulary.hpp"
@@ -423,4 +427,7 @@ class UdpPeer {
 }  // namespace osp
 
 #endif  // OSP_HAS_SOCKPP
+
+#endif  // OSP_HAS_NETWORK
+
 #endif  // OSP_NET_HPP_

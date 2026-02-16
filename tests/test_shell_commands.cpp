@@ -15,7 +15,10 @@
 #include "osp/lifecycle_node.hpp"
 #include "osp/qos.hpp"
 #include "osp/mem_pool.hpp"
+#include "osp/platform.hpp"
+#if OSP_HAS_NETWORK
 #include "osp/transport.hpp"
+#endif
 #include "osp/worker_pool.hpp"
 #include "osp/serial_transport.hpp"
 
@@ -152,6 +155,7 @@ TEST_CASE("shell_cmd RegisterDiscoveryHsm registers and executes",
   CHECK(found);
 }
 
+#if OSP_HAS_NETWORK
 TEST_CASE("shell_cmd RegisterTransport registers and executes",
           "[shell_commands]") {
   osp::SequenceTracker tracker;
@@ -172,6 +176,7 @@ TEST_CASE("shell_cmd RegisterTransport registers and executes",
       });
   CHECK(found);
 }
+#endif  // OSP_HAS_NETWORK
 
 TEST_CASE("shell_cmd RegisterQos registers and executes",
           "[shell_commands]") {

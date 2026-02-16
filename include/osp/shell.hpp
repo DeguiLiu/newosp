@@ -55,11 +55,17 @@
 #include <mutex>
 #include <thread>
 
+#if OSP_HAS_NETWORK
 #include <arpa/inet.h>
+#endif
 #include <fcntl.h>
+#if OSP_HAS_NETWORK
 #include <netinet/in.h>
+#endif
 #include <poll.h>
+#if OSP_HAS_NETWORK
 #include <sys/socket.h>
+#endif
 #include <termios.h>
 #include <unistd.h>
 
@@ -99,7 +105,9 @@ struct ShellCmd {
 // Forward declarations
 // ============================================================================
 
+#if OSP_HAS_NETWORK
 class DebugShell;
+#endif
 class ConsoleShell;
 class UartShell;
 
@@ -115,6 +123,7 @@ using ShellWriteFn = ssize_t (*)(int fd, const void* buf, size_t len);
 /// @brief Read function pointer type for backend-agnostic I/O.
 using ShellReadFn = ssize_t (*)(int fd, void* buf, size_t len);
 
+#if OSP_HAS_NETWORK
 /// @brief TCP write wrapper (send with MSG_NOSIGNAL).
 inline ssize_t ShellTcpWrite(int fd, const void* buf, size_t len) {
   return ::send(fd, buf, len, MSG_NOSIGNAL);
@@ -124,6 +133,7 @@ inline ssize_t ShellTcpWrite(int fd, const void* buf, size_t len) {
 inline ssize_t ShellTcpRead(int fd, void* buf, size_t len) {
   return ::recv(fd, buf, len, 0);
 }
+#endif  // OSP_HAS_NETWORK
 
 /// @brief POSIX write wrapper (for Console/UART).
 inline ssize_t ShellPosixWrite(int fd, const void* buf, size_t len) {
@@ -870,6 +880,7 @@ inline int ShellPrintf(const char* fmt, ...) {
   return -1;
 }
 
+#if OSP_HAS_NETWORK
 // ============================================================================
 // DebugShell - TCP telnet debug server
 // ============================================================================
@@ -1057,10 +1068,11 @@ inline void DebugShell::Stop() {
 
   running_.store(false, std::memory_order_release);
 
-  // Close the listening socket to unblock accept().
+  // Shutdown the listening socket to unblock poll()/accept() in AcceptLoop.
+  // Do NOT close() or modify listen_fd_ here -- AcceptLoop reads it concurrently.
+  // The actual close happens after accept_thread_.join() below.
   if (listen_fd_ >= 0) {
-    ::close(listen_fd_);
-    listen_fd_ = -1;
+    (void)::shutdown(listen_fd_, SHUT_RDWR);
   }
 
   // Shutdown all active session sockets to unblock their recv().
@@ -1070,9 +1082,12 @@ inline void DebugShell::Stop() {
   // ScopeGuard perform the actual close().
   if (sessions_ != nullptr) {
     for (uint32_t i = 0; i < cfg_.max_connections; ++i) {
+      // Snapshot the fd before signaling shutdown -- session thread's
+      // ScopeGuard may clear read_fd after we set active=false.
+      int fd = sessions_[i].read_fd;
       sessions_[i].active.store(false, std::memory_order_release);
-      if (sessions_[i].read_fd >= 0) {
-        (void)::shutdown(sessions_[i].read_fd, SHUT_RDWR);
+      if (fd >= 0) {
+        (void)::shutdown(fd, SHUT_RDWR);
       }
     }
   }
@@ -1080,6 +1095,12 @@ inline void DebugShell::Stop() {
   // Join the accept thread.
   if (accept_thread_.joinable()) {
     accept_thread_.join();
+  }
+
+  // Now safe to close listen_fd_ (accept thread has exited).
+  if (listen_fd_ >= 0) {
+    ::close(listen_fd_);
+    listen_fd_ = -1;
   }
 
   // Join all session threads (each thread closes its own fd via ScopeGuard).
@@ -1245,10 +1266,12 @@ inline bool DebugShell::RunAuth(Session& s) {
 
 inline void DebugShell::SessionLoop(Session& s) {
   // RAII cleanup: close socket and mark session inactive on any exit path.
+  // Note: read_fd is NOT set to -1 here to avoid a data race with Stop().
+  // Stop() calls shutdown(read_fd) to unblock recv(), then join() ensures
+  // the session thread has exited before cleaning up.
   OSP_SCOPE_EXIT(
     if (s.read_fd >= 0) {
       ::close(s.read_fd);
-      s.read_fd = -1;
     }
     s.active.store(false, std::memory_order_release);
   );
@@ -1329,6 +1352,7 @@ inline int DebugShell::Printf(const char* fmt, ...) {
   }
   return -1;
 }
+#endif  // OSP_HAS_NETWORK
 
 // ============================================================================
 // ConsoleShell - stdin/stdout backend

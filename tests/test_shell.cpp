@@ -8,6 +8,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -488,7 +489,7 @@ TEST_CASE("FilterIac: no effect when telnet_mode is false in ProcessByte",
 // ESC sequence tests
 // ============================================================================
 
-TEST_CASE("ProcessByte: ESC [ A triggers HistoryUp", "[shell][esc]") {
+TEST_CASE("ProcessByte: ESC-A triggers HistoryUp", "[shell][esc]") {
   MockSession mock;
   auto& s = mock.session;
 
@@ -512,7 +513,7 @@ TEST_CASE("ProcessByte: ESC [ A triggers HistoryUp", "[shell][esc]") {
   REQUIRE(s.hist_browsing);
 }
 
-TEST_CASE("ProcessByte: ESC [ B triggers HistoryDown", "[shell][esc]") {
+TEST_CASE("ProcessByte: ESC-B triggers HistoryDown", "[shell][esc]") {
   MockSession mock;
   auto& s = mock.session;
 
@@ -877,6 +878,7 @@ TEST_CASE("SessionInit: initializes all fields correctly", "[shell][init]") {
 // DebugShell lifecycle tests
 // ============================================================================
 
+#if OSP_HAS_NETWORK
 TEST_CASE("DebugShell: start and stop", "[shell][tcp]") {
   osp::DebugShell::Config cfg;
   cfg.port = 15090;  // Use a high port to avoid conflicts.
@@ -945,6 +947,7 @@ TEST_CASE("DebugShell: no auth when username=nullptr", "[shell][tcp]") {
 
   shell.Stop();
 }
+#endif  // OSP_HAS_NETWORK
 
 // ============================================================================
 // ConsoleShell via pipe test
@@ -1007,10 +1010,10 @@ TEST_CASE("ConsoleShell: command execution via pipe", "[shell][console]") {
   REQUIRE(::pipe(out_pipe) == 0);
 
   // Register a test command with unique name.
-  static bool console_cmd_executed = false;
-  console_cmd_executed = false;
+  static std::atomic<bool> console_cmd_executed{false};
+  console_cmd_executed.store(false, std::memory_order_relaxed);
   auto console_cmd = [](int /*argc*/, char* /*argv*/[]) -> int {
-    console_cmd_executed = true;
+    console_cmd_executed.store(true, std::memory_order_release);
     return 0;
   };
   (void)osp::detail::GlobalCmdRegistry::Instance().Register(
@@ -1036,7 +1039,7 @@ TEST_CASE("ConsoleShell: command execution via pipe", "[shell][console]") {
   // Wait for execution.
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-  REQUIRE(console_cmd_executed);
+  REQUIRE(console_cmd_executed.load(std::memory_order_acquire));
 
   console.Stop();
 

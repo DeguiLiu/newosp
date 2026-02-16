@@ -45,6 +45,10 @@
 #ifndef OSP_PROCESS_HPP_
 #define OSP_PROCESS_HPP_
 
+#include "osp/platform.hpp"
+
+#if defined(OSP_PLATFORM_LINUX)
+
 #include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -785,5 +789,7 @@ inline ProcessResult RunCommand(const char* const* argv,
 }
 
 }  // namespace osp
+
+#endif  // defined(OSP_PLATFORM_LINUX)
 
 #endif  // OSP_PROCESS_HPP_

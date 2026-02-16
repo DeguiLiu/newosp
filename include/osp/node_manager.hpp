@@ -39,7 +39,7 @@
 #include "osp/socket.hpp"
 #include "osp/timer.hpp"
 
-#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+#if OSP_HAS_NETWORK
 
 #include <atomic>
 #include <chrono>
@@ -555,6 +555,6 @@ class NodeManager {
 
 }  // namespace osp
 
-#endif  // defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+#endif  // OSP_HAS_NETWORK
 
 #endif  // OSP_NODE_MANAGER_HPP_

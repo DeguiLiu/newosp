@@ -4,8 +4,10 @@
  */
 
 #include "osp/node_manager_hsm.hpp"
-#include "osp/node_manager.hpp"
 #include "osp/platform.hpp"
+#if OSP_HAS_NETWORK
+#include "osp/node_manager.hpp"
+#endif
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -665,6 +667,7 @@ TEST_CASE("HsmNodeManager: scheduler injection - timeout detection works", "[Hsm
   sched.Stop();
 }
 
+#if OSP_HAS_NETWORK
 TEST_CASE("HsmNodeManager: scheduler injection - shared scheduler with NodeManager", "[HsmNodeManager][scheduler][edge]") {
   osp::TimerScheduler<> sched;
   sched.Start();
@@ -722,3 +725,4 @@ TEST_CASE("HsmNodeManager: scheduler injection - shared scheduler with NodeManag
 
   sched.Stop();
 }
+#endif  // OSP_HAS_NETWORK
