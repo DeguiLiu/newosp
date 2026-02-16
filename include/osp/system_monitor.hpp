@@ -82,19 +82,20 @@
 #ifndef OSP_SYSTEM_MONITOR_HPP_
 #define OSP_SYSTEM_MONITOR_HPP_
 
-#include "osp/log.hpp"
 #include "osp/platform.hpp"
+
+#if defined(OSP_PLATFORM_LINUX)
+
+#include "osp/log.hpp"
 
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 
-#if defined(OSP_PLATFORM_LINUX)
 #include <fcntl.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
-#endif
 
 namespace osp {
 
@@ -339,7 +340,6 @@ class SystemMonitor final {
     CpuSnapshot snap{};
     snap.temperature_mc = ReadCpuTemperature();
 
-#if defined(OSP_PLATFORM_LINUX)
     CpuJiffies curr{};
     if (!ReadCpuJiffies(curr)) {
       return snap;  // Parse failed, return zeros
@@ -378,7 +378,6 @@ class SystemMonitor final {
     }
 
     prev_jiffies_ = curr;
-#endif
 
     return snap;
   }
@@ -393,7 +392,6 @@ class SystemMonitor final {
   static MemorySnapshot ReadMemory() noexcept {
     MemorySnapshot snap{};
 
-#if defined(OSP_PLATFORM_LINUX)
     const int fd = ::open("/proc/meminfo", O_RDONLY);
     if (fd < 0) {
       return snap;
@@ -435,7 +433,6 @@ class SystemMonitor final {
           static_cast<uint32_t>((snap.used_kb * 100ULL) / snap.total_kb);
       snap.used_percent = (snap.used_percent > 100) ? 100 : snap.used_percent;
     }
-#endif
 
     return snap;
   }
@@ -451,7 +448,6 @@ class SystemMonitor final {
   static DiskSnapshot ReadDisk(const char* path) noexcept {
     DiskSnapshot snap{};
 
-#if defined(OSP_PLATFORM_LINUX)
     if (path == nullptr) {
       return snap;
     }
@@ -470,9 +466,6 @@ class SystemMonitor final {
           static_cast<uint32_t>((used_bytes * 100ULL) / snap.total_bytes);
       snap.used_percent = (snap.used_percent > 100) ? 100 : snap.used_percent;
     }
-#else
-    (void)path;  // Suppress unused warning
-#endif
 
     return snap;
   }
@@ -485,7 +478,6 @@ class SystemMonitor final {
    * @return Temperature in milli-Celsius (e.g., 45000 = 45.0°C), or -1 if N/A.
    */
   static int32_t ReadCpuTemperature() noexcept {
-#if defined(OSP_PLATFORM_LINUX)
     const int fd = ::open("/sys/class/thermal/thermal_zone0/temp", O_RDONLY);
     if (fd < 0) {
       return -1;
@@ -504,7 +496,6 @@ class SystemMonitor final {
     if (std::sscanf(buf, "%d", &temp_mc) == 1) {
       return temp_mc;
     }
-#endif
     return -1;
   }
 
@@ -590,7 +581,6 @@ class SystemMonitor final {
    * @return true if parse succeeded, false otherwise.
    */
   bool ReadCpuJiffies(CpuJiffies& out) noexcept {
-#if defined(OSP_PLATFORM_LINUX)
     const int fd = ::open("/proc/stat", O_RDONLY);
     if (fd < 0) {
       return false;
@@ -621,10 +611,6 @@ class SystemMonitor final {
     out.busy = out.total - out.idle - out.iowait;
 
     return true;
-#else
-    (void)out;  // Suppress unused warning
-    return false;
-#endif
   }
 
   /**
@@ -787,5 +773,7 @@ class SystemMonitor final {
 };
 
 }  // namespace osp
+
+#endif  // defined(OSP_PLATFORM_LINUX)
 
 #endif  // OSP_SYSTEM_MONITOR_HPP_

@@ -40,7 +40,7 @@
 #include "osp/vocabulary.hpp"
 #include "osp/timer.hpp"
 
-#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+#if OSP_HAS_NETWORK
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -808,8 +808,8 @@ class TopicAwareDiscovery {
   uint32_t local_service_count_;
 };
 
-#endif  // defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
-
 }  // namespace osp
+
+#endif  // OSP_HAS_NETWORK
 
 #endif  // OSP_DISCOVERY_HPP_

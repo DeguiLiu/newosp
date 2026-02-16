@@ -21,6 +21,7 @@ option(OSP_CONFIG_INI     "Enable INI config support (inicpp)"         ON)
 option(OSP_CONFIG_JSON    "Enable JSON config support (nlohmann/json)" OFF)
 option(OSP_CONFIG_YAML    "Enable YAML config support (fkYAML)"        OFF)
 option(OSP_WITH_SOCKPP    "Use sockpp for network transport"           ON)
+option(OSP_WITH_NETWORK   "Enable BSD-socket network modules"          ON)
 
 # --- INI Config (using embedded inicpp.hpp) ---
 if(OSP_CONFIG_INI)
@@ -54,6 +55,11 @@ if(OSP_CONFIG_YAML)
 
     target_compile_definitions(osp INTERFACE OSP_CONFIG_YAML_ENABLED)
     target_link_libraries(osp INTERFACE fkYAML::fkYAML)
+endif()
+
+# --- Network stack control ---
+if(NOT OSP_WITH_NETWORK)
+    target_compile_definitions(osp INTERFACE OSP_HAS_NETWORK=0)
 endif()
 
 # --- sockpp (Network library, used by net.hpp) ---

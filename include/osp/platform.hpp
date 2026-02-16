@@ -54,6 +54,30 @@ namespace osp {
 #endif
 
 // ============================================================================
+// Network Stack Detection
+// ============================================================================
+
+// OSP_HAS_NETWORK: set to 1 when the target has a BSD-socket API available.
+// Users may override via CMake (-DOSP_HAS_NETWORK=0) for bare-metal or
+// RTOS configurations that do not enable a network stack.
+#ifndef OSP_HAS_NETWORK
+#if defined(__has_include)
+#if __has_include(<sys/socket.h>)
+#define OSP_HAS_NETWORK 1
+#else
+#define OSP_HAS_NETWORK 0
+#endif
+#else
+// Conservative default: assume network is available on known desktop/server OS.
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+#define OSP_HAS_NETWORK 1
+#else
+#define OSP_HAS_NETWORK 0
+#endif
+#endif
+#endif  // ifndef OSP_HAS_NETWORK
+
+// ============================================================================
 // Architecture Detection
 // ============================================================================
 

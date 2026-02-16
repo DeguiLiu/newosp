@@ -48,7 +48,7 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 
 - **语言**: C++17 (兼容 `-fno-exceptions -fno-rtti`)
 - **构建**: CMake >= 3.14, FetchContent 自动管理依赖
-- **测试**: Catch2 v3.5.2, 1078+ test cases, ASan/TSan/UBSan clean
+- **测试**: Catch2 v3.5.2, 1114 test cases (26085 assertions), ASan/TSan/UBSan clean
 - **代码规范**: Google C++ Style (clang-format), cpplint, MISRA C++
 - **CI**: GitHub Actions (Ubuntu, GCC x Debug/Release, Sanitizers)
 
@@ -87,6 +87,14 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 | sockpp | master (DeguiLiu fork) | RAII Socket 封装 | `OSP_WITH_SOCKPP=ON` |
 | CSerialPort | v4.3.1 | 串口通信 | `OSP_WITH_SERIAL=ON` |
 | Catch2 | v3.5.2 | 单元测试 | `OSP_BUILD_TESTS=ON` |
+
+**CMake 构建模式**:
+
+| 模式 | 命令 | 说明 |
+|------|------|------|
+| 全模块 | `cmake -B build -DOSP_BUILD_TESTS=ON` | 默认，包含所有模块 |
+| 无网络 | `cmake -B build -DOSP_BUILD_TESTS=ON -DOSP_WITH_NETWORK=OFF` | 排除网络依赖模块，适合无网络栈平台 |
+| 无异常 | `cmake -B build -DOSP_BUILD_TESTS=ON -DOSP_NO_EXCEPTIONS=ON` | `-fno-exceptions` 编译 |
 
 ### 2.4 开发分级
 
@@ -224,17 +232,19 @@ vocabulary.hpp  ────────────────  (依赖 platfo
     └────────────┘  └────────────┘
 ```
 
-### 3.4 模块总览 (39 个头文件)
+### 3.4 模块总览 (41 个头文件)
+
+> 网络依赖标记: 无标记 = 始终可用; `[N]` = 需要 `OSP_HAS_NETWORK`; `[L]` = 仅 Linux
 
 | 层 | 模块 | 头文件 | 说明 |
 |----|------|--------|------|
-| 基础层 | Platform | platform.hpp | 平台检测、OSP_ASSERT、ThreadHeartbeat |
+| 基础层 | Platform | platform.hpp | 平台检测、OSP_ASSERT、OSP_HAS_NETWORK、ThreadHeartbeat |
 | 基础层 | Vocabulary | vocabulary.hpp | expected, FixedString/Vector, FixedFunction, ScopeGuard |
 | 基础层 | Config | config.hpp | INI/JSON/YAML 多格式配置 |
 | 基础层 | Log | log.hpp | stderr 日志宏 |
 | 基础层 | AsyncLog | async_log.hpp | 异步日志 (Per-Thread SPSC, 分级路由, 背压丢弃上报) |
 | 基础层 | Timer | timer.hpp | 定时调度器 |
-| 基础层 | Shell | shell.hpp | telnet 调试 Shell |
+| 基础层 | Shell | shell.hpp | 多后端调试 Shell (DebugShell `[N]`, ConsoleShell, UartShell) |
 | 基础层 | MemPool | mem_pool.hpp | 固定块内存池 |
 | 基础层 | Shutdown | shutdown.hpp | 优雅关停 |
 | 核心通信 | AsyncBus | bus.hpp | 无锁 MPSC 消息总线 |
@@ -247,17 +257,17 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 | 核心通信 | DataFusion | data_fusion.hpp | 多源数据融合 |
 | 状态机 | HSM | hsm.hpp | 层次状态机 |
 | 行为树 | BT | bt.hpp | 行为树 |
-| 网络传输 | Socket | socket.hpp | TCP/UDP 封装 |
-| 网络传输 | IoPoller | io_poller.hpp | epoll 事件循环 |
+| 网络传输 | Socket | socket.hpp | TCP/UDP 封装 `[N]` |
+| 网络传输 | IoPoller | io_poller.hpp | I/O 多路复用 (epoll/kqueue/poll) `[N]` |
 | 网络传输 | Connection | connection.hpp | 连接管理 |
-| 网络传输 | Transport | transport.hpp | 透明网络传输 |
-| 网络传输 | ShmTransport | shm_transport.hpp | 共享内存 IPC |
+| 网络传输 | Transport | transport.hpp | 透明网络传输 `[N]` |
+| 网络传输 | ShmTransport | shm_transport.hpp | 共享内存 IPC `[N]` |
 | 网络传输 | SerialTransport | serial_transport.hpp | 串口传输 |
-| 网络传输 | Net | net.hpp | sockpp 集成层 |
-| 网络传输 | TransportFactory | transport_factory.hpp | 自动传输选择 |
-| 服务发现 | Discovery | discovery.hpp | 节点发现 |
-| 服务发现 | Service | service.hpp | RPC 服务 |
-| 服务发现 | NodeManager | node_manager.hpp | 节点管理 |
+| 网络传输 | Net | net.hpp | sockpp 集成层 `[N]` |
+| 网络传输 | TransportFactory | transport_factory.hpp | 自动传输选择 `[N]` |
+| 服务发现 | Discovery | discovery.hpp | 节点发现 `[N]` |
+| 服务发现 | Service | service.hpp | RPC 服务 `[N]` |
+| 服务发现 | NodeManager | node_manager.hpp | 节点管理 `[N]` |
 | 服务发现 | NodeManagerHsm | node_manager_hsm.hpp | HSM 驱动节点管理 |
 | 服务发现 | ServiceHsm | service_hsm.hpp | HSM 驱动服务生命周期 |
 | 服务发现 | DiscoveryHsm | discovery_hsm.hpp | HSM 驱动节点发现 |
@@ -268,7 +278,8 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 | 可靠性 | Watchdog | watchdog.hpp | 线程看门狗 |
 | 可靠性 | FaultCollector | fault_collector.hpp | 故障收集器 |
 | 可靠性 | ShellCommands | shell_commands.hpp | 内置诊断 Shell 命令桥接 |
-| 可靠性 | SystemMonitor | system_monitor.hpp | 系统健康监控 |
+| 可靠性 | SystemMonitor | system_monitor.hpp | 系统健康监控 `[L]` |
+| 可靠性 | Process | process.hpp | 进程管理 `[L]` |
 
 ---
 
@@ -280,6 +291,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 |------|------|
 | `OSP_PLATFORM_LINUX/MACOS/WINDOWS` | 平台检测宏 |
 | `OSP_ARCH_ARM/X86` | 架构检测宏 |
+| `OSP_HAS_NETWORK` | 网络可用性宏 (BSD socket 检测，见下文) |
 | `kCacheLineSize` | 缓存行大小常量 (64) |
 | `OSP_LIKELY(x)` / `OSP_UNLIKELY(x)` | 分支预测提示 |
 | `OSP_ASSERT(cond)` | 调试断言 (NDEBUG 下编译消除) |
@@ -287,6 +299,18 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 | `ThreadHeartbeat` | 原子心跳结构 (供 Watchdog 使用) |
 
 纯宏 + constexpr 实现，零运行时开销。
+
+**OSP_HAS_NETWORK -- 网络条件编译**:
+
+通过 `__has_include(<sys/socket.h>)` 自动检测 BSD socket 可用性。CMake 层可通过 `-DOSP_WITH_NETWORK=OFF` 强制关闭 (设置 `OSP_HAS_NETWORK=0`)。默认在 Linux/macOS 上为 ON，无网络栈的裸机/RTOS 平台上为 OFF。
+
+基于此宏，所有模块分为两类:
+
+| 类别 | 模块 | 说明 |
+|------|------|------|
+| 无网络依赖 (27 个) | platform, vocabulary, spsc_ringbuffer, log, async_log, timer, shell (ConsoleShell/UartShell), mem_pool, shutdown, bus, node, static_node, worker_pool, executor, hsm, bt, semaphore, app, post, qos, lifecycle_node, serial_transport, data_fusion, connection, node_manager_hsm, service_hsm, discovery_hsm, fault_collector, watchdog, shell_commands | 始终可用 |
+| 网络依赖 (11 个, `#if OSP_HAS_NETWORK`) | socket, io_poller, transport, discovery, service, node_manager, transport_factory, shm_transport, net, DebugShell (shell.hpp 中 TCP telnet 后端) | 需 BSD socket |
+| Linux 专用 (`#if OSP_PLATFORM_LINUX`) | process, system_monitor | 依赖 /proc 文件系统 |
 
 ---
 
@@ -318,7 +342,8 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 ```cpp
 enum class ConfigError : uint8_t { kFileNotFound, kParseError, kFormatNotSupported, kBufferFull };
 enum class TimerError  : uint8_t { kSlotsFull, kInvalidPeriod, kNotRunning, kAlreadyRunning };
-enum class ShellError  : uint8_t { kRegistryFull, kDuplicateName, kPortInUse, kNotRunning };
+enum class ShellError  : uint8_t { kRegistryFull, kDuplicateName, kPortInUse, kNotRunning,
+                                   kAlreadyRunning, kAuthFailed, kDeviceOpenFailed };
 enum class MemPoolError: uint8_t { kPoolExhausted, kInvalidPointer };
 ```
 
@@ -439,20 +464,94 @@ uint64_t ns = sched.NsToNextTask();  // UINT64_MAX=无任务, 0=已过期
 
 ---
 
-### 4.6 shell.hpp -- 远程调试 Shell
+### 4.6 shell.hpp -- 多后端调试 Shell
 
-telnet 远程调试接口，支持命令注册、TAB 补全、历史记录。
+三后端调试 Shell: TCP telnet / 本地 Console / UART 串口，共享行编辑和命令执行逻辑。
 
-```cpp
-OSP_SHELL_CMD(stats, "Show system statistics") {
-    osp::DebugShell::Printf("uptime: %u seconds\n", get_uptime());
-    return 0;
-}
+**后端可用性**: ConsoleShell 和 UartShell 始终可用 (依赖 termios); DebugShell (TCP telnet) 需要 `OSP_HAS_NETWORK`。
+
+```
+        ┌─────────────────────────────────────────────────────┐
+        │                  共享层 (detail::)                   │
+        │  ProcessByte ← FilterIac ← ESC FSM ← History       │
+        │  TabComplete   ExecuteLine   SessionWrite            │
+        │  WriteFn/ReadFn 函数指针抽象                          │
+        └────────┬──────────────┬──────────────┬──────────────┘
+                 │              │              │
+        ┌────────▼───┐  ┌──────▼─────┐  ┌────▼────────┐
+        │ DebugShell  │  │ConsoleShell│  │  UartShell   │
+        │ TCP telnet  │  │stdin/stdout│  │ /dev/ttyS*   │
+        │ IAC 过滤    │  │ termios raw│  │ baudrate cfg │
+        │ 多连接 auth │  │ poll(100ms)│  │ poll(200ms)  │
+        └─────────────┘  └────────────┘  └──────────────┘
 ```
 
-- Meyer's 单例命令注册表 (最多 64 个命令)
-- 线程局部 session 指针路由 `Printf()` 输出
-- 原始 POSIX socket (无外部依赖)
+**后端 I/O 抽象**:
+
+```cpp
+using ShellWriteFn = ssize_t (*)(int fd, const void* buf, size_t len);
+using ShellReadFn  = ssize_t (*)(int fd, void* buf, size_t len);
+// TCP: send/recv + MSG_NOSIGNAL     Console/UART: write/read (POSIX)
+```
+
+**字节处理流水线** (每字节经过):
+
+```
+raw byte ──> [FilterIac] ──> [skip_next_lf] ──> [ESC FSM] ──> [字符分类]
+              (telnet 专用)    (\r\n 去重)        (方向键)      (Enter/BS/Tab/Ctrl/打印)
+```
+
+**IAC 协议过滤** (4 状态, telnet 专用):
+- kNormal: 正常字节透传; 0xFF -> kIac
+- kIac: WILL/WONT/DO/DONT (0xFB-0xFE) -> kNego; SB (0xFA) -> kSub; IAC IAC -> literal 0xFF
+- kNego: 消耗 option byte -> kNormal
+- kSub: 等待 IAC SE 结束子协商 -> kNormal
+
+**ESC 序列解析** (3 状态):
+- kNone: 0x1B -> kEsc
+- kEsc: '[' -> kBracket; 其他 -> kNone
+- kBracket: 'A' = HistoryUp, 'B' = HistoryDown, 'C'/'D' = 预留 -> kNone
+
+**历史记录**: 环形缓冲 `history[16][256]`，head/count/browse 索引，跳过连续重复。
+
+**认证** (DebugShell 可选): username/password 配置，3 次失败断开，星号掩码密码输入。
+
+```cpp
+// TCP telnet (多连接 + 认证)
+osp::DebugShell::Config cfg;
+cfg.port = 5090;
+cfg.username = "admin";    // nullptr = 无认证
+cfg.password = "secret";
+osp::DebugShell shell(cfg);
+shell.Start();
+
+// 本地 Console (stdin/stdout raw mode)
+osp::ConsoleShell console;
+console.Start();           // 异步, 或 console.Run() 同步阻塞
+
+// UART 串口
+osp::UartShell::Config ucfg;
+ucfg.device = "/dev/ttyS0";
+ucfg.baudrate = 115200;
+osp::UartShell uart(ucfg);
+uart.Start();
+```
+
+**编译期配置宏**:
+
+| 宏 | 默认值 | 说明 |
+|----|--------|------|
+| `OSP_SHELL_LINE_BUF_SIZE` | 256 | 行缓冲大小 (字节) |
+| `OSP_SHELL_HISTORY_SIZE` | 16 | 历史记录条数 |
+| `OSP_SHELL_MAX_ARGS` | 16 | 命令最大参数数 |
+
+**线程安全**:
+- 注册表: mutex 保护
+- 会话线程: 各自独立 ShellSession，无共享可变状态
+- Stop(): `shutdown(SHUT_RDWR)` 安全唤醒 recv() 阻塞的会话线程
+- AcceptLoop: `poll()` + 200ms 超时，Stop() 时 close(listen_fd_) 即可退出
+- `[[nodiscard]]` 标注所有有返回值意义的公有函数
+- `ScopeGuard` / `OSP_SCOPE_EXIT` 管理 fd 生命周期
 
 ---
 
@@ -849,7 +948,13 @@ class TcpListener { /* accept loop */ };
 
 ### 7.2 io_poller.hpp -- I/O 多路复用
 
-epoll (Linux) / kqueue (macOS) 统一抽象。
+epoll (Linux) / kqueue (macOS) / poll (其他 POSIX) 统一抽象，`#if OSP_HAS_NETWORK` 条件编译。
+
+| 平台 | 后端 |
+|------|------|
+| Linux | epoll (默认) |
+| macOS | kqueue |
+| 其他 POSIX | poll() 回退 |
 
 ```cpp
 class IoPoller {
@@ -902,6 +1007,20 @@ osp::NetworkNode<Payload> sensor("sensor", 1);
 sensor.AdvertiseTo<SensorData>({"tcp://0.0.0.0:9001"});
 sensor.Publish(SensorData{25.0f});  // 本地 + 远程同时发布
 ```
+
+**TCP 发送: short write 与 EAGAIN 处理** (v0.4.1):
+
+`TcpTransport::SendAll()` 采用同步循环发送，处理 TCP short write (部分写入)。
+v0.4.1 新增 EAGAIN/EWOULDBLOCK 区分:
+
+- `SocketError::kWouldBlock`: 内核发送缓冲区满，瞬态错误
+- `SendAll()` 对 EAGAIN 进行有限重试 (yield + 最多 16 次)，重试耗尽返回 `TransportError::kWouldBlock` 而**不断开连接**
+- 致命错误 (EPIPE, ECONNRESET 等) 仍返回 `kSendFailed` 并标记连接断开
+
+**已知限制**: SendAll 是同步阻塞的，重试期间调用线程被阻塞。高吞吐 TCP
+场景 (如远程传感器流) 应考虑用户态发送缓冲 (SPSC 字节环形缓冲 + EPOLLOUT
+事件驱动异步刷写) 替代同步重试。当前方案适用于 newosp 主要场景: 同机
+shm_transport 优先，TCP 作为远程低频备选。
 
 ---
 
@@ -1561,7 +1680,7 @@ inline void RegisterWatchdog(WatchdogType& wd) {
 
 ### 10.6 system_monitor.hpp -- 系统健康监控
 
-Linux 专用系统健康监控模块，通过 /proc 和 /sys 文件系统采集 CPU、内存、磁盘、温度指标。
+Linux 专用系统健康监控模块 (`#if defined(OSP_PLATFORM_LINUX)`)，通过 /proc 和 /sys 文件系统采集 CPU、内存、磁盘、温度指标。
 
 **设计要点**:
 
@@ -1616,7 +1735,7 @@ scheduler.AddTimer(1000, osp::SystemMonitor<4>::SampleTick, &monitor);
 
 ### 10.7 process.hpp -- 进程管理
 
-Linux 专用进程管理模块，提供进程发现、控制、子进程 spawn 和管道输出捕获。
+Linux 专用进程管理模块 (`#if defined(OSP_PLATFORM_LINUX)`)，提供进程发现、控制、子进程 spawn 和管道输出捕获。
 
 **设计要点**:
 
@@ -1758,7 +1877,7 @@ expected<V, E> 返回
 |------|----------|--------|--------|
 | Config (128 entries) | ~48 KB | 0 | 0 |
 | TimerScheduler(16) | ~1 KB | ~1 KB | 1 |
-| DebugShell(2 conn) | ~1 KB | ~4 KB | 3 |
+| DebugShell(2 conn) | ~9 KB | ~4 KB | 3 |
 | FixedPool<256,64> | 16 KB | 0 | 0 |
 | ShutdownManager | <256 B | 0 | 0 |
 | AsyncBus(4096) | ~320 KB | 0 | 0 |
@@ -1828,7 +1947,8 @@ expected<V, E> 返回
 - 每模块独立测试文件: `test_<module>.cpp`
 - 覆盖目标: 基础 API + 边界条件 + 多线程场景
 - Sanitizer 验证: 所有测试在 ASan/TSan/UBSan 下通过
-- 当前: 1078+ test cases
+- 当前: 1114 test cases (全模块), 723 test cases (无网络模式)
+- 构建模式: 正常模式 (全模块) / 无网络模式 (`-DOSP_WITH_NETWORK=OFF`) / 无异常模式 (`-DOSP_NO_EXCEPTIONS=ON`)
 
 ---
 
@@ -1873,6 +1993,7 @@ expected<V, E> 返回
 
 | 宏 | 默认值 | 模块 | 说明 |
 |----|--------|------|------|
+| `OSP_HAS_NETWORK` | 自动检测 | platform.hpp | 网络可用性 (`__has_include(<sys/socket.h>)`); CMake: `-DOSP_WITH_NETWORK=OFF` 强制关闭 |
 | `OSP_LOG_MIN_LEVEL` | 0/1 | log.hpp | 编译期日志级别 |
 | `OSP_ASYNC_LOG_QUEUE_DEPTH` | 256 | async_log.hpp | 每线程 SPSC 队列深度 |
 | `OSP_ASYNC_LOG_MAX_THREADS` | 8 | async_log.hpp | 最大并发日志线程数 |
@@ -1912,7 +2033,7 @@ expected<V, E> 返回
 | log | fprintf 原子写 |
 | async_log | wait-free SPSC 生产者; 单消费者写线程; CAS 线程注册 |
 | timer | mutex 保护所有公有方法 |
-| shell | 注册表 mutex + 会话线程隔离 |
+| shell | 注册表 mutex + 会话线程隔离 + shutdown(SHUT_RDWR) 安全关停 |
 | mem_pool | mutex 保护 alloc/free |
 | shutdown | 原子标志 + async-signal-safe pipe |
 | bus | 无锁 MPSC + SharedMutex 订阅 |

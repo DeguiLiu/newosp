@@ -40,6 +40,8 @@
 #include <cstdint>
 #include <cstring>
 
+#if OSP_HAS_NETWORK
+
 namespace osp {
 
 // ============================================================================
@@ -232,5 +234,7 @@ class TransportSelector final {
 };
 
 }  // namespace osp
+
+#endif  // OSP_HAS_NETWORK
 
 #endif  // OSP_TRANSPORT_FACTORY_HPP_

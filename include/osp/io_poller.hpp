@@ -39,11 +39,15 @@
 #include <array>
 #include <unistd.h>
 
+#if OSP_HAS_NETWORK
+
 #if defined(OSP_PLATFORM_LINUX)
 #include <sys/epoll.h>
 #elif defined(OSP_PLATFORM_MACOS)
 #include <sys/event.h>
 #include <sys/time.h>
+#else
+#include <poll.h>
 #endif
 
 namespace osp {
@@ -134,6 +138,11 @@ class IoPoller {
   int32_t poller_fd_;
   std::array<PollResult, OSP_IO_POLLER_MAX_EVENTS> results_;
   uint32_t result_count_;
+
+#if !defined(OSP_PLATFORM_LINUX) && !defined(OSP_PLATFORM_MACOS)
+  struct pollfd fds_[OSP_IO_POLLER_MAX_EVENTS];
+  uint32_t fd_count_ = 0;
+#endif
 };
 
 // ============================================================================
@@ -424,9 +433,175 @@ inline expected<uint32_t, PollerError> IoPoller::Wait(int timeout_ms) {
 }
 
 #else
-#error "IoPoller: unsupported platform (requires Linux epoll or macOS kqueue)"
+
+// ----------------------------------------------------------------------------
+// Fallback (POSIX poll) -- level-triggered, no kernel object
+// ----------------------------------------------------------------------------
+
+namespace detail {
+
+inline int16_t IoEventToPoll(uint8_t events) {
+  int16_t pev = 0;
+  if (events & static_cast<uint8_t>(IoEvent::kReadable)) {
+    pev |= POLLIN;
+  }
+  if (events & static_cast<uint8_t>(IoEvent::kWritable)) {
+    pev |= POLLOUT;
+  }
+  return pev;
+}
+
+inline uint8_t PollToIoEvent(int16_t revents) {
+  uint8_t ev = 0;
+  if (revents & POLLIN) {
+    ev |= static_cast<uint8_t>(IoEvent::kReadable);
+  }
+  if (revents & POLLOUT) {
+    ev |= static_cast<uint8_t>(IoEvent::kWritable);
+  }
+  if (revents & POLLERR) {
+    ev |= static_cast<uint8_t>(IoEvent::kError);
+  }
+  if (revents & POLLHUP) {
+    ev |= static_cast<uint8_t>(IoEvent::kHangup);
+  }
+  return ev;
+}
+
+}  // namespace detail
+
+inline IoPoller::IoPoller() noexcept
+    : poller_fd_(0),  // sentinel: poll() has no kernel object
+      results_{},
+      result_count_(0),
+      fds_{},
+      fd_count_(0) {
+  for (uint32_t i = 0; i < OSP_IO_POLLER_MAX_EVENTS; ++i) {
+    fds_[i].fd = -1;
+    fds_[i].events = 0;
+    fds_[i].revents = 0;
+  }
+}
+
+inline IoPoller::~IoPoller() {
+  poller_fd_ = -1;  // no kernel resource to close
+}
+
+inline IoPoller::IoPoller(IoPoller&& other) noexcept
+    : poller_fd_(other.poller_fd_),
+      results_{},
+      result_count_(0),
+      fd_count_(other.fd_count_) {
+  for (uint32_t i = 0; i < fd_count_; ++i) {
+    fds_[i] = other.fds_[i];
+  }
+  for (uint32_t i = fd_count_; i < OSP_IO_POLLER_MAX_EVENTS; ++i) {
+    fds_[i].fd = -1;
+    fds_[i].events = 0;
+    fds_[i].revents = 0;
+  }
+  other.poller_fd_ = -1;
+  other.fd_count_ = 0;
+  other.result_count_ = 0;
+}
+
+inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
+  if (this != &other) {
+    poller_fd_ = other.poller_fd_;
+    fd_count_ = other.fd_count_;
+    result_count_ = 0;
+    for (uint32_t i = 0; i < fd_count_; ++i) {
+      fds_[i] = other.fds_[i];
+    }
+    for (uint32_t i = fd_count_; i < OSP_IO_POLLER_MAX_EVENTS; ++i) {
+      fds_[i].fd = -1;
+      fds_[i].events = 0;
+      fds_[i].revents = 0;
+    }
+    other.poller_fd_ = -1;
+    other.fd_count_ = 0;
+    other.result_count_ = 0;
+  }
+  return *this;
+}
+
+inline expected<void, PollerError> IoPoller::Add(int32_t fd, uint8_t events) {
+  // Check for duplicate fd
+  for (uint32_t i = 0; i < fd_count_; ++i) {
+    if (fds_[i].fd == fd) {
+      return expected<void, PollerError>::error(PollerError::kAddFailed);
+    }
+  }
+  if (fd_count_ >= OSP_IO_POLLER_MAX_EVENTS) {
+    return expected<void, PollerError>::error(PollerError::kAddFailed);
+  }
+  fds_[fd_count_].fd = fd;
+  fds_[fd_count_].events = detail::IoEventToPoll(events);
+  fds_[fd_count_].revents = 0;
+  ++fd_count_;
+  return expected<void, PollerError>::success();
+}
+
+inline expected<void, PollerError> IoPoller::Modify(int32_t fd,
+                                                     uint8_t events) {
+  for (uint32_t i = 0; i < fd_count_; ++i) {
+    if (fds_[i].fd == fd) {
+      fds_[i].events = detail::IoEventToPoll(events);
+      fds_[i].revents = 0;
+      return expected<void, PollerError>::success();
+    }
+  }
+  return expected<void, PollerError>::error(PollerError::kModifyFailed);
+}
+
+inline expected<void, PollerError> IoPoller::Remove(int32_t fd) {
+  for (uint32_t i = 0; i < fd_count_; ++i) {
+    if (fds_[i].fd == fd) {
+      // Swap with last entry and decrement count
+      if (i != fd_count_ - 1) {
+        fds_[i] = fds_[fd_count_ - 1];
+      }
+      --fd_count_;
+      fds_[fd_count_].fd = -1;
+      fds_[fd_count_].events = 0;
+      fds_[fd_count_].revents = 0;
+      return expected<void, PollerError>::success();
+    }
+  }
+  return expected<void, PollerError>::error(PollerError::kRemoveFailed);
+}
+
+inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results,
+                                                      uint32_t max_results,
+                                                      int32_t timeout_ms) {
+  int32_t n = ::poll(fds_, static_cast<nfds_t>(fd_count_), timeout_ms);
+  if (n < 0) {
+    return expected<uint32_t, PollerError>::error(PollerError::kWaitFailed);
+  }
+
+  uint32_t count = 0;
+  for (uint32_t i = 0; i < fd_count_ && count < max_results; ++i) {
+    if (fds_[i].revents != 0) {
+      results[count].fd = fds_[i].fd;
+      results[count].events = detail::PollToIoEvent(fds_[i].revents);
+      ++count;
+    }
+  }
+  return expected<uint32_t, PollerError>::success(count);
+}
+
+inline expected<uint32_t, PollerError> IoPoller::Wait(int32_t timeout_ms) {
+  auto r = Wait(results_.data(), OSP_IO_POLLER_MAX_EVENTS, timeout_ms);
+  if (r.has_value()) {
+    result_count_ = r.value();
+  }
+  return r;
+}
+
 #endif
 
 }  // namespace osp
+
+#endif  // OSP_HAS_NETWORK
 
 #endif  // OSP_IO_POLLER_HPP_

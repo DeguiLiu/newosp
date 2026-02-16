@@ -11,7 +11,7 @@ include(Catch)
 
 find_package(Threads REQUIRED)
 
-# Core test sources (no sockpp dependency)
+# Core test sources (no network, no sockpp dependency)
 set(OSP_TEST_CORE_SOURCES
     test_platform.cpp
     test_vocabulary.cpp
@@ -27,9 +27,7 @@ set(OSP_TEST_CORE_SOURCES
     test_executor.cpp
     test_hsm.cpp
     test_bt.cpp
-    test_io_poller.cpp
     test_semaphore.cpp
-    test_shm_transport.cpp
     test_data_fusion.cpp
     test_node_manager_hsm.cpp
     test_service_hsm.cpp
@@ -49,8 +47,15 @@ set(OSP_TEST_CORE_SOURCES
     test_async_log.cpp
 )
 
-# Network test sources (depend on sockpp or use exceptions, incompatible with -fno-exceptions)
-set(OSP_TEST_NET_SOURCES
+# Network test sources (require BSD sockets; excluded when OSP_WITH_NETWORK=OFF)
+set(OSP_TEST_NETWORK_SOURCES
+    test_io_poller.cpp
+    test_shm_transport.cpp
+)
+
+# Sockpp-dependent test sources (also require exceptions; excluded when
+# OSP_NO_EXCEPTIONS=ON or OSP_WITH_NETWORK=OFF)
+set(OSP_TEST_SOCKPP_SOURCES
     test_config.cpp
     test_inicpp.cpp
     test_socket.cpp
@@ -64,12 +69,24 @@ set(OSP_TEST_NET_SOURCES
 )
 
 if(OSP_NO_EXCEPTIONS)
-    # -fno-exceptions mode: only core tests (sockpp uses throw internally)
+    # -fno-exceptions mode: core tests only (sockpp uses throw internally)
     add_executable(osp_tests ${OSP_TEST_CORE_SOURCES})
+    if(OSP_WITH_NETWORK)
+        target_sources(osp_tests PRIVATE ${OSP_TEST_NETWORK_SOURCES})
+    endif()
     target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
     target_compile_options(osp_tests PRIVATE -fno-exceptions -fno-rtti)
+elseif(NOT OSP_WITH_NETWORK)
+    # No-network mode: core tests only (network headers are disabled)
+    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES})
+    target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
 else()
-    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES} ${OSP_TEST_NET_SOURCES})
+    # Normal mode: all tests
+    add_executable(osp_tests
+        ${OSP_TEST_CORE_SOURCES}
+        ${OSP_TEST_NETWORK_SOURCES}
+        ${OSP_TEST_SOCKPP_SOURCES}
+    )
     target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
     if(OSP_WITH_SOCKPP)
         target_sources(osp_tests PRIVATE test_net.cpp)
