@@ -107,7 +107,7 @@ inline void RegisterWatchdog(WatchdogType& wd) {
     });
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_watchdog", +cmd, "Show thread watchdog status");
 }
 
@@ -157,7 +157,7 @@ inline void RegisterFaults(FaultCollectorType& fc) {
     }
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_faults", +cmd, "Show fault collector statistics");
 }
 
@@ -185,7 +185,7 @@ inline void RegisterBusStats(BusType& bus) {
                        detail::BackpressureName(bp));
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_bus", +cmd, "Show AsyncBus statistics");
 }
 
@@ -208,7 +208,7 @@ inline void RegisterWorkerPool(PoolType& pool) {
                        stats.bus_stats.messages_dropped);
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_pool", +cmd, "Show WorkerPool statistics");
 }
 
@@ -237,7 +237,7 @@ inline void RegisterTransport(TrackerType& tracker) {
     }
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_transport", +cmd, "Show transport sequence tracker");
 }
 
@@ -266,7 +266,7 @@ inline void RegisterSerial(SerialType& serial) {
                        s.rate_limit_drops);
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_serial", +cmd, "Show serial transport statistics");
 }
 
@@ -295,7 +295,7 @@ inline void RegisterHsmNodes(HsmNodeMgrType& mgr) {
     });
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_nodes", +cmd, "Show HSM node manager status");
 }
 
@@ -321,7 +321,7 @@ inline void RegisterNodeManager(NodeMgrType& mgr) {
     });
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_nodes_basic", +cmd, "Show basic node manager status");
 }
 
@@ -334,7 +334,7 @@ inline void RegisterServiceHsm(ServiceHsmType& svc) {
     DebugShell::Printf("  state: %s\r\n", s_svc->GetState());
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_service", +cmd, "Show service HSM state");
 }
 
@@ -349,7 +349,7 @@ inline void RegisterDiscoveryHsm(DiscoveryHsmType& disc) {
                        s_disc->GetLostCount());
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_discovery", +cmd, "Show discovery HSM state");
 }
 
@@ -378,7 +378,7 @@ inline void RegisterLifecycle(LifecycleNodeType& node) {
                        s_node->DetailedStateName());
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_lifecycle", +cmd, "Show lifecycle node state");
 }
 
@@ -413,7 +413,7 @@ inline void RegisterQos(const QosType& profile,
                        s_profile->lifespan_ms);
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_qos", +cmd, "Show QoS profile");
 }
 
@@ -471,7 +471,7 @@ inline void RegisterSystemMonitor(MonitorType& mon) {
     }
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_sysmon", +cmd, "Show system health monitor status");
 }
 
@@ -487,7 +487,7 @@ inline void RegisterMemPool(PoolType& pool, const char* label = "pool") {
     DebugShell::Printf("  free:     %" PRIu32 "\r\n", s_pool->FreeCount());
     return 0;
   };
-  osp::detail::GlobalCmdRegistry::Instance().Register(
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
       "osp_mempool", +cmd, "Show memory pool usage");
 }
 

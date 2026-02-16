@@ -24,17 +24,20 @@
 
 /**
  * @file shell.hpp
- * @brief Header-only debug shell with pluggable I/O backends.
+ * @brief Header-only multi-backend debug shell with telnet/console/UART
+ *        access, command registration, IAC protocol, ESC sequences,
+ *        history navigation, and optional authentication.
  *
- * Provides a global command registry, auto-registration macros, in-place
- * command line parsing, and a default TCP telnet backend (DebugShell).
- * Additional backends (ConsoleShell, UartShell) are in separate headers.
+ * Provides:
+ * - DebugShell:  TCP telnet backend (IAC negotiation, optional auth)
+ * - ConsoleShell: stdin/stdout backend (termios raw mode)
+ * - UartShell:    Serial port backend (configurable baud rate)
  *
- * The session I/O is abstracted via function pointers (read_fn / write_fn)
- * so that all backends share the same command dispatch, tab completion,
- * and Printf routing.
+ * All backends share the global command registry, line editor with
+ * arrow-key history and Tab completion.
  *
- * Compatible with -fno-exceptions -fno-rtti, C++14/17.
+ * Designed for embedded ARM-Linux diagnostics.
+ * Requires C++17. Compatible with -fno-exceptions -fno-rtti.
  */
 
 #ifndef OSP_SHELL_HPP_
@@ -60,6 +63,22 @@
 #include <termios.h>
 #include <unistd.h>
 
+// ============================================================================
+// Compile-time configuration
+// ============================================================================
+
+#ifndef OSP_SHELL_LINE_BUF_SIZE
+#define OSP_SHELL_LINE_BUF_SIZE 256
+#endif
+
+#ifndef OSP_SHELL_HISTORY_SIZE
+#define OSP_SHELL_HISTORY_SIZE 16
+#endif
+
+#ifndef OSP_SHELL_MAX_ARGS
+#define OSP_SHELL_MAX_ARGS 16
+#endif
+
 namespace osp {
 
 // ============================================================================
@@ -81,59 +100,81 @@ struct ShellCmd {
 // ============================================================================
 
 class DebugShell;
+class ConsoleShell;
+class UartShell;
 
 namespace detail {
 
 // ============================================================================
-// I/O function pointer types
+// I/O function pointer types and backend implementations
 // ============================================================================
 
-/// @brief Write function: ssize_t write(int fd, const void* buf, size_t len).
+/// @brief Write function pointer type for backend-agnostic I/O.
 using ShellWriteFn = ssize_t (*)(int fd, const void* buf, size_t len);
 
-/// @brief Read function: ssize_t read(int fd, void* buf, size_t len).
+/// @brief Read function pointer type for backend-agnostic I/O.
 using ShellReadFn = ssize_t (*)(int fd, void* buf, size_t len);
 
-// ============================================================================
-// Built-in I/O backends
-// ============================================================================
-
-/// @brief TCP backend: send() with MSG_NOSIGNAL.
+/// @brief TCP write wrapper (send with MSG_NOSIGNAL).
 inline ssize_t ShellTcpWrite(int fd, const void* buf, size_t len) {
   return ::send(fd, buf, len, MSG_NOSIGNAL);
 }
 
-/// @brief TCP backend: recv().
+/// @brief TCP read wrapper (recv).
 inline ssize_t ShellTcpRead(int fd, void* buf, size_t len) {
   return ::recv(fd, buf, len, 0);
 }
 
-/// @brief POSIX backend: write() for stdin/stdout/UART.
+/// @brief POSIX write wrapper (for Console/UART).
 inline ssize_t ShellPosixWrite(int fd, const void* buf, size_t len) {
   return ::write(fd, buf, len);
 }
 
-/// @brief POSIX backend: read() for stdin/UART.
+/// @brief POSIX read wrapper (for Console/UART).
 inline ssize_t ShellPosixRead(int fd, void* buf, size_t len) {
   return ::read(fd, buf, len);
 }
 
 // ============================================================================
-// ShellSession - Backend-agnostic session state
+// ShellSession - per-connection state (shared by all backends)
 // ============================================================================
 
-/// @brief Session state used by all shell backends.
+/// @brief Session state used internally by all shell backends.
 struct ShellSession {
-  int read_fd = -1;             ///< File descriptor for reading input.
-  int write_fd = -1;            ///< File descriptor for writing output.
-  std::thread thread;
-  char line_buf[128] = {};
-  uint32_t line_pos = 0;
-  std::atomic<bool> active{false};
+  // --- I/O abstraction ---
+  int read_fd = -1;             ///< Read file descriptor.
+  int write_fd = -1;            ///< Write file descriptor (may differ for Console).
+  ShellWriteFn write_fn = nullptr;
+  ShellReadFn  read_fn = nullptr;
 
-  ShellWriteFn write_fn = nullptr;  ///< Backend-specific write function.
-  ShellReadFn read_fn = nullptr;    ///< Backend-specific read function.
-  bool telnet_mode = false;         ///< True for TCP (handle \\r\\n peek).
+  // --- Line editing ---
+  char line_buf[OSP_SHELL_LINE_BUF_SIZE] = {};
+  uint32_t line_pos = 0;
+
+  // --- History ring buffer ---
+  char history[OSP_SHELL_HISTORY_SIZE][OSP_SHELL_LINE_BUF_SIZE] = {};
+  uint32_t hist_count = 0;      ///< Total entries stored.
+  uint32_t hist_head = 0;       ///< Next write position.
+  uint32_t hist_browse = 0;     ///< Current browse position.
+  bool hist_browsing = false;   ///< Currently navigating history.
+
+  // --- ESC sequence state ---
+  enum class EscState : uint8_t { kNone = 0, kEsc, kBracket };
+  EscState esc_state = EscState::kNone;
+
+  // --- IAC protocol state (telnet only) ---
+  enum class IacState : uint8_t { kNormal = 0, kIac, kNego, kSub };
+  IacState iac_state = IacState::kNormal;
+
+  // --- Authentication state ---
+  bool authenticated = false;
+  uint8_t auth_attempts = 0;
+
+  // --- Control ---
+  std::thread thread;
+  std::atomic<bool> active{false};
+  bool telnet_mode = false;     ///< true = TCP (enable IAC filtering).
+  bool skip_next_lf = false;    ///< CRLF dedup (replaces MSG_PEEK).
 };
 
 /// @brief Returns a reference to the thread-local current session pointer.
@@ -142,11 +183,31 @@ inline ShellSession*& CurrentSession() noexcept {
   return s;
 }
 
+/// @brief Initialize a ShellSession for a given backend.
+///
+/// Consolidates the repeated session setup code used by DebugShell,
+/// ConsoleShell, and UartShell into a single helper.
+inline void ShellSessionInit(ShellSession& s, int read_fd, int write_fd,
+                         ShellWriteFn write_fn, ShellReadFn read_fn,
+                         bool telnet_mode) noexcept {
+  s.read_fd = read_fd;
+  s.write_fd = write_fd;
+  s.write_fn = write_fn;
+  s.read_fn = read_fn;
+  s.telnet_mode = telnet_mode;
+  s.iac_state = ShellSession::IacState::kNormal;
+  s.esc_state = ShellSession::EscState::kNone;
+  s.line_pos = 0;
+  s.hist_browsing = false;
+  s.skip_next_lf = false;
+  s.active.store(true, std::memory_order_release);
+}
+
 // ============================================================================
 // Session I/O helpers
 // ============================================================================
 
-/// @brief Write a NUL-terminated string to a session.
+/// @brief Write a NUL-terminated string to the session.
 inline void ShellSessionWrite(ShellSession& s, const char* str) {
   if (s.write_fn != nullptr && str != nullptr) {
     const size_t len = std::strlen(str);
@@ -156,11 +217,130 @@ inline void ShellSessionWrite(ShellSession& s, const char* str) {
   }
 }
 
-/// @brief Write exactly @p len bytes to a session.
-inline void ShellSessionWriteN(ShellSession& s, const char* buf, size_t len) {
+/// @brief Write a buffer of given length to the session.
+inline void ShellSessionWrite(ShellSession& s, const void* buf, size_t len) {
   if (s.write_fn != nullptr && len > 0) {
     (void)s.write_fn(s.write_fd, buf, len);
   }
+}
+
+// ============================================================================
+// History functions
+// ============================================================================
+
+/// @brief Replace the current terminal line with new content.
+inline void ReplaceLine(ShellSession& s,
+                         const char* new_line,
+                         uint32_t new_len) {
+  // Erase current line on terminal.
+  for (uint32_t i = 0; i < s.line_pos; ++i) {
+    ShellSessionWrite(s, "\b \b", 3);
+  }
+  // Display new content.
+  if (new_len > 0) {
+    ShellSessionWrite(s, new_line, new_len);
+  }
+  // Update session state.
+  if (new_len > 0) {
+    std::memcpy(s.line_buf, new_line, new_len);
+  }
+  s.line_buf[new_len] = '\0';
+  s.line_pos = new_len;
+}
+
+/// @brief Push the current line into the history ring buffer.
+inline void PushHistory(ShellSession& s) {
+  if (s.line_pos == 0) return;
+  s.line_buf[s.line_pos] = '\0';
+  // Skip consecutive duplicates.
+  if (s.hist_count > 0) {
+    const uint32_t last =
+        (s.hist_head + OSP_SHELL_HISTORY_SIZE - 1) % OSP_SHELL_HISTORY_SIZE;
+    if (std::strcmp(s.history[last], s.line_buf) == 0) return;
+  }
+  std::memcpy(s.history[s.hist_head], s.line_buf, s.line_pos + 1);
+  s.hist_head = (s.hist_head + 1) % OSP_SHELL_HISTORY_SIZE;
+  if (s.hist_count < OSP_SHELL_HISTORY_SIZE) ++s.hist_count;
+}
+
+/// @brief Navigate to the previous (older) history entry.
+inline void HistoryUp(ShellSession& s) {
+  if (s.hist_count == 0) return;
+  if (!s.hist_browsing) {
+    s.hist_browse = s.hist_head;
+    s.hist_browsing = true;
+  }
+  const uint32_t oldest = (s.hist_count < OSP_SHELL_HISTORY_SIZE)
+                               ? 0
+                               : s.hist_head;
+  if (s.hist_browse == oldest) return;
+  s.hist_browse =
+      (s.hist_browse + OSP_SHELL_HISTORY_SIZE - 1) % OSP_SHELL_HISTORY_SIZE;
+  const uint32_t len =
+      static_cast<uint32_t>(std::strlen(s.history[s.hist_browse]));
+  ReplaceLine(s, s.history[s.hist_browse], len);
+}
+
+/// @brief Navigate to the next (newer) history entry, or back to empty line.
+inline void HistoryDown(ShellSession& s) {
+  if (!s.hist_browsing) return;
+  const uint32_t newest =
+      (s.hist_head + OSP_SHELL_HISTORY_SIZE - 1) % OSP_SHELL_HISTORY_SIZE;
+  if (s.hist_browse == newest || s.hist_browse == s.hist_head) {
+    // Back to current (empty) line.
+    s.hist_browsing = false;
+    ReplaceLine(s, "", 0);
+    return;
+  }
+  s.hist_browse = (s.hist_browse + 1) % OSP_SHELL_HISTORY_SIZE;
+  const uint32_t len =
+      static_cast<uint32_t>(std::strlen(s.history[s.hist_browse]));
+  ReplaceLine(s, s.history[s.hist_browse], len);
+}
+
+// ============================================================================
+// IAC protocol byte filter (telnet only)
+// ============================================================================
+
+/// @brief Filter IAC protocol bytes from telnet stream.
+/// @return The effective character, or '\0' if the byte was consumed.
+[[nodiscard]] inline char FilterIac(ShellSession& s, uint8_t byte) noexcept {
+  switch (s.iac_state) {
+    case ShellSession::IacState::kNormal:
+      if (byte == 0xFF) {
+        s.iac_state = ShellSession::IacState::kIac;
+        return '\0';
+      }
+      return static_cast<char>(byte);
+
+    case ShellSession::IacState::kIac:
+      if (byte >= 0xFB && byte <= 0xFE) {
+        // WILL (0xFB), WONT (0xFC), DO (0xFD), DONT (0xFE)
+        s.iac_state = ShellSession::IacState::kNego;
+        return '\0';
+      }
+      if (byte == 0xFA) {
+        // SB (subnegotiation begin)
+        s.iac_state = ShellSession::IacState::kSub;
+        return '\0';
+      }
+      s.iac_state = ShellSession::IacState::kNormal;
+      // IAC IAC = literal 0xFF
+      return (byte == 0xFF) ? static_cast<char>(0xFF) : '\0';
+
+    case ShellSession::IacState::kNego:
+      // Consume the option byte after WILL/WONT/DO/DONT.
+      s.iac_state = ShellSession::IacState::kNormal;
+      return '\0';
+
+    case ShellSession::IacState::kSub:
+      // Consume bytes until IAC SE (0xFF 0xF0).
+      if (byte == 0xFF) {
+        s.iac_state = ShellSession::IacState::kIac;
+      }
+      return '\0';
+  }
+  return '\0';
 }
 
 // ============================================================================
@@ -190,7 +370,7 @@ class GlobalCmdRegistry final {
    * @return success on OK; ShellError::kRegistryFull or kDuplicateName on
    *         failure.
    */
-  inline expected<void, ShellError> Register(const char* name,
+  [[nodiscard]] inline expected<void, ShellError> Register(const char* name,
                                              ShellCmdFn fn,
                                              const char* desc) noexcept;
 
@@ -198,7 +378,7 @@ class GlobalCmdRegistry final {
    * @brief Find a command by exact name.
    * @return Pointer to the ShellCmd, or nullptr if not found.
    */
-  inline const ShellCmd* Find(const char* name) const noexcept;
+  [[nodiscard]] inline const ShellCmd* Find(const char* name) const noexcept;
 
   /**
    * @brief Auto-complete a command name prefix.
@@ -211,7 +391,7 @@ class GlobalCmdRegistry final {
    * @param buf_size Size of @p out_buf in bytes.
    * @return Number of matching commands.
    */
-  inline uint32_t AutoComplete(const char* prefix,
+  [[nodiscard]] inline uint32_t AutoComplete(const char* prefix,
                                char* out_buf,
                                uint32_t buf_size) const noexcept;
 
@@ -223,7 +403,7 @@ class GlobalCmdRegistry final {
       function_ref<void(const ShellCmd&)> visitor) const noexcept;
 
   /// @brief Return the number of registered commands.
-  uint32_t Count() const noexcept { return count_; }
+  [[nodiscard]] uint32_t Count() const noexcept { return count_; }
 
  private:
   GlobalCmdRegistry() = default;
@@ -340,13 +520,13 @@ inline void GlobalCmdRegistry::ForEach(
 // ============================================================================
 
 /// @brief Maximum number of arguments supported per command line.
-static constexpr uint32_t kMaxArgs = 8;
+static constexpr uint32_t kMaxArgs = OSP_SHELL_MAX_ARGS;
 
 /**
  * @brief Split a command line in-place into argc / argv.
  *
  * Replaces whitespace with NUL bytes and fills @p argv with pointers into
- * @p cmd.  Supports double-quoted strings: cmd "hello world" arg2
+ * @p cmd.  Supports double-quoted and single-quoted strings.
  *
  * @param cmd    Mutable command line buffer (modified in-place).
  * @param length Length of @p cmd in bytes (excluding NUL terminator).
@@ -369,15 +549,16 @@ inline int ShellSplit(char* cmd,
       break;
     }
 
-    if (cmd[i] == '"') {
+    if (cmd[i] == '"' || cmd[i] == '\'') {
       // Quoted argument -- consume up to matching quote.
+      const char quote = cmd[i];
       cmd[i] = '\0';  // strip opening quote
       ++i;
       if (i >= length) {
         break;
       }
       argv[argc++] = &cmd[i];
-      while (i < length && cmd[i] != '"') {
+      while (i < length && cmd[i] != quote) {
         ++i;
       }
       if (i < length) {
@@ -397,26 +578,172 @@ inline int ShellSplit(char* cmd,
 }
 
 // ============================================================================
-// Shared session logic - command execution and interactive loop
+// Tab completion helper
+// ============================================================================
+
+/// @brief Handle Tab key press: auto-complete command name.
+inline void TabComplete(ShellSession& s, const char* prompt) noexcept {
+  s.line_buf[s.line_pos] = '\0';
+  char completion[64] = {};
+  const uint32_t matches = GlobalCmdRegistry::Instance().AutoComplete(
+      s.line_buf, completion, sizeof(completion));
+
+  if (matches == 1) {
+    uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
+    if (comp_len >= OSP_SHELL_LINE_BUF_SIZE - 1) {
+      comp_len = OSP_SHELL_LINE_BUF_SIZE - 2;
+    }
+    // Clear current line and replace with completion + space.
+    for (uint32_t i = 0; i < s.line_pos; ++i) {
+      ShellSessionWrite(s, "\b \b", 3);
+    }
+    std::memcpy(s.line_buf, completion, comp_len);
+    s.line_buf[comp_len] = ' ';
+    s.line_pos = comp_len + 1;
+    s.line_buf[s.line_pos] = '\0';
+    ShellSessionWrite(s, s.line_buf, s.line_pos);
+  } else if (matches > 1) {
+    // Show all matching commands.
+    ShellSessionWrite(s, "\r\n");
+    GlobalCmdRegistry::Instance().ForEach([&](const ShellCmd& cmd) {
+      if (std::strncmp(cmd.name, s.line_buf, s.line_pos) == 0) {
+        ShellSessionWrite(s, cmd.name);
+        ShellSessionWrite(s, "  ");
+      }
+    });
+    ShellSessionWrite(s, "\r\n");
+    // Re-display prompt and fill with longest common prefix.
+    ShellSessionWrite(s, prompt);
+    uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
+    if (comp_len >= OSP_SHELL_LINE_BUF_SIZE - 1) {
+      comp_len = OSP_SHELL_LINE_BUF_SIZE - 2;
+    }
+    std::memcpy(s.line_buf, completion, comp_len);
+    s.line_pos = comp_len;
+    s.line_buf[s.line_pos] = '\0';
+    ShellSessionWrite(s, s.line_buf, s.line_pos);
+  }
+}
+
+// ============================================================================
+// ProcessByte - Unified byte handler (IAC + ESC + line editing)
 // ============================================================================
 
 /**
- * @brief Parse and dispatch the current line buffer of a session.
- *
- * Called by all shell backends. Uses GlobalCmdRegistry for command lookup.
+ * @brief Process a single input byte through IAC filter, ESC FSM, and
+ *        line editing logic.
+ * @return true if the line is ready for execution (Enter pressed).
  */
-inline void ShellExecuteLine(ShellSession& s) {
-  char* argv[kMaxArgs] = {};
-  int argc = ShellSplit(s.line_buf, s.line_pos, argv);
-
-  if (argc == 0) {
-    return;
+[[nodiscard]] inline bool ProcessByte(ShellSession& s,
+                         uint8_t raw_byte,
+                         const char* prompt) noexcept {
+  // IAC filtering (telnet mode only).
+  char ch;
+  if (s.telnet_mode) {
+    ch = FilterIac(s, raw_byte);
+    if (ch == '\0') return false;
+  } else {
+    ch = static_cast<char>(raw_byte);
   }
 
-  const ShellCmd* cmd = GlobalCmdRegistry::Instance().Find(argv[0]);
+  // CRLF dedup: skip \n after \r.
+  if (s.skip_next_lf) {
+    s.skip_next_lf = false;
+    if (ch == '\n') return false;
+  }
 
+  // ESC sequence state machine.
+  switch (s.esc_state) {
+    case ShellSession::EscState::kEsc:
+      if (ch == '[') {
+        s.esc_state = ShellSession::EscState::kBracket;
+        return false;
+      }
+      s.esc_state = ShellSession::EscState::kNone;
+      return false;
+
+    case ShellSession::EscState::kBracket:
+      s.esc_state = ShellSession::EscState::kNone;
+      switch (ch) {
+        case 'A': HistoryUp(s); return false;
+        case 'B': HistoryDown(s); return false;
+        case 'C': return false;  // Right arrow (reserved)
+        case 'D': return false;  // Left arrow (reserved)
+        default: return false;
+      }
+
+    case ShellSession::EscState::kNone:
+      break;
+  }
+
+  // Control characters.
+  if (ch == '\x1b') {
+    s.esc_state = ShellSession::EscState::kEsc;
+    return false;
+  }
+
+  if (ch == 0x03) {
+    // Ctrl+C: cancel current line.
+    ShellSessionWrite(s, "^C\r\n");
+    s.line_pos = 0;
+    s.line_buf[0] = '\0';
+    s.hist_browsing = false;
+    ShellSessionWrite(s, prompt);
+    return false;
+  }
+
+  if (ch == 0x04) {
+    // Ctrl+D: EOF (close session if line is empty).
+    if (s.line_pos == 0) {
+      s.active.store(false, std::memory_order_release);
+      return false;
+    }
+  }
+
+  if (ch == 0x7F || ch == 0x08) {
+    // Backspace.
+    if (s.line_pos > 0) {
+      --s.line_pos;
+      ShellSessionWrite(s, "\b \b", 3);
+    }
+    return false;
+  }
+
+  if (ch == '\t') {
+    TabComplete(s, prompt);
+    return false;
+  }
+
+  if (ch == '\r' || ch == '\n') {
+    ShellSessionWrite(s, "\r\n");
+    if (ch == '\r') s.skip_next_lf = true;
+    s.hist_browsing = false;
+    return true;
+  }
+
+  // Printable characters.
+  if (ch >= 0x20 &&
+      s.line_pos < static_cast<uint32_t>(OSP_SHELL_LINE_BUF_SIZE - 1)) {
+    s.line_buf[s.line_pos++] = ch;
+    ShellSessionWrite(s, &ch, 1);
+  }
+  return false;
+}
+
+// ============================================================================
+// ShellExecuteLine - Parse and dispatch the current line buffer
+// ============================================================================
+
+/// @brief Parse the line buffer, push to history, and dispatch the command.
+inline void ShellExecuteLine(ShellSession& s) {
+  PushHistory(s);
+  s.line_buf[s.line_pos] = '\0';
+  char* argv[kMaxArgs] = {};
+  int argc = ShellSplit(s.line_buf, s.line_pos, argv);
+  if (argc == 0) return;
+
+  const ShellCmd* cmd = GlobalCmdRegistry::Instance().Find(argv[0]);
   if (cmd != nullptr) {
-    // Set the thread-local session pointer so Printf() works.
     CurrentSession() = &s;
     cmd->func(argc, argv);
     CurrentSession() = nullptr;
@@ -425,147 +752,9 @@ inline void ShellExecuteLine(ShellSession& s) {
     int n = std::snprintf(msg, sizeof(msg),
                           "unknown command: %s\r\n", argv[0]);
     if (n > 0) {
-      ShellSessionWriteN(s, msg, static_cast<size_t>(n));
+      ShellSessionWrite(s, msg, static_cast<size_t>(n));
     }
   }
-}
-
-/**
- * @brief Interactive session loop shared by all backends.
- *
- * Reads characters one at a time from the session's read_fn, handles
- * editing (backspace, Ctrl+C), tab completion, and command dispatch.
- *
- * @param s       Session with configured read_fn / write_fn.
- * @param running Atomic flag; loop exits when set to false.
- * @param prompt  Prompt string to display.
- */
-inline void ShellRunSession(ShellSession& s,
-                            std::atomic<bool>& running,
-                            const char* prompt) {
-  ShellSessionWrite(s, prompt);
-
-  while (running.load(std::memory_order_relaxed) &&
-         s.active.load(std::memory_order_acquire)) {
-    // Poll with timeout so we periodically re-check the running flag.
-    // This avoids the need to close(fd) from another thread to unblock
-    // a blocking read(), which is a POSIX-undefined data race (TSan).
-    struct pollfd pfd;
-    pfd.fd = s.read_fd;
-    pfd.events = POLLIN;
-    int pr = ::poll(&pfd, 1, 200);
-    if (pr == 0) {
-      continue;  // Timeout -- re-check running flag.
-    }
-    if (pr < 0) {
-      if (errno == EINTR) continue;
-      break;
-    }
-
-    char ch;
-    ssize_t n = s.read_fn(s.read_fd, &ch, 1);
-    if (n < 0) {
-      if (errno == EINTR) continue;
-      break;
-    }
-    if (n == 0) {
-      break;
-    }
-
-    if (ch == 0x03) {
-      // Ctrl+C -- close session.
-      ShellSessionWrite(s, "\r\nBye.\r\n");
-      break;
-    }
-
-    if (ch == 0x7F || ch == 0x08) {
-      // Backspace.
-      if (s.line_pos > 0) {
-        --s.line_pos;
-        ShellSessionWrite(s, "\b \b");
-      }
-      continue;
-    }
-
-    if (ch == '\t') {
-      // Tab -- auto-complete.
-      s.line_buf[s.line_pos] = '\0';
-      char completion[64] = {};
-      uint32_t matches = GlobalCmdRegistry::Instance().AutoComplete(
-          s.line_buf, completion, sizeof(completion));
-
-      if (matches == 1) {
-        // Clear the current line on terminal and replace.
-        for (uint32_t i = 0; i < s.line_pos; ++i) {
-          ShellSessionWrite(s, "\b \b");
-        }
-        uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
-        if (comp_len >= sizeof(s.line_buf) - 1) {
-          comp_len = sizeof(s.line_buf) - 2;
-        }
-        std::memcpy(s.line_buf, completion, comp_len);
-        s.line_buf[comp_len] = ' ';
-        s.line_pos = comp_len + 1;
-        s.line_buf[s.line_pos] = '\0';
-        ShellSessionWriteN(s, s.line_buf, s.line_pos);
-      } else if (matches > 1) {
-        // Show all matches.
-        ShellSessionWrite(s, "\r\n");
-        GlobalCmdRegistry::Instance().ForEach(
-            [&s](const ShellCmd& cmd) {
-              if (std::strncmp(cmd.name, s.line_buf,
-                               s.line_pos) == 0) {
-                ShellSessionWrite(s, cmd.name);
-                ShellSessionWrite(s, "  ");
-              }
-            });
-        ShellSessionWrite(s, "\r\n");
-        // Re-display prompt and current input.
-        ShellSessionWrite(s, prompt);
-        // Fill with the longest common prefix.
-        uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
-        if (comp_len >= sizeof(s.line_buf) - 1) {
-          comp_len = sizeof(s.line_buf) - 2;
-        }
-        std::memcpy(s.line_buf, completion, comp_len);
-        s.line_pos = comp_len;
-        s.line_buf[s.line_pos] = '\0';
-        ShellSessionWriteN(s, s.line_buf, s.line_pos);
-      }
-      continue;
-    }
-
-    if (ch == '\r' || ch == '\n') {
-      // Enter pressed -- execute the line.
-      ShellSessionWrite(s, "\r\n");
-
-      // Telnet sends \r\n; peek-and-consume the trailing byte.
-      if (s.telnet_mode && ch == '\r') {
-        char next;
-        ssize_t peek = ::recv(s.read_fd, &next, 1, MSG_PEEK);
-        if (peek == 1 && (next == '\n' || next == '\0')) {
-          (void)::recv(s.read_fd, &next, 1, 0);  // consume it
-        }
-      }
-
-      s.line_buf[s.line_pos] = '\0';
-      if (s.line_pos > 0) {
-        ShellExecuteLine(s);
-      }
-      s.line_pos = 0;
-      ShellSessionWrite(s, prompt);
-      continue;
-    }
-
-    // Regular printable character.
-    if (s.line_pos < sizeof(s.line_buf) - 1) {
-      s.line_buf[s.line_pos++] = ch;
-      // Echo the character back.
-      ShellSessionWriteN(s, &ch, 1);
-    }
-  }
-
-  s.active.store(false, std::memory_order_release);
 }
 
 }  // namespace detail
@@ -582,7 +771,7 @@ inline void ShellRunSession(ShellSession& s,
 class ShellAutoReg {
  public:
   ShellAutoReg(const char* name, ShellCmdFn func, const char* desc) {
-    detail::GlobalCmdRegistry::Instance().Register(name, func, desc);
+    (void)detail::GlobalCmdRegistry::Instance().Register(name, func, desc);
   }
 };
 
@@ -610,15 +799,14 @@ namespace detail {
  * @brief Built-in "help" command that lists all registered commands.
  */
 inline int ShellBuiltinHelp(int /*argc*/, char* /*argv*/[]) {
+  ShellSession* sess = CurrentSession();
+  if (sess == nullptr) return -1;
   char buf[256];
-  GlobalCmdRegistry::Instance().ForEach([&buf](const ShellCmd& cmd) {
+  GlobalCmdRegistry::Instance().ForEach([&](const ShellCmd& cmd) {
     int n = std::snprintf(buf, sizeof(buf), "  %-16s - %s\r\n",
                           cmd.name, cmd.desc ? cmd.desc : "");
     if (n > 0) {
-      ShellSession*& sess = CurrentSession();
-      if (sess != nullptr && sess->write_fn != nullptr) {
-        (void)sess->write_fn(sess->write_fd, buf, static_cast<size_t>(n));
-      }
+      ShellSessionWrite(*sess, buf, static_cast<size_t>(n));
     }
   });
   return 0;
@@ -627,7 +815,7 @@ inline int ShellBuiltinHelp(int /*argc*/, char* /*argv*/[]) {
 /// @brief Auto-register the built-in help command.
 inline bool RegisterHelpOnce() noexcept {
   static const bool done = []() {
-    GlobalCmdRegistry::Instance().Register("help", ShellBuiltinHelp,
+    (void)GlobalCmdRegistry::Instance().Register("help", ShellBuiltinHelp,
                                            "List all commands");
     return true;
   }();
@@ -646,9 +834,9 @@ static const bool kHelpRegistered OSP_UNUSED = RegisterHelpOnce();
 /**
  * @brief Printf into the current session's output.
  *
- * May only be called from within a command callback. Uses a thread-local
- * session pointer set by the shell before command dispatch. Works with
- * any backend (TCP, stdin, UART) via the session's write_fn.
+ * May only be called from within a command callback.  Uses a thread-local
+ * session pointer set by the shell before command dispatch.  Works with
+ * any backend (TCP, Console, UART) via the session's write_fn.
  *
  * @param fmt printf-style format string.
  * @return Number of bytes written, or -1 on error.
@@ -683,11 +871,12 @@ inline int ShellPrintf(const char* fmt, ...) {
 }
 
 // ============================================================================
-// DebugShell - TCP telnet debug server (default backend)
+// DebugShell - TCP telnet debug server
 // ============================================================================
 
 /**
- * @brief Lightweight telnet debug shell.
+ * @brief Lightweight telnet debug shell with IAC protocol, authentication,
+ *        arrow-key history, and Tab completion.
  *
  * Listens on a configurable TCP port and accepts up to @p max_connections
  * concurrent telnet sessions.  Each session runs in its own thread, reading
@@ -708,11 +897,20 @@ class DebugShell final {
  public:
   /// @brief Shell configuration.
   struct Config {
-    uint16_t port;           ///< TCP listen port.
-    uint32_t max_connections;///< Maximum concurrent sessions.
-    const char* prompt;      ///< Prompt string sent to clients.
+    uint16_t port;            ///< TCP listen port.
+    uint32_t max_connections; ///< Maximum concurrent sessions.
+    const char* prompt;       ///< Prompt string sent to clients.
+    const char* banner;       ///< Banner shown on connect (nullptr = none).
+    const char* username;     ///< Auth username (nullptr = no auth).
+    const char* password;     ///< Auth password.
 
-    Config() noexcept : port(5090), max_connections(2), prompt("osp> ") {}
+    Config() noexcept
+        : port(5090),
+          max_connections(2),
+          prompt("osp> "),
+          banner(nullptr),
+          username(nullptr),
+          password(nullptr) {}
   };
 
   /**
@@ -735,10 +933,9 @@ class DebugShell final {
    * Creates a TCP listening socket and spawns the accept thread.
    *
    * @return success on OK; ShellError::kPortInUse if bind fails;
-   *         ShellError::kAlreadyRunning (via kNotRunning reused) if already
-   *         started.
+   *         ShellError::kAlreadyRunning if already started.
    */
-  inline expected<void, ShellError> Start();
+  [[nodiscard]] inline expected<void, ShellError> Start();
 
   /**
    * @brief Stop the telnet server and close all sessions.
@@ -749,10 +946,11 @@ class DebugShell final {
   inline void Stop();
 
   /**
-   * @brief Printf into the current session's socket.
+   * @brief Printf into the current session.
    *
    * May only be called from within a command callback. Uses a thread-local
    * session pointer set by the shell before command dispatch.
+   * Works with all backends (TCP, Console, UART).
    *
    * @param fmt printf-style format string.
    * @return Number of bytes written, or -1 on error.
@@ -764,7 +962,9 @@ class DebugShell final {
       ;
 
   /// @brief Check whether the shell is currently running.
-  bool IsRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
+  [[nodiscard]] bool IsRunning() const noexcept {
+    return running_.load(std::memory_order_relaxed);
+  }
 
   /** @brief Set heartbeat for external watchdog monitoring (accept thread). */
   void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
@@ -785,14 +985,14 @@ class DebugShell final {
   /// @brief Per-session interactive loop.
   inline void SessionLoop(Session& s);
 
-  /// @brief Send a string to a TCP socket directly (for pre-session use).
-  static inline void TcpSendStr(int fd, const char* str) {
-    if (fd >= 0 && str != nullptr) {
-      const size_t len = std::strlen(str);
-      if (len > 0) {
-        (void)::send(fd, str, len, MSG_NOSIGNAL);
-      }
-    }
+  /// @brief Run authentication flow for a session.
+  /// @return true if authenticated, false if failed.
+  inline bool RunAuth(Session& s);
+
+  /// @brief Send a telnet IAC command.
+  static inline void SendIac(int fd, uint8_t cmd, uint8_t option) {
+    uint8_t buf[3] = {0xFF, cmd, option};
+    (void)::send(fd, buf, 3, MSG_NOSIGNAL);
   }
 };
 
@@ -802,7 +1002,7 @@ class DebugShell final {
 
 inline expected<void, ShellError> DebugShell::Start() {
   if (running_.load(std::memory_order_acquire)) {
-    return expected<void, ShellError>::error(ShellError::kNotRunning);
+    return expected<void, ShellError>::error(ShellError::kAlreadyRunning);
   }
 
   // Create TCP socket.
@@ -810,6 +1010,12 @@ inline expected<void, ShellError> DebugShell::Start() {
   if (listen_fd_ < 0) {
     return expected<void, ShellError>::error(ShellError::kPortInUse);
   }
+
+  // RAII guard: close listen_fd_ on any error path below.
+  ScopeGuard fd_guard(FixedFunction<void()>([this]() {
+    ::close(listen_fd_);
+    listen_fd_ = -1;
+  }));
 
   // Allow address reuse.
   int opt = 1;
@@ -824,14 +1030,10 @@ inline expected<void, ShellError> DebugShell::Start() {
 
   if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr),
              sizeof(addr)) < 0) {
-    ::close(listen_fd_);
-    listen_fd_ = -1;
     return expected<void, ShellError>::error(ShellError::kPortInUse);
   }
 
   if (::listen(listen_fd_, static_cast<int>(cfg_.max_connections)) < 0) {
-    ::close(listen_fd_);
-    listen_fd_ = -1;
     return expected<void, ShellError>::error(ShellError::kPortInUse);
   }
 
@@ -844,6 +1046,7 @@ inline expected<void, ShellError> DebugShell::Start() {
   running_.store(true, std::memory_order_release);
   accept_thread_ = std::thread([this]() { AcceptLoop(); });
 
+  fd_guard.release();  // Success -- keep the fd open.
   return expected<void, ShellError>::success();
 }
 
@@ -860,10 +1063,17 @@ inline void DebugShell::Stop() {
     listen_fd_ = -1;
   }
 
-  // Mark all sessions inactive so poll-based session loops will exit.
+  // Shutdown all active session sockets to unblock their recv().
+  // Use shutdown() instead of close() -- POSIX requires that close() on an fd
+  // used concurrently by another thread is undefined behavior.  shutdown()
+  // signals the socket without closing the fd, letting the session thread's
+  // ScopeGuard perform the actual close().
   if (sessions_ != nullptr) {
     for (uint32_t i = 0; i < cfg_.max_connections; ++i) {
       sessions_[i].active.store(false, std::memory_order_release);
+      if (sessions_[i].read_fd >= 0) {
+        (void)::shutdown(sessions_[i].read_fd, SHUT_RDWR);
+      }
     }
   }
 
@@ -872,16 +1082,11 @@ inline void DebugShell::Stop() {
     accept_thread_.join();
   }
 
-  // Join all session threads, then close their sockets.
+  // Join all session threads (each thread closes its own fd via ScopeGuard).
   if (sessions_ != nullptr) {
     for (uint32_t i = 0; i < cfg_.max_connections; ++i) {
       if (sessions_[i].thread.joinable()) {
         sessions_[i].thread.join();
-      }
-      if (sessions_[i].read_fd >= 0) {
-        ::close(sessions_[i].read_fd);
-        sessions_[i].read_fd = -1;
-        sessions_[i].write_fd = -1;
       }
     }
     delete[] sessions_;
@@ -892,6 +1097,19 @@ inline void DebugShell::Stop() {
 inline void DebugShell::AcceptLoop() {
   while (running_.load(std::memory_order_relaxed)) {
     if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+
+    // Use poll() to avoid blocking forever in accept().
+    // close(listen_fd_) in Stop() does NOT reliably unblock accept() on Linux.
+    struct pollfd pfd;
+    pfd.fd = listen_fd_;
+    pfd.events = POLLIN;
+    int pr = ::poll(&pfd, 1, 200);
+    if (pr == 0) continue;            // Timeout -- re-check running_ flag.
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      break;                          // Fatal poll error.
+    }
+
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
 
@@ -916,12 +1134,11 @@ inline void DebugShell::AcceptLoop() {
         if (sessions_[i].thread.joinable()) {
           sessions_[i].thread.join();
         }
-        sessions_[i].read_fd = client_fd;
-        sessions_[i].write_fd = client_fd;
-        sessions_[i].write_fn = detail::ShellTcpWrite;
-        sessions_[i].read_fn = detail::ShellTcpRead;
-        sessions_[i].telnet_mode = true;
-        sessions_[i].line_pos = 0;
+        // Initialize session for TCP telnet.
+        detail::ShellSessionInit(sessions_[i], client_fd, client_fd,
+                            detail::ShellTcpWrite, detail::ShellTcpRead, true);
+        sessions_[i].authenticated = (cfg_.username == nullptr);
+        sessions_[i].auth_attempts = 0;
         sessions_[i].active.store(true, std::memory_order_release);
         sessions_[i].thread =
             std::thread([this, i]() { SessionLoop(sessions_[i]); });
@@ -939,16 +1156,155 @@ inline void DebugShell::AcceptLoop() {
   }
 }
 
-inline void DebugShell::SessionLoop(Session& s) {
-  // Delegate to the shared session loop.
-  detail::ShellRunSession(s, running_, cfg_.prompt);
+inline bool DebugShell::RunAuth(Session& s) {
+  static constexpr uint8_t kMaxAuthAttempts = 3;
+  char user_buf[64] = {};
+  char pass_buf[64] = {};
 
-  // TCP-specific cleanup: close socket.
-  if (s.read_fd >= 0) {
-    ::close(s.read_fd);
-    s.read_fd = -1;
-    s.write_fd = -1;
+  while (s.auth_attempts < kMaxAuthAttempts &&
+         s.active.load(std::memory_order_acquire) &&
+         running_.load(std::memory_order_relaxed)) {
+    // Username prompt.
+    detail::ShellSessionWrite(s, "Username: ");
+    uint32_t upos = 0;
+    while (upos < sizeof(user_buf) - 1) {
+      uint8_t byte;
+      ssize_t n = s.read_fn(s.read_fd, &byte, 1);
+      if (n <= 0) return false;
+      // Filter IAC bytes.
+      char ch = detail::FilterIac(s, byte);
+      if (ch == '\0') continue;
+      if (ch == '\r' || ch == '\n') {
+        if (ch == '\r') s.skip_next_lf = true;
+        break;
+      }
+      if (s.skip_next_lf) {
+        s.skip_next_lf = false;
+        if (ch == '\n') continue;
+      }
+      if (ch == 0x7F || ch == 0x08) {
+        if (upos > 0) {
+          --upos;
+          detail::ShellSessionWrite(s, "\b \b", 3);
+        }
+        continue;
+      }
+      if (ch >= 0x20) {
+        user_buf[upos++] = ch;
+        detail::ShellSessionWrite(s, &ch, 1);
+      }
+    }
+    user_buf[upos] = '\0';
+    detail::ShellSessionWrite(s, "\r\n");
+
+    // Password prompt (masked with '*').
+    detail::ShellSessionWrite(s, "Password: ");
+    uint32_t ppos = 0;
+    while (ppos < sizeof(pass_buf) - 1) {
+      uint8_t byte;
+      ssize_t n = s.read_fn(s.read_fd, &byte, 1);
+      if (n <= 0) return false;
+      char ch = detail::FilterIac(s, byte);
+      if (ch == '\0') continue;
+      if (ch == '\r' || ch == '\n') {
+        if (ch == '\r') s.skip_next_lf = true;
+        break;
+      }
+      if (s.skip_next_lf) {
+        s.skip_next_lf = false;
+        if (ch == '\n') continue;
+      }
+      if (ch == 0x7F || ch == 0x08) {
+        if (ppos > 0) {
+          --ppos;
+          detail::ShellSessionWrite(s, "\b \b", 3);
+        }
+        continue;
+      }
+      if (ch >= 0x20) {
+        pass_buf[ppos++] = ch;
+        detail::ShellSessionWrite(s, "*");  // Mask password.
+      }
+    }
+    pass_buf[ppos] = '\0';
+    detail::ShellSessionWrite(s, "\r\n");
+
+    // Verify credentials.
+    if (std::strcmp(user_buf, cfg_.username) == 0 &&
+        std::strcmp(pass_buf, cfg_.password) == 0) {
+      s.authenticated = true;
+      detail::ShellSessionWrite(s, "\r\nAuthenticated.\r\n\r\n");
+      return true;
+    }
+    ++s.auth_attempts;
+    detail::ShellSessionWrite(s, "\r\nLogin incorrect.\r\n\r\n");
   }
+  detail::ShellSessionWrite(s, "Too many attempts. Disconnecting.\r\n");
+  return false;
+}
+
+inline void DebugShell::SessionLoop(Session& s) {
+  // RAII cleanup: close socket and mark session inactive on any exit path.
+  OSP_SCOPE_EXIT(
+    if (s.read_fd >= 0) {
+      ::close(s.read_fd);
+      s.read_fd = -1;
+    }
+    s.active.store(false, std::memory_order_release);
+  );
+
+  // Telnet IAC negotiation: WILL SGA + WILL ECHO.
+  SendIac(s.read_fd, 0xFB, 0x03);  // WILL Suppress Go Ahead
+  SendIac(s.read_fd, 0xFB, 0x01);  // WILL Echo
+
+  // Send banner if configured.
+  if (cfg_.banner != nullptr) {
+    detail::ShellSessionWrite(s, cfg_.banner);
+  }
+
+  // Run authentication if configured.
+  if (!s.authenticated) {
+    if (!RunAuth(s)) {
+      return;  // ScopeGuard handles cleanup.
+    }
+  }
+
+  // Send initial prompt.
+  detail::ShellSessionWrite(s, cfg_.prompt);
+
+  while (running_.load(std::memory_order_relaxed) &&
+         s.active.load(std::memory_order_acquire)) {
+    // Use poll() with timeout so the thread can check running_ periodically
+    // even if no data arrives.  Pure blocking recv() can hang during shutdown
+    // if the client disconnects while the kernel hasn't signaled the server fd.
+    struct pollfd pfd;
+    pfd.fd = s.read_fd;
+    pfd.events = POLLIN;
+    int pr = ::poll(&pfd, 1, 200);
+    if (pr == 0) continue;  // Timeout -- re-check running_ flag.
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+
+    uint8_t byte;
+    ssize_t n = s.read_fn(s.read_fd, &byte, 1);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (n == 0) break;
+
+    if (detail::ProcessByte(s, byte, cfg_.prompt)) {
+      detail::ShellExecuteLine(s);
+      s.line_pos = 0;
+      s.line_buf[0] = '\0';
+      if (s.active.load(std::memory_order_acquire)) {
+        detail::ShellSessionWrite(s, cfg_.prompt);
+      }
+    }
+  }
+  // ScopeGuard handles cleanup on all exit paths.
 }
 
 inline int DebugShell::Printf(const char* fmt, ...) {
@@ -968,43 +1324,35 @@ inline int DebugShell::Printf(const char* fmt, ...) {
                       ? n
                       : static_cast<int>(sizeof(buf) - 1);
     ssize_t sent = sess->write_fn(sess->write_fd, buf,
-                                  static_cast<size_t>(to_send));
+                                   static_cast<size_t>(to_send));
     return static_cast<int>(sent);
   }
   return -1;
 }
 
 // ============================================================================
-// ConsoleShell - stdin/stdout debug shell (no network required)
+// ConsoleShell - stdin/stdout backend
 // ============================================================================
 
 /**
- * @brief Interactive debug shell using stdin/stdout.
+ * @brief Interactive console shell using stdin/stdout.
  *
- * Designed for scenarios without network access: SSH into the device,
- * early boot debugging, or CI automated testing via pipe.
- *
- * Typical usage:
- * @code
- *   osp::ConsoleShell::Config cfg;
- *   osp::ConsoleShell shell(cfg);
- *   shell.Start();   // spawns a shell thread
- *   // ... application runs ...
- *   shell.Stop();
- * @endcode
- *
- * For testing, set cfg.read_fd / cfg.write_fd to pipe file descriptors.
+ * Configures the terminal to raw mode for character-by-character input.
+ * Restores the original terminal settings on Stop().
  */
 class ConsoleShell final {
  public:
   struct Config {
-    const char* prompt;   ///< Prompt string.
-    int read_fd;          ///< Override read fd (-1 = STDIN_FILENO).
-    int write_fd;         ///< Override write fd (-1 = STDOUT_FILENO).
-    bool raw_mode;        ///< Set termios raw mode (only for real stdin).
+    const char* prompt;
+    int read_fd;
+    int write_fd;
+    bool raw_mode;
 
     Config() noexcept
-        : prompt("osp> "), read_fd(-1), write_fd(-1), raw_mode(true) {}
+        : prompt("osp> "),
+          read_fd(STDIN_FILENO),
+          write_fd(STDOUT_FILENO),
+          raw_mode(true) {}
   };
 
   explicit ConsoleShell(const Config& cfg = Config{}) : cfg_(cfg) {
@@ -1016,148 +1364,155 @@ class ConsoleShell final {
   ConsoleShell(const ConsoleShell&) = delete;
   ConsoleShell& operator=(const ConsoleShell&) = delete;
 
-  inline expected<void, ShellError> Start();
-  inline void Stop();
+  /// @brief Start the console shell asynchronously.
+  [[nodiscard]] inline expected<void, ShellError> Start() noexcept;
 
-  /// @brief Printf into the current session (delegates to ShellPrintf).
-  static inline int Printf(const char* fmt, ...)
-#if defined(__GNUC__) || defined(__clang__)
-      __attribute__((format(printf, 1, 2)))
-#endif
-      ;
+  /// @brief Stop the console shell and restore terminal.
+  inline void Stop() noexcept;
 
-  bool IsRunning() const noexcept {
+  /// @brief Run the shell synchronously (blocking).
+  inline void Run() noexcept;
+
+  [[nodiscard]] bool IsRunning() const noexcept {
     return running_.load(std::memory_order_relaxed);
   }
 
  private:
-  using Session = detail::ShellSession;
-
   Config cfg_;
-  Session session_;
+  detail::ShellSession session_ = {};
+  std::thread thread_;
   std::atomic<bool> running_{false};
-  struct termios orig_termios_{};
+  struct termios orig_termios_ = {};
   bool termios_saved_ = false;
+
+  inline void SetRawMode() noexcept;
+  inline void RestoreTermios() noexcept;
+  inline void RunLoop() noexcept;
 };
 
 // ----------------------------------------------------------------------------
 // ConsoleShell inline implementation
 // ----------------------------------------------------------------------------
 
-inline expected<void, ShellError> ConsoleShell::Start() {
-  if (running_.load(std::memory_order_acquire)) {
-    return expected<void, ShellError>::error(ShellError::kNotRunning);
-  }
+inline void ConsoleShell::SetRawMode() noexcept {
+  if (!cfg_.raw_mode) return;
+  if (::tcgetattr(cfg_.read_fd, &orig_termios_) != 0) return;
+  termios_saved_ = true;
 
-  const int rfd = (cfg_.read_fd >= 0) ? cfg_.read_fd : STDIN_FILENO;
-  const int wfd = (cfg_.write_fd >= 0) ? cfg_.write_fd : STDOUT_FILENO;
-
-  // Set terminal to raw mode if using real stdin.
-  if (cfg_.raw_mode && rfd == STDIN_FILENO && ::isatty(STDIN_FILENO)) {
-    if (::tcgetattr(STDIN_FILENO, &orig_termios_) == 0) {
-      struct termios raw = orig_termios_;
-      raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
-      raw.c_cc[VMIN] = 1;
-      raw.c_cc[VTIME] = 0;
-      ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
-      termios_saved_ = true;
-    }
-  }
-
-  session_.read_fd = rfd;
-  session_.write_fd = wfd;
-  session_.write_fn = detail::ShellPosixWrite;
-  session_.read_fn = detail::ShellPosixRead;
-  session_.telnet_mode = false;
-  session_.line_pos = 0;
-
-  running_.store(true, std::memory_order_release);
-  session_.active.store(true, std::memory_order_release);
-  session_.thread = std::thread([this]() {
-    detail::ShellRunSession(session_, running_, cfg_.prompt);
-  });
-
-  return expected<void, ShellError>::success();
+  struct termios raw = orig_termios_;
+  raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON | ISIG | IEXTEN);
+  raw.c_iflag &= ~static_cast<tcflag_t>(IXON | IXOFF | ICRNL | INLCR |
+                                          IGNCR);
+  raw.c_oflag &= ~static_cast<tcflag_t>(OPOST);
+  raw.c_cc[VMIN] = 0;
+  raw.c_cc[VTIME] = 0;
+  (void)::tcsetattr(cfg_.read_fd, TCSANOW, &raw);
 }
 
-inline void ConsoleShell::Stop() {
-  if (!running_.load(std::memory_order_acquire)) {
-    return;
-  }
-
-  running_.store(false, std::memory_order_release);
-  session_.active.store(false, std::memory_order_release);
-
-  // Join first -- the session loop uses poll() with a 200ms timeout,
-  // so it will notice running_==false and exit within one poll cycle.
-  if (session_.thread.joinable()) {
-    session_.thread.join();
-  }
-
-  // Restore terminal settings.
+inline void ConsoleShell::RestoreTermios() noexcept {
   if (termios_saved_) {
-    ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios_);
+    (void)::tcsetattr(cfg_.read_fd, TCSANOW, &orig_termios_);
     termios_saved_ = false;
   }
 }
 
-inline int ConsoleShell::Printf(const char* fmt, ...) {
-  detail::ShellSession* sess = detail::CurrentSession();
-  if (sess == nullptr || sess->write_fn == nullptr) {
-    return -1;
+inline expected<void, ShellError> ConsoleShell::Start() noexcept {
+  if (running_.load(std::memory_order_relaxed)) {
+    return expected<void, ShellError>::error(ShellError::kAlreadyRunning);
   }
 
-  char buf[256];
-  va_list args;
-  va_start(args, fmt);
-  int n = std::vsnprintf(buf, sizeof(buf), fmt, args);
-  va_end(args);
+  SetRawMode();
 
-  if (n > 0) {
-    int to_send = (n < static_cast<int>(sizeof(buf)))
-                      ? n
-                      : static_cast<int>(sizeof(buf) - 1);
-    ssize_t sent = sess->write_fn(sess->write_fd, buf,
-                                  static_cast<size_t>(to_send));
-    return static_cast<int>(sent);
+  detail::ShellSessionInit(session_, cfg_.read_fd, cfg_.write_fd,
+                       detail::ShellPosixWrite, detail::ShellPosixRead, false);
+
+  running_.store(true, std::memory_order_release);
+  thread_ = std::thread([this]() { RunLoop(); });
+
+  return expected<void, ShellError>::success();
+}
+
+inline void ConsoleShell::Stop() noexcept {
+  if (!running_.load(std::memory_order_relaxed)) return;
+  running_.store(false, std::memory_order_release);
+  session_.active.store(false, std::memory_order_release);
+
+  if (thread_.joinable()) {
+    thread_.join();
   }
-  return -1;
+  RestoreTermios();
+}
+
+inline void ConsoleShell::Run() noexcept {
+  SetRawMode();
+
+  detail::ShellSessionInit(session_, cfg_.read_fd, cfg_.write_fd,
+                       detail::ShellPosixWrite, detail::ShellPosixRead, false);
+  running_.store(true, std::memory_order_release);
+
+  RunLoop();
+
+  RestoreTermios();
+  running_.store(false, std::memory_order_release);
+}
+
+inline void ConsoleShell::RunLoop() noexcept {
+  auto& s = session_;
+  detail::ShellSessionWrite(s, cfg_.prompt);
+
+  while (running_.load(std::memory_order_relaxed) &&
+         s.active.load(std::memory_order_acquire)) {
+    struct pollfd pfd;
+    pfd.fd = s.read_fd;
+    pfd.events = POLLIN;
+    int pr = ::poll(&pfd, 1, 100);
+    if (pr == 0) continue;
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+
+    uint8_t byte;
+    ssize_t n = s.read_fn(s.read_fd, &byte, 1);
+    if (n <= 0) {
+      if (n < 0 && errno == EINTR) continue;
+      break;
+    }
+
+    if (detail::ProcessByte(s, byte, cfg_.prompt)) {
+      detail::ShellExecuteLine(s);
+      s.line_pos = 0;
+      s.line_buf[0] = '\0';
+      if (s.active.load(std::memory_order_acquire)) {
+        detail::ShellSessionWrite(s, cfg_.prompt);
+      }
+    }
+  }
 }
 
 // ============================================================================
-// UartShell - UART/serial debug shell
+// UartShell - Serial port backend
 // ============================================================================
 
 /**
- * @brief Interactive debug shell over a UART/serial device.
+ * @brief UART serial port shell backend.
  *
- * Opens a serial port via Linux termios, configures baud rate and raw mode,
- * and runs the standard shell session loop over the serial line.
- *
- * Typical usage:
- * @code
- *   osp::UartShell::Config cfg;
- *   cfg.device = "/dev/ttyS1";
- *   cfg.baudrate = 115200;
- *   osp::UartShell shell(cfg);
- *   shell.Start();
- *   // connect via minicom / picocom
- *   shell.Stop();
- * @endcode
- *
- * For testing, set cfg.override_fd to a PTY master fd.
+ * Opens a serial device (e.g., /dev/ttyS0, /dev/ttyUSB0) and provides
+ * interactive command-line access over a serial connection.
  */
 class UartShell final {
  public:
   struct Config {
-    const char* device;    ///< Serial device path.
-    uint32_t baudrate;     ///< Baud rate.
-    const char* prompt;    ///< Prompt string.
-    int override_fd;       ///< Override fd for testing (-1 = open device).
+    const char* device;
+    uint32_t baudrate;
+    const char* prompt;
+    int override_fd;  ///< For testing: use this fd instead of opening device.
 
     Config() noexcept
-        : device("/dev/ttyS0"), baudrate(115200),
-          prompt("osp> "), override_fd(-1) {}
+        : device("/dev/ttyS0"),
+          baudrate(115200),
+          prompt("osp> "),
+          override_fd(-1) {}
   };
 
   explicit UartShell(const Config& cfg = Config{}) : cfg_(cfg) {
@@ -1169,39 +1524,33 @@ class UartShell final {
   UartShell(const UartShell&) = delete;
   UartShell& operator=(const UartShell&) = delete;
 
-  inline expected<void, ShellError> Start();
-  inline void Stop();
+  /// @brief Start the UART shell.
+  [[nodiscard]] inline expected<void, ShellError> Start() noexcept;
 
-  /// @brief Printf into the current session (delegates to ShellPrintf).
-  static inline int Printf(const char* fmt, ...)
-#if defined(__GNUC__) || defined(__clang__)
-      __attribute__((format(printf, 1, 2)))
-#endif
-      ;
+  /// @brief Stop the UART shell.
+  inline void Stop() noexcept;
 
-  bool IsRunning() const noexcept {
+  [[nodiscard]] bool IsRunning() const noexcept {
     return running_.load(std::memory_order_relaxed);
   }
 
  private:
-  using Session = detail::ShellSession;
-
   Config cfg_;
-  Session session_;
+  detail::ShellSession session_ = {};
+  std::thread thread_;
+  std::atomic<bool> running_{false};
   int uart_fd_ = -1;
   bool owns_fd_ = false;
-  std::atomic<bool> running_{false};
 
-  static speed_t BaudToSpeed(uint32_t baud) noexcept {
+  inline void RunLoop() noexcept;
+
+  static constexpr speed_t BaudToSpeed(uint32_t baud) noexcept {
     switch (baud) {
       case 9600:   return B9600;
       case 19200:  return B19200;
       case 38400:  return B38400;
       case 57600:  return B57600;
       case 115200: return B115200;
-      case 230400: return B230400;
-      case 460800: return B460800;
-      case 921600: return B921600;
       default:     return B115200;
     }
   }
@@ -1211,89 +1560,113 @@ class UartShell final {
 // UartShell inline implementation
 // ----------------------------------------------------------------------------
 
-inline expected<void, ShellError> UartShell::Start() {
-  if (running_.load(std::memory_order_acquire)) {
-    return expected<void, ShellError>::error(ShellError::kNotRunning);
+inline expected<void, ShellError> UartShell::Start() noexcept {
+  if (running_.load(std::memory_order_relaxed)) {
+    return expected<void, ShellError>::error(ShellError::kAlreadyRunning);
   }
 
   if (cfg_.override_fd >= 0) {
-    // Testing mode: use provided fd (e.g. PTY slave).
     uart_fd_ = cfg_.override_fd;
     owns_fd_ = false;
   } else {
     uart_fd_ = ::open(cfg_.device, O_RDWR | O_NOCTTY);
     if (uart_fd_ < 0) {
-      return expected<void, ShellError>::error(ShellError::kBindFailed);
+      return expected<void, ShellError>::error(ShellError::kDeviceOpenFailed);
     }
     owns_fd_ = true;
 
-    struct termios tio{};
-    ::tcgetattr(uart_fd_, &tio);
-    ::cfmakeraw(&tio);
-    ::cfsetispeed(&tio, BaudToSpeed(cfg_.baudrate));
-    ::cfsetospeed(&tio, BaudToSpeed(cfg_.baudrate));
-    tio.c_cc[VMIN] = 1;
-    tio.c_cc[VTIME] = 0;
-    ::tcsetattr(uart_fd_, TCSAFLUSH, &tio);
+    // RAII guard: close uart_fd_ on any error path below.
+    ScopeGuard fd_guard(FixedFunction<void()>([this]() {
+      ::close(uart_fd_);
+      uart_fd_ = -1;
+      owns_fd_ = false;
+    }));
+
+    // Configure termios: 8N1, no flow control, raw mode.
+    struct termios tty = {};
+    if (::tcgetattr(uart_fd_, &tty) != 0) {
+      return expected<void, ShellError>::error(ShellError::kDeviceOpenFailed);
+    }
+
+    const speed_t spd = BaudToSpeed(cfg_.baudrate);
+    (void)::cfsetispeed(&tty, spd);
+    (void)::cfsetospeed(&tty, spd);
+
+    tty.c_cflag = (tty.c_cflag & ~static_cast<tcflag_t>(CSIZE)) | CS8;
+    tty.c_cflag |= static_cast<tcflag_t>(CLOCAL | CREAD);
+    tty.c_cflag &= ~static_cast<tcflag_t>(PARENB | CSTOPB | CRTSCTS);
+
+    tty.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO | ECHOE | ISIG);
+    tty.c_iflag &= ~static_cast<tcflag_t>(IXON | IXOFF | IXANY |
+                                            ICRNL | INLCR | IGNCR);
+    tty.c_oflag &= ~static_cast<tcflag_t>(OPOST);
+
+    tty.c_cc[VMIN] = 1;
+    tty.c_cc[VTIME] = 0;
+
+    if (::tcsetattr(uart_fd_, TCSANOW, &tty) != 0) {
+      return expected<void, ShellError>::error(ShellError::kDeviceOpenFailed);
+    }
+
+    fd_guard.release();  // Success -- keep the fd open.
   }
 
-  session_.read_fd = uart_fd_;
-  session_.write_fd = uart_fd_;
-  session_.write_fn = detail::ShellPosixWrite;
-  session_.read_fn = detail::ShellPosixRead;
-  session_.telnet_mode = false;
-  session_.line_pos = 0;
+  detail::ShellSessionInit(session_, uart_fd_, uart_fd_,
+                       detail::ShellPosixWrite, detail::ShellPosixRead, false);
 
   running_.store(true, std::memory_order_release);
-  session_.active.store(true, std::memory_order_release);
-  session_.thread = std::thread([this]() {
-    detail::ShellRunSession(session_, running_, cfg_.prompt);
-  });
+  thread_ = std::thread([this]() { RunLoop(); });
 
   return expected<void, ShellError>::success();
 }
 
-inline void UartShell::Stop() {
-  if (!running_.load(std::memory_order_acquire)) {
-    return;
-  }
-
+inline void UartShell::Stop() noexcept {
+  if (!running_.load(std::memory_order_relaxed)) return;
   running_.store(false, std::memory_order_release);
   session_.active.store(false, std::memory_order_release);
 
-  // Join first -- poll() timeout in session loop handles exit.
-  if (session_.thread.joinable()) {
-    session_.thread.join();
+  if (thread_.joinable()) {
+    thread_.join();
   }
 
-  // Close fd after thread has exited (TSan-safe).
-  if (uart_fd_ >= 0 && owns_fd_) {
+  if (owns_fd_ && uart_fd_ >= 0) {
     ::close(uart_fd_);
     uart_fd_ = -1;
   }
 }
 
-inline int UartShell::Printf(const char* fmt, ...) {
-  detail::ShellSession* sess = detail::CurrentSession();
-  if (sess == nullptr || sess->write_fn == nullptr) {
-    return -1;
-  }
+inline void UartShell::RunLoop() noexcept {
+  auto& s = session_;
+  detail::ShellSessionWrite(s, cfg_.prompt);
 
-  char buf[256];
-  va_list args;
-  va_start(args, fmt);
-  int n = std::vsnprintf(buf, sizeof(buf), fmt, args);
-  va_end(args);
+  while (running_.load(std::memory_order_relaxed) &&
+         s.active.load(std::memory_order_acquire)) {
+    struct pollfd pfd;
+    pfd.fd = s.read_fd;
+    pfd.events = POLLIN;
+    int pr = ::poll(&pfd, 1, 200);
+    if (pr == 0) continue;
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
 
-  if (n > 0) {
-    int to_send = (n < static_cast<int>(sizeof(buf)))
-                      ? n
-                      : static_cast<int>(sizeof(buf) - 1);
-    ssize_t sent = sess->write_fn(sess->write_fd, buf,
-                                  static_cast<size_t>(to_send));
-    return static_cast<int>(sent);
+    uint8_t byte;
+    ssize_t n = s.read_fn(s.read_fd, &byte, 1);
+    if (n <= 0) {
+      if (n < 0 && errno == EINTR) continue;
+      break;
+    }
+
+    if (detail::ProcessByte(s, byte, cfg_.prompt)) {
+      detail::ShellExecuteLine(s);
+      s.line_pos = 0;
+      s.line_buf[0] = '\0';
+      if (s.active.load(std::memory_order_acquire)) {
+        detail::ShellSessionWrite(s, cfg_.prompt);
+      }
+    }
   }
-  return -1;
 }
 
 }  // namespace osp

@@ -70,7 +70,10 @@ enum class ShellError : uint8_t {
   kDuplicateName,
   kPortInUse,
   kNotRunning,
-  kBindFailed
+  kBindFailed,
+  kAlreadyRunning,
+  kAuthFailed,
+  kDeviceOpenFailed
 };
 
 enum class MemPoolError : uint8_t {
