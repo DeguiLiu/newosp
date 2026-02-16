@@ -11,6 +11,7 @@
 {% for inc in includes | default([]) %}
 #include <{{ inc }}>
 {% endfor %}
+#include <cstdio>
 #include <type_traits>
 #include <variant>
 
@@ -18,6 +19,30 @@
 namespace {{ namespace }} {
 {% endif %}
 
+{% if version is defined %}
+/// Protocol version.
+static constexpr uint32_t kVersion = {{ version }};
+
+{% endif %}
+// ============================================================================
+// Standalone Enums
+// ============================================================================
+
+{% for e in enums | default([]) %}
+{% if e.desc is defined %}
+/// {{ e.desc }}
+{% endif %}
+enum class {{ e.name }} : {{ e.type | default("uint32_t") }} {
+{% for v in e.entries %}
+{% if v.desc is defined %}
+  {{ v.name | upper_snake_to_k }} = {{ v.value }}{{ "," if not loop.last else "" }}  ///< {{ v.desc }}
+{% else %}
+  {{ v.name | upper_snake_to_k }} = {{ v.value }}{{ "," if not loop.last else "" }}
+{% endif %}
+{% endfor %}
+};
+
+{% endfor %}
 // ============================================================================
 // Events
 // ============================================================================
@@ -27,7 +52,11 @@ namespace {{ namespace }} {
 {% set enum_name = (ns | capitalize) + "Event" if ns else "Event" %}
 enum {{ enum_name }} : uint32_t {
 {% for evt in events %}
+{% if evt.desc is defined %}
+  {{ snake_to_k_prefix(ns, evt.name) }} = {{ evt.id }}{{ "," if not loop.last else "" }}  ///< {{ evt.desc }}
+{% else %}
   {{ snake_to_k_prefix(ns, evt.name) }} = {{ evt.id }}{{ "," if not loop.last else "" }}
+{% endif %}
 {% endfor %}
 };
 {% endif %}
@@ -37,16 +66,36 @@ enum {{ enum_name }} : uint32_t {
 // ============================================================================
 
 {% for msg in messages | default([]) %}
+{% if msg.packed | default(false) %}
+#pragma pack(push, 1)
+{% endif %}
+{% if msg.deprecated is defined %}
+/// @deprecated {{ msg.deprecated }}
+struct [[deprecated("{{ msg.deprecated }}")]] {{ msg.name }} {
+{% elif msg.desc is defined %}
+/// {{ msg.desc }}
 struct {{ msg.name }} {
+{% else %}
+struct {{ msg.name }} {
+{% endif %}
 {% for field in msg.fields %}
 {% set arr = parse_array_type(field.type) %}
+{% if field.desc is defined %}
+{% if arr %}
+  {{ arr[0] }} {{ field.name }}[{{ arr[1] }}];  ///< {{ field.desc }}
+{% else %}
+  {{ field.type }} {{ field.name }};  ///< {{ field.desc }}
+{% endif %}
+{% else %}
 {% if arr %}
   {{ arr[0] }} {{ field.name }}[{{ arr[1] }}];
 {% else %}
   {{ field.type }} {{ field.name }};
 {% endif %}
+{% endif %}
 {% endfor %}
 
+  /// Default constructor (zero-initialized).
   {{ msg.name }}() noexcept
 {% for field in msg.fields %}
 {% set arr = parse_array_type(field.type) %}
@@ -56,7 +105,71 @@ struct {{ msg.name }} {
       {{ ": " if loop.first else "  " }}{{ field.name }}({{ field.default | default("0") }}){{ "," if not loop.last else " {}" }}
 {% endif %}
 {% endfor %}
+
+{% if has_range_fields(msg) %}
+  /// Validate field constraints.
+  /// @return true if all fields are within their defined ranges.
+  bool Validate() const noexcept {
+{% for field in msg.fields %}
+{% if field.range is defined %}
+    if ({{ range_check_expr(field.name, field.type, field.range) }}) {
+      return false;
+    }
+{% endif %}
+{% endfor %}
+    return true;
+  }
+
+{% endif %}
+  /// Dump struct contents to buffer for debugging.
+  /// @param buf  Output buffer.
+  /// @param cap  Buffer capacity in bytes.
+  /// @return Number of characters written (excluding null terminator).
+  uint32_t Dump(char* buf, uint32_t cap) const noexcept {
+{% set printable = [] %}
+{% for field in msg.fields %}
+{% set pinfo = printf_info(field.type) %}
+{% if pinfo %}
+{% if printable.append(field) %}{% endif %}
+{% endif %}
+{% endfor %}
+{% if printable | length > 0 %}
+    int n = std::snprintf(buf, cap,
+        "{{ msg.name }}{
+        {%- for field in printable -%}
+        {{ field.name }}={{ printf_info(field.type)[0] }}
+        {%- if not loop.last %}, {% endif -%}
+        {%- endfor -%}
+        }"
+        {%- for field in printable -%}
+        ,
+        {{ printf_info(field.type)[1].format(field.name) }}
+        {%- endfor %});
+    return (n > 0) ? static_cast<uint32_t>(n) : 0;
+{% else %}
+    int n = std::snprintf(buf, cap, "{{ msg.name }}{}");
+    return (n > 0) ? static_cast<uint32_t>(n) : 0;
+{% endif %}
+  }
+
+{% if byte_order | default("native") == "network" %}
+  /// Convert all multi-byte fields to network byte order (big-endian).
+  /// @warning Calling twice restores original order.
+  void SwapByteOrder() noexcept {
+{% for field in msg.fields %}
+{% if needs_bswap(field.type) %}
+{% for line in bswap_lines(field.name, field.type) %}
+    {{ line }};
+{% endfor %}
+{% endif %}
+{% endfor %}
+  }
+
+{% endif %}
 };
+{% if msg.packed | default(false) %}
+#pragma pack(pop)
+{% endif %}
 
 {% endfor %}
 
@@ -75,14 +188,59 @@ using {{ payload_name }} = std::variant<
 {% endif %}
 
 // ============================================================================
-// Static assertions (trivially copyable)
+// Static assertions
 // ============================================================================
 
 {% for msg in messages | default([]) %}
 static_assert(std::is_trivially_copyable<{{ msg.name }}>::value,
               "{{ msg.name }} must be trivially copyable");
+{% if msg.expected_size is defined %}
+static_assert(sizeof({{ msg.name }}) == {{ msg.expected_size }},
+              "{{ msg.name }} size mismatch (check field alignment/packing)");
+{% endif %}
 {% endfor %}
 
+{% set bound_msgs = [] %}
+{% for msg in messages | default([]) %}
+{% if msg.event is defined %}
+{% if bound_msgs.append(msg) %}{% endif %}
+{% endif %}
+{% endfor %}
+{% if bound_msgs | length > 0 %}
+// ============================================================================
+// Event <-> Message binding
+// ============================================================================
+
+{% set ns = namespace | default("") %}
+/// Forward mapping: event ID -> message type.
+template <uint32_t EventId>
+struct EventMessage {};
+
+{% for msg in bound_msgs %}
+template <>
+struct EventMessage<{{ snake_to_k_prefix(ns, msg.event) }}> {
+  using type = {{ msg.name }};
+};
+
+{% endfor %}
+/// Reverse mapping: message type -> event ID.
+template <typename MsgT>
+struct MessageEvent {};
+
+{% for msg in bound_msgs %}
+template <>
+struct MessageEvent<{{ msg.name }}> {
+  static constexpr uint32_t value = {{ snake_to_k_prefix(ns, msg.event) }};
+};
+
+{% endfor %}
+/// Get the event ID for a given message type.
+template <typename MsgT>
+constexpr uint32_t EventIdOf() noexcept {
+  return MessageEvent<MsgT>::value;
+}
+
+{% endif %}
 {% if namespace is defined %}
 }  // namespace {{ namespace }}
 {% endif %}

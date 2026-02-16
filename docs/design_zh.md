@@ -1092,6 +1092,10 @@ class ShmChannel {
 
 避免默认 `seq_cst`，显式使用 `acquire/release` 配对，在 ARM 上可获得 3-5 倍性能提升。
 
+**Huge Pages 支持 (可选)**:
+
+定义 `OSP_SHM_HUGE_PAGES` 宏后，`SharedMemorySegment::Create()` 和 `Open()` 的 `mmap()` 调用携带 `MAP_HUGETLB` 标志，减少大段共享内存的 TLB miss。若系统未配置 huge pages 或权限不足，自动回退到普通 `MAP_SHARED`，无需调用方处理。启用前需确保内核预留了足够的 huge pages (`/proc/sys/vm/nr_hugepages`)。
+
 **崩溃恢复: CreateOrReplace 模式**:
 
 工业场景中进程可能因 SIGKILL 或断电异常退出，残留 `/dev/shm/osp_shm_*` 文件。`CreateOrReplace` 先 `shm_unlink` 清除残留，再执行标准 `Create`:
@@ -1427,18 +1431,18 @@ class LifecycleNode : public Node<PayloadVariant> {
 
 ---
 
-### 9.5 代码生成工具 (ospgen)
+### 9.5 代码生成工具 (ospgen v2)
 
-YAML 驱动的编译期代码生成，零运行时开销。
+YAML 驱动的编译期代码生成，零运行时开销。v2 新增: standalone enum class、sizeof 断言、event-message 编译期绑定、字段描述/范围约束、Validate()、Dump()、字节序转换、packed struct、版本号、deprecated 标记。
 
 | 类型 | YAML 定义 | 生成内容 |
 |------|----------|---------|
-| 消息/事件 | `defs/*.yaml` | 事件枚举、POD 结构体、`std::variant`、`static_assert` |
-| 节点拓扑 | `defs/topology.yaml` | `constexpr` 节点 ID/名称常量 |
+| 消息/事件 | `defs/*.yaml` | enum class、事件枚举 (含 desc)、POD 结构体 (Validate/Dump)、`std::variant`、`static_assert` (trivially_copyable + sizeof)、EventMessage/MessageEvent 编译期绑定 |
+| 节点拓扑 | `defs/topology.yaml` | `constexpr` 节点 ID/名称/订阅计数常量 (含 desc) |
 
 ```bash
 python3 tools/ospgen.py --input defs/protocol_messages.yaml \
-  --output include/generated/ --templates tools/templates/
+  --output generated/osp/protocol_messages.hpp
 ```
 
 CMake 集成: `OSP_CODEGEN=ON` 时通过 `add_custom_command` + `DEPENDS` 增量生成。
@@ -2014,6 +2018,7 @@ expected<V, E> 返回
 | `OSP_CONNECTION_POOL_CAPACITY` | 32 | connection.hpp | 连接池默认容量 |
 | `OSP_SHM_SLOT_SIZE` | 4096 | shm_transport.hpp | 共享内存 slot 大小 |
 | `OSP_SHM_SLOT_COUNT` | 256 | shm_transport.hpp | 共享内存 slot 数量 |
+| `OSP_SHM_HUGE_PAGES` | 未定义 | shm_transport.hpp | 定义后 mmap 使用 MAP_HUGETLB (透明回退) |
 | `OSP_DISCOVERY_PORT` | 9999 | discovery.hpp | 多播发现端口 |
 | `OSP_HEARTBEAT_INTERVAL_MS` | 1000 | node_manager.hpp | 心跳间隔 |
 | `OSP_HEARTBEAT_TIMEOUT_COUNT` | 3 | node_manager.hpp | 心跳超时次数 |

@@ -2,12 +2,15 @@
 //
 // Streaming protocol demo: GB28181/RTSP-style pipeline simulation.
 //
+// Uses ospgen-generated message types and topology constants:
+//   - protocol_messages.hpp: POD structs + Validate() + Dump() + event binding
+//   - topology.hpp: node IDs, names, subscription counts
+//
 // Server-side nodes use StaticNode (compile-time handler dispatch).
 // Client node uses regular Node (dynamic callback + timer context).
 // Shell support: --console for stdin/stdout, default TCP on port 5093.
 
 #include "handlers.hpp"
-#include "messages.hpp"
 
 #include "osp/bus.hpp"
 #include "osp/log.hpp"
@@ -18,6 +21,25 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+
+// ============================================================================
+// Compile-time event<->message binding verification (ospgen v2)
+// ============================================================================
+
+static_assert(protocol::EventIdOf<protocol::RegisterRequest>() ==
+                  protocol::kProtocolRegister,
+              "RegisterRequest must bind to REGISTER event");
+static_assert(protocol::EventIdOf<protocol::HeartbeatMsg>() ==
+                  protocol::kProtocolHeartbeat,
+              "HeartbeatMsg must bind to HEARTBEAT event");
+static_assert(protocol::EventIdOf<protocol::StreamData>() ==
+                  protocol::kProtocolStreamData,
+              "StreamData must bind to STREAM_DATA event");
+
+// Compile-time sizeof verification (ospgen v2)
+static_assert(sizeof(protocol::RegisterRequest) == 50, "");
+static_assert(sizeof(protocol::HeartbeatMsg) == 16, "");
+static_assert(sizeof(protocol::StreamCommand) == 8, "");
 
 // ============================================================================
 // Static pointers for shell command access
@@ -66,7 +88,9 @@ OSP_SHELL_CMD(cmd_bus, "Show bus statistics");
 int main(int argc, char* argv[]) {
   osp::log::Init();
   osp::log::SetLevel(osp::log::Level::kDebug);
-  OSP_LOG_INFO("Proto", "=== streaming protocol demo start ===");
+  OSP_LOG_INFO("Proto", "=== streaming protocol demo (ospgen v2) ===");
+  OSP_LOG_INFO("Proto", "protocol version=%u, node count=%u",
+               protocol::kVersion, kNodeCount);
 
   // -- Parse CLI: --console selects ConsoleShell, else DebugShell -----------
   bool use_console = false;
@@ -111,33 +135,39 @@ int main(int argc, char* argv[]) {
   g_state = &state;
   g_bus = &bus;
 
-  // -- Server-side: StaticNode (direct dispatch, zero overhead, inlinable) --
+  // -- Server-side: StaticNode with ospgen topology constants ----------------
 
   RegistrarNode registrar(
-      "registrar", kRegistrarId,
+      kNodeName_registrar, kNodeId_registrar,
       RegistrarHandler{&state, &bus});
 
   HeartbeatNode heartbeat_monitor(
-      "heartbeat_monitor", kHeartbeatId,
+      kNodeName_heartbeat_monitor, kNodeId_heartbeat_monitor,
       HeartbeatHandler{&state});
 
   StreamCtrlNode stream_controller(
-      "stream_controller", kStreamCtrlId,
+      kNodeName_stream_controller, kNodeId_stream_controller,
       StreamHandler{&state});
 
-  // -- Client-side: regular Node (dynamic callback, timer ctx pointer) ------
+  // -- Client-side: regular Node with ospgen topology constants --------------
 
-  osp::Node<Payload> client("client", kClientId);
+  osp::Node<Payload> client(kNodeName_client, kNodeId_client);
   SetupClient(client);
   client.Start();
 
   // Step 1: device registration (HIGH priority)
   OSP_LOG_INFO("Proto", "--- step 1: device registration ---");
-  RegisterRequest req{};
+  protocol::RegisterRequest req{};
   std::strncpy(req.device_id, "CAM-310200001", sizeof(req.device_id) - 1);
   std::strncpy(req.ip, "192.168.1.100", sizeof(req.ip) - 1);
   req.port = 5060;
-  client.PublishWithPriority(req, osp::MessagePriority::kHigh);
+
+  // Validate before publish (ospgen-generated range check)
+  if (req.Validate()) {
+    client.PublishWithPriority(req, osp::MessagePriority::kHigh);
+  } else {
+    OSP_LOG_ERROR("Proto", "RegisterRequest validation failed");
+  }
   registrar.SpinOnce();
   registrar.SpinOnce();
 
@@ -155,15 +185,17 @@ int main(int argc, char* argv[]) {
 
   // Step 3: stream start / data / stop
   OSP_LOG_INFO("Proto", "--- step 3: stream control ---");
-  StreamCommand start_cmd{};
+  protocol::StreamCommand start_cmd{};
   start_cmd.session_id = kDemoSessionId;
-  start_cmd.action = 1;
-  start_cmd.media_type = 2;
+  start_cmd.action =
+      static_cast<uint8_t>(protocol::StreamAction::kStart);
+  start_cmd.media_type =
+      static_cast<uint8_t>(protocol::MediaType::kAv);
   client.PublishWithPriority(start_cmd, osp::MessagePriority::kHigh);
   stream_controller.SpinOnce();
 
   for (uint32_t seq = 0; seq < 5; ++seq) {
-    StreamData sd{};
+    protocol::StreamData sd{};
     sd.session_id = kDemoSessionId;
     sd.seq = seq;
     sd.payload_size = 128;
@@ -172,10 +204,12 @@ int main(int argc, char* argv[]) {
   }
   stream_controller.SpinOnce();
 
-  StreamCommand stop_cmd{};
+  protocol::StreamCommand stop_cmd{};
   stop_cmd.session_id = kDemoSessionId;
-  stop_cmd.action = 0;
-  stop_cmd.media_type = 2;
+  stop_cmd.action =
+      static_cast<uint8_t>(protocol::StreamAction::kStop);
+  stop_cmd.media_type =
+      static_cast<uint8_t>(protocol::MediaType::kAv);
   client.PublishWithPriority(stop_cmd, osp::MessagePriority::kHigh);
   stream_controller.SpinOnce();
 
@@ -189,6 +223,12 @@ int main(int argc, char* argv[]) {
   OSP_LOG_INFO("Proto", "app: registered=%u heartbeats=%u streams=%u errors=%u",
                state.registered_count, state.heartbeat_count,
                state.stream_count, state.error_count);
+  OSP_LOG_INFO("Proto",
+               "topology: %s(subs=%u) %s(subs=%u) %s(subs=%u) %s(subs=%u)",
+               kNodeName_registrar, kNodeSubCount_registrar,
+               kNodeName_heartbeat_monitor, kNodeSubCount_heartbeat_monitor,
+               kNodeName_stream_controller, kNodeSubCount_stream_controller,
+               kNodeName_client, kNodeSubCount_client);
   OSP_LOG_INFO("Proto", "=== streaming protocol demo end ===");
 
   // -- Shell teardown -------------------------------------------------------

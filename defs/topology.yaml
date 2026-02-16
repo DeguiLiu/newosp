@@ -6,7 +6,22 @@
 payload_header: "osp/protocol_messages.hpp"
 
 nodes:
-  - { name: registrar,          id: 1, subscriptions: [RegisterRequest, RegisterResponse] }
-  - { name: heartbeat_monitor,  id: 2, subscriptions: [HeartbeatMsg] }
-  - { name: stream_controller,  id: 3, subscriptions: [StreamCommand, StreamData] }
-  - { name: client,             id: 10, subscriptions: [RegisterResponse] }
+  - name: registrar
+    id: 1
+    desc: "Device registration service"
+    subscriptions: [RegisterRequest, RegisterResponse]
+
+  - name: heartbeat_monitor
+    id: 2
+    desc: "Heartbeat keepalive monitor"
+    subscriptions: [HeartbeatMsg]
+
+  - name: stream_controller
+    id: 3
+    desc: "Media stream start/stop controller"
+    subscriptions: [StreamCommand, StreamData]
+
+  - name: client
+    id: 10
+    desc: "Client endpoint"
+    subscriptions: [RegisterResponse]

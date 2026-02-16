@@ -85,6 +85,16 @@ enum class ShmError : uint8_t {
   kClosed
 };
 
+// Huge pages: reduces TLB misses for large shared memory segments (e.g. video
+// frames).  Requires system-level huge page reservation:
+//   echo 64 > /proc/sys/vm/nr_hugepages
+// When enabled, mmap uses MAP_HUGETLB.  Falls back to normal pages on failure.
+#ifdef OSP_SHM_HUGE_PAGES
+static constexpr int kShmMmapFlags = MAP_SHARED | MAP_HUGETLB;
+#else
+static constexpr int kShmMmapFlags = MAP_SHARED;
+#endif
+
 #if defined(OSP_PLATFORM_LINUX)
 
 // ============================================================================
@@ -197,8 +207,15 @@ class SharedMemorySegment final {
           ShmError::kCreateFailed);
     }
 
-    seg.addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                       seg.fd_, 0);
+    seg.addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                       kShmMmapFlags, seg.fd_, 0);
+#ifdef OSP_SHM_HUGE_PAGES
+    if (seg.addr_ == MAP_FAILED) {
+      // Huge page allocation failed -- fall back to normal pages.
+      seg.addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                         MAP_SHARED, seg.fd_, 0);
+    }
+#endif
     if (seg.addr_ == MAP_FAILED) {
       ::close(seg.fd_);
       ::shm_unlink(seg.name_.c_str());
@@ -293,7 +310,14 @@ class SharedMemorySegment final {
 
     seg.size_ = static_cast<uint32_t>(st.st_size);
     seg.addr_ = ::mmap(nullptr, seg.size_, PROT_READ | PROT_WRITE,
-                       MAP_SHARED, seg.fd_, 0);
+                       kShmMmapFlags, seg.fd_, 0);
+#ifdef OSP_SHM_HUGE_PAGES
+    if (seg.addr_ == MAP_FAILED) {
+      // Fallback: retry without MAP_HUGETLB.
+      seg.addr_ = ::mmap(nullptr, seg.size_, PROT_READ | PROT_WRITE,
+                         MAP_SHARED, seg.fd_, 0);
+    }
+#endif
     if (seg.addr_ == MAP_FAILED) {
       ::close(seg.fd_);
       return expected<SharedMemorySegment, ShmError>::error(

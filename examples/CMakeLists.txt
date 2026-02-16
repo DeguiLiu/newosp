@@ -13,7 +13,8 @@ endfunction()
 
 # --- demo executables -----------------------------------------------------
 add_osp_example(osp_basic_demo              basic_demo.cpp)
-add_osp_example(osp_protocol_demo           streaming_protocol/main.cpp)
+# streaming_protocol uses ospgen-generated headers (requires OSP_CODEGEN=ON)
+# add_osp_example(osp_protocol_demo           streaming_protocol/main.cpp)
 add_osp_example(osp_client_demo             client_gateway/main.cpp)
 add_osp_example(osp_priority_demo           priority_demo.cpp)
 add_osp_example(osp_benchmark               benchmark.cpp)
@@ -34,6 +35,9 @@ target_compile_options(unix_socket_benchmark PRIVATE -O3)
 if(OSP_CODEGEN)
     add_osp_example(osp_codegen_demo codegen_demo.cpp)
     add_dependencies(osp_codegen_demo osp_codegen)
+
+    add_osp_example(osp_protocol_demo streaming_protocol/main.cpp)
+    add_dependencies(osp_protocol_demo osp_codegen)
 endif()
 
 # --- SHM IPC demo (subdirectory) -------------------------------------------

@@ -18,6 +18,9 @@
 // ============================================================================
 
 {% for node in nodes | default([]) %}
+{% if node.desc is defined %}
+/// {{ node.desc }}
+{% endif %}
 static constexpr uint32_t kNodeId_{{ node.name }} = {{ node.id }};
 {% endfor %}
 
@@ -31,6 +34,15 @@ static constexpr uint32_t kNodeCount = {{ nodes | length }};
 
 {% for node in nodes | default([]) %}
 static constexpr const char* kNodeName_{{ node.name }} = "{{ node.name }}";
+{% endfor %}
+
+// ============================================================================
+// Node Subscription Counts
+// ============================================================================
+
+{% for node in nodes | default([]) %}
+{% set subs = node.subscriptions | default([]) %}
+static constexpr uint32_t kNodeSubCount_{{ node.name }} = {{ subs | length }};
 {% endfor %}
 
 #endif  // {{ guard }}

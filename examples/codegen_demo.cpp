@@ -7,10 +7,15 @@
  * Showcases:
  *   1. Generated protocol messages (register, heartbeat, stream control)
  *   2. Generated sensor messages (temperature, alarm)
- *   3. Generated topology constants (node IDs, names)
- *   4. Event enum for dispatch/logging
+ *   3. Generated topology constants (node IDs, names, subscription counts)
+ *   4. Event enum for dispatch/logging (with Doxygen descriptions)
  *   5. Multi-node pub/sub with generated types
  *   6. Application/Instance model with generated messages via OspPost
+ *   7. Standalone enums (StreamAction, MediaType, AlarmSeverity, LogLevel)
+ *   8. Validate() -- field range constraint checking
+ *   9. Dump() -- debug-friendly struct printing
+ *  10. EventIdOf<T>() / EventMessage<E> -- compile-time event<->message binding
+ *  11. Subscription counts from topology
  */
 
 #include "osp/protocol_messages.hpp"
@@ -251,6 +256,115 @@ static void RunAppModelDemo() {
 }
 
 // ============================================================================
+// Part 4: New ospgen v2 features showcase
+// ============================================================================
+
+static void RunNewFeaturesDemo() {
+  OSP_LOG_INFO("demo", "--- Part 4: ospgen v2 features ---");
+
+  // --- 4a: Standalone enums (enum class, type-safe) ---
+  protocol::StreamAction action = protocol::StreamAction::kStart;
+  protocol::MediaType media = protocol::MediaType::kAv;
+  OSP_LOG_INFO("demo", "standalone enums: action=%u media=%u",
+               static_cast<unsigned>(action), static_cast<unsigned>(media));
+
+  sensor::AlarmSeverity severity = sensor::AlarmSeverity::kCritical;
+  sensor::LogLevel level = sensor::LogLevel::kWarning;
+  OSP_LOG_INFO("demo", "sensor enums: severity=%u log_level=%u",
+               static_cast<unsigned>(severity), static_cast<unsigned>(level));
+
+  // --- 4b: Validate() -- field range checking ---
+  protocol::RegisterRequest good_req{};
+  std::strncpy(good_req.device_id, "SENSOR-01", sizeof(good_req.device_id) - 1);
+  std::strncpy(good_req.ip, "10.0.0.1", sizeof(good_req.ip) - 1);
+  good_req.port = 8080;
+  OSP_LOG_INFO("demo", "validate(port=8080): %s",
+               good_req.Validate() ? "PASS" : "FAIL");
+
+  protocol::RegisterRequest bad_req{};
+  bad_req.port = 0;  // out of range [1, 65535]
+  OSP_LOG_INFO("demo", "validate(port=0): %s",
+               bad_req.Validate() ? "PASS" : "FAIL");
+
+  protocol::StreamCommand bad_cmd{};
+  bad_cmd.action = 5;  // out of range [0, 1]
+  OSP_LOG_INFO("demo", "validate(action=5): %s",
+               bad_cmd.Validate() ? "PASS" : "FAIL");
+
+  sensor::SensorData bad_sensor{};
+  bad_sensor.temp = 200.0f;  // out of range [-40.0, 125.0]
+  bad_sensor.humidity = 50.0f;
+  OSP_LOG_INFO("demo", "validate(temp=200): %s",
+               bad_sensor.Validate() ? "PASS" : "FAIL");
+
+  // --- 4c: Dump() -- debug printing ---
+  char buf[256];
+  good_req.Dump(buf, sizeof(buf));
+  OSP_LOG_INFO("demo", "dump: %s", buf);
+
+  protocol::HeartbeatMsg hb{};
+  hb.session_id = 0xBEEF;
+  hb.timestamp_us = 1234567890ULL;
+  hb.Dump(buf, sizeof(buf));
+  OSP_LOG_INFO("demo", "dump: %s", buf);
+
+  sensor::SensorAlarm alarm{};
+  alarm.sensor_id = 42;
+  alarm.code = sensor::kSensorAlarm;
+  alarm.value = 85.5f;
+  alarm.threshold = 80.0f;
+  alarm.Dump(buf, sizeof(buf));
+  OSP_LOG_INFO("demo", "dump: %s", buf);
+
+  // --- 4d: EventIdOf<T>() -- compile-time event<->message binding ---
+  static_assert(protocol::EventIdOf<protocol::RegisterRequest>() ==
+                    protocol::kProtocolRegister,
+                "RegisterRequest must bind to REGISTER event");
+  static_assert(protocol::EventIdOf<protocol::HeartbeatMsg>() ==
+                    protocol::kProtocolHeartbeat,
+                "HeartbeatMsg must bind to HEARTBEAT event");
+  static_assert(protocol::EventIdOf<protocol::StreamData>() ==
+                    protocol::kProtocolStreamData,
+                "StreamData must bind to STREAM_DATA event");
+
+  // Forward mapping: event -> type
+  using RegMsgType = protocol::EventMessage<protocol::kProtocolRegister>::type;
+  static_assert(std::is_same<RegMsgType, protocol::RegisterRequest>::value,
+                "event REGISTER must map to RegisterRequest");
+
+  // Reverse mapping at runtime
+  uint32_t hb_event = protocol::EventIdOf<protocol::HeartbeatMsg>();
+  OSP_LOG_INFO("demo", "EventIdOf<HeartbeatMsg>()=%u (expected=%u)",
+               hb_event, static_cast<unsigned>(protocol::kProtocolHeartbeat));
+
+  // --- 4e: Protocol version ---
+  OSP_LOG_INFO("demo", "protocol version=%u, sensor version=%u",
+               protocol::kVersion, sensor::kVersion);
+
+  // --- 4f: Topology subscription counts ---
+  OSP_LOG_INFO("demo", "subscription counts: %s=%u, %s=%u, %s=%u, %s=%u",
+               kNodeName_registrar, kNodeSubCount_registrar,
+               kNodeName_heartbeat_monitor, kNodeSubCount_heartbeat_monitor,
+               kNodeName_stream_controller, kNodeSubCount_stream_controller,
+               kNodeName_client, kNodeSubCount_client);
+
+  // --- 4g: sizeof assertions (compile-time, shown here for documentation) ---
+  OSP_LOG_INFO("demo",
+               "sizeof: RegisterRequest=%u RegisterResponse=%u "
+               "HeartbeatMsg=%u StreamCommand=%u StreamData=%u",
+               static_cast<unsigned>(sizeof(protocol::RegisterRequest)),
+               static_cast<unsigned>(sizeof(protocol::RegisterResponse)),
+               static_cast<unsigned>(sizeof(protocol::HeartbeatMsg)),
+               static_cast<unsigned>(sizeof(protocol::StreamCommand)),
+               static_cast<unsigned>(sizeof(protocol::StreamData)));
+
+  OSP_LOG_INFO("demo", "sizeof: SensorData=%u SystemLog=%u SensorAlarm=%u",
+               static_cast<unsigned>(sizeof(sensor::SensorData)),
+               static_cast<unsigned>(sizeof(sensor::SystemLog)),
+               static_cast<unsigned>(sizeof(sensor::SensorAlarm)));
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -262,6 +376,7 @@ int main() {
   RunProtocolDemo();
   RunSensorDemo();
   RunAppModelDemo();
+  RunNewFeaturesDemo();
 
   OSP_LOG_INFO("demo", "=== all demos complete ===");
   return 0;

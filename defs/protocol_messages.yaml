@@ -4,47 +4,90 @@
 # Usage: python3 tools/ospgen.py -i defs/protocol_messages.yaml -o generated/osp/protocol_messages.hpp
 
 namespace: protocol
+version: 1
+byte_order: native    # native | network (generates ToNetworkOrder/FromNetworkOrder)
 includes:
   - cstdint
   - cstring
 
-events:
-  - { name: REGISTER,     id: 1 }
-  - { name: REGISTER_ACK, id: 2 }
-  - { name: HEARTBEAT,    id: 3 }
-  - { name: STREAM_START, id: 4 }
-  - { name: STREAM_STOP,  id: 5 }
-  - { name: STREAM_DATA,  id: 6 }
-  - { name: DISCONNECT,   id: 7 }
-  - { name: ERROR,        id: 8 }
+# --------------------------------------------------------------------------
+# Standalone enums (P0: type-safe enum class)
+# --------------------------------------------------------------------------
+enums:
+  - name: StreamAction
+    desc: "Stream control action"
+    type: uint8_t
+    entries:
+      - { name: STOP,  value: 0, desc: "Stop streaming" }
+      - { name: START, value: 1, desc: "Start streaming" }
 
+  - name: MediaType
+    desc: "Media type identifier"
+    type: uint8_t
+    entries:
+      - { name: NONE,  value: 0 }
+      - { name: VIDEO, value: 1, desc: "Video only" }
+      - { name: AUDIO, value: 2, desc: "Audio only" }
+      - { name: AV,    value: 3, desc: "Audio + Video" }
+
+# --------------------------------------------------------------------------
+# Events (enum uint32_t, kPrefixName style)
+# --------------------------------------------------------------------------
+events:
+  - { name: REGISTER,     id: 1, desc: "Device registration request" }
+  - { name: REGISTER_ACK, id: 2, desc: "Device registration acknowledgement" }
+  - { name: HEARTBEAT,    id: 3, desc: "Keepalive heartbeat" }
+  - { name: STREAM_START, id: 4, desc: "Start media stream" }
+  - { name: STREAM_STOP,  id: 5, desc: "Stop media stream" }
+  - { name: STREAM_DATA,  id: 6, desc: "Media stream data payload" }
+  - { name: DISCONNECT,   id: 7, desc: "Graceful disconnect" }
+  - { name: ERROR,        id: 8, desc: "Error notification" }
+
+# --------------------------------------------------------------------------
+# Messages
+# --------------------------------------------------------------------------
 messages:
   - name: RegisterRequest
+    desc: "Device registration request sent by client"
+    event: REGISTER
+    expected_size: 50
     fields:
-      - { name: device_id, type: "char[32]" }
-      - { name: ip,        type: "char[16]" }
-      - { name: port,      type: uint16_t }
+      - { name: device_id, type: "char[32]", desc: "Unique device identifier" }
+      - { name: ip,        type: "char[16]", desc: "Device IP address string" }
+      - { name: port,      type: uint16_t,   desc: "Listening port number", range: [1, 65535] }
 
   - name: RegisterResponse
+    desc: "Registration acknowledgement from server"
+    event: REGISTER_ACK
+    expected_size: 40
     fields:
-      - { name: device_id,  type: "char[32]" }
-      - { name: result,     type: uint8_t }
-      - { name: session_id, type: uint32_t }
+      - { name: device_id,  type: "char[32]", desc: "Echoed device identifier" }
+      - { name: result,     type: uint8_t,    desc: "0=success, non-zero=error code" }
+      - { name: session_id, type: uint32_t,   desc: "Assigned session identifier" }
 
   - name: HeartbeatMsg
+    desc: "Keepalive heartbeat message"
+    event: HEARTBEAT
+    expected_size: 16
     fields:
-      - { name: session_id,   type: uint32_t }
-      - { name: timestamp_us, type: uint64_t }
+      - { name: session_id,   type: uint32_t, desc: "Session identifier" }
+      - { name: timestamp_us, type: uint64_t, desc: "Monotonic timestamp in microseconds" }
 
   - name: StreamCommand
+    desc: "Stream start/stop control command"
+    event: STREAM_START
+    expected_size: 8
     fields:
-      - { name: session_id, type: uint32_t }
-      - { name: action,     type: uint8_t }
-      - { name: media_type, type: uint8_t }
+      - { name: session_id, type: uint32_t, desc: "Session identifier" }
+      - { name: action,     type: uint8_t,  desc: "0=STOP, 1=START", range: [0, 1] }
+      - { name: media_type, type: uint8_t,  desc: "Media type (see MediaType enum)" }
 
   - name: StreamData
+    desc: "Media stream data payload"
+    event: STREAM_DATA
+    expected_size: 268
     fields:
-      - { name: session_id,   type: uint32_t }
-      - { name: seq,          type: uint32_t }
-      - { name: payload_size, type: uint16_t }
-      - { name: data,         type: "uint8_t[256]" }
+      - { name: session_id,   type: uint32_t,      desc: "Session identifier" }
+      - { name: seq,          type: uint32_t,       desc: "Sequence number" }
+      - { name: payload_size, type: uint16_t,       desc: "Actual payload bytes in data[]" }
+      - { name: data,         type: "uint8_t[256]", desc: "Raw media payload" }

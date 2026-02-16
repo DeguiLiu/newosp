@@ -4,30 +4,67 @@
 # Usage: python3 tools/ospgen.py -i defs/sensor_messages.yaml -o generated/osp/sensor_messages.hpp
 
 namespace: sensor
+version: 1
+byte_order: native
 includes:
   - cstdint
   - cstring
 
-events:
-  - { name: TEMPERATURE_UPDATE, id: 1 }
-  - { name: HUMIDITY_UPDATE,    id: 2 }
-  - { name: ALARM,              id: 3 }
-  - { name: CALIBRATE,          id: 4 }
+# --------------------------------------------------------------------------
+# Standalone enums
+# --------------------------------------------------------------------------
+enums:
+  - name: AlarmSeverity
+    desc: "Alarm severity level"
+    type: uint8_t
+    entries:
+      - { name: INFO,     value: 0, desc: "Informational" }
+      - { name: WARNING,  value: 1, desc: "Warning threshold crossed" }
+      - { name: CRITICAL, value: 2, desc: "Critical, requires immediate action" }
 
+  - name: LogLevel
+    desc: "System log severity"
+    type: uint8_t
+    entries:
+      - { name: DEBUG,   value: 0 }
+      - { name: INFO,    value: 1 }
+      - { name: WARNING, value: 2 }
+      - { name: ERROR,   value: 3 }
+
+# --------------------------------------------------------------------------
+# Events
+# --------------------------------------------------------------------------
+events:
+  - { name: TEMPERATURE_UPDATE, id: 1, desc: "Temperature sensor reading update" }
+  - { name: HUMIDITY_UPDATE,    id: 2, desc: "Humidity sensor reading update" }
+  - { name: ALARM,              id: 3, desc: "Sensor alarm triggered" }
+  - { name: CALIBRATE,          id: 4, desc: "Calibration command" }
+
+# --------------------------------------------------------------------------
+# Messages
+# --------------------------------------------------------------------------
 messages:
   - name: SensorData
+    desc: "Periodic sensor reading (temperature + humidity)"
+    event: TEMPERATURE_UPDATE
+    expected_size: 8
     fields:
-      - { name: temp,     type: float }
-      - { name: humidity, type: float }
+      - { name: temp,     type: float, desc: "Temperature in Celsius", range: [-40.0, 125.0] }
+      - { name: humidity, type: float, desc: "Relative humidity percentage", range: [0.0, 100.0] }
 
   - name: SystemLog
+    desc: "System log entry"
+    expected_size: 65
     fields:
-      - { name: message, type: "char[64]" }
-      - { name: level,   type: uint8_t }
+      - { name: message, type: "char[64]", desc: "Log message string" }
+      - { name: level,   type: uint8_t,    desc: "Log level (see LogLevel enum)", range: [0, 3] }
 
   - name: SensorAlarm
+    desc: "Sensor alarm notification"
+    event: ALARM
+    expected_size: 16
     fields:
-      - { name: sensor_id, type: uint16_t }
-      - { name: code,      type: uint32_t }
-      - { name: value,     type: float }
-      - { name: threshold, type: float }
+      - { name: sensor_id, type: uint16_t, desc: "Sensor hardware ID" }
+      - { name: code,      type: uint32_t, desc: "Alarm event code" }
+      - { name: value,     type: float,    desc: "Current sensor reading" }
+      - { name: threshold, type: float,    desc: "Alarm threshold that was crossed" }

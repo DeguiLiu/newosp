@@ -2,13 +2,17 @@
 //
 // handlers.hpp -- Protocol handlers for streaming protocol demo.
 //
+// Uses ospgen-generated message types (protocol_messages.hpp) and
+// topology constants (topology.hpp) instead of hand-written structs.
+//
 // Server-side handlers use StaticNode (compile-time dispatch, inlinable).
 // Client uses regular Node (dynamic callback, also timer context pointer).
 
 #ifndef OSP_EXAMPLES_STREAMING_PROTOCOL_HANDLERS_HPP_
 #define OSP_EXAMPLES_STREAMING_PROTOCOL_HANDLERS_HPP_
 
-#include "messages.hpp"
+#include "osp/protocol_messages.hpp"
+#include "osp/topology.hpp"
 
 #include "osp/bus.hpp"
 #include "osp/log.hpp"
@@ -18,6 +22,12 @@
 
 #include <cstdint>
 #include <cstring>
+
+// Payload type alias from ospgen-generated variant
+using Payload = protocol::ProtocolPayload;
+
+// Session ID for this demo
+static constexpr uint32_t kDemoSessionId = 0x1001;
 
 // ============================================================================
 // Protocol Statistics
@@ -29,16 +39,6 @@ struct ProtocolState {
   uint32_t stream_count = 0;
   uint32_t error_count = 0;
 };
-
-// ============================================================================
-// Node IDs
-// ============================================================================
-
-static constexpr uint32_t kRegistrarId = 1;
-static constexpr uint32_t kHeartbeatId = 2;
-static constexpr uint32_t kStreamCtrlId = 3;
-static constexpr uint32_t kClientId = 10;
-static constexpr uint32_t kDemoSessionId = 0x1001;
 
 // ============================================================================
 // StaticNode Handler structs (compile-time dispatch, zero overhead)
@@ -55,16 +55,26 @@ struct RegistrarHandler {
   ProtocolState* state;
   osp::AsyncBus<Payload>* bus;
 
-  void operator()(const RegisterRequest& req,
+  void operator()(const protocol::RegisterRequest& req,
                   const osp::MessageHeader& /*h*/) {
-    OSP_LOG_INFO("Registrar", "device %s from %s:%u", req.device_id,
-                 req.ip, static_cast<unsigned>(req.port));
-    RegisterResponse resp{};
+    // Validate incoming request (ospgen-generated range constraints)
+    if (!req.Validate()) {
+      OSP_LOG_WARN("Registrar", "rejected: port out of range [1,65535]");
+      ++state->error_count;
+      return;
+    }
+
+    // Debug dump (ospgen-generated snprintf)
+    char dump[256];
+    req.Dump(dump, sizeof(dump));
+    OSP_LOG_INFO("Registrar", "recv: %s", dump);
+
+    protocol::RegisterResponse resp{};
     std::strncpy(resp.device_id, req.device_id,
                  sizeof(resp.device_id) - 1);
     resp.result = 0;
     resp.session_id = kDemoSessionId;
-    bus->Publish(Payload(resp), kRegistrarId);
+    bus->Publish(Payload(resp), kNodeId_registrar);
     ++state->registered_count;
   }
 
@@ -78,7 +88,7 @@ struct RegistrarHandler {
 struct HeartbeatHandler {
   ProtocolState* state;
 
-  void operator()(const HeartbeatMsg& hb,
+  void operator()(const protocol::HeartbeatMsg& hb,
                   const osp::MessageHeader& /*h*/) {
     uint64_t age_us = osp::SteadyNowUs() - hb.timestamp_us;
     if (age_us > 500000) {
@@ -101,22 +111,43 @@ struct HeartbeatHandler {
 struct StreamHandler {
   ProtocolState* state;
 
-  void operator()(const StreamCommand& cmd,
+  void operator()(const protocol::StreamCommand& cmd,
                   const osp::MessageHeader& /*h*/) {
-    const char* action = (cmd.action == 1) ? "START" : "STOP";
-    const char* media = (cmd.media_type == 0)   ? "video"
-                        : (cmd.media_type == 1) ? "audio"
-                                                : "A/V";
+    // Validate action range (ospgen-generated: [0,1])
+    if (!cmd.Validate()) {
+      OSP_LOG_WARN("StreamCtrl", "rejected: action out of range");
+      ++state->error_count;
+      return;
+    }
+
+    // Type-safe comparison via ospgen-generated standalone enums
+    const char* action =
+        (cmd.action ==
+         static_cast<uint8_t>(protocol::StreamAction::kStart))
+            ? "START"
+            : "STOP";
+    const char* media =
+        (cmd.media_type ==
+         static_cast<uint8_t>(protocol::MediaType::kVideo))
+            ? "video"
+        : (cmd.media_type ==
+           static_cast<uint8_t>(protocol::MediaType::kAudio))
+            ? "audio"
+        : (cmd.media_type ==
+           static_cast<uint8_t>(protocol::MediaType::kAv))
+            ? "A/V"
+            : "none";
     OSP_LOG_INFO("StreamCtrl", "session 0x%X %s %s",
                  cmd.session_id, action, media);
     ++state->stream_count;
   }
 
-  void operator()(const StreamData& sd,
+  void operator()(const protocol::StreamData& sd,
                   const osp::MessageHeader& /*h*/) {
-    OSP_LOG_DEBUG("StreamCtrl", "session 0x%X seq=%u size=%u",
-                  sd.session_id, sd.seq,
-                  static_cast<unsigned>(sd.payload_size));
+    // Debug dump (ospgen-generated)
+    char dump[256];
+    sd.Dump(dump, sizeof(dump));
+    OSP_LOG_DEBUG("StreamCtrl", "%s", dump);
     ++state->stream_count;
   }
 
@@ -138,7 +169,7 @@ using StreamCtrlNode = osp::StaticNode<Payload, StreamHandler>;
 
 inline void HeartbeatTimerCb(void* ctx) {
   auto* node = static_cast<osp::Node<Payload>*>(ctx);
-  HeartbeatMsg hb{};
+  protocol::HeartbeatMsg hb{};
   hb.session_id = kDemoSessionId;
   hb.timestamp_us = osp::SteadyNowUs();
   node->PublishWithPriority(hb, osp::MessagePriority::kMedium);
@@ -149,12 +180,12 @@ inline void HeartbeatTimerCb(void* ctx) {
 // ============================================================================
 
 inline void SetupClient(osp::Node<Payload>& client) {
-  client.Subscribe<RegisterResponse>(
-      [](const RegisterResponse& resp, const osp::MessageHeader&) {
-        OSP_LOG_INFO("Client",
-                     "registered device %s, session 0x%X, result %u",
-                     resp.device_id, resp.session_id,
-                     static_cast<unsigned>(resp.result));
+  client.Subscribe<protocol::RegisterResponse>(
+      [](const protocol::RegisterResponse& resp, const osp::MessageHeader&) {
+        // Use Dump() for structured debug output
+        char dump[256];
+        resp.Dump(dump, sizeof(dump));
+        OSP_LOG_INFO("Client", "registered: %s", dump);
       });
 }
 
