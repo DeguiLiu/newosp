@@ -24,12 +24,15 @@
 
 /**
  * @file shell.hpp
- * @brief Header-only remote debug shell with telnet access and command
- *        registration.
+ * @brief Header-only debug shell with pluggable I/O backends.
  *
- * Provides a lightweight telnet server using raw POSIX sockets, a global
- * command registry with auto-registration macros, and in-place command line
- * parsing.  Designed for embedded ARM-Linux diagnostics.
+ * Provides a global command registry, auto-registration macros, in-place
+ * command line parsing, and a default TCP telnet backend (DebugShell).
+ * Additional backends (ConsoleShell, UartShell) are in separate headers.
+ *
+ * The session I/O is abstracted via function pointers (read_fn / write_fn)
+ * so that all backends share the same command dispatch, tab completion,
+ * and Printf routing.
  *
  * Compatible with -fno-exceptions -fno-rtti, C++14/17.
  */
@@ -50,8 +53,10 @@
 #include <thread>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <termios.h>
 #include <unistd.h>
 
 namespace osp {
@@ -71,7 +76,7 @@ struct ShellCmd {
 };
 
 // ============================================================================
-// Forward declaration for DebugShell::Session (needed by detail)
+// Forward declarations
 // ============================================================================
 
 class DebugShell;
@@ -79,22 +84,82 @@ class DebugShell;
 namespace detail {
 
 // ============================================================================
-// Thread-local current session pointer (for Printf routing)
+// I/O function pointer types
 // ============================================================================
 
-/// @brief Session type used internally by DebugShell.
+/// @brief Write function: ssize_t write(int fd, const void* buf, size_t len).
+using ShellWriteFn = ssize_t (*)(int fd, const void* buf, size_t len);
+
+/// @brief Read function: ssize_t read(int fd, void* buf, size_t len).
+using ShellReadFn = ssize_t (*)(int fd, void* buf, size_t len);
+
+// ============================================================================
+// Built-in I/O backends
+// ============================================================================
+
+/// @brief TCP backend: send() with MSG_NOSIGNAL.
+inline ssize_t ShellTcpWrite(int fd, const void* buf, size_t len) {
+  return ::send(fd, buf, len, MSG_NOSIGNAL);
+}
+
+/// @brief TCP backend: recv().
+inline ssize_t ShellTcpRead(int fd, void* buf, size_t len) {
+  return ::recv(fd, buf, len, 0);
+}
+
+/// @brief POSIX backend: write() for stdin/stdout/UART.
+inline ssize_t ShellPosixWrite(int fd, const void* buf, size_t len) {
+  return ::write(fd, buf, len);
+}
+
+/// @brief POSIX backend: read() for stdin/UART.
+inline ssize_t ShellPosixRead(int fd, void* buf, size_t len) {
+  return ::read(fd, buf, len);
+}
+
+// ============================================================================
+// ShellSession - Backend-agnostic session state
+// ============================================================================
+
+/// @brief Session state used by all shell backends.
 struct ShellSession {
-  int sock_fd = -1;
+  int read_fd = -1;             ///< File descriptor for reading input.
+  int write_fd = -1;            ///< File descriptor for writing output.
   std::thread thread;
   char line_buf[128] = {};
   uint32_t line_pos = 0;
   std::atomic<bool> active{false};
+
+  ShellWriteFn write_fn = nullptr;  ///< Backend-specific write function.
+  ShellReadFn read_fn = nullptr;    ///< Backend-specific read function.
+  bool telnet_mode = false;         ///< True for TCP (handle \\r\\n peek).
 };
 
 /// @brief Returns a reference to the thread-local current session pointer.
 inline ShellSession*& CurrentSession() noexcept {
   static thread_local ShellSession* s = nullptr;
   return s;
+}
+
+// ============================================================================
+// Session I/O helpers
+// ============================================================================
+
+/// @brief Write a NUL-terminated string to a session.
+inline void ShellSessionWrite(ShellSession& s, const char* str) {
+  if (s.write_fn != nullptr && str != nullptr) {
+    const size_t len = std::strlen(str);
+    if (len > 0) {
+      (void)s.write_fn(s.write_fd, str, len);
+    }
+  }
+}
+
+/// @brief Write exactly @p len bytes to a session.
+inline void ShellSessionWriteN(ShellSession& s, const char* buf, size_t len) {
+  if (s.write_fn != nullptr && len > 0) {
+    (void)s.write_fn(s.write_fd, buf, len);
+  }
 }
 
 // ============================================================================
@@ -330,6 +395,163 @@ inline int ShellSplit(char* cmd,
   return argc;
 }
 
+// ============================================================================
+// Shared session logic - command execution and interactive loop
+// ============================================================================
+
+/**
+ * @brief Parse and dispatch the current line buffer of a session.
+ *
+ * Called by all shell backends. Uses GlobalCmdRegistry for command lookup.
+ */
+inline void ShellExecuteLine(ShellSession& s) {
+  char* argv[kMaxArgs] = {};
+  int argc = ShellSplit(s.line_buf, s.line_pos, argv);
+
+  if (argc == 0) {
+    return;
+  }
+
+  const ShellCmd* cmd = GlobalCmdRegistry::Instance().Find(argv[0]);
+
+  if (cmd != nullptr) {
+    // Set the thread-local session pointer so Printf() works.
+    CurrentSession() = &s;
+    cmd->func(argc, argv);
+    CurrentSession() = nullptr;
+  } else {
+    char msg[160];
+    int n = std::snprintf(msg, sizeof(msg),
+                          "unknown command: %s\r\n", argv[0]);
+    if (n > 0) {
+      ShellSessionWriteN(s, msg, static_cast<size_t>(n));
+    }
+  }
+}
+
+/**
+ * @brief Interactive session loop shared by all backends.
+ *
+ * Reads characters one at a time from the session's read_fn, handles
+ * editing (backspace, Ctrl+C), tab completion, and command dispatch.
+ *
+ * @param s       Session with configured read_fn / write_fn.
+ * @param running Atomic flag; loop exits when set to false.
+ * @param prompt  Prompt string to display.
+ */
+inline void ShellRunSession(ShellSession& s,
+                            std::atomic<bool>& running,
+                            const char* prompt) {
+  ShellSessionWrite(s, prompt);
+
+  while (running.load(std::memory_order_relaxed) &&
+         s.active.load(std::memory_order_acquire)) {
+    char ch;
+    ssize_t n = s.read_fn(s.read_fd, &ch, 1);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (n == 0) {
+      break;
+    }
+
+    if (ch == 0x03) {
+      // Ctrl+C -- close session.
+      ShellSessionWrite(s, "\r\nBye.\r\n");
+      break;
+    }
+
+    if (ch == 0x7F || ch == 0x08) {
+      // Backspace.
+      if (s.line_pos > 0) {
+        --s.line_pos;
+        ShellSessionWrite(s, "\b \b");
+      }
+      continue;
+    }
+
+    if (ch == '\t') {
+      // Tab -- auto-complete.
+      s.line_buf[s.line_pos] = '\0';
+      char completion[64] = {};
+      uint32_t matches = GlobalCmdRegistry::Instance().AutoComplete(
+          s.line_buf, completion, sizeof(completion));
+
+      if (matches == 1) {
+        // Clear the current line on terminal and replace.
+        for (uint32_t i = 0; i < s.line_pos; ++i) {
+          ShellSessionWrite(s, "\b \b");
+        }
+        uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
+        if (comp_len >= sizeof(s.line_buf) - 1) {
+          comp_len = sizeof(s.line_buf) - 2;
+        }
+        std::memcpy(s.line_buf, completion, comp_len);
+        s.line_buf[comp_len] = ' ';
+        s.line_pos = comp_len + 1;
+        s.line_buf[s.line_pos] = '\0';
+        ShellSessionWriteN(s, s.line_buf, s.line_pos);
+      } else if (matches > 1) {
+        // Show all matches.
+        ShellSessionWrite(s, "\r\n");
+        GlobalCmdRegistry::Instance().ForEach(
+            [&s](const ShellCmd& cmd) {
+              if (std::strncmp(cmd.name, s.line_buf,
+                               s.line_pos) == 0) {
+                ShellSessionWrite(s, cmd.name);
+                ShellSessionWrite(s, "  ");
+              }
+            });
+        ShellSessionWrite(s, "\r\n");
+        // Re-display prompt and current input.
+        ShellSessionWrite(s, prompt);
+        // Fill with the longest common prefix.
+        uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
+        if (comp_len >= sizeof(s.line_buf) - 1) {
+          comp_len = sizeof(s.line_buf) - 2;
+        }
+        std::memcpy(s.line_buf, completion, comp_len);
+        s.line_pos = comp_len;
+        s.line_buf[s.line_pos] = '\0';
+        ShellSessionWriteN(s, s.line_buf, s.line_pos);
+      }
+      continue;
+    }
+
+    if (ch == '\r' || ch == '\n') {
+      // Enter pressed -- execute the line.
+      ShellSessionWrite(s, "\r\n");
+
+      // Telnet sends \r\n; peek-and-consume the trailing byte.
+      if (s.telnet_mode && ch == '\r') {
+        char next;
+        ssize_t peek = ::recv(s.read_fd, &next, 1, MSG_PEEK);
+        if (peek == 1 && (next == '\n' || next == '\0')) {
+          (void)::recv(s.read_fd, &next, 1, 0);  // consume it
+        }
+      }
+
+      s.line_buf[s.line_pos] = '\0';
+      if (s.line_pos > 0) {
+        ShellExecuteLine(s);
+      }
+      s.line_pos = 0;
+      ShellSessionWrite(s, prompt);
+      continue;
+    }
+
+    // Regular printable character.
+    if (s.line_pos < sizeof(s.line_buf) - 1) {
+      s.line_buf[s.line_pos++] = ch;
+      // Echo the character back.
+      ShellSessionWriteN(s, &ch, 1);
+    }
+  }
+
+  s.active.store(false, std::memory_order_release);
+}
+
 }  // namespace detail
 
 // ============================================================================
@@ -378,8 +600,8 @@ inline int ShellBuiltinHelp(int /*argc*/, char* /*argv*/[]) {
                           cmd.name, cmd.desc ? cmd.desc : "");
     if (n > 0) {
       ShellSession*& sess = CurrentSession();
-      if (sess != nullptr && sess->sock_fd >= 0) {
-        (void)::send(sess->sock_fd, buf, static_cast<size_t>(n), MSG_NOSIGNAL);
+      if (sess != nullptr && sess->write_fn != nullptr) {
+        (void)sess->write_fn(sess->write_fd, buf, static_cast<size_t>(n));
       }
     }
   });
@@ -402,7 +624,50 @@ static const bool kHelpRegistered OSP_UNUSED = RegisterHelpOnce();
 }  // namespace detail
 
 // ============================================================================
-// DebugShell - Telnet debug server
+// ShellPrintf - Backend-agnostic printf into the current session
+// ============================================================================
+
+/**
+ * @brief Printf into the current session's output.
+ *
+ * May only be called from within a command callback. Uses a thread-local
+ * session pointer set by the shell before command dispatch. Works with
+ * any backend (TCP, stdin, UART) via the session's write_fn.
+ *
+ * @param fmt printf-style format string.
+ * @return Number of bytes written, or -1 on error.
+ */
+inline int ShellPrintf(const char* fmt, ...)
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+
+inline int ShellPrintf(const char* fmt, ...) {
+  detail::ShellSession* sess = detail::CurrentSession();
+  if (sess == nullptr || sess->write_fn == nullptr) {
+    return -1;
+  }
+
+  char buf[256];
+  va_list args;
+  va_start(args, fmt);
+  int n = std::vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+
+  if (n > 0) {
+    int to_send = (n < static_cast<int>(sizeof(buf)))
+                      ? n
+                      : static_cast<int>(sizeof(buf) - 1);
+    ssize_t sent = sess->write_fn(sess->write_fd, buf,
+                                  static_cast<size_t>(to_send));
+    return static_cast<int>(sent);
+  }
+  return -1;
+}
+
+// ============================================================================
+// DebugShell - TCP telnet debug server (default backend)
 // ============================================================================
 
 /**
@@ -504,11 +769,8 @@ class DebugShell final {
   /// @brief Per-session interactive loop.
   inline void SessionLoop(Session& s);
 
-  /// @brief Parse and dispatch the current line buffer.
-  inline void ExecuteLine(Session& s);
-
-  /// @brief Send a string to a session socket.
-  static inline void SendStr(int fd, const char* str) {
+  /// @brief Send a string to a TCP socket directly (for pre-session use).
+  static inline void TcpSendStr(int fd, const char* str) {
     if (fd >= 0 && str != nullptr) {
       const size_t len = std::strlen(str);
       if (len > 0) {
@@ -585,9 +847,10 @@ inline void DebugShell::Stop() {
   // Close all active session sockets to unblock their recv().
   if (sessions_ != nullptr) {
     for (uint32_t i = 0; i < cfg_.max_connections; ++i) {
-      if (sessions_[i].sock_fd >= 0) {
-        ::close(sessions_[i].sock_fd);
-        sessions_[i].sock_fd = -1;
+      if (sessions_[i].read_fd >= 0) {
+        ::close(sessions_[i].read_fd);
+        sessions_[i].read_fd = -1;
+        sessions_[i].write_fd = -1;
       }
     }
   }
@@ -636,7 +899,11 @@ inline void DebugShell::AcceptLoop() {
         if (sessions_[i].thread.joinable()) {
           sessions_[i].thread.join();
         }
-        sessions_[i].sock_fd = client_fd;
+        sessions_[i].read_fd = client_fd;
+        sessions_[i].write_fd = client_fd;
+        sessions_[i].write_fn = detail::ShellTcpWrite;
+        sessions_[i].read_fn = detail::ShellTcpRead;
+        sessions_[i].telnet_mode = true;
         sessions_[i].line_pos = 0;
         sessions_[i].active.store(true, std::memory_order_release);
         sessions_[i].thread =
@@ -656,157 +923,20 @@ inline void DebugShell::AcceptLoop() {
 }
 
 inline void DebugShell::SessionLoop(Session& s) {
-  // Send initial prompt.
-  SendStr(s.sock_fd, cfg_.prompt);
+  // Delegate to the shared session loop.
+  detail::ShellRunSession(s, running_, cfg_.prompt);
 
-  while (running_.load(std::memory_order_relaxed) &&
-         s.active.load(std::memory_order_acquire)) {
-    char ch;
-    ssize_t n = ::recv(s.sock_fd, &ch, 1, 0);
-    if (n < 0) {
-      if (errno == EINTR) continue;
-      break;
-    }
-    if (n == 0) {
-      break;
-    }
-
-    if (ch == 0x03) {
-      // Ctrl+C -- close session.
-      const char* msg = "\r\nBye.\r\n";
-      SendStr(s.sock_fd, msg);
-      break;
-    }
-
-    if (ch == 0x7F || ch == 0x08) {
-      // Backspace.
-      if (s.line_pos > 0) {
-        --s.line_pos;
-        // Send backspace-space-backspace to erase on terminal.
-        const char bs[] = "\b \b";
-        (void)::send(s.sock_fd, bs, 3, MSG_NOSIGNAL);
-      }
-      continue;
-    }
-
-    if (ch == '\t') {
-      // Tab -- auto-complete.
-      s.line_buf[s.line_pos] = '\0';
-      char completion[64] = {};
-      uint32_t matches = detail::GlobalCmdRegistry::Instance().AutoComplete(
-          s.line_buf, completion, sizeof(completion));
-
-      if (matches == 1) {
-        // Clear the current line on terminal and replace.
-        // Send backspaces to erase current input.
-        for (uint32_t i = 0; i < s.line_pos; ++i) {
-          const char bs[] = "\b \b";
-          (void)::send(s.sock_fd, bs, 3, MSG_NOSIGNAL);
-        }
-        uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
-        if (comp_len >= sizeof(s.line_buf) - 1) {
-          comp_len = sizeof(s.line_buf) - 2;
-        }
-        std::memcpy(s.line_buf, completion, comp_len);
-        s.line_buf[comp_len] = ' ';
-        s.line_pos = comp_len + 1;
-        s.line_buf[s.line_pos] = '\0';
-        (void)::send(s.sock_fd, s.line_buf, s.line_pos, MSG_NOSIGNAL);
-      } else if (matches > 1) {
-        // Show all matches.
-        SendStr(s.sock_fd, "\r\n");
-        detail::GlobalCmdRegistry::Instance().ForEach(
-            [&](const ShellCmd& cmd) {
-              if (std::strncmp(cmd.name, s.line_buf,
-                               s.line_pos) == 0) {
-                SendStr(s.sock_fd, cmd.name);
-                SendStr(s.sock_fd, "  ");
-              }
-            });
-        SendStr(s.sock_fd, "\r\n");
-        // Re-display prompt and current input.
-        SendStr(s.sock_fd, cfg_.prompt);
-        // Fill with the longest common prefix.
-        uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
-        if (comp_len >= sizeof(s.line_buf) - 1) {
-          comp_len = sizeof(s.line_buf) - 2;
-        }
-        std::memcpy(s.line_buf, completion, comp_len);
-        s.line_pos = comp_len;
-        s.line_buf[s.line_pos] = '\0';
-        (void)::send(s.sock_fd, s.line_buf, s.line_pos, MSG_NOSIGNAL);
-      }
-      continue;
-    }
-
-    if (ch == '\r' || ch == '\n') {
-      // Enter pressed -- execute the line.
-      SendStr(s.sock_fd, "\r\n");
-
-      // Skip bare \n following \r (telnet sends \r\n).
-      if (ch == '\r') {
-        // Peek at the next byte; discard \n or \0.
-        char next;
-        ssize_t peek = ::recv(s.sock_fd, &next, 1, MSG_PEEK);
-        if (peek == 1 && (next == '\n' || next == '\0')) {
-          (void)::recv(s.sock_fd, &next, 1, 0);  // consume it
-        }
-      }
-
-      s.line_buf[s.line_pos] = '\0';
-      if (s.line_pos > 0) {
-        ExecuteLine(s);
-      }
-      s.line_pos = 0;
-      SendStr(s.sock_fd, cfg_.prompt);
-      continue;
-    }
-
-    // Regular printable character.
-    if (s.line_pos < sizeof(s.line_buf) - 1) {
-      s.line_buf[s.line_pos++] = ch;
-      // Echo the character back.
-      (void)::send(s.sock_fd, &ch, 1, MSG_NOSIGNAL);
-    }
-  }
-
-  // Cleanup session.
-  if (s.sock_fd >= 0) {
-    ::close(s.sock_fd);
-    s.sock_fd = -1;
-  }
-  s.active.store(false, std::memory_order_release);
-}
-
-inline void DebugShell::ExecuteLine(Session& s) {
-  char* argv[detail::kMaxArgs] = {};
-  int argc = detail::ShellSplit(s.line_buf, s.line_pos, argv);
-
-  if (argc == 0) {
-    return;
-  }
-
-  const ShellCmd* cmd =
-      detail::GlobalCmdRegistry::Instance().Find(argv[0]);
-
-  if (cmd != nullptr) {
-    // Set the thread-local session pointer so Printf() works.
-    detail::CurrentSession() = &s;
-    cmd->func(argc, argv);
-    detail::CurrentSession() = nullptr;
-  } else {
-    char msg[160];
-    int n = std::snprintf(msg, sizeof(msg),
-                          "unknown command: %s\r\n", argv[0]);
-    if (n > 0) {
-      (void)::send(s.sock_fd, msg, static_cast<size_t>(n), MSG_NOSIGNAL);
-    }
+  // TCP-specific cleanup: close socket.
+  if (s.read_fd >= 0) {
+    ::close(s.read_fd);
+    s.read_fd = -1;
+    s.write_fd = -1;
   }
 }
 
 inline int DebugShell::Printf(const char* fmt, ...) {
   detail::ShellSession* sess = detail::CurrentSession();
-  if (sess == nullptr || sess->sock_fd < 0) {
+  if (sess == nullptr || sess->write_fn == nullptr) {
     return -1;
   }
 
@@ -820,8 +950,333 @@ inline int DebugShell::Printf(const char* fmt, ...) {
     int to_send = (n < static_cast<int>(sizeof(buf)))
                       ? n
                       : static_cast<int>(sizeof(buf) - 1);
-    ssize_t sent = ::send(sess->sock_fd, buf, static_cast<size_t>(to_send),
-                          MSG_NOSIGNAL);
+    ssize_t sent = sess->write_fn(sess->write_fd, buf,
+                                  static_cast<size_t>(to_send));
+    return static_cast<int>(sent);
+  }
+  return -1;
+}
+
+// ============================================================================
+// ConsoleShell - stdin/stdout debug shell (no network required)
+// ============================================================================
+
+/**
+ * @brief Interactive debug shell using stdin/stdout.
+ *
+ * Designed for scenarios without network access: SSH into the device,
+ * early boot debugging, or CI automated testing via pipe.
+ *
+ * Typical usage:
+ * @code
+ *   osp::ConsoleShell::Config cfg;
+ *   osp::ConsoleShell shell(cfg);
+ *   shell.Start();   // spawns a shell thread
+ *   // ... application runs ...
+ *   shell.Stop();
+ * @endcode
+ *
+ * For testing, set cfg.read_fd / cfg.write_fd to pipe file descriptors.
+ */
+class ConsoleShell final {
+ public:
+  struct Config {
+    const char* prompt;   ///< Prompt string.
+    int read_fd;          ///< Override read fd (-1 = STDIN_FILENO).
+    int write_fd;         ///< Override write fd (-1 = STDOUT_FILENO).
+    bool raw_mode;        ///< Set termios raw mode (only for real stdin).
+
+    Config() noexcept
+        : prompt("osp> "), read_fd(-1), write_fd(-1), raw_mode(true) {}
+  };
+
+  explicit ConsoleShell(const Config& cfg = Config{}) : cfg_(cfg) {
+    detail::RegisterHelpOnce();
+  }
+
+  ~ConsoleShell() { Stop(); }
+
+  ConsoleShell(const ConsoleShell&) = delete;
+  ConsoleShell& operator=(const ConsoleShell&) = delete;
+
+  inline expected<void, ShellError> Start();
+  inline void Stop();
+
+  /// @brief Printf into the current session (delegates to ShellPrintf).
+  static inline int Printf(const char* fmt, ...)
+#if defined(__GNUC__) || defined(__clang__)
+      __attribute__((format(printf, 1, 2)))
+#endif
+      ;
+
+  bool IsRunning() const noexcept {
+    return running_.load(std::memory_order_relaxed);
+  }
+
+ private:
+  using Session = detail::ShellSession;
+
+  Config cfg_;
+  Session session_;
+  std::atomic<bool> running_{false};
+  struct termios orig_termios_{};
+  bool termios_saved_ = false;
+};
+
+// ----------------------------------------------------------------------------
+// ConsoleShell inline implementation
+// ----------------------------------------------------------------------------
+
+inline expected<void, ShellError> ConsoleShell::Start() {
+  if (running_.load(std::memory_order_acquire)) {
+    return expected<void, ShellError>::error(ShellError::kNotRunning);
+  }
+
+  const int rfd = (cfg_.read_fd >= 0) ? cfg_.read_fd : STDIN_FILENO;
+  const int wfd = (cfg_.write_fd >= 0) ? cfg_.write_fd : STDOUT_FILENO;
+
+  // Set terminal to raw mode if using real stdin.
+  if (cfg_.raw_mode && rfd == STDIN_FILENO && ::isatty(STDIN_FILENO)) {
+    if (::tcgetattr(STDIN_FILENO, &orig_termios_) == 0) {
+      struct termios raw = orig_termios_;
+      raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
+      raw.c_cc[VMIN] = 1;
+      raw.c_cc[VTIME] = 0;
+      ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+      termios_saved_ = true;
+    }
+  }
+
+  session_.read_fd = rfd;
+  session_.write_fd = wfd;
+  session_.write_fn = detail::ShellPosixWrite;
+  session_.read_fn = detail::ShellPosixRead;
+  session_.telnet_mode = false;
+  session_.line_pos = 0;
+
+  running_.store(true, std::memory_order_release);
+  session_.active.store(true, std::memory_order_release);
+  session_.thread = std::thread([this]() {
+    detail::ShellRunSession(session_, running_, cfg_.prompt);
+  });
+
+  return expected<void, ShellError>::success();
+}
+
+inline void ConsoleShell::Stop() {
+  if (!running_.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  running_.store(false, std::memory_order_release);
+  session_.active.store(false, std::memory_order_release);
+
+  // For pipe-based testing: close the read fd to unblock read().
+  // Do NOT close real stdin (fd 0).
+  if (cfg_.read_fd >= 0 && cfg_.read_fd != STDIN_FILENO) {
+    ::close(cfg_.read_fd);
+  }
+
+  if (session_.thread.joinable()) {
+    session_.thread.join();
+  }
+
+  // Restore terminal settings.
+  if (termios_saved_) {
+    ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios_);
+    termios_saved_ = false;
+  }
+}
+
+inline int ConsoleShell::Printf(const char* fmt, ...) {
+  detail::ShellSession* sess = detail::CurrentSession();
+  if (sess == nullptr || sess->write_fn == nullptr) {
+    return -1;
+  }
+
+  char buf[256];
+  va_list args;
+  va_start(args, fmt);
+  int n = std::vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+
+  if (n > 0) {
+    int to_send = (n < static_cast<int>(sizeof(buf)))
+                      ? n
+                      : static_cast<int>(sizeof(buf) - 1);
+    ssize_t sent = sess->write_fn(sess->write_fd, buf,
+                                  static_cast<size_t>(to_send));
+    return static_cast<int>(sent);
+  }
+  return -1;
+}
+
+// ============================================================================
+// UartShell - UART/serial debug shell
+// ============================================================================
+
+/**
+ * @brief Interactive debug shell over a UART/serial device.
+ *
+ * Opens a serial port via Linux termios, configures baud rate and raw mode,
+ * and runs the standard shell session loop over the serial line.
+ *
+ * Typical usage:
+ * @code
+ *   osp::UartShell::Config cfg;
+ *   cfg.device = "/dev/ttyS1";
+ *   cfg.baudrate = 115200;
+ *   osp::UartShell shell(cfg);
+ *   shell.Start();
+ *   // connect via minicom / picocom
+ *   shell.Stop();
+ * @endcode
+ *
+ * For testing, set cfg.override_fd to a PTY master fd.
+ */
+class UartShell final {
+ public:
+  struct Config {
+    const char* device;    ///< Serial device path.
+    uint32_t baudrate;     ///< Baud rate.
+    const char* prompt;    ///< Prompt string.
+    int override_fd;       ///< Override fd for testing (-1 = open device).
+
+    Config() noexcept
+        : device("/dev/ttyS0"), baudrate(115200),
+          prompt("osp> "), override_fd(-1) {}
+  };
+
+  explicit UartShell(const Config& cfg = Config{}) : cfg_(cfg) {
+    detail::RegisterHelpOnce();
+  }
+
+  ~UartShell() { Stop(); }
+
+  UartShell(const UartShell&) = delete;
+  UartShell& operator=(const UartShell&) = delete;
+
+  inline expected<void, ShellError> Start();
+  inline void Stop();
+
+  /// @brief Printf into the current session (delegates to ShellPrintf).
+  static inline int Printf(const char* fmt, ...)
+#if defined(__GNUC__) || defined(__clang__)
+      __attribute__((format(printf, 1, 2)))
+#endif
+      ;
+
+  bool IsRunning() const noexcept {
+    return running_.load(std::memory_order_relaxed);
+  }
+
+ private:
+  using Session = detail::ShellSession;
+
+  Config cfg_;
+  Session session_;
+  int uart_fd_ = -1;
+  bool owns_fd_ = false;
+  std::atomic<bool> running_{false};
+
+  static speed_t BaudToSpeed(uint32_t baud) noexcept {
+    switch (baud) {
+      case 9600:   return B9600;
+      case 19200:  return B19200;
+      case 38400:  return B38400;
+      case 57600:  return B57600;
+      case 115200: return B115200;
+      case 230400: return B230400;
+      case 460800: return B460800;
+      case 921600: return B921600;
+      default:     return B115200;
+    }
+  }
+};
+
+// ----------------------------------------------------------------------------
+// UartShell inline implementation
+// ----------------------------------------------------------------------------
+
+inline expected<void, ShellError> UartShell::Start() {
+  if (running_.load(std::memory_order_acquire)) {
+    return expected<void, ShellError>::error(ShellError::kNotRunning);
+  }
+
+  if (cfg_.override_fd >= 0) {
+    // Testing mode: use provided fd (e.g. PTY slave).
+    uart_fd_ = cfg_.override_fd;
+    owns_fd_ = false;
+  } else {
+    uart_fd_ = ::open(cfg_.device, O_RDWR | O_NOCTTY);
+    if (uart_fd_ < 0) {
+      return expected<void, ShellError>::error(ShellError::kBindFailed);
+    }
+    owns_fd_ = true;
+
+    struct termios tio{};
+    ::tcgetattr(uart_fd_, &tio);
+    ::cfmakeraw(&tio);
+    ::cfsetispeed(&tio, BaudToSpeed(cfg_.baudrate));
+    ::cfsetospeed(&tio, BaudToSpeed(cfg_.baudrate));
+    tio.c_cc[VMIN] = 1;
+    tio.c_cc[VTIME] = 0;
+    ::tcsetattr(uart_fd_, TCSAFLUSH, &tio);
+  }
+
+  session_.read_fd = uart_fd_;
+  session_.write_fd = uart_fd_;
+  session_.write_fn = detail::ShellPosixWrite;
+  session_.read_fn = detail::ShellPosixRead;
+  session_.telnet_mode = false;
+  session_.line_pos = 0;
+
+  running_.store(true, std::memory_order_release);
+  session_.active.store(true, std::memory_order_release);
+  session_.thread = std::thread([this]() {
+    detail::ShellRunSession(session_, running_, cfg_.prompt);
+  });
+
+  return expected<void, ShellError>::success();
+}
+
+inline void UartShell::Stop() {
+  if (!running_.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  running_.store(false, std::memory_order_release);
+  session_.active.store(false, std::memory_order_release);
+
+  // Close fd to unblock the read() in session loop.
+  if (uart_fd_ >= 0 && owns_fd_) {
+    ::close(uart_fd_);
+    uart_fd_ = -1;
+  }
+
+  if (session_.thread.joinable()) {
+    session_.thread.join();
+  }
+}
+
+inline int UartShell::Printf(const char* fmt, ...) {
+  detail::ShellSession* sess = detail::CurrentSession();
+  if (sess == nullptr || sess->write_fn == nullptr) {
+    return -1;
+  }
+
+  char buf[256];
+  va_list args;
+  va_start(args, fmt);
+  int n = std::vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+
+  if (n > 0) {
+    int to_send = (n < static_cast<int>(sizeof(buf)))
+                      ? n
+                      : static_cast<int>(sizeof(buf) - 1);
+    ssize_t sent = sess->write_fn(sess->write_fd, buf,
+                                  static_cast<size_t>(to_send));
     return static_cast<int>(sent);
   }
   return -1;

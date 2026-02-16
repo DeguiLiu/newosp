@@ -417,6 +417,24 @@ inline void RegisterQos(const QosType& profile,
       "osp_qos", +cmd, "Show QoS profile");
 }
 
+/// Register osp_app command (Application instance pool).
+/// Requires: osp/app.hpp included by caller.
+template <typename AppType>
+inline void RegisterApp(AppType& app) {
+  static AppType* s_app = &app;
+  static auto cmd = [](int /*argc*/, char* /*argv*/[]) -> int {
+    DebugShell::Printf("[osp_app] Application '%s' (id=%" PRIu16 ")\r\n",
+                       s_app->Name(), s_app->AppId());
+    DebugShell::Printf("  instances:    %" PRIu32 "\r\n",
+                       s_app->InstanceCount());
+    DebugShell::Printf("  pending_msgs: %" PRIu32 "\r\n",
+                       s_app->PendingMessages());
+    return 0;
+  };
+  osp::detail::GlobalCmdRegistry::Instance().Register(
+      "osp_app", +cmd, "Show application instance pool status");
+}
+
 // ============================================================================
 // Foundation Layer
 // ============================================================================

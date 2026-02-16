@@ -452,7 +452,12 @@ OSP_SHELL_CMD(cmd_retransmit, "Show channel corruption & retransmission stats");
 // Main
 // ============================================================================
 
-int main() {
+int main(int argc, char* argv[]) {
+  bool use_console = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--console") == 0) use_console = true;
+  }
+
   OSP_LOG_INFO("OTA_MAIN", "=== Serial OTA Demo ===");
   OSP_LOG_INFO("OTA_MAIN", "Components: StateMachine + BehaviorTree + "
                "DebugShell + TimerScheduler + AsyncBus + WorkerPool + "
@@ -502,14 +507,27 @@ int main() {
   // RAII cleanup for g_host pointer
   OSP_SCOPE_EXIT(g_host = nullptr);
 
-  // --- Start shell (osp::DebugShell) -----------------------------------------
-  osp::DebugShell::Config shell_cfg;
-  shell_cfg.port = kShellPort;
-  osp::DebugShell shell(shell_cfg);
+  // --- Start shell (osp::ConsoleShell or osp::DebugShell) --------------------
+  osp::ConsoleShell console_shell({});
+  osp::DebugShell::Config tcp_cfg;
+  tcp_cfg.port = kShellPort;
+  osp::DebugShell tcp_shell(tcp_cfg);
 
-  auto shell_result = shell.Start();
-  if (shell_result) {
-    OSP_LOG_INFO("OTA_MAIN", "Debug shell: telnet localhost %u", kShellPort);
+  bool shell_ok = false;
+  if (use_console) {
+    auto r = console_shell.Start();
+    shell_ok = r.has_value();
+    if (shell_ok) {
+      OSP_LOG_INFO("OTA_MAIN", "Console shell started (stdin/stdout)");
+    }
+  } else {
+    auto r = tcp_shell.Start();
+    shell_ok = r.has_value();
+    if (shell_ok) {
+      OSP_LOG_INFO("OTA_MAIN", "Debug shell: telnet localhost %u", kShellPort);
+    }
+  }
+  if (shell_ok) {
     OSP_LOG_INFO("OTA_MAIN", "  Commands: cmd_ota_status, cmd_serial_stats, "
                  "cmd_bus_stats, cmd_pool_stats, cmd_uart_fifo, cmd_retransmit, "
                  "cmd_flash_dump, cmd_flash_crc, cmd_timer_info");
@@ -659,15 +677,23 @@ int main() {
   OSP_LOG_INFO("OTA_MAIN", "=============================");
 
   // --- Shell interaction (keep alive briefly) --------------------------------
-  if (shell_result) {
-    OSP_LOG_INFO("OTA_MAIN", "Shell on port %u -- waiting 3s for inspection",
-                 kShellPort);
+  if (shell_ok) {
+    if (use_console) {
+      OSP_LOG_INFO("OTA_MAIN", "Console shell active -- waiting 3s for inspection");
+    } else {
+      OSP_LOG_INFO("OTA_MAIN", "Shell on port %u -- waiting 3s for inspection",
+                   kShellPort);
+    }
     std::this_thread::sleep_for(std::chrono::seconds(3));
   }
 
   // --- Shutdown (reverse order of start) ------------------------------------
   pool.Shutdown();
-  shell.Stop();
+  if (use_console) {
+    console_shell.Stop();
+  } else {
+    tcp_shell.Stop();
+  }
   OSP_LOG_INFO("OTA_MAIN", "Demo finished.");
   return 0;
 }
