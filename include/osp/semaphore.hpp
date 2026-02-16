@@ -36,15 +36,17 @@
 
 #include "osp/platform.hpp"
 
+#include <cstdint>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdint>
 #include <mutex>
 #include <thread>
 
 #if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
 #include <cerrno>
+
 #include <semaphore.h>
 #include <time.h>
 #endif
@@ -55,11 +57,7 @@ namespace osp {
 // SemaphoreError
 // ============================================================================
 
-enum class SemaphoreError : uint8_t {
-  kTimeout = 0,
-  kInterrupted,
-  kInvalid
-};
+enum class SemaphoreError : uint8_t { kTimeout = 0, kInterrupted, kInvalid };
 
 // ============================================================================
 // LightSemaphore
@@ -87,8 +85,7 @@ class LightSemaphore final {
    * @brief Construct with an initial count.
    * @param initial_count Starting value of the semaphore counter.
    */
-  explicit LightSemaphore(uint32_t initial_count = 0) noexcept
-      : count_(initial_count) {}
+  explicit LightSemaphore(uint32_t initial_count = 0) noexcept : count_(initial_count) {}
 
   ~LightSemaphore() = default;
 
@@ -147,9 +144,7 @@ class LightSemaphore final {
    */
   bool WaitFor(uint64_t timeout_us) noexcept {
     std::unique_lock<std::mutex> lk(mtx_);
-    bool result = cv_.wait_for(
-        lk, std::chrono::microseconds(timeout_us),
-        [this] { return count_ > 0U; });
+    bool result = cv_.wait_for(lk, std::chrono::microseconds(timeout_us), [this] { return count_ > 0U; });
     if (result) {
       --count_;
     }
@@ -195,8 +190,7 @@ class BinarySemaphore final {
    * @brief Construct with an initial count (clamped to 0 or 1).
    * @param initial_count Starting value, clamped to max 1.
    */
-  explicit BinarySemaphore(uint32_t initial_count = 0) noexcept
-      : count_(initial_count > 0U ? 1U : 0U) {}
+  explicit BinarySemaphore(uint32_t initial_count = 0) noexcept : count_(initial_count > 0U ? 1U : 0U) {}
 
   ~BinarySemaphore() = default;
 
@@ -255,9 +249,7 @@ class BinarySemaphore final {
    */
   bool WaitFor(uint64_t timeout_us) noexcept {
     std::unique_lock<std::mutex> lk(mtx_);
-    bool result = cv_.wait_for(
-        lk, std::chrono::microseconds(timeout_us),
-        [this] { return count_ > 0U; });
+    bool result = cv_.wait_for(lk, std::chrono::microseconds(timeout_us), [this] { return count_ > 0U; });
     if (result) {
       count_ = 0U;
     }
@@ -301,8 +293,7 @@ class PosixSemaphore final {
    * @brief Construct and initialize the POSIX semaphore.
    * @param initial_count Initial semaphore value.
    */
-  explicit PosixSemaphore(uint32_t initial_count = 0) noexcept
-      : valid_(false) {
+  explicit PosixSemaphore(uint32_t initial_count = 0) noexcept : valid_(false) {
     if (::sem_init(&sem_, 0, initial_count) == 0) {
       valid_ = true;
     }
@@ -419,8 +410,7 @@ class PosixSemaphore final {
    * expires. Less efficient than sem_timedwait but portable.
    */
   bool TimedWaitPoll(uint64_t timeout_us) noexcept {
-    auto deadline = std::chrono::steady_clock::now() +
-                    std::chrono::microseconds(timeout_us);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
 
     // Try immediately first
     if (::sem_trywait(&sem_) == 0) {

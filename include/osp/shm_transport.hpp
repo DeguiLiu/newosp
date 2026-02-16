@@ -37,20 +37,21 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
-#include <atomic>
 #include <cstdint>
 #include <cstring>
+
+#include <atomic>
 #include <utility>
 
 #if OSP_HAS_NETWORK
 
 #if defined(OSP_PLATFORM_LINUX)
+#include <chrono>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <unistd.h>
-#include <chrono>
 #include <thread>
+#include <unistd.h>
 #endif
 
 namespace osp {
@@ -75,15 +76,7 @@ namespace osp {
 // ShmError
 // ============================================================================
 
-enum class ShmError : uint8_t {
-  kCreateFailed = 0,
-  kOpenFailed,
-  kMapFailed,
-  kFull,
-  kEmpty,
-  kTimeout,
-  kClosed
-};
+enum class ShmError : uint8_t { kCreateFailed = 0, kOpenFailed, kMapFailed, kFull, kEmpty, kTimeout, kClosed };
 
 // Huge pages: reduces TLB misses for large shared memory segments (e.g. video
 // frames).  Requires system-level huge page reservation:
@@ -111,8 +104,7 @@ class SharedMemorySegment final {
   static constexpr mode_t kShmPermissions = 0600;  ///< Owner read/write
 
  public:
-  SharedMemorySegment() noexcept
-      : fd_(-1), addr_(nullptr), size_(0), name_{} {}
+  SharedMemorySegment() noexcept : fd_(-1), addr_(nullptr), size_(0), name_{} {}
 
   ~SharedMemorySegment() {
     if (addr_ != nullptr && addr_ != MAP_FAILED) {
@@ -129,10 +121,7 @@ class SharedMemorySegment final {
 
   // Movable
   SharedMemorySegment(SharedMemorySegment&& other) noexcept
-      : fd_(other.fd_),
-        addr_(other.addr_),
-        size_(other.size_),
-        name_(other.name_) {
+      : fd_(other.fd_), addr_(other.addr_), size_(other.size_), name_(other.name_) {
     other.fd_ = -1;
     other.addr_ = nullptr;
     other.size_ = 0;
@@ -169,16 +158,14 @@ class SharedMemorySegment final {
    * @param size Size in bytes.
    * @return expected with SharedMemorySegment on success.
    */
-  static expected<SharedMemorySegment, ShmError> Create(
-      const char* name, uint32_t size) noexcept {
+  static expected<SharedMemorySegment, ShmError> Create(const char* name, uint32_t size) noexcept {
     SharedMemorySegment seg;
     seg.name_.assign(TruncateToCapacity, "/osp_shm_");
 
     // Append user name
     uint32_t prefix_len = seg.name_.size();
     uint32_t name_len = 0;
-    while (name[name_len] != '\0' &&
-           (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
+    while (name[name_len] != '\0' && (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
       ++name_len;
     }
 
@@ -196,36 +183,30 @@ class SharedMemorySegment final {
 
     seg.fd_ = ::shm_open(seg.name_.c_str(), O_CREAT | O_RDWR | O_EXCL, kShmPermissions);
     if (seg.fd_ < 0) {
-      return expected<SharedMemorySegment, ShmError>::error(
-          ShmError::kCreateFailed);
+      return expected<SharedMemorySegment, ShmError>::error(ShmError::kCreateFailed);
     }
 
     if (::ftruncate(seg.fd_, size) != 0) {
       ::close(seg.fd_);
       ::shm_unlink(seg.name_.c_str());
-      return expected<SharedMemorySegment, ShmError>::error(
-          ShmError::kCreateFailed);
+      return expected<SharedMemorySegment, ShmError>::error(ShmError::kCreateFailed);
     }
 
-    seg.addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
-                       kShmMmapFlags, seg.fd_, 0);
+    seg.addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, kShmMmapFlags, seg.fd_, 0);
 #ifdef OSP_SHM_HUGE_PAGES
     if (seg.addr_ == MAP_FAILED) {
       // Huge page allocation failed -- fall back to normal pages.
-      seg.addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
-                         MAP_SHARED, seg.fd_, 0);
+      seg.addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, seg.fd_, 0);
     }
 #endif
     if (seg.addr_ == MAP_FAILED) {
       ::close(seg.fd_);
       ::shm_unlink(seg.name_.c_str());
-      return expected<SharedMemorySegment, ShmError>::error(
-          ShmError::kMapFailed);
+      return expected<SharedMemorySegment, ShmError>::error(ShmError::kMapFailed);
     }
 
     seg.size_ = size;
-    return expected<SharedMemorySegment, ShmError>::success(
-        static_cast<SharedMemorySegment&&>(seg));
+    return expected<SharedMemorySegment, ShmError>::success(static_cast<SharedMemorySegment&&>(seg));
   }
 
   /**
@@ -238,15 +219,13 @@ class SharedMemorySegment final {
    * @param size Size in bytes.
    * @return expected with SharedMemorySegment on success.
    */
-  static expected<SharedMemorySegment, ShmError> CreateOrReplace(
-      const char* name, uint32_t size) noexcept {
+  static expected<SharedMemorySegment, ShmError> CreateOrReplace(const char* name, uint32_t size) noexcept {
     // Build the full name to unlink any stale segment
     FixedString<OSP_SHM_CHANNEL_NAME_MAX> full_name;
     full_name.assign(TruncateToCapacity, "/osp_shm_");
     uint32_t prefix_len = full_name.size();
     uint32_t name_len = 0;
-    while (name[name_len] != '\0' &&
-           (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
+    while (name[name_len] != '\0' && (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
       ++name_len;
     }
     for (uint32_t i = 0; i < name_len; ++i) {
@@ -271,16 +250,14 @@ class SharedMemorySegment final {
    * @param name Segment name (will be prefixed with /osp_shm_).
    * @return expected with SharedMemorySegment on success.
    */
-  static expected<SharedMemorySegment, ShmError> Open(
-      const char* name) noexcept {
+  static expected<SharedMemorySegment, ShmError> Open(const char* name) noexcept {
     SharedMemorySegment seg;
     seg.name_.assign(TruncateToCapacity, "/osp_shm_");
 
     // Append user name
     uint32_t prefix_len = seg.name_.size();
     uint32_t name_len = 0;
-    while (name[name_len] != '\0' &&
-           (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
+    while (name[name_len] != '\0' && (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
       ++name_len;
     }
 
@@ -297,35 +274,29 @@ class SharedMemorySegment final {
 
     seg.fd_ = ::shm_open(seg.name_.c_str(), O_RDWR, kShmPermissions);
     if (seg.fd_ < 0) {
-      return expected<SharedMemorySegment, ShmError>::error(
-          ShmError::kOpenFailed);
+      return expected<SharedMemorySegment, ShmError>::error(ShmError::kOpenFailed);
     }
 
     struct stat st;
     if (::fstat(seg.fd_, &st) != 0) {
       ::close(seg.fd_);
-      return expected<SharedMemorySegment, ShmError>::error(
-          ShmError::kOpenFailed);
+      return expected<SharedMemorySegment, ShmError>::error(ShmError::kOpenFailed);
     }
 
     seg.size_ = static_cast<uint32_t>(st.st_size);
-    seg.addr_ = ::mmap(nullptr, seg.size_, PROT_READ | PROT_WRITE,
-                       kShmMmapFlags, seg.fd_, 0);
+    seg.addr_ = ::mmap(nullptr, seg.size_, PROT_READ | PROT_WRITE, kShmMmapFlags, seg.fd_, 0);
 #ifdef OSP_SHM_HUGE_PAGES
     if (seg.addr_ == MAP_FAILED) {
       // Fallback: retry without MAP_HUGETLB.
-      seg.addr_ = ::mmap(nullptr, seg.size_, PROT_READ | PROT_WRITE,
-                         MAP_SHARED, seg.fd_, 0);
+      seg.addr_ = ::mmap(nullptr, seg.size_, PROT_READ | PROT_WRITE, MAP_SHARED, seg.fd_, 0);
     }
 #endif
     if (seg.addr_ == MAP_FAILED) {
       ::close(seg.fd_);
-      return expected<SharedMemorySegment, ShmError>::error(
-          ShmError::kMapFailed);
+      return expected<SharedMemorySegment, ShmError>::error(ShmError::kMapFailed);
     }
 
-    return expected<SharedMemorySegment, ShmError>::success(
-        static_cast<SharedMemorySegment&&>(seg));
+    return expected<SharedMemorySegment, ShmError>::success(static_cast<SharedMemorySegment&&>(seg));
   }
 
   /**
@@ -364,11 +335,9 @@ class SharedMemorySegment final {
  * @tparam SlotSize Maximum size of each message slot.
  * @tparam SlotCount Number of slots (must be power of 2).
  */
-template <uint32_t SlotSize = OSP_SHM_SLOT_SIZE,
-          uint32_t SlotCount = OSP_SHM_SLOT_COUNT>
+template <uint32_t SlotSize = OSP_SHM_SLOT_SIZE, uint32_t SlotCount = OSP_SHM_SLOT_COUNT>
 class ShmRingBuffer final {
-  static_assert((SlotCount & (SlotCount - 1)) == 0,
-                "SlotCount must be power of 2");
+  static_assert((SlotCount & (SlotCount - 1)) == 0, "SlotCount must be power of 2");
 
  public:
   static constexpr uint32_t kSlotSize = SlotSize;
@@ -411,9 +380,7 @@ class ShmRingBuffer final {
    * @brief Calculate required size for the ring buffer structure.
    * @return Size in bytes.
    */
-  static constexpr uint32_t Size() noexcept {
-    return sizeof(ShmRingBuffer);
-  }
+  static constexpr uint32_t Size() noexcept { return sizeof(ShmRingBuffer); }
 
   /**
    * @brief Try to push data into the ring buffer (non-blocking).
@@ -439,9 +406,8 @@ class ShmRingBuffer final {
         // Slot not available
         return false;
       }
-    } while (!producer_pos_.compare_exchange_weak(
-        prod_pos, prod_pos + 1,
-        std::memory_order_acq_rel, std::memory_order_relaxed));
+    } while (!producer_pos_.compare_exchange_weak(prod_pos, prod_pos + 1, std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed));
 
     // Fill slot
     target->size = size;
@@ -510,8 +476,7 @@ class ShmRingBuffer final {
     char data[SlotSize];
   };
 
-  static_assert(std::is_standard_layout<Slot>::value,
-                "Slot must be standard layout for shared memory");
+  static_assert(std::is_standard_layout<Slot>::value, "Slot must be standard layout for shared memory");
 
   // Cache line aligned to prevent false sharing between producer and consumer
   alignas(64) std::atomic<uint32_t> producer_pos_;
@@ -534,8 +499,7 @@ class ShmRingBuffer final {
  * producer-consumer communication across processes. Uses polling
  * for WaitReadable since eventfd cannot be shared across processes.
  */
-template <uint32_t SlotSize = OSP_SHM_SLOT_SIZE,
-          uint32_t SlotCount = OSP_SHM_SLOT_COUNT>
+template <uint32_t SlotSize = OSP_SHM_SLOT_SIZE, uint32_t SlotCount = OSP_SHM_SLOT_COUNT>
 class ShmChannel final {
  public:
   using RingBuffer = ShmRingBuffer<SlotSize, SlotCount>;
@@ -584,8 +548,7 @@ class ShmChannel final {
     channel.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
     channel.ring_buffer_ = RingBuffer::InitAt(channel.shm_segment_.Data());
 
-    return expected<ShmChannel, ShmError>::success(
-        static_cast<ShmChannel&&>(channel));
+    return expected<ShmChannel, ShmError>::success(static_cast<ShmChannel&&>(channel));
   }
 
   /**
@@ -596,8 +559,7 @@ class ShmChannel final {
    * @param name Channel name.
    * @return expected with ShmChannel on success.
    */
-  static expected<ShmChannel, ShmError> CreateOrReplaceWriter(
-      const char* name) noexcept {
+  static expected<ShmChannel, ShmError> CreateOrReplaceWriter(const char* name) noexcept {
     ShmChannel channel;
     channel.is_writer_ = true;
 
@@ -610,8 +572,7 @@ class ShmChannel final {
     channel.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
     channel.ring_buffer_ = RingBuffer::InitAt(channel.shm_segment_.Data());
 
-    return expected<ShmChannel, ShmError>::success(
-        static_cast<ShmChannel&&>(channel));
+    return expected<ShmChannel, ShmError>::success(static_cast<ShmChannel&&>(channel));
   }
 
   /**
@@ -631,8 +592,7 @@ class ShmChannel final {
     channel.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
     channel.ring_buffer_ = RingBuffer::AttachAt(channel.shm_segment_.Data());
 
-    return expected<ShmChannel, ShmError>::success(
-        static_cast<ShmChannel&&>(channel));
+    return expected<ShmChannel, ShmError>::success(static_cast<ShmChannel&&>(channel));
   }
 
   /**
@@ -671,8 +631,7 @@ class ShmChannel final {
   expected<void, ShmError> WaitReadable(uint32_t timeout_ms) noexcept {
     OSP_ASSERT(ring_buffer_ != nullptr);
 
-    auto deadline = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(timeout_ms);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
 
     // Try immediately first
     if (ring_buffer_->Depth() > 0) {
@@ -728,9 +687,7 @@ class ShmChannel final {
   /**
    * @brief Get current depth of the ring buffer.
    */
-  uint32_t Depth() const noexcept {
-    return ring_buffer_ ? ring_buffer_->Depth() : 0;
-  }
+  uint32_t Depth() const noexcept { return ring_buffer_ ? ring_buffer_->Depth() : 0; }
 
  private:
   SharedMemorySegment shm_segment_;

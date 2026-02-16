@@ -128,11 +128,11 @@ struct SystemMonitorFaultIndex {
  * (e.g., 45000 = 45.0°C), or -1 if unavailable.
  */
 struct CpuSnapshot {
-  uint32_t total_percent;    ///< Overall CPU usage (0-100).
-  uint32_t user_percent;     ///< User-space usage (0-100).
-  uint32_t system_percent;   ///< Kernel-space usage (0-100).
-  uint32_t iowait_percent;   ///< I/O wait percentage (0-100).
-  int32_t temperature_mc;    ///< CPU temperature in milli-Celsius (-1 if N/A).
+  uint32_t total_percent;   ///< Overall CPU usage (0-100).
+  uint32_t user_percent;    ///< User-space usage (0-100).
+  uint32_t system_percent;  ///< Kernel-space usage (0-100).
+  uint32_t iowait_percent;  ///< I/O wait percentage (0-100).
+  int32_t temperature_mc;   ///< CPU temperature in milli-Celsius (-1 if N/A).
 };
 
 /**
@@ -141,10 +141,10 @@ struct CpuSnapshot {
  * All sizes in kilobytes (kB). Percentage is in range [0, 100].
  */
 struct MemorySnapshot {
-  uint64_t total_kb;       ///< Total physical memory (kB).
-  uint64_t available_kb;   ///< Available memory (kB).
-  uint64_t used_kb;        ///< Used memory (kB).
-  uint32_t used_percent;   ///< Usage percentage (0-100).
+  uint64_t total_kb;      ///< Total physical memory (kB).
+  uint64_t available_kb;  ///< Available memory (kB).
+  uint64_t used_kb;       ///< Used memory (kB).
+  uint32_t used_percent;  ///< Usage percentage (0-100).
 };
 
 /**
@@ -165,9 +165,9 @@ struct DiskSnapshot {
  * via GetDiskSnapshot().
  */
 struct SystemSnapshot {
-  CpuSnapshot cpu;           ///< CPU metrics.
-  MemorySnapshot memory;     ///< Memory metrics.
-  uint64_t timestamp_us;     ///< Monotonic timestamp (SteadyNowUs).
+  CpuSnapshot cpu;        ///< CPU metrics.
+  MemorySnapshot memory;  ///< Memory metrics.
+  uint64_t timestamp_us;  ///< Monotonic timestamp (SteadyNowUs).
 };
 
 // ============================================================================
@@ -180,10 +180,10 @@ struct SystemSnapshot {
  * Alerts fire when metrics cross thresholds (state-change pattern).
  */
 struct AlertThresholds {
-  uint32_t cpu_percent = 90;       ///< CPU usage alert threshold (0-100).
-  int32_t cpu_temp_mc = 85000;     ///< CPU temp alert (85°C in milli-Celsius).
-  uint32_t memory_percent = 90;    ///< Memory usage alert threshold (0-100).
-  uint32_t disk_percent = 90;      ///< Disk usage alert threshold (0-100).
+  uint32_t cpu_percent = 90;     ///< CPU usage alert threshold (0-100).
+  int32_t cpu_temp_mc = 85000;   ///< CPU temp alert (85°C in milli-Celsius).
+  uint32_t memory_percent = 90;  ///< Memory usage alert threshold (0-100).
+  uint32_t disk_percent = 90;    ///< Disk usage alert threshold (0-100).
 };
 
 // ============================================================================
@@ -211,8 +211,7 @@ class SystemMonitor final {
    * @param alert_msg  Alert message (stack buffer, valid only during call).
    * @param ctx      User context pointer.
    */
-  using AlertCallback = void (*)(const SystemSnapshot& snap,
-                                  const char* alert_msg, void* ctx);
+  using AlertCallback = void (*)(const SystemSnapshot& snap, const char* alert_msg, void* ctx);
 
   SystemMonitor() noexcept = default;
   ~SystemMonitor() noexcept = default;
@@ -244,8 +243,7 @@ class SystemMonitor final {
   // -- FaultReporter integration (optional) --
 
   /// Function pointer type matching FaultReporter::fn signature.
-  using FaultReportFn = void (*)(uint16_t fault_index, uint32_t detail,
-                                  uint8_t priority, void* ctx);
+  using FaultReportFn = void (*)(uint16_t fault_index, uint32_t detail, uint8_t priority, void* ctx);
 
   /**
    * @brief Set fault reporter for threshold-crossing events.
@@ -278,9 +276,7 @@ class SystemMonitor final {
    *
    * Default: cpu_overload=0, cpu_overheat=1, memory_overload=2, disk_full=3.
    */
-  void SetFaultIndices(const SystemMonitorFaultIndex& idx) noexcept {
-    fault_idx_ = idx;
-  }
+  void SetFaultIndices(const SystemMonitorFaultIndex& idx) noexcept { fault_idx_ = idx; }
 
   /**
    * @brief Add a disk path to monitor (e.g., "/", "/tmp", "/userdata").
@@ -359,22 +355,16 @@ class SystemMonitor final {
     const uint64_t iowait_delta = curr.iowait - prev_jiffies_.iowait;
 
     if (OSP_LIKELY(total_delta > 0)) {
-      snap.total_percent =
-          static_cast<uint32_t>((busy_delta * 100ULL) / total_delta);
-      snap.user_percent =
-          static_cast<uint32_t>((user_delta * 100ULL) / total_delta);
-      snap.system_percent =
-          static_cast<uint32_t>((system_delta * 100ULL) / total_delta);
-      snap.iowait_percent =
-          static_cast<uint32_t>((iowait_delta * 100ULL) / total_delta);
+      snap.total_percent = static_cast<uint32_t>((busy_delta * 100ULL) / total_delta);
+      snap.user_percent = static_cast<uint32_t>((user_delta * 100ULL) / total_delta);
+      snap.system_percent = static_cast<uint32_t>((system_delta * 100ULL) / total_delta);
+      snap.iowait_percent = static_cast<uint32_t>((iowait_delta * 100ULL) / total_delta);
 
       // Clamp to [0, 100]
       snap.total_percent = (snap.total_percent > 100) ? 100 : snap.total_percent;
       snap.user_percent = (snap.user_percent > 100) ? 100 : snap.user_percent;
-      snap.system_percent =
-          (snap.system_percent > 100) ? 100 : snap.system_percent;
-      snap.iowait_percent =
-          (snap.iowait_percent > 100) ? 100 : snap.iowait_percent;
+      snap.system_percent = (snap.system_percent > 100) ? 100 : snap.system_percent;
+      snap.iowait_percent = (snap.iowait_percent > 100) ? 100 : snap.iowait_percent;
     }
 
     prev_jiffies_ = curr;
@@ -429,8 +419,7 @@ class SystemMonitor final {
 
     if (found_total && found_available && snap.total_kb > 0) {
       snap.used_kb = snap.total_kb - snap.available_kb;
-      snap.used_percent =
-          static_cast<uint32_t>((snap.used_kb * 100ULL) / snap.total_kb);
+      snap.used_percent = static_cast<uint32_t>((snap.used_kb * 100ULL) / snap.total_kb);
       snap.used_percent = (snap.used_percent > 100) ? 100 : snap.used_percent;
     }
 
@@ -462,8 +451,7 @@ class SystemMonitor final {
 
     if (snap.total_bytes > 0) {
       const uint64_t used_bytes = snap.total_bytes - snap.available_bytes;
-      snap.used_percent =
-          static_cast<uint32_t>((used_bytes * 100ULL) / snap.total_bytes);
+      snap.used_percent = static_cast<uint32_t>((used_bytes * 100ULL) / snap.total_bytes);
       snap.used_percent = (snap.used_percent > 100) ? 100 : snap.used_percent;
     }
 
@@ -506,9 +494,7 @@ class SystemMonitor final {
    *
    * @return Reference to last SystemSnapshot.
    */
-  const SystemSnapshot& LastSnapshot() const noexcept {
-    return last_snapshot_;
-  }
+  const SystemSnapshot& LastSnapshot() const noexcept { return last_snapshot_; }
 
   /**
    * @brief Get disk snapshot by index.
@@ -597,17 +583,14 @@ class SystemMonitor final {
 
     // Parse first line: "cpu user nice system idle iowait irq softirq steal"
     const int parsed = std::sscanf(
-        buf, "cpu %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
-             " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64,
-        &out.user, &out.nice, &out.system, &out.idle,
-        &out.iowait, &out.irq, &out.softirq, &out.steal);
+        buf, "cpu %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64,
+        &out.user, &out.nice, &out.system, &out.idle, &out.iowait, &out.irq, &out.softirq, &out.steal);
 
     if (parsed < 4) {
       return false;  // At least user, nice, system, idle required
     }
 
-    out.total = out.user + out.nice + out.system + out.idle + out.iowait +
-                out.irq + out.softirq + out.steal;
+    out.total = out.user + out.nice + out.system + out.idle + out.iowait + out.irq + out.softirq + out.steal;
     out.busy = out.total - out.idle - out.iowait;
 
     return true;
@@ -625,12 +608,9 @@ class SystemMonitor final {
     char msg[128];
 
     // CPU usage alert
-    if (StateCrossed(prev_cpu_percent_, snap.cpu.total_percent,
-                     thresholds_.cpu_percent)) {
-      const bool exceeded =
-          snap.cpu.total_percent >= thresholds_.cpu_percent;
-      std::snprintf(msg, sizeof(msg), "CPU usage %s threshold: %u%% (limit %u%%)",
-                    exceeded ? "exceeded" : "below",
+    if (StateCrossed(prev_cpu_percent_, snap.cpu.total_percent, thresholds_.cpu_percent)) {
+      const bool exceeded = snap.cpu.total_percent >= thresholds_.cpu_percent;
+      std::snprintf(msg, sizeof(msg), "CPU usage %s threshold: %u%% (limit %u%%)", exceeded ? "exceeded" : "below",
                     snap.cpu.total_percent, thresholds_.cpu_percent);
       OSP_LOG_WARN("SysMon", "%s", msg);
       if (alert_fn_ != nullptr) {
@@ -645,24 +625,18 @@ class SystemMonitor final {
 
     // CPU temperature alert
     if (snap.cpu.temperature_mc >= 0) {
-      if (StateCrossed(prev_cpu_temp_mc_, snap.cpu.temperature_mc,
-                       thresholds_.cpu_temp_mc)) {
-        const bool exceeded =
-            snap.cpu.temperature_mc >= thresholds_.cpu_temp_mc;
-        std::snprintf(msg, sizeof(msg),
-                      "CPU temperature %s threshold: %d.%d C (limit %d.%d C)",
-                      exceeded ? "exceeded" : "below",
-                      snap.cpu.temperature_mc / 1000,
-                      (snap.cpu.temperature_mc % 1000) / 100,
-                      thresholds_.cpu_temp_mc / 1000,
+      if (StateCrossed(prev_cpu_temp_mc_, snap.cpu.temperature_mc, thresholds_.cpu_temp_mc)) {
+        const bool exceeded = snap.cpu.temperature_mc >= thresholds_.cpu_temp_mc;
+        std::snprintf(msg, sizeof(msg), "CPU temperature %s threshold: %d.%d C (limit %d.%d C)",
+                      exceeded ? "exceeded" : "below", snap.cpu.temperature_mc / 1000,
+                      (snap.cpu.temperature_mc % 1000) / 100, thresholds_.cpu_temp_mc / 1000,
                       (thresholds_.cpu_temp_mc % 1000) / 100);
         OSP_LOG_WARN("SysMon", "%s", msg);
         if (alert_fn_ != nullptr) {
           alert_fn_(snap, msg, alert_ctx_);
         }
         if (exceeded) {
-          ReportFault(fault_idx_.cpu_overheat,
-                      static_cast<uint32_t>(snap.cpu.temperature_mc),
+          ReportFault(fault_idx_.cpu_overheat, static_cast<uint32_t>(snap.cpu.temperature_mc),
                       1U);  // kHigh
         }
       }
@@ -670,13 +644,9 @@ class SystemMonitor final {
     }
 
     // Memory usage alert
-    if (StateCrossed(prev_mem_percent_, snap.memory.used_percent,
-                     thresholds_.memory_percent)) {
-      const bool exceeded =
-          snap.memory.used_percent >= thresholds_.memory_percent;
-      std::snprintf(msg, sizeof(msg),
-                    "Memory usage %s threshold: %u%% (limit %u%%)",
-                    exceeded ? "exceeded" : "below",
+    if (StateCrossed(prev_mem_percent_, snap.memory.used_percent, thresholds_.memory_percent)) {
+      const bool exceeded = snap.memory.used_percent >= thresholds_.memory_percent;
+      std::snprintf(msg, sizeof(msg), "Memory usage %s threshold: %u%% (limit %u%%)", exceeded ? "exceeded" : "below",
                     snap.memory.used_percent, thresholds_.memory_percent);
       OSP_LOG_WARN("SysMon", "%s", msg);
       if (alert_fn_ != nullptr) {
@@ -695,22 +665,16 @@ class SystemMonitor final {
       if (!slot.active) {
         continue;
       }
-      if (StateCrossed(slot.prev_used_percent, slot.snapshot.used_percent,
-                       thresholds_.disk_percent)) {
-        const bool exceeded =
-            slot.snapshot.used_percent >= thresholds_.disk_percent;
-        std::snprintf(msg, sizeof(msg),
-                      "Disk usage %s threshold on %s: %u%% (limit %u%%)",
-                      exceeded ? "exceeded" : "below",
-                      slot.path, slot.snapshot.used_percent,
-                      thresholds_.disk_percent);
+      if (StateCrossed(slot.prev_used_percent, slot.snapshot.used_percent, thresholds_.disk_percent)) {
+        const bool exceeded = slot.snapshot.used_percent >= thresholds_.disk_percent;
+        std::snprintf(msg, sizeof(msg), "Disk usage %s threshold on %s: %u%% (limit %u%%)",
+                      exceeded ? "exceeded" : "below", slot.path, slot.snapshot.used_percent, thresholds_.disk_percent);
         OSP_LOG_WARN("SysMon", "%s", msg);
         if (alert_fn_ != nullptr) {
           alert_fn_(snap, msg, alert_ctx_);
         }
         if (exceeded) {
-          ReportFault(fault_idx_.disk_full,
-                      (i << 16U) | slot.snapshot.used_percent,
+          ReportFault(fault_idx_.disk_full, (i << 16U) | slot.snapshot.used_percent,
                       1U);  // kHigh, detail encodes disk index + percent
         }
       }
@@ -719,8 +683,7 @@ class SystemMonitor final {
   }
 
   /// Report a fault via the injected FaultReporter (no-op if not wired).
-  void ReportFault(uint16_t fault_index, uint32_t detail,
-                   uint8_t priority) noexcept {
+  void ReportFault(uint16_t fault_index, uint32_t detail, uint8_t priority) noexcept {
     if (fault_fn_ != nullptr) {
       fault_fn_(fault_index, detail, priority, fault_ctx_);
     }
@@ -738,19 +701,15 @@ class SystemMonitor final {
    * @param threshold  Threshold value.
    * @return true if state changed, false otherwise.
    */
-  static constexpr bool StateCrossed(uint32_t prev, uint32_t curr,
-                                     uint32_t threshold) noexcept {
-    return ((prev < threshold && curr >= threshold) ||
-            (prev >= threshold && curr < threshold));
+  static constexpr bool StateCrossed(uint32_t prev, uint32_t curr, uint32_t threshold) noexcept {
+    return ((prev < threshold && curr >= threshold) || (prev >= threshold && curr < threshold));
   }
 
   /**
    * @brief Check if a value crossed a threshold (int32_t overload).
    */
-  static constexpr bool StateCrossed(int32_t prev, int32_t curr,
-                                     int32_t threshold) noexcept {
-    return ((prev < threshold && curr >= threshold) ||
-            (prev >= threshold && curr < threshold));
+  static constexpr bool StateCrossed(int32_t prev, int32_t curr, int32_t threshold) noexcept {
+    return ((prev < threshold && curr >= threshold) || (prev >= threshold && curr < threshold));
   }
 
   // State

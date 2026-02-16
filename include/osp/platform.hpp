@@ -32,12 +32,13 @@
 #ifndef OSP_PLATFORM_HPP_
 #define OSP_PLATFORM_HPP_
 
-#include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+
+#include <atomic>
+#include <chrono>
 
 namespace osp {
 
@@ -128,8 +129,7 @@ inline void AssertFail(const char* cond, const char* file, int line) {
 #ifdef NDEBUG
 #define OSP_ASSERT(cond) ((void)0)
 #else
-#define OSP_ASSERT(cond)                                                    \
-  ((cond) ? ((void)0) : ::osp::detail::AssertFail(#cond, __FILE__, __LINE__))
+#define OSP_ASSERT(cond) ((cond) ? ((void)0) : ::osp::detail::AssertFail(#cond, __FILE__, __LINE__))
 #endif
 
 // ============================================================================
@@ -141,8 +141,7 @@ inline void AssertFail(const char* cond, const char* file, int line) {
  */
 inline uint64_t SteadyNowNs() noexcept {
   const auto dur = std::chrono::steady_clock::now().time_since_epoch();
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count());
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count());
 }
 
 /**
@@ -150,8 +149,7 @@ inline uint64_t SteadyNowNs() noexcept {
  */
 inline uint64_t SteadyNowUs() noexcept {
   const auto dur = std::chrono::steady_clock::now().time_since_epoch();
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(dur).count());
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(dur).count());
 }
 
 // ============================================================================
@@ -171,14 +169,10 @@ struct ThreadHeartbeat {
   std::atomic<uint64_t> last_beat_us{0};  ///< Last heartbeat timestamp (us).
 
   /** @brief Record a heartbeat (hot path, single relaxed store). */
-  void Beat() noexcept {
-    last_beat_us.store(SteadyNowUs(), std::memory_order_relaxed);
-  }
+  void Beat() noexcept { last_beat_us.store(SteadyNowUs(), std::memory_order_relaxed); }
 
   /** @brief Read last heartbeat timestamp. */
-  uint64_t LastBeatUs() const noexcept {
-    return last_beat_us.load(std::memory_order_acquire);
-  }
+  [[nodiscard]] uint64_t LastBeatUs() const noexcept { return last_beat_us.load(std::memory_order_acquire); }
 };
 
 // ============================================================================

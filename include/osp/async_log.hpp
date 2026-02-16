@@ -55,19 +55,20 @@
 #include "osp/platform.hpp"
 #include "osp/spsc_ringbuffer.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#include <atomic>
+#include <chrono>
 #include <thread>
 
 #if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/syscall.h>
 #endif
 
 // ============================================================================
@@ -101,21 +102,20 @@ namespace log {
  * memcpy batch path. Size: 320 bytes = 5 cache lines.
  */
 struct LogEntry {
-  uint64_t timestamp_ns;      ///<  8B  Monotonic timestamp (CLOCK_MONOTONIC).
-  uint32_t wallclock_sec;     ///<  4B  Wall-clock seconds since epoch.
-  uint16_t wallclock_ms;      ///<  2B  Wall-clock milliseconds.
-  Level level;                ///<  1B  Severity level.
-  uint8_t padding0;           ///<  1B  Alignment padding.
-  char category[16];          ///< 16B  Null-terminated category string.
-  char message[256];          ///<256B  Pre-formatted message (vsnprintf).
-  char file[24];              ///< 24B  Source file basename (truncated).
-  uint32_t line;              ///<  4B  Source line number.
-  uint32_t thread_id;         ///<  4B  Cached thread ID.
+  uint64_t timestamp_ns;   ///<  8B  Monotonic timestamp (CLOCK_MONOTONIC).
+  uint32_t wallclock_sec;  ///<  4B  Wall-clock seconds since epoch.
+  uint16_t wallclock_ms;   ///<  2B  Wall-clock milliseconds.
+  Level level;             ///<  1B  Severity level.
+  uint8_t padding0;        ///<  1B  Alignment padding.
+  char category[16];       ///< 16B  Null-terminated category string.
+  char message[256];       ///< 256B  Pre-formatted message (vsnprintf).
+  char file[24];           ///< 24B  Source file basename (truncated).
+  uint32_t line;           ///<  4B  Source line number.
+  uint32_t thread_id;      ///<  4B  Cached thread ID.
 };
 
 static_assert(sizeof(LogEntry) == 320, "LogEntry size must be 320 bytes");
-static_assert(std::is_trivially_copyable<LogEntry>::value,
-              "LogEntry must be trivially copyable for SPSC memcpy path");
+static_assert(std::is_trivially_copyable<LogEntry>::value, "LogEntry must be trivially copyable for SPSC memcpy path");
 
 // ============================================================================
 // LogSinkFn -- Output sink function pointer
@@ -128,8 +128,7 @@ static_assert(std::is_trivially_copyable<LogEntry>::value,
  * @param count    Number of entries in the array.
  * @param context  User-provided context pointer.
  */
-using LogSinkFn = void (*)(const LogEntry* entries, uint32_t count,
-                           void* context);
+using LogSinkFn = void (*)(const LogEntry* entries, uint32_t count, void* context);
 
 // ============================================================================
 // AsyncLogConfig
@@ -139,8 +138,8 @@ using LogSinkFn = void (*)(const LogEntry* entries, uint32_t count,
  * @brief Configuration for the async logging backend.
  */
 struct AsyncLogConfig {
-  LogSinkFn sink = nullptr;       ///< Output sink (nullptr = stderr).
-  void* sink_context = nullptr;   ///< Context passed to sink.
+  LogSinkFn sink = nullptr;      ///< Output sink (nullptr = stderr).
+  void* sink_context = nullptr;  ///< Context passed to sink.
 };
 
 // ============================================================================
@@ -151,9 +150,9 @@ struct AsyncLogConfig {
  * @brief Runtime statistics for the async logging backend.
  */
 struct AsyncLogStats {
-  uint64_t entries_written;   ///< Total entries written to sink.
-  uint64_t entries_dropped;   ///< Total entries dropped (queue full).
-  uint64_t sync_fallbacks;    ///< Entries that fell back to sync write.
+  uint64_t entries_written;  ///< Total entries written to sink.
+  uint64_t entries_dropped;  ///< Total entries dropped (queue full).
+  uint64_t sync_fallbacks;   ///< Entries that fell back to sync write.
 };
 
 // ============================================================================
@@ -171,18 +170,17 @@ inline uint32_t GetCachedThreadId() noexcept {
 #if defined(__linux__)
     tl_tid = static_cast<uint32_t>(::syscall(SYS_gettid));
 #else
-    tl_tid = static_cast<uint32_t>(
-        std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    tl_tid = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
 #endif
   }
   return tl_tid;
 }
 
 /// @brief Copy src to dst with truncation. Always null-terminates.
-inline void SafeStrCopy(char* dst, size_t dst_size,
-                        const char* src) noexcept {
+inline void SafeStrCopy(char* dst, size_t dst_size, const char* src) noexcept {
   if (src == nullptr || dst_size == 0) {
-    if (dst_size > 0) dst[0] = '\0';
+    if (dst_size > 0)
+      dst[0] = '\0';
     return;
   }
   size_t len = std::strlen(src);
@@ -195,7 +193,8 @@ inline void SafeStrCopy(char* dst, size_t dst_size,
 
 /// @brief Extract basename from a full file path.
 inline const char* Basename(const char* path) noexcept {
-  if (path == nullptr) return "?";
+  if (path == nullptr)
+    return "?";
   const char* slash = std::strrchr(path, '/');
   return (slash != nullptr) ? slash + 1 : path;
 }
@@ -214,26 +213,19 @@ inline void CaptureWallclock(uint32_t& sec, uint16_t& ms) noexcept {
 }
 
 /// @brief Format a LogEntry's wallclock into "YYYY-MM-DD HH:MM:SS.mmm".
-inline void FormatEntryTimestamp(const LogEntry& e, char* buf,
-                                size_t bufsz) noexcept {
+inline void FormatEntryTimestamp(const LogEntry& e, char* buf, size_t bufsz) noexcept {
   time_t t = static_cast<time_t>(e.wallclock_sec);
 #if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
   struct tm tm_local;
   localtime_r(&t, &tm_local);
-  (void)snprintf(buf, bufsz,
-                 "%04d-%02d-%02d %02d:%02d:%02d.%03u",
-                 tm_local.tm_year + 1900, tm_local.tm_mon + 1,
-                 tm_local.tm_mday, tm_local.tm_hour,
-                 tm_local.tm_min, tm_local.tm_sec,
+  (void)snprintf(buf, bufsz, "%04d-%02d-%02d %02d:%02d:%02d.%03u", tm_local.tm_year + 1900, tm_local.tm_mon + 1,
+                 tm_local.tm_mday, tm_local.tm_hour, tm_local.tm_min, tm_local.tm_sec,
                  static_cast<unsigned>(e.wallclock_ms));
 #else
   struct std::tm* tm_local = std::localtime(&t);
   if (tm_local != nullptr) {
-    (void)snprintf(buf, bufsz,
-                   "%04d-%02d-%02d %02d:%02d:%02d.%03u",
-                   tm_local->tm_year + 1900, tm_local->tm_mon + 1,
-                   tm_local->tm_mday, tm_local->tm_hour,
-                   tm_local->tm_min, tm_local->tm_sec,
+    (void)snprintf(buf, bufsz, "%04d-%02d-%02d %02d:%02d:%02d.%03u", tm_local->tm_year + 1900, tm_local->tm_mon + 1,
+                   tm_local->tm_mday, tm_local->tm_hour, tm_local->tm_min, tm_local->tm_sec,
                    static_cast<unsigned>(e.wallclock_ms));
   } else {
     (void)snprintf(buf, bufsz, "0000-00-00 00:00:00.000");
@@ -305,27 +297,17 @@ struct TlsCleanup {
 // --- Default Stderr Sink ----------------------------------------------------
 
 /// @brief Default sink: write log entries to stderr.
-inline void StderrSink(const LogEntry* entries, uint32_t count,
-                       void* /*ctx*/) noexcept {
+inline void StderrSink(const LogEntry* entries, uint32_t count, void* /*ctx*/) noexcept {
   for (uint32_t i = 0; i < count; ++i) {
     const auto& e = entries[i];
     char ts_buf[64];
     FormatEntryTimestamp(e, ts_buf, sizeof(ts_buf));
 
 #ifdef NDEBUG
-    (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n",
-                       ts_buf,
-                       log::detail::LevelTag(e.level),
-                       e.category,
-                       e.message);
+    (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n", ts_buf, log::detail::LevelTag(e.level), e.category, e.message);
 #else
-    (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%u)\n",
-                       ts_buf,
-                       log::detail::LevelTag(e.level),
-                       e.category,
-                       e.message,
-                       e.file,
-                       e.line);
+    (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%u)\n", ts_buf, log::detail::LevelTag(e.level), e.category,
+                       e.message, e.file, e.line);
 #endif
   }
 }
@@ -372,8 +354,7 @@ inline LogBuffer* AcquireLogBuffer() noexcept {
   auto& ctx = AsyncLogContext::Instance();
   for (uint32_t i = 0; i < OSP_ASYNC_LOG_MAX_THREADS; ++i) {
     bool expected = false;
-    if (ctx.buffers[i].active.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel)) {
+    if (ctx.buffers[i].active.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       ctx.buffers[i].thread_id = GetCachedThreadId();
       tls_cleanup.buf = &ctx.buffers[i];
       return tls_cleanup.buf;
@@ -398,15 +379,13 @@ inline void WriterLoop() noexcept {
 
   // Drop-stats reporting state.
   uint64_t last_reported_drops = 0;
-  auto next_report_time = std::chrono::steady_clock::now() +
-      std::chrono::seconds(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S);
+  auto next_report_time = std::chrono::steady_clock::now() + std::chrono::seconds(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S);
 
   while (!ctx.shutdown.load(std::memory_order_acquire)) {
     uint32_t total_popped = 0;
 
     for (uint32_t i = 0; i < OSP_ASYNC_LOG_MAX_THREADS; ++i) {
-      if (!ctx.buffers[i].active.load(std::memory_order_acquire) &&
-          ctx.buffers[i].queue.IsEmpty()) {
+      if (!ctx.buffers[i].active.load(std::memory_order_acquire) && ctx.buffers[i].queue.IsEmpty()) {
         continue;
       }
 
@@ -414,8 +393,7 @@ inline void WriterLoop() noexcept {
       if (n > 0) {
         sink(batch, static_cast<uint32_t>(n), sink_ctx);
         total_popped += static_cast<uint32_t>(n);
-        ctx.entries_written.fetch_add(static_cast<uint64_t>(n),
-                                      std::memory_order_relaxed);
+        ctx.entries_written.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
       }
     }
 
@@ -429,24 +407,20 @@ inline void WriterLoop() noexcept {
     if (OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S > 0) {
       auto now = std::chrono::steady_clock::now();
       if (now >= next_report_time) {
-        uint64_t cur_drops = ctx.entries_dropped.load(
-            std::memory_order_relaxed);
-        uint64_t cur_written = ctx.entries_written.load(
-            std::memory_order_relaxed);
+        uint64_t cur_drops = ctx.entries_dropped.load(std::memory_order_relaxed);
+        uint64_t cur_written = ctx.entries_written.load(std::memory_order_relaxed);
         uint64_t new_drops = cur_drops - last_reported_drops;
         if (new_drops > 0) {
           // Report via sync stderr (always visible, crash-safe).
           (void)std::fprintf(stderr,
-              "[AsyncLog] WARN: %" PRIu64 " entries dropped in last %us"
-              " (total: written=%" PRIu64 " dropped=%" PRIu64
-              " fallbacks=%" PRIu64 ")\n",
-              new_drops, OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S,
-              cur_written, cur_drops,
-              ctx.sync_fallbacks.load(std::memory_order_relaxed));
+                             "[AsyncLog] WARN: %" PRIu64
+                             " entries dropped in last %us"
+                             " (total: written=%" PRIu64 " dropped=%" PRIu64 " fallbacks=%" PRIu64 ")\n",
+                             new_drops, OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S, cur_written, cur_drops,
+                             ctx.sync_fallbacks.load(std::memory_order_relaxed));
         }
         last_reported_drops = cur_drops;
-        next_report_time = now +
-            std::chrono::seconds(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S);
+        next_report_time = now + std::chrono::seconds(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S);
       }
     }
   }
@@ -459,27 +433,24 @@ inline void WriterLoop() noexcept {
       if (n > 0) {
         sink(batch, static_cast<uint32_t>(n), sink_ctx);
         drained += static_cast<uint32_t>(n);
-        ctx.entries_written.fetch_add(static_cast<uint64_t>(n),
-                                      std::memory_order_relaxed);
+        ctx.entries_written.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
       }
     }
-    if (drained == 0) break;
+    if (drained == 0)
+      break;
   }
 
   // Final drop-stats report on shutdown.
   {
-    uint64_t final_drops = ctx.entries_dropped.load(
-        std::memory_order_relaxed);
+    uint64_t final_drops = ctx.entries_dropped.load(std::memory_order_relaxed);
     uint64_t unreported = final_drops - last_reported_drops;
     if (unreported > 0) {
       (void)std::fprintf(stderr,
-          "[AsyncLog] WARN: %" PRIu64 " entries dropped since last report"
-          " (total: written=%" PRIu64 " dropped=%" PRIu64
-          " fallbacks=%" PRIu64 ")\n",
-          unreported,
-          ctx.entries_written.load(std::memory_order_relaxed),
-          final_drops,
-          ctx.sync_fallbacks.load(std::memory_order_relaxed));
+                         "[AsyncLog] WARN: %" PRIu64
+                         " entries dropped since last report"
+                         " (total: written=%" PRIu64 " dropped=%" PRIu64 " fallbacks=%" PRIu64 ")\n",
+                         unreported, ctx.entries_written.load(std::memory_order_relaxed), final_drops,
+                         ctx.sync_fallbacks.load(std::memory_order_relaxed));
     }
   }
 }
@@ -505,8 +476,7 @@ inline void StartAsync(const AsyncLogConfig& config = {}) noexcept {
 
   // CAS to ensure only one thread starts the writer.
   bool expected = false;
-  if (!ctx.running.compare_exchange_strong(
-          expected, true, std::memory_order_acq_rel)) {
+  if (!ctx.running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
     return;  // Already running (another thread won the race).
   }
 
@@ -518,8 +488,7 @@ inline void StartAsync(const AsyncLogConfig& config = {}) noexcept {
 
   // Register atexit handler (once) for graceful drain on process exit.
   bool atexit_expected = false;
-  if (ctx.atexit_registered.compare_exchange_strong(
-          atexit_expected, true, std::memory_order_acq_rel)) {
+  if (ctx.atexit_registered.compare_exchange_strong(atexit_expected, true, std::memory_order_acq_rel)) {
     (void)std::atexit(StopAsync);
   }
 }
@@ -547,8 +516,7 @@ inline void StopAsync() noexcept {
  * @brief Check if async logging is currently active.
  */
 inline bool IsAsyncEnabled() noexcept {
-  return detail::AsyncLogContext::Instance().running.load(
-      std::memory_order_acquire);
+  return detail::AsyncLogContext::Instance().running.load(std::memory_order_acquire);
 }
 
 /**
@@ -594,11 +562,10 @@ inline void ResetAsyncStats() noexcept {
  * - Falls back to sync if async is not started or no buffer available.
  * - Drops silently (increments counter) if the SPSC queue is full.
  */
-inline void AsyncLogWrite(Level level, const char* category, const char* file,
-                          int line, const char* fmt, ...) noexcept {
+inline void AsyncLogWrite(Level level, const char* category, const char* file, int line, const char* fmt,
+                          ...) noexcept {
   // --- Runtime level gate ---
-  if (static_cast<uint8_t>(level) <
-      static_cast<uint8_t>(detail::LogLevelRef())) {
+  if (static_cast<uint8_t>(level) < static_cast<uint8_t>(detail::LogLevelRef())) {
     return;
   }
 
@@ -640,8 +607,7 @@ inline void AsyncLogWrite(Level level, const char* category, const char* file,
   entry.line = static_cast<uint32_t>(line);
 
   detail::SafeStrCopy(entry.category, sizeof(entry.category), category);
-  detail::SafeStrCopy(entry.file, sizeof(entry.file),
-                      detail::Basename(file));
+  detail::SafeStrCopy(entry.file, sizeof(entry.file), detail::Basename(file));
 
   va_list args;
   va_start(args, fmt);
@@ -674,28 +640,25 @@ inline void AsyncLogWrite(Level level, const char* category, const char* file,
 #undef OSP_LOG_INFO
 #undef OSP_LOG_WARN
 
-#define OSP_LOG_DEBUG(cat, fmt, ...)                                         \
-  do {                                                                      \
-    if (OSP_LOG_MIN_LEVEL <= 0) {                                           \
-      ::osp::log::AsyncLogWrite(::osp::log::Level::kDebug, cat,            \
-                                __FILE__, __LINE__, fmt, ##__VA_ARGS__);    \
-    }                                                                       \
+#define OSP_LOG_DEBUG(cat, fmt, ...)                                                                     \
+  do {                                                                                                   \
+    if (OSP_LOG_MIN_LEVEL <= 0) {                                                                        \
+      ::osp::log::AsyncLogWrite(::osp::log::Level::kDebug, cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+    }                                                                                                    \
   } while (0)
 
-#define OSP_LOG_INFO(cat, fmt, ...)                                         \
-  do {                                                                      \
-    if (OSP_LOG_MIN_LEVEL <= 1) {                                           \
-      ::osp::log::AsyncLogWrite(::osp::log::Level::kInfo, cat,             \
-                                __FILE__, __LINE__, fmt, ##__VA_ARGS__);    \
-    }                                                                       \
+#define OSP_LOG_INFO(cat, fmt, ...)                                                                     \
+  do {                                                                                                  \
+    if (OSP_LOG_MIN_LEVEL <= 1) {                                                                       \
+      ::osp::log::AsyncLogWrite(::osp::log::Level::kInfo, cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+    }                                                                                                   \
   } while (0)
 
-#define OSP_LOG_WARN(cat, fmt, ...)                                         \
-  do {                                                                      \
-    if (OSP_LOG_MIN_LEVEL <= 2) {                                           \
-      ::osp::log::AsyncLogWrite(::osp::log::Level::kWarn, cat,             \
-                                __FILE__, __LINE__, fmt, ##__VA_ARGS__);    \
-    }                                                                       \
+#define OSP_LOG_WARN(cat, fmt, ...)                                                                     \
+  do {                                                                                                  \
+    if (OSP_LOG_MIN_LEVEL <= 2) {                                                                       \
+      ::osp::log::AsyncLogWrite(::osp::log::Level::kWarn, cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+    }                                                                                                   \
   } while (0)
 
 #endif  // OSP_LOG_SYNC_ONLY

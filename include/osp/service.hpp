@@ -40,21 +40,21 @@
 
 #if OSP_HAS_NETWORK
 
+#include <cerrno>
+#include <cstring>
+
+#include <algorithm>
 #include <arpa/inet.h>
+#include <atomic>
 #include <fcntl.h>
+#include <memory>
+#include <mutex>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
-#include <unistd.h>
-
-#include <algorithm>
-#include <atomic>
-#include <cerrno>
-#include <cstring>
-#include <memory>
-#include <mutex>
 #include <thread>
 #include <type_traits>
+#include <unistd.h>
 #include <vector>
 
 namespace osp {
@@ -117,14 +117,9 @@ class Service {
   };
 
   explicit Service(const Config& cfg = {}) noexcept
-      : config_(cfg),
-        running_(false),
-        handler_(nullptr),
-        handler_ctx_(nullptr) {
-    static_assert(std::is_trivially_copyable<Request>::value,
-                  "Request must be trivially copyable");
-    static_assert(std::is_trivially_copyable<Response>::value,
-                  "Response must be trivially copyable");
+      : config_(cfg), running_(false), handler_(nullptr), handler_ctx_(nullptr) {
+    static_assert(std::is_trivially_copyable<Request>::value, "Request must be trivially copyable");
+    static_assert(std::is_trivially_copyable<Response>::value, "Response must be trivially copyable");
     sockfd_.store(-1, std::memory_order_relaxed);
   }
 
@@ -162,8 +157,7 @@ class Service {
 
     // Set SO_REUSEADDR
     int32_t opt = kSocketOptEnable;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt,
-                 static_cast<socklen_t>(sizeof(opt)));
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
 
     // Bind
     sockaddr_in bind_addr{};
@@ -171,8 +165,7 @@ class Service {
     bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     bind_addr.sin_port = htons(config_.port);
 
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&bind_addr),
-               sizeof(bind_addr)) < 0) {
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
       ::close(fd);
       return expected<void, ServiceError>::error(ServiceError::kBindFailed);
     }
@@ -196,7 +189,8 @@ class Service {
    * @brief Stop the service and join threads.
    */
   void Stop() noexcept {
-    if (!running_.load(std::memory_order_acquire)) return;
+    if (!running_.load(std::memory_order_acquire))
+      return;
 
     running_.store(false, std::memory_order_release);
 
@@ -222,14 +216,13 @@ class Service {
   }
 
   /** @brief Check if the service is running. */
-  bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_acquire);
-  }
+  bool IsRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
   /** @brief Get the bound port (useful when using port 0 for OS-assigned). */
   uint16_t GetPort() const noexcept {
     int32_t fd = sockfd_.load(std::memory_order_acquire);
-    if (fd < 0) return 0;
+    if (fd < 0)
+      return 0;
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
     ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
@@ -247,8 +240,7 @@ class Service {
 
   class WorkerScope {
    public:
-    explicit WorkerScope(std::atomic<uint32_t>& counter) noexcept
-        : counter_(counter) {
+    explicit WorkerScope(std::atomic<uint32_t>& counter) noexcept : counter_(counter) {
       counter_.fetch_add(1, std::memory_order_relaxed);
     }
     ~WorkerScope() { counter_.fetch_sub(1, std::memory_order_relaxed); }
@@ -276,7 +268,9 @@ class Service {
 
   void AcceptLoop() noexcept {
     while (running_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+      if (heartbeat_ != nullptr) {
+        heartbeat_->Beat();
+      }
       // Reap finished workers
       ReapFinishedWorkers();
 
@@ -284,12 +278,13 @@ class Service {
       socklen_t addr_len = sizeof(client_addr);
 
       int32_t fd = sockfd_.load(std::memory_order_acquire);
-      if (fd < 0) break;
+      if (fd < 0)
+        break;
 
-      int32_t client_fd = ::accept(fd, reinterpret_cast<sockaddr*>(&client_addr),
-                               &addr_len);
+      int32_t client_fd = ::accept(fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
       if (client_fd < 0) {
-        if (!running_.load(std::memory_order_acquire)) break;
+        if (!running_.load(std::memory_order_acquire))
+          break;
         continue;
       }
 
@@ -302,13 +297,12 @@ class Service {
       // Spawn worker thread to handle this connection
       auto finished = std::make_shared<std::atomic<bool>>(false);
       std::lock_guard<std::mutex> lock(threads_mutex_);
-      worker_entries_.push_back(WorkerEntry{
-          std::thread([this, client_fd, finished]() {
-            WorkerScope scope(active_workers_);
-            HandleConnection(client_fd);
-            finished->store(true, std::memory_order_release);
-          }),
-          finished});
+      worker_entries_.push_back(WorkerEntry{std::thread([this, client_fd, finished]() {
+                                              WorkerScope scope(active_workers_);
+                                              HandleConnection(client_fd);
+                                              finished->store(true, std::memory_order_release);
+                                            }),
+                                            finished});
     }
   }
 
@@ -323,16 +317,19 @@ class Service {
       // Validate magic
       uint32_t magic;
       std::memcpy(&magic, header, 4);
-      if (magic != kServiceRequestMagic) break;
+      if (magic != kServiceRequestMagic)
+        break;
 
       // Extract request size
       uint32_t req_size;
       std::memcpy(&req_size, header + 4, 4);
-      if (req_size != sizeof(Request)) break;
+      if (req_size != sizeof(Request))
+        break;
 
       // Receive request data
       Request req;
-      if (!RecvAll(client_fd, &req, sizeof(Request))) break;
+      if (!RecvAll(client_fd, &req, sizeof(Request)))
+        break;
 
       // Invoke handler
       Response resp;
@@ -349,8 +346,10 @@ class Service {
       std::memcpy(resp_header, &resp_magic, 4);
       std::memcpy(resp_header + 4, &resp_size, 4);
 
-      if (!SendAll(client_fd, resp_header, kServiceFrameHeaderSize)) break;
-      if (!SendAll(client_fd, &resp, sizeof(Response))) break;
+      if (!SendAll(client_fd, resp_header, kServiceFrameHeaderSize))
+        break;
+      if (!SendAll(client_fd, &resp, sizeof(Response)))
+        break;
     }
     ::close(client_fd);
   }
@@ -361,10 +360,12 @@ class Service {
     while (remaining > 0) {
       int64_t n = ::recv(fd, ptr, remaining, 0);
       if (n < 0) {
-        if (errno == EINTR) continue;
+        if (errno == EINTR)
+          continue;
         return false;
       }
-      if (n == 0) return false;  // EOF
+      if (n == 0)
+        return false;  // EOF
       ptr += n;
       remaining -= static_cast<uint64_t>(n);
     }
@@ -377,10 +378,12 @@ class Service {
     while (remaining > 0) {
       int64_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
       if (n < 0) {
-        if (errno == EINTR) continue;
+        if (errno == EINTR)
+          continue;
         return false;
       }
-      if (n == 0) return false;  // EOF
+      if (n == 0)
+        return false;  // EOF
       ptr += n;
       remaining -= static_cast<uint64_t>(n);
     }
@@ -417,17 +420,14 @@ template <typename Request, typename Response>
 class Client {
  public:
   Client() noexcept : sockfd_(-1), connected_(false) {
-    static_assert(std::is_trivially_copyable<Request>::value,
-                  "Request must be trivially copyable");
-    static_assert(std::is_trivially_copyable<Response>::value,
-                  "Response must be trivially copyable");
+    static_assert(std::is_trivially_copyable<Request>::value, "Request must be trivially copyable");
+    static_assert(std::is_trivially_copyable<Response>::value, "Response must be trivially copyable");
   }
 
   ~Client() { Close(); }
 
   // Move-only
-  Client(Client&& other) noexcept
-      : sockfd_(other.sockfd_), connected_(other.connected_) {
+  Client(Client&& other) noexcept : sockfd_(other.sockfd_), connected_(other.connected_) {
     other.sockfd_ = -1;
     other.connected_ = false;
   }
@@ -453,8 +453,7 @@ class Client {
    * @param timeout_ms Connection timeout in milliseconds.
    * @return Client instance on success, ServiceError on failure.
    */
-  static expected<Client, ServiceError> Connect(const char* host, uint16_t port,
-                                                 int32_t timeout_ms = 5000) noexcept {
+  static expected<Client, ServiceError> Connect(const char* host, uint16_t port, int32_t timeout_ms = 5000) noexcept {
     Client client;
 
     // Create socket
@@ -477,8 +476,7 @@ class Client {
       return expected<Client, ServiceError>::error(ServiceError::kConnectFailed);
     }
 
-    int32_t ret = ::connect(client.sockfd_, reinterpret_cast<sockaddr*>(&server_addr),
-                        sizeof(server_addr));
+    int32_t ret = ::connect(client.sockfd_, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr));
     if (ret < 0 && errno != EINPROGRESS) {
       ::close(client.sockfd_);
       client.sockfd_ = -1;
@@ -518,8 +516,7 @@ class Client {
 
     // Disable Nagle's algorithm
     int32_t nodelay = kSocketOptEnable;
-    ::setsockopt(client.sockfd_, IPPROTO_TCP, TCP_NODELAY, &nodelay,
-                 static_cast<socklen_t>(sizeof(nodelay)));
+    ::setsockopt(client.sockfd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, static_cast<socklen_t>(sizeof(nodelay)));
 
     client.connected_ = true;
     return expected<Client, ServiceError>::success(std::move(client));
@@ -531,8 +528,7 @@ class Client {
    * @param timeout_ms Timeout in milliseconds.
    * @return Response on success, ServiceError on failure.
    */
-  expected<Response, ServiceError> Call(const Request& req,
-                                         int32_t timeout_ms = 2000) noexcept {
+  expected<Response, ServiceError> Call(const Request& req, int32_t timeout_ms = 2000) noexcept {
     if (!connected_) {
       return expected<Response, ServiceError>::error(ServiceError::kNotRunning);
     }
@@ -558,8 +554,7 @@ class Client {
     timeval tv;
     tv.tv_sec = static_cast<time_t>(timeout_ms / 1000);
     tv.tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000);
-    ::setsockopt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &tv,
-                 static_cast<socklen_t>(sizeof(tv)));
+    ::setsockopt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &tv, static_cast<socklen_t>(sizeof(tv)));
 
     // Receive response frame
     uint8_t resp_header[kServiceFrameHeaderSize];
@@ -573,8 +568,7 @@ class Client {
     std::memcpy(&resp_magic, resp_header, 4);
     if (resp_magic != kServiceResponseMagic) {
       connected_ = false;
-      return expected<Response, ServiceError>::error(
-          ServiceError::kDeserializeFailed);
+      return expected<Response, ServiceError>::error(ServiceError::kDeserializeFailed);
     }
 
     // Extract response size
@@ -582,8 +576,7 @@ class Client {
     std::memcpy(&resp_size, resp_header + 4, 4);
     if (resp_size != sizeof(Response)) {
       connected_ = false;
-      return expected<Response, ServiceError>::error(
-          ServiceError::kDeserializeFailed);
+      return expected<Response, ServiceError>::error(ServiceError::kDeserializeFailed);
     }
 
     // Receive response data
@@ -615,10 +608,12 @@ class Client {
     while (remaining > 0) {
       int64_t n = ::recv(fd, ptr, remaining, 0);
       if (n < 0) {
-        if (errno == EINTR) continue;
+        if (errno == EINTR)
+          continue;
         return false;
       }
-      if (n == 0) return false;  // EOF
+      if (n == 0)
+        return false;  // EOF
       ptr += n;
       remaining -= static_cast<uint64_t>(n);
     }
@@ -631,10 +626,12 @@ class Client {
     while (remaining > 0) {
       int64_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
       if (n < 0) {
-        if (errno == EINTR) continue;
+        if (errno == EINTR)
+          continue;
         return false;
       }
-      if (n == 0) return false;  // EOF
+      if (n == 0)
+        return false;  // EOF
       ptr += n;
       remaining -= static_cast<uint64_t>(n);
     }
@@ -687,8 +684,7 @@ class ServiceRegistry {
    * @param port Port number.
    * @return Success or ServiceError.
    */
-  expected<void, ServiceError> Register(const char* name, const char* host,
-                                         uint16_t port) noexcept {
+  expected<void, ServiceError> Register(const char* name, const char* host, uint16_t port) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Check for duplicate name
@@ -781,23 +777,16 @@ class ServiceRegistry {
 template <typename Request, typename Response>
 class AsyncClient {
  public:
-  AsyncClient() noexcept
-      : connected_(false),
-        call_in_progress_(false),
-        result_ready_(false) {
-    static_assert(std::is_trivially_copyable<Request>::value,
-                  "Request must be trivially copyable");
-    static_assert(std::is_trivially_copyable<Response>::value,
-                  "Response must be trivially copyable");
+  AsyncClient() noexcept : connected_(false), call_in_progress_(false), result_ready_(false) {
+    static_assert(std::is_trivially_copyable<Request>::value, "Request must be trivially copyable");
+    static_assert(std::is_trivially_copyable<Response>::value, "Response must be trivially copyable");
     std::memset(&result_.response, 0, sizeof(Response));
     result_.error = ServiceError::kNotRunning;
     result_.completed = false;
     result_.success = false;
   }
 
-  ~AsyncClient() {
-    Close();
-  }
+  ~AsyncClient() { Close(); }
 
   AsyncClient(const AsyncClient&) = delete;
   AsyncClient& operator=(const AsyncClient&) = delete;
@@ -835,8 +824,8 @@ class AsyncClient {
    * @param timeout_ms Connection timeout in milliseconds.
    * @return AsyncClient instance on success, ServiceError on failure.
    */
-  static expected<AsyncClient, ServiceError> Connect(
-      const char* host, uint16_t port, int32_t timeout_ms = 5000) noexcept {
+  static expected<AsyncClient, ServiceError> Connect(const char* host, uint16_t port,
+                                                     int32_t timeout_ms = 5000) noexcept {
     AsyncClient async_client;
 
     auto client_r = Client<Request, Response>::Connect(host, port, timeout_ms);
@@ -847,8 +836,7 @@ class AsyncClient {
     async_client.client_ = std::move(client_r.value());
     async_client.connected_ = true;
 
-    return expected<AsyncClient, ServiceError>::success(
-        std::move(async_client));
+    return expected<AsyncClient, ServiceError>::success(std::move(async_client));
   }
 
   /**
@@ -858,11 +846,11 @@ class AsyncClient {
    * @return true if call was initiated, false if already in progress.
    */
   bool CallAsync(const Request& req, int32_t timeout_ms = 2000) noexcept {
-    if (!connected_) return false;
+    if (!connected_)
+      return false;
 
     bool expected_false = false;
-    if (!call_in_progress_.compare_exchange_strong(expected_false, true,
-                                                    std::memory_order_acquire)) {
+    if (!call_in_progress_.compare_exchange_strong(expected_false, true, std::memory_order_acquire)) {
       return false;  // Call already in progress
     }
 
@@ -900,9 +888,7 @@ class AsyncClient {
    * @brief Check if async result is ready.
    * @return true if result is available.
    */
-  bool IsReady() const noexcept {
-    return result_ready_.load(std::memory_order_acquire);
-  }
+  bool IsReady() const noexcept { return result_ready_.load(std::memory_order_acquire); }
 
   /**
    * @brief Get result (blocks if not ready, with timeout).

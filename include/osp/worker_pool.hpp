@@ -180,8 +180,8 @@ struct WorkerPoolConfig {
 // ============================================================================
 
 enum class WorkerPoolError {
-  kFlushTimeout,      ///< FlushAndPause timed out waiting for workers
-  kWorkerUnhealthy,   ///< One or more worker threads are dead
+  kFlushTimeout,     ///< FlushAndPause timed out waiting for workers
+  kWorkerUnhealthy,  ///< One or more worker threads are dead
 };
 
 // ============================================================================
@@ -267,18 +267,16 @@ class WorkerPool {
    */
   template <typename T, typename Func,
             typename = typename std::enable_if<
-                !std::is_convertible<Func, void (*)(const T&, const osp::MessageHeader&)>::value
-            >::type>
+                !std::is_convertible<Func, void (*)(const T&, const osp::MessageHeader&)>::value>::type>
   void RegisterHandler(Func&& func) noexcept {
     constexpr size_t idx = osp::VariantIndex<T, PayloadVariant>::value;
     static_assert(idx < kMaxTypes, "Type not in PayloadVariant");
-    handlers_[idx] = HandlerFn(
-        [f = static_cast<Func&&>(func)](const EnvelopeType& env) {
-          const T* data = std::get_if<T>(&env.payload);
-          if (data != nullptr) {
-            f(*data, env.header);
-          }
-        });
+    handlers_[idx] = HandlerFn([f = static_cast<Func&&>(func)](const EnvelopeType& env) {
+      const T* data = std::get_if<T>(&env.payload);
+      if (data != nullptr) {
+        f(*data, env.header);
+      }
+    });
   }
 
   // ======================== Lifecycle ========================
@@ -489,7 +487,6 @@ class WorkerPool {
   void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
 
  private:
-
   /// SBO buffer for handler callable (fits lambda with 1-2 captures).
   static constexpr size_t kHandlerBufSize = 4 * sizeof(void*);
   using HandlerFn = osp::FixedFunction<void(const EnvelopeType&), kHandlerBufSize>;
@@ -546,7 +543,9 @@ class WorkerPool {
     detail::AdaptiveBackoff backoff;
 
     while (!shutdown_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+      if (heartbeat_ != nullptr) {
+        heartbeat_->Beat();
+      }
       uint32_t count = BusType::Instance().ProcessBatch();
       if (count > 0U) {
         backoff.Reset();

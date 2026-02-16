@@ -61,8 +61,9 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
-#include <array>
 #include <cstdint>
+
+#include <array>
 
 namespace osp {
 
@@ -82,23 +83,23 @@ enum class LifecycleState : uint8_t {
 // ============================================================================
 
 enum class LifecycleDetailedState : uint8_t {
-  kAlive = 0,        // Root (abstract parent)
-  kUnconfigured,     // Parent for Initializing/WaitingConfig
-  kInitializing,     // Entry: loading defaults
-  kWaitingConfig,    // Waiting for configure trigger
-  kConfigured,       // Parent for Inactive/Active
-  kInactive,         // Parent for Standby/Paused
-  kStandby,          // Ready to activate
-  kPaused,           // Was active, deactivated, can resume
-  kActive,           // Parent for Starting/Running/Degraded
-  kStarting,         // Transitional: running on_activate
-  kRunning,          // Normal operation
-  kDegraded,         // Running with warnings/errors
-  kError,            // Parent for Recoverable/Fatal
-  kRecoverable,      // Can retry configure/activate
-  kFatal,            // Must shutdown
-  kFinalized,        // Terminal state
-  kCount             // Sentinel
+  kAlive = 0,      // Root (abstract parent)
+  kUnconfigured,   // Parent for Initializing/WaitingConfig
+  kInitializing,   // Entry: loading defaults
+  kWaitingConfig,  // Waiting for configure trigger
+  kConfigured,     // Parent for Inactive/Active
+  kInactive,       // Parent for Standby/Paused
+  kStandby,        // Ready to activate
+  kPaused,         // Was active, deactivated, can resume
+  kActive,         // Parent for Starting/Running/Degraded
+  kStarting,       // Transitional: running on_activate
+  kRunning,        // Normal operation
+  kDegraded,       // Running with warnings/errors
+  kError,          // Parent for Recoverable/Fatal
+  kRecoverable,    // Can retry configure/activate
+  kFatal,          // Must shutdown
+  kFinalized,      // Terminal state
+  kCount           // Sentinel
 };
 
 // ============================================================================
@@ -106,11 +107,11 @@ enum class LifecycleDetailedState : uint8_t {
 // ============================================================================
 
 enum class LifecycleTransition : uint8_t {
-  kConfigure,     // Unconfigured -> Inactive
-  kActivate,      // Inactive -> Active
-  kDeactivate,    // Active -> Inactive
-  kCleanup,       // Inactive -> Unconfigured
-  kShutdown       // Any -> Finalized
+  kConfigure,   // Unconfigured -> Inactive
+  kActivate,    // Inactive -> Active
+  kDeactivate,  // Active -> Inactive
+  kCleanup,     // Inactive -> Unconfigured
+  kShutdown     // Any -> Finalized
 };
 
 // ============================================================================
@@ -127,8 +128,8 @@ enum class LifecycleError : uint8_t {
 // Lifecycle Callback Types
 // ============================================================================
 
-using LifecycleCallback = bool(*)();
-using LifecycleShutdownCallback = void(*)();
+using LifecycleCallback = bool (*)();
+using LifecycleShutdownCallback = void (*)();
 
 // ============================================================================
 // HSM Events for Lifecycle
@@ -168,10 +169,10 @@ struct LifecycleHsmContext {
   FaultReporter fault_reporter;
 
   // Built-in fault indices for lifecycle transitions
-  static constexpr uint16_t kFaultConfigureFailed  = 0U;
-  static constexpr uint16_t kFaultActivateFailed   = 1U;
+  static constexpr uint16_t kFaultConfigureFailed = 0U;
+  static constexpr uint16_t kFaultActivateFailed = 1U;
   static constexpr uint16_t kFaultDeactivateFailed = 2U;
-  static constexpr uint16_t kFaultCleanupFailed    = 3U;
+  static constexpr uint16_t kFaultCleanupFailed = 3U;
 
   // Transition result tracking (set by handlers before RequestTransition)
   LifecycleError last_error;
@@ -184,17 +185,18 @@ struct LifecycleHsmContext {
   std::array<int32_t, static_cast<uint8_t>(LifecycleDetailedState::kCount)> idx;
 
   LifecycleHsmContext() noexcept
-      : on_configure(nullptr), on_activate(nullptr),
-        on_deactivate(nullptr), on_cleanup(nullptr),
+      : on_configure(nullptr),
+        on_activate(nullptr),
+        on_deactivate(nullptr),
+        on_cleanup(nullptr),
         on_shutdown(nullptr),
         last_error(LifecycleError::kInvalidTransition),
-        transition_failed(false), sm(nullptr) {
+        transition_failed(false),
+        sm(nullptr) {
     idx.fill(-1);
   }
 
-  int32_t I(LifecycleDetailedState s) const noexcept {
-    return idx[static_cast<uint8_t>(s)];
-  }
+  int32_t I(LifecycleDetailedState s) const noexcept { return idx[static_cast<uint8_t>(s)]; }
 };
 
 // ============================================================================
@@ -231,8 +233,7 @@ inline TransitionResult HandleWaitingConfig(Ctx& ctx, const Event& event) {
     if (ctx.on_configure != nullptr && !ctx.on_configure()) {
       ctx.transition_failed = true;
       ctx.last_error = LifecycleError::kCallbackFailed;
-      ctx.fault_reporter.Report(Ctx::kFaultConfigureFailed, 0U,
-                                FaultPriority::kHigh);
+      ctx.fault_reporter.Report(Ctx::kFaultConfigureFailed, 0U, FaultPriority::kHigh);
       return TransitionResult::kHandled;  // Stay in current state
     }
     return ctx.sm->RequestTransition(ctx.I(DS::kStandby));
@@ -246,8 +247,7 @@ inline TransitionResult HandleStandby(Ctx& ctx, const Event& event) {
     if (ctx.on_activate != nullptr && !ctx.on_activate()) {
       ctx.transition_failed = true;
       ctx.last_error = LifecycleError::kCallbackFailed;
-      ctx.fault_reporter.Report(Ctx::kFaultActivateFailed, 0U,
-                                FaultPriority::kHigh);
+      ctx.fault_reporter.Report(Ctx::kFaultActivateFailed, 0U, FaultPriority::kHigh);
       return TransitionResult::kHandled;
     }
     return ctx.sm->RequestTransition(ctx.I(DS::kRunning));
@@ -256,8 +256,7 @@ inline TransitionResult HandleStandby(Ctx& ctx, const Event& event) {
     if (ctx.on_cleanup != nullptr && !ctx.on_cleanup()) {
       ctx.transition_failed = true;
       ctx.last_error = LifecycleError::kCallbackFailed;
-      ctx.fault_reporter.Report(Ctx::kFaultCleanupFailed, 0U,
-                                FaultPriority::kMedium);
+      ctx.fault_reporter.Report(Ctx::kFaultCleanupFailed, 0U, FaultPriority::kMedium);
       return TransitionResult::kHandled;
     }
     return ctx.sm->RequestTransition(ctx.I(DS::kWaitingConfig));
@@ -272,8 +271,7 @@ inline TransitionResult HandlePaused(Ctx& ctx, const Event& event) {
     if (ctx.on_activate != nullptr && !ctx.on_activate()) {
       ctx.transition_failed = true;
       ctx.last_error = LifecycleError::kCallbackFailed;
-      ctx.fault_reporter.Report(Ctx::kFaultActivateFailed, 0U,
-                                FaultPriority::kHigh);
+      ctx.fault_reporter.Report(Ctx::kFaultActivateFailed, 0U, FaultPriority::kHigh);
       return TransitionResult::kHandled;
     }
     return ctx.sm->RequestTransition(ctx.I(DS::kRunning));
@@ -282,8 +280,7 @@ inline TransitionResult HandlePaused(Ctx& ctx, const Event& event) {
     if (ctx.on_cleanup != nullptr && !ctx.on_cleanup()) {
       ctx.transition_failed = true;
       ctx.last_error = LifecycleError::kCallbackFailed;
-      ctx.fault_reporter.Report(Ctx::kFaultCleanupFailed, 0U,
-                                FaultPriority::kMedium);
+      ctx.fault_reporter.Report(Ctx::kFaultCleanupFailed, 0U, FaultPriority::kMedium);
       return TransitionResult::kHandled;
     }
     return ctx.sm->RequestTransition(ctx.I(DS::kWaitingConfig));
@@ -297,8 +294,7 @@ inline TransitionResult HandleRunning(Ctx& ctx, const Event& event) {
     if (ctx.on_deactivate != nullptr && !ctx.on_deactivate()) {
       ctx.transition_failed = true;
       ctx.last_error = LifecycleError::kCallbackFailed;
-      ctx.fault_reporter.Report(Ctx::kFaultDeactivateFailed, 0U,
-                                FaultPriority::kHigh);
+      ctx.fault_reporter.Report(Ctx::kFaultDeactivateFailed, 0U, FaultPriority::kHigh);
       return TransitionResult::kHandled;
     }
     return ctx.sm->RequestTransition(ctx.I(DS::kStandby));
@@ -307,8 +303,7 @@ inline TransitionResult HandleRunning(Ctx& ctx, const Event& event) {
     if (ctx.on_deactivate != nullptr && !ctx.on_deactivate()) {
       ctx.transition_failed = true;
       ctx.last_error = LifecycleError::kCallbackFailed;
-      ctx.fault_reporter.Report(Ctx::kFaultDeactivateFailed, 0U,
-                                FaultPriority::kHigh);
+      ctx.fault_reporter.Report(Ctx::kFaultDeactivateFailed, 0U, FaultPriority::kHigh);
       return TransitionResult::kHandled;
     }
     return ctx.sm->RequestTransition(ctx.I(DS::kPaused));
@@ -328,8 +323,7 @@ inline TransitionResult HandleDegraded(Ctx& ctx, const Event& event) {
     if (ctx.on_deactivate != nullptr && !ctx.on_deactivate()) {
       ctx.transition_failed = true;
       ctx.last_error = LifecycleError::kCallbackFailed;
-      ctx.fault_reporter.Report(Ctx::kFaultDeactivateFailed, 0U,
-                                FaultPriority::kHigh);
+      ctx.fault_reporter.Report(Ctx::kFaultDeactivateFailed, 0U, FaultPriority::kHigh);
       return TransitionResult::kHandled;
     }
     return ctx.sm->RequestTransition(ctx.I(DS::kStandby));
@@ -338,8 +332,7 @@ inline TransitionResult HandleDegraded(Ctx& ctx, const Event& event) {
     if (ctx.on_deactivate != nullptr && !ctx.on_deactivate()) {
       ctx.transition_failed = true;
       ctx.last_error = LifecycleError::kCallbackFailed;
-      ctx.fault_reporter.Report(Ctx::kFaultDeactivateFailed, 0U,
-                                FaultPriority::kHigh);
+      ctx.fault_reporter.Report(Ctx::kFaultDeactivateFailed, 0U, FaultPriority::kHigh);
       return TransitionResult::kHandled;
     }
     return ctx.sm->RequestTransition(ctx.I(DS::kPaused));
@@ -439,9 +432,7 @@ class LifecycleNode : public Node<PayloadVariant> {
   /**
    * @brief Get the coarse-grained lifecycle state (backward-compatible).
    */
-  LifecycleState GetState() const noexcept {
-    return MapToCoarseState(GetDetailedState());
-  }
+  LifecycleState GetState() const noexcept { return MapToCoarseState(GetDetailedState()); }
 
   // ======================== Rich State Query ========================
 
@@ -449,7 +440,8 @@ class LifecycleNode : public Node<PayloadVariant> {
    * @brief Get the detailed hierarchical state.
    */
   LifecycleDetailedState GetDetailedState() const noexcept {
-    if (!hsm_initialized_) return DS::kFinalized;
+    if (!hsm_initialized_)
+      return DS::kFinalized;
     int32_t current = GetHsm()->CurrentState();
     // Map HSM state index back to LifecycleDetailedState
     for (uint8_t i = 0; i < static_cast<uint8_t>(DS::kCount); ++i) {
@@ -464,7 +456,8 @@ class LifecycleNode : public Node<PayloadVariant> {
    * @brief Get the HSM state name string.
    */
   const char* DetailedStateName() const noexcept {
-    if (!hsm_initialized_) return "Finalized";
+    if (!hsm_initialized_)
+      return "Finalized";
     return GetHsm()->CurrentStateName();
   }
 
@@ -472,7 +465,8 @@ class LifecycleNode : public Node<PayloadVariant> {
    * @brief Check if currently in a given detailed state or any descendant.
    */
   bool IsInDetailedState(LifecycleDetailedState state) const noexcept {
-    if (!hsm_initialized_) return state == DS::kFinalized;
+    if (!hsm_initialized_)
+      return state == DS::kFinalized;
     return GetHsm()->IsInState(ctx_.I(state));
   }
 
@@ -486,31 +480,24 @@ class LifecycleNode : public Node<PayloadVariant> {
 
   /// @brief Wire fault reporter for automatic transition failure reporting.
   /// @param reporter FaultReporter with fn + ctx (nullptr fn = disabled).
-  void SetFaultReporter(FaultReporter reporter) noexcept {
-    ctx_.fault_reporter = reporter;
-  }
+  void SetFaultReporter(FaultReporter reporter) noexcept { ctx_.fault_reporter = reporter; }
 
   // ======================== State Transitions (backward-compatible) ========================
 
   /**
    * @brief Trigger a lifecycle state transition.
    */
-  expected<void, LifecycleError> Trigger(
-      LifecycleTransition transition) noexcept {
+  expected<void, LifecycleError> Trigger(LifecycleTransition transition) noexcept {
     DS current = GetDetailedState();
 
     // Check if already finalized (except for shutdown, which is idempotent)
-    if (current == DS::kFinalized &&
-        transition != LifecycleTransition::kShutdown) {
-      return expected<void, LifecycleError>::error(
-          LifecycleError::kAlreadyFinalized);
+    if (current == DS::kFinalized && transition != LifecycleTransition::kShutdown) {
+      return expected<void, LifecycleError>::error(LifecycleError::kAlreadyFinalized);
     }
 
     // Error states block all transitions except shutdown
-    if (IsInDetailedState(DS::kError) &&
-        transition != LifecycleTransition::kShutdown) {
-      return expected<void, LifecycleError>::error(
-          LifecycleError::kInvalidTransition);
+    if (IsInDetailedState(DS::kError) && transition != LifecycleTransition::kShutdown) {
+      return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
     }
 
     // Validate transition is allowed from current coarse state
@@ -520,29 +507,25 @@ class LifecycleNode : public Node<PayloadVariant> {
     switch (transition) {
       case LifecycleTransition::kConfigure:
         if (coarse != LifecycleState::kUnconfigured) {
-          return expected<void, LifecycleError>::error(
-              LifecycleError::kInvalidTransition);
+          return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
         }
         evt_id = static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtConfigure);
         break;
       case LifecycleTransition::kActivate:
         if (coarse != LifecycleState::kInactive) {
-          return expected<void, LifecycleError>::error(
-              LifecycleError::kInvalidTransition);
+          return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
         }
         evt_id = static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtActivate);
         break;
       case LifecycleTransition::kDeactivate:
         if (coarse != LifecycleState::kActive) {
-          return expected<void, LifecycleError>::error(
-              LifecycleError::kInvalidTransition);
+          return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
         }
         evt_id = static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtDeactivate);
         break;
       case LifecycleTransition::kCleanup:
         if (coarse != LifecycleState::kInactive) {
-          return expected<void, LifecycleError>::error(
-              LifecycleError::kInvalidTransition);
+          return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
         }
         evt_id = static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtCleanup);
         break;
@@ -556,21 +539,11 @@ class LifecycleNode : public Node<PayloadVariant> {
 
   // ======================== Convenience Methods (backward-compatible) ========================
 
-  expected<void, LifecycleError> Configure() noexcept {
-    return Trigger(LifecycleTransition::kConfigure);
-  }
-  expected<void, LifecycleError> Activate() noexcept {
-    return Trigger(LifecycleTransition::kActivate);
-  }
-  expected<void, LifecycleError> Deactivate() noexcept {
-    return Trigger(LifecycleTransition::kDeactivate);
-  }
-  expected<void, LifecycleError> Cleanup() noexcept {
-    return Trigger(LifecycleTransition::kCleanup);
-  }
-  expected<void, LifecycleError> Shutdown() noexcept {
-    return Trigger(LifecycleTransition::kShutdown);
-  }
+  expected<void, LifecycleError> Configure() noexcept { return Trigger(LifecycleTransition::kConfigure); }
+  expected<void, LifecycleError> Activate() noexcept { return Trigger(LifecycleTransition::kActivate); }
+  expected<void, LifecycleError> Deactivate() noexcept { return Trigger(LifecycleTransition::kDeactivate); }
+  expected<void, LifecycleError> Cleanup() noexcept { return Trigger(LifecycleTransition::kCleanup); }
+  expected<void, LifecycleError> Shutdown() noexcept { return Trigger(LifecycleTransition::kShutdown); }
 
   // ======================== Rich Transitions (new API) ========================
 
@@ -579,8 +552,7 @@ class LifecycleNode : public Node<PayloadVariant> {
    */
   expected<void, LifecycleError> Pause() noexcept {
     if (!IsInDetailedState(DS::kActive)) {
-      return expected<void, LifecycleError>::error(
-          LifecycleError::kInvalidTransition);
+      return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
     }
     return DispatchAndCheck(static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtPause));
   }
@@ -591,8 +563,7 @@ class LifecycleNode : public Node<PayloadVariant> {
   expected<void, LifecycleError> Resume() noexcept {
     DS current = GetDetailedState();
     if (current != DS::kPaused) {
-      return expected<void, LifecycleError>::error(
-          LifecycleError::kInvalidTransition);
+      return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
     }
     return DispatchAndCheck(static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtResume));
   }
@@ -603,8 +574,7 @@ class LifecycleNode : public Node<PayloadVariant> {
   expected<void, LifecycleError> MarkDegraded() noexcept {
     DS current = GetDetailedState();
     if (current != DS::kRunning) {
-      return expected<void, LifecycleError>::error(
-          LifecycleError::kInvalidTransition);
+      return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
     }
     return DispatchAndCheck(static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtMarkDegraded));
   }
@@ -615,8 +585,7 @@ class LifecycleNode : public Node<PayloadVariant> {
   expected<void, LifecycleError> ClearDegraded() noexcept {
     DS current = GetDetailedState();
     if (current != DS::kDegraded) {
-      return expected<void, LifecycleError>::error(
-          LifecycleError::kInvalidTransition);
+      return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
     }
     return DispatchAndCheck(static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtClearDegraded));
   }
@@ -627,8 +596,7 @@ class LifecycleNode : public Node<PayloadVariant> {
   expected<void, LifecycleError> TriggerError() noexcept {
     DS current = GetDetailedState();
     if (current == DS::kFinalized || IsInDetailedState(DS::kError)) {
-      return expected<void, LifecycleError>::error(
-          LifecycleError::kInvalidTransition);
+      return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
     }
     return DispatchAndCheck(static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtError));
   }
@@ -639,8 +607,7 @@ class LifecycleNode : public Node<PayloadVariant> {
   expected<void, LifecycleError> TriggerFatalError() noexcept {
     DS current = GetDetailedState();
     if (current == DS::kFinalized || IsInDetailedState(DS::kError)) {
-      return expected<void, LifecycleError>::error(
-          LifecycleError::kInvalidTransition);
+      return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
     }
     return DispatchAndCheck(static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtFatalError));
   }
@@ -651,8 +618,7 @@ class LifecycleNode : public Node<PayloadVariant> {
   expected<void, LifecycleError> Recover() noexcept {
     DS current = GetDetailedState();
     if (current != DS::kRecoverable) {
-      return expected<void, LifecycleError>::error(
-          LifecycleError::kInvalidTransition);
+      return expected<void, LifecycleError>::error(LifecycleError::kInvalidTransition);
     }
     return DispatchAndCheck(static_cast<uint32_t>(LifecycleHsmEvent::kLcEvtRecover));
   }
@@ -666,12 +632,8 @@ class LifecycleNode : public Node<PayloadVariant> {
 
   // MISRA C++ Rule 5-2-4 deviation: reinterpret_cast for placement-new storage.
   // Required for in-place HSM construction without heap allocation.
-  HsmType* GetHsm() noexcept {
-    return reinterpret_cast<HsmType*>(hsm_storage_);
-  }
-  const HsmType* GetHsm() const noexcept {
-    return reinterpret_cast<const HsmType*>(hsm_storage_);
-  }
+  HsmType* GetHsm() noexcept { return reinterpret_cast<HsmType*>(hsm_storage_); }
+  const HsmType* GetHsm() const noexcept { return reinterpret_cast<const HsmType*>(hsm_storage_); }
 
   // ======================== HSM Initialization ========================
 

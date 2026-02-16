@@ -52,11 +52,12 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
+#include <cstdint>
+
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdint>
 #include <mutex>
 #include <thread>
 #include <type_traits>
@@ -70,26 +71,26 @@ namespace osp {
 /// Fault priority levels (lower value = higher priority).
 enum class FaultPriority : uint8_t {
   kCritical = 0U,  ///< System safety, never dropped
-  kHigh     = 1U,  ///< Hardware fault, comm loss
-  kMedium   = 2U,  ///< Performance degradation
-  kLow      = 3U   ///< Diagnostics, statistics
+  kHigh = 1U,      ///< Hardware fault, comm loss
+  kMedium = 2U,    ///< Performance degradation
+  kLow = 3U        ///< Diagnostics, statistics
 };
 
 /// Hook return action.
 enum class HookAction : uint8_t {
-  kHandled  = 0U,  ///< Fault resolved, clear active bit
+  kHandled = 0U,   ///< Fault resolved, clear active bit
   kEscalate = 1U,  ///< Re-enqueue at higher priority
-  kDefer    = 2U,  ///< Keep active, process later
+  kDefer = 2U,     ///< Keep active, process later
   kShutdown = 3U   ///< Request system shutdown
 };
 
 /// Error codes for FaultCollector operations.
 enum class FaultCollectorError : uint8_t {
-  kQueueFull      = 0U,
-  kInvalidIndex   = 1U,
+  kQueueFull = 0U,
+  kInvalidIndex = 1U,
   kAlreadyStarted = 2U,
-  kNotStarted     = 3U,
-  kHookSlotFull   = 4U
+  kNotStarted = 3U,
+  kHookSlotFull = 4U
 };
 
 // ============================================================================
@@ -133,10 +134,10 @@ struct QueueUsageInfo {
 
 /// Recent fault record for diagnostic iteration.
 struct RecentFaultInfo {
-  uint16_t fault_index;       ///< Fault point index
-  uint32_t detail;            ///< User-defined detail value
-  FaultPriority priority;     ///< Fault priority level
-  uint64_t timestamp_us;      ///< Steady-clock timestamp (microseconds)
+  uint16_t fault_index;    ///< Fault point index
+  uint32_t detail;         ///< User-defined detail value
+  FaultPriority priority;  ///< Fault priority level
+  uint64_t timestamp_us;   ///< Steady-clock timestamp (microseconds)
 };
 
 // ============================================================================
@@ -148,8 +149,7 @@ struct RecentFaultInfo {
 /// @param detail       User-defined detail value.
 /// @param priority     Fault priority level.
 /// @param ctx          User context pointer.
-using FaultReportFn = void (*)(uint16_t fault_index, uint32_t detail,
-                               FaultPriority priority, void* ctx);
+using FaultReportFn = void (*)(uint16_t fault_index, uint32_t detail, FaultPriority priority, void* ctx);
 
 /// Zero-overhead fault reporter injection point.
 ///
@@ -176,8 +176,7 @@ struct FaultReporter {
   void* ctx = nullptr;         ///< User context (typically FaultCollector*)
 
   /// Convenience: report a fault if reporter is wired.
-  void Report(uint16_t fault_index, uint32_t detail,
-              FaultPriority priority) const noexcept {
+  void Report(uint16_t fault_index, uint32_t detail, FaultPriority priority) const noexcept {
     if (fn != nullptr) {
       fn(fault_index, detail, priority, ctx);
     }
@@ -212,8 +211,7 @@ class FaultRingBuffer {
       int32_t diff = static_cast<int32_t>(seq) - static_cast<int32_t>(pos);
       if (diff == 0) {
         // Slot available, try to claim it
-        if (producer_pos_.compare_exchange_weak(
-                pos, pos + 1U, std::memory_order_relaxed)) {
+        if (producer_pos_.compare_exchange_weak(pos, pos + 1U, std::memory_order_relaxed)) {
           node.entry = entry;
           node.sequence.store(pos + 1U, std::memory_order_release);
           return true;
@@ -274,14 +272,10 @@ class FaultRingBuffer {
 /// @tparam MaxFaults   Maximum number of fault points (1-256)
 /// @tparam QueueDepth  Ring buffer depth per priority (power of 2)
 /// @tparam HookBufSize FixedFunction SBO buffer size
-template <uint32_t MaxFaults = 64U,
-          uint32_t QueueDepth = 256U,
-          uint32_t HookBufSize = 32U>
+template <uint32_t MaxFaults = 64U, uint32_t QueueDepth = 256U, uint32_t HookBufSize = 32U>
 class FaultCollector {
-  static_assert((QueueDepth & (QueueDepth - 1U)) == 0U,
-                "QueueDepth must be power of 2");
-  static_assert(MaxFaults >= 1U && MaxFaults <= 256U,
-                "MaxFaults must be in [1, 256]");
+  static_assert((QueueDepth & (QueueDepth - 1U)) == 0U, "QueueDepth must be power of 2");
+  static_assert(MaxFaults >= 1U && MaxFaults <= 256U, "MaxFaults must be in [1, 256]");
 
  public:
   using HookFn = FixedFunction<HookAction(const FaultEvent&), HookBufSize>;
@@ -298,14 +292,10 @@ class FaultCollector {
   // -- Configuration (call before Start) ------------------------------------
 
   /// Register a fault point in the table.
-  expected<void, FaultCollectorError> RegisterFault(
-      uint16_t fault_index,
-      uint32_t fault_code,
-      uint32_t attr = 0U,
-      uint32_t err_threshold = 1U) noexcept {
+  expected<void, FaultCollectorError> RegisterFault(uint16_t fault_index, uint32_t fault_code, uint32_t attr = 0U,
+                                                    uint32_t err_threshold = 1U) noexcept {
     if (OSP_UNLIKELY(fault_index >= MaxFaults)) {
-      return expected<void, FaultCollectorError>::error(
-          FaultCollectorError::kInvalidIndex);
+      return expected<void, FaultCollectorError>::error(FaultCollectorError::kInvalidIndex);
     }
     auto& entry = table_[fault_index];
     entry.fault_code = fault_code;
@@ -317,15 +307,12 @@ class FaultCollector {
 
   /// Register a user hook for a specific fault index.
   template <typename Func>
-  expected<void, FaultCollectorError> RegisterHook(
-      uint16_t fault_index, Func&& hook) noexcept {
+  expected<void, FaultCollectorError> RegisterHook(uint16_t fault_index, Func&& hook) noexcept {
     if (OSP_UNLIKELY(fault_index >= MaxFaults)) {
-      return expected<void, FaultCollectorError>::error(
-          FaultCollectorError::kInvalidIndex);
+      return expected<void, FaultCollectorError>::error(FaultCollectorError::kInvalidIndex);
     }
     if (OSP_UNLIKELY(!table_[fault_index].registered)) {
-      return expected<void, FaultCollectorError>::error(
-          FaultCollectorError::kInvalidIndex);
+      return expected<void, FaultCollectorError>::error(FaultCollectorError::kInvalidIndex);
     }
     table_[fault_index].hook = HookFn(static_cast<Func&&>(hook));
     return expected<void, FaultCollectorError>::success();
@@ -345,9 +332,7 @@ class FaultCollector {
 
   /// Set optional heartbeat for consumer thread monitoring.
   /// Must be called before Start(). The pointer must remain valid until Stop().
-  void SetConsumerHeartbeat(ThreadHeartbeat* hb) noexcept {
-    consumer_heartbeat_ = hb;
-  }
+  void SetConsumerHeartbeat(ThreadHeartbeat* hb) noexcept { consumer_heartbeat_ = hb; }
 
   /// Set shutdown callback (invoked when a hook returns kShutdown).
   /// The callback is invoked from the consumer thread.
@@ -361,8 +346,7 @@ class FaultCollector {
   /// Start the consumer thread.
   expected<void, FaultCollectorError> Start() noexcept {
     if (running_.load(std::memory_order_relaxed)) {
-      return expected<void, FaultCollectorError>::error(
-          FaultCollectorError::kAlreadyStarted);
+      return expected<void, FaultCollectorError>::error(FaultCollectorError::kAlreadyStarted);
     }
     running_.store(true, std::memory_order_release);
     consumer_thread_ = std::thread([this] { ConsumerLoop(); });
@@ -384,25 +368,18 @@ class FaultCollector {
   }
 
   /// Check if consumer thread is running.
-  bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_relaxed);
-  }
+  bool IsRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
 
   /// Check if a hook has requested system shutdown.
-  bool IsShutdownRequested() const noexcept {
-    return shutdown_requested_.load(std::memory_order_acquire);
-  }
+  bool IsShutdownRequested() const noexcept { return shutdown_requested_.load(std::memory_order_acquire); }
 
   // -- Reporting (thread-safe, hot path) ------------------------------------
 
   /// Report a fault (multi-producer safe).
-  expected<void, FaultCollectorError> ReportFault(
-      uint16_t fault_index,
-      uint32_t detail = 0U,
-      FaultPriority priority = FaultPriority::kMedium) noexcept {
+  expected<void, FaultCollectorError> ReportFault(uint16_t fault_index, uint32_t detail = 0U,
+                                                  FaultPriority priority = FaultPriority::kMedium) noexcept {
     if (OSP_UNLIKELY(fault_index >= MaxFaults)) {
-      return expected<void, FaultCollectorError>::error(
-          FaultCollectorError::kInvalidIndex);
+      return expected<void, FaultCollectorError>::error(FaultCollectorError::kInvalidIndex);
     }
 
     uint32_t pri = static_cast<uint32_t>(priority);
@@ -415,8 +392,7 @@ class FaultCollector {
       if (overflow_cb_) {
         overflow_cb_(fault_index, priority);
       }
-      return expected<void, FaultCollectorError>::error(
-          FaultCollectorError::kQueueFull);
+      return expected<void, FaultCollectorError>::error(FaultCollectorError::kQueueFull);
     }
 
     FaultEntry entry{};
@@ -431,8 +407,7 @@ class FaultCollector {
       if (overflow_cb_) {
         overflow_cb_(fault_index, priority);
       }
-      return expected<void, FaultCollectorError>::error(
-          FaultCollectorError::kQueueFull);
+      return expected<void, FaultCollectorError>::error(FaultCollectorError::kQueueFull);
     }
 
     // Update stats and active bitmap
@@ -507,10 +482,8 @@ class FaultCollector {
     s.total_processed = stats_total_processed_.load(std::memory_order_relaxed);
     s.total_dropped = stats_total_dropped_.load(std::memory_order_relaxed);
     for (uint32_t i = 0U; i < detail::kPriorityLevels; ++i) {
-      s.priority_reported[i] =
-          stats_reported_[i].load(std::memory_order_relaxed);
-      s.priority_dropped[i] =
-          stats_dropped_[i].load(std::memory_order_relaxed);
+      s.priority_reported[i] = stats_reported_[i].load(std::memory_order_relaxed);
+      s.priority_dropped[i] = stats_dropped_[i].load(std::memory_order_relaxed);
     }
     return s;
   }
@@ -590,12 +563,9 @@ class FaultCollector {
  private:
   // -- Admission thresholds -------------------------------------------------
 
-  static constexpr uint32_t kLowThreshold =
-      (QueueDepth * 60U) / 100U;
-  static constexpr uint32_t kMediumThreshold =
-      (QueueDepth * 80U) / 100U;
-  static constexpr uint32_t kHighThreshold =
-      (QueueDepth * 99U) / 100U;
+  static constexpr uint32_t kLowThreshold = (QueueDepth * 60U) / 100U;
+  static constexpr uint32_t kMediumThreshold = (QueueDepth * 80U) / 100U;
+  static constexpr uint32_t kHighThreshold = (QueueDepth * 99U) / 100U;
 
   /// Check if a fault at given priority should be admitted.
   bool AdmitByPriority(uint32_t pri, uint32_t current_depth) const noexcept {
@@ -620,15 +590,13 @@ class FaultCollector {
   void SetFaultActive(uint16_t fault_index) noexcept {
     uint32_t word_idx = fault_index / 64U;
     uint32_t bit_idx = fault_index % 64U;
-    active_bitmap_[word_idx].fetch_or(1ULL << bit_idx,
-                                      std::memory_order_relaxed);
+    active_bitmap_[word_idx].fetch_or(1ULL << bit_idx, std::memory_order_relaxed);
   }
 
   void ClearFaultActive(uint16_t fault_index) noexcept {
     uint32_t word_idx = fault_index / 64U;
     uint32_t bit_idx = fault_index % 64U;
-    active_bitmap_[word_idx].fetch_and(~(1ULL << bit_idx),
-                                       std::memory_order_relaxed);
+    active_bitmap_[word_idx].fetch_and(~(1ULL << bit_idx), std::memory_order_relaxed);
   }
 
   static uint32_t PopCount64(uint64_t x) noexcept {
@@ -651,8 +619,7 @@ class FaultCollector {
     if (consumer_heartbeat_ != nullptr) {
       consumer_heartbeat_->Beat();
     }
-    while (running_.load(std::memory_order_acquire) &&
-           !shutdown_requested_.load(std::memory_order_acquire)) {
+    while (running_.load(std::memory_order_acquire) && !shutdown_requested_.load(std::memory_order_acquire)) {
       uint32_t processed = ProcessBatch();
       if (consumer_heartbeat_ != nullptr) {
         consumer_heartbeat_->Beat();
@@ -660,8 +627,7 @@ class FaultCollector {
       if (processed == 0U) {
         std::unique_lock<std::mutex> lock(wake_mutex_);
         wake_cv_.wait_for(lock, std::chrono::milliseconds(10), [this] {
-          return !running_.load(std::memory_order_relaxed) ||
-                 shutdown_requested_.load(std::memory_order_relaxed) ||
+          return !running_.load(std::memory_order_relaxed) || shutdown_requested_.load(std::memory_order_relaxed) ||
                  QueueDepthCurrent() > 0U;
         });
       }
@@ -708,8 +674,7 @@ class FaultCollector {
     auto& tbl = table_[idx];
 
     // Increment occurrence count
-    uint32_t prev_count =
-        tbl.occurrence_count.fetch_add(1U, std::memory_order_relaxed);
+    uint32_t prev_count = tbl.occurrence_count.fetch_add(1U, std::memory_order_relaxed);
 
     // Build FaultEvent
     FaultEvent evt{};
@@ -721,9 +686,7 @@ class FaultCollector {
     evt.occurrence_count = prev_count + 1U;
     evt.is_first = (prev_count == 0U);
 
-    OSP_LOG_DEBUG("FCCU",
-                  "Processing fault idx=%u code=0x%08x detail=0x%08x pri=%u",
-                  idx, tbl.fault_code, entry.detail,
+    OSP_LOG_DEBUG("FCCU", "Processing fault idx=%u code=0x%08x detail=0x%08x pri=%u", idx, tbl.fault_code, entry.detail,
                   static_cast<uint32_t>(entry.priority));
 
     // Invoke hook
@@ -746,9 +709,7 @@ class FaultCollector {
         // Keep active, do nothing
         break;
       case HookAction::kShutdown:
-        OSP_LOG_ERROR("FCCU",
-                      "Shutdown requested by fault idx=%u code=0x%08x",
-                      idx, tbl.fault_code);
+        OSP_LOG_ERROR("FCCU", "Shutdown requested by fault idx=%u code=0x%08x", idx, tbl.fault_code);
         shutdown_requested_.store(true, std::memory_order_release);
         if (shutdown_fn_ != nullptr) {
           shutdown_fn_(shutdown_ctx_);
@@ -766,9 +727,7 @@ class FaultCollector {
     uint32_t pri = static_cast<uint32_t>(original.priority);
     if (pri == 0U) {
       // Already kCritical, cannot escalate further
-      OSP_LOG_WARN("FCCU",
-                   "Fault idx=%u already at kCritical, cannot escalate",
-                   original.fault_index);
+      OSP_LOG_WARN("FCCU", "Fault idx=%u already at kCritical, cannot escalate", original.fault_index);
       return;
     }
 
@@ -776,12 +735,9 @@ class FaultCollector {
     escalated.priority = static_cast<FaultPriority>(pri - 1U);
 
     if (!queues_[pri - 1U].TryPush(escalated)) {
-      OSP_LOG_WARN("FCCU",
-                   "Escalation failed for fault idx=%u (queue full)",
-                   original.fault_index);
+      OSP_LOG_WARN("FCCU", "Escalation failed for fault idx=%u (queue full)", original.fault_index);
     } else {
-      OSP_LOG_INFO("FCCU", "Fault idx=%u escalated from pri=%u to pri=%u",
-                   original.fault_index, pri, pri - 1U);
+      OSP_LOG_INFO("FCCU", "Fault idx=%u escalated from pri=%u to pri=%u", original.fault_index, pri, pri - 1U);
     }
   }
 
@@ -799,8 +755,7 @@ class FaultCollector {
   // -- Member data ----------------------------------------------------------
 
   // Per-priority ring buffers
-  std::array<detail::FaultRingBuffer<QueueDepth>,
-             detail::kPriorityLevels> queues_;
+  std::array<detail::FaultRingBuffer<QueueDepth>, detail::kPriorityLevels> queues_;
 
   // Fault table
   std::array<FaultTableEntry, MaxFaults> table_{};

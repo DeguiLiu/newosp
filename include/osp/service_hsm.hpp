@@ -39,6 +39,7 @@
 #include "osp/platform.hpp"
 
 #include <cstdint>
+
 #include <mutex>
 
 namespace osp {
@@ -85,11 +86,18 @@ struct ServiceHsmContext {
   int32_t idx_shutting_down;
 
   ServiceHsmContext() noexcept
-      : active_clients(0), error_code(0),
-        on_error(nullptr), on_shutdown(nullptr), callback_ctx(nullptr),
+      : active_clients(0),
+        error_code(0),
+        on_error(nullptr),
+        on_shutdown(nullptr),
+        callback_ctx(nullptr),
         fault_reporter(),
-        sm(nullptr), idx_idle(-1), idx_listening(-1), idx_active(-1),
-        idx_error(-1), idx_shutting_down(-1) {}
+        sm(nullptr),
+        idx_idle(-1),
+        idx_listening(-1),
+        idx_active(-1),
+        idx_error(-1),
+        idx_shutting_down(-1) {}
 };
 
 // ============================================================================
@@ -113,8 +121,7 @@ inline TransitionResult StateIdle(ServiceHsmContext& ctx, const Event& event) {
 }
 
 // Listening state: bound to port, waiting for connections
-inline TransitionResult StateListening(ServiceHsmContext& ctx,
-                                       const Event& event) {
+inline TransitionResult StateListening(ServiceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtClientConnected)) {
     ++ctx.active_clients;
     return ctx.sm->RequestTransition(ctx.idx_active);
@@ -132,8 +139,7 @@ inline TransitionResult StateListening(ServiceHsmContext& ctx,
 }
 
 // Active state: has active client connections
-inline TransitionResult StateActive(ServiceHsmContext& ctx,
-                                    const Event& event) {
+inline TransitionResult StateActive(ServiceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtClientConnected)) {
     ++ctx.active_clients;
     return TransitionResult::kHandled;
@@ -173,17 +179,15 @@ inline TransitionResult StateError(ServiceHsmContext& ctx, const Event& event) {
 }
 
 // ShuttingDown state: service is shutting down
-inline TransitionResult StateShuttingDown(ServiceHsmContext& /*ctx*/,
-                                          const Event& /*event*/) {
+inline TransitionResult StateShuttingDown(ServiceHsmContext& /*ctx*/, const Event& /*event*/) {
   // Terminal state, no transitions out
   return TransitionResult::kHandled;
 }
 
 // Entry action for Error state
 inline void OnEnterError(ServiceHsmContext& ctx) {
-  ctx.fault_reporter.Report(
-      ServiceHsmContext::kFaultServiceError,
-      static_cast<uint32_t>(ctx.error_code), FaultPriority::kHigh);
+  ctx.fault_reporter.Report(ServiceHsmContext::kFaultServiceError, static_cast<uint32_t>(ctx.error_code),
+                            FaultPriority::kHigh);
   if (ctx.on_error != nullptr) {
     ctx.on_error(ctx.error_code, ctx.callback_ctx);
   }
@@ -218,37 +222,16 @@ class HsmService {
     context_.sm = &hsm_;
 
     // Add states
-    context_.idx_idle = hsm_.AddState({
-        "Idle", -1,
-        detail::StateIdle,
-        nullptr, nullptr, nullptr
-    });
+    context_.idx_idle = hsm_.AddState({"Idle", -1, detail::StateIdle, nullptr, nullptr, nullptr});
 
-    context_.idx_listening = hsm_.AddState({
-        "Listening", -1,
-        detail::StateListening,
-        nullptr, nullptr, nullptr
-    });
+    context_.idx_listening = hsm_.AddState({"Listening", -1, detail::StateListening, nullptr, nullptr, nullptr});
 
-    context_.idx_active = hsm_.AddState({
-        "Active", -1,
-        detail::StateActive,
-        nullptr, nullptr, nullptr
-    });
+    context_.idx_active = hsm_.AddState({"Active", -1, detail::StateActive, nullptr, nullptr, nullptr});
 
-    context_.idx_error = hsm_.AddState({
-        "Error", -1,
-        detail::StateError,
-        detail::OnEnterError,
-        nullptr, nullptr
-    });
+    context_.idx_error = hsm_.AddState({"Error", -1, detail::StateError, detail::OnEnterError, nullptr, nullptr});
 
-    context_.idx_shutting_down = hsm_.AddState({
-        "ShuttingDown", -1,
-        detail::StateShuttingDown,
-        detail::OnEnterShuttingDown,
-        nullptr, nullptr
-    });
+    context_.idx_shutting_down =
+        hsm_.AddState({"ShuttingDown", -1, detail::StateShuttingDown, detail::OnEnterShuttingDown, nullptr, nullptr});
 
     hsm_.SetInitialState(context_.idx_idle);
   }
@@ -280,7 +263,8 @@ class HsmService {
    */
   void Stop() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return;
+    if (!started_)
+      return;
     Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtStop), nullptr};
     hsm_.Dispatch(evt);
   }
@@ -290,7 +274,8 @@ class HsmService {
    */
   void Recover() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return;
+    if (!started_)
+      return;
     Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtRecover), nullptr};
     hsm_.Dispatch(evt);
   }
@@ -304,7 +289,8 @@ class HsmService {
    */
   void OnClientConnect() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return;
+    if (!started_)
+      return;
     Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtClientConnected), nullptr};
     hsm_.Dispatch(evt);
   }
@@ -314,7 +300,8 @@ class HsmService {
    */
   void OnClientDisconnect() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return;
+    if (!started_)
+      return;
     Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtClientDisconnected), nullptr};
     hsm_.Dispatch(evt);
   }
@@ -325,7 +312,8 @@ class HsmService {
    */
   void OnError(int32_t error_code) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return;
+    if (!started_)
+      return;
     Event evt{static_cast<uint32_t>(ServiceHsmEvent::kSvcEvtError), &error_code};
     hsm_.Dispatch(evt);
   }
@@ -373,7 +361,8 @@ class HsmService {
    */
   const char* GetState() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return "NotStarted";
+    if (!started_)
+      return "NotStarted";
     return hsm_.CurrentStateName();
   }
 
@@ -382,7 +371,8 @@ class HsmService {
    */
   bool IsActive() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return false;
+    if (!started_)
+      return false;
     return hsm_.IsInState(context_.idx_active);
   }
 
@@ -391,7 +381,8 @@ class HsmService {
    */
   bool IsListening() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return false;
+    if (!started_)
+      return false;
     return hsm_.IsInState(context_.idx_listening);
   }
 
@@ -400,7 +391,8 @@ class HsmService {
    */
   bool IsError() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return false;
+    if (!started_)
+      return false;
     return hsm_.IsInState(context_.idx_error);
   }
 
@@ -409,7 +401,8 @@ class HsmService {
    */
   bool IsIdle() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return true;
+    if (!started_)
+      return true;
     return hsm_.IsInState(context_.idx_idle);
   }
 
@@ -418,7 +411,8 @@ class HsmService {
    */
   bool IsShuttingDown() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) return false;
+    if (!started_)
+      return false;
     return hsm_.IsInState(context_.idx_shutting_down);
   }
 

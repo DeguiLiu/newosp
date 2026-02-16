@@ -49,20 +49,20 @@
 
 #if defined(OSP_PLATFORM_LINUX)
 
-#include <dirent.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
-
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <string>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 
 namespace osp {
 
@@ -72,9 +72,9 @@ namespace osp {
 
 enum class ProcessResult : int8_t {
   kSuccess = 0,
-  kNotFound = -1,       ///< Process not found by name
-  kFailed = -2,         ///< Signal delivery or state change failed
-  kWaitError = -3,      ///< waitpid(2) error after SIGKILL
+  kNotFound = -1,   ///< Process not found by name
+  kFailed = -2,     ///< Signal delivery or state change failed
+  kWaitError = -3,  ///< waitpid(2) error after SIGKILL
 };
 
 namespace detail {
@@ -114,9 +114,11 @@ inline void SleepMs(uint32_t ms) {
 
 /// @brief Check if string consists entirely of ASCII digits.
 inline bool IsDigitString(const char* s) {
-  if (*s == '\0') return false;
+  if (*s == '\0')
+    return false;
   for (; *s != '\0'; ++s) {
-    if (*s < '0' || *s > '9') return false;
+    if (*s < '0' || *s > '9')
+      return false;
   }
   return true;
 }
@@ -125,7 +127,8 @@ inline bool IsDigitString(const char* s) {
 inline const char* Basename(const char* path) {
   const char* last_slash = nullptr;
   for (const char* p = path; *p != '\0'; ++p) {
-    if (*p == '/') last_slash = p;
+    if (*p == '/')
+      last_slash = p;
   }
   return last_slash ? (last_slash + 1) : path;
 }
@@ -135,10 +138,12 @@ inline const char* Basename(const char* path) {
 inline int ReadProcFile(const char* path, char* buf, size_t buf_size) {
   // Use POSIX read() instead of std::ifstream to avoid heap allocation
   int fd = open(path, O_RDONLY);  // NOLINT
-  if (fd < 0) return -1;
+  if (fd < 0)
+    return -1;
   ssize_t n = read(fd, buf, buf_size - 1);
   close(fd);  // NOLINT
-  if (n < 0) return -1;
+  if (n < 0)
+    return -1;
   buf[static_cast<size_t>(n)] = '\0';
   return static_cast<int>(n);
 }
@@ -166,10 +171,12 @@ inline bool IsProcessStopped(pid_t pid) {
   // Find "State:" line and extract state character
   // Format: "State:\tS (sleeping)" or "State:\tT (stopped)"
   const char* state_line = strstr(buf, "State:");
-  if (!state_line) return false;
+  if (!state_line)
+    return false;
 
   const char* p = state_line + 6;  // skip "State:"
-  while (*p == ' ' || *p == '\t') ++p;
+  while (*p == ' ' || *p == '\t')
+    ++p;
   return *p == 'T';
 }
 
@@ -194,8 +201,10 @@ inline ProcessResult FindPidByName(const char* name, pid_t& out_pid) {
 
   struct dirent* entry;
   while ((entry = readdir(dir.get())) != nullptr) {
-    if (entry->d_type != DT_DIR) continue;
-    if (!detail::IsDigitString(entry->d_name)) continue;
+    if (entry->d_type != DT_DIR)
+      continue;
+    if (!detail::IsDigitString(entry->d_name))
+      continue;
 
     char path[280];
     char buf[256];
@@ -205,7 +214,8 @@ inline ProcessResult FindPidByName(const char* name, pid_t& out_pid) {
     int n = detail::ReadProcFile(path, buf, sizeof(buf));
     if (n > 0) {
       // comm has trailing newline, strip it
-      if (n > 0 && buf[n - 1] == '\n') buf[n - 1] = '\0';
+      if (n > 0 && buf[n - 1] == '\n')
+        buf[n - 1] = '\0';
       if (strcmp(buf, name) == 0) {
         out_pid = static_cast<pid_t>(atoi(entry->d_name));
         return ProcessResult::kSuccess;
@@ -242,8 +252,7 @@ inline ProcessResult FreezeProcess(pid_t pid) {
     return ProcessResult::kFailed;
   }
   detail::SleepMs(1);
-  return IsProcessStopped(pid) ? ProcessResult::kSuccess
-                               : ProcessResult::kFailed;
+  return IsProcessStopped(pid) ? ProcessResult::kSuccess : ProcessResult::kFailed;
 }
 
 /**
@@ -254,7 +263,8 @@ inline ProcessResult FreezeProcess(pid_t pid) {
 inline ProcessResult FreezeProcessByName(const char* name) {
   pid_t pid;
   ProcessResult r = FindPidByName(name, pid);
-  if (r != ProcessResult::kSuccess) return r;
+  if (r != ProcessResult::kSuccess)
+    return r;
   return FreezeProcess(pid);
 }
 
@@ -283,11 +293,11 @@ inline ProcessResult ResumeProcess(pid_t pid, uint32_t attempts = 3) {
  * @param attempts Maximum retry count (default 3).
  * @return kSuccess, kNotFound, or kFailed.
  */
-inline ProcessResult ResumeProcessByName(const char* name,
-                                         uint32_t attempts = 3) {
+inline ProcessResult ResumeProcessByName(const char* name, uint32_t attempts = 3) {
   pid_t pid;
   ProcessResult r = FindPidByName(name, pid);
-  if (r != ProcessResult::kSuccess) return r;
+  if (r != ProcessResult::kSuccess)
+    return r;
   return ResumeProcess(pid, attempts);
 }
 
@@ -309,7 +319,8 @@ inline ProcessResult TerminateProcess(pid_t pid, uint32_t attempts = 3) {
       pid_t w = waitpid(pid, &status, 0);
       if (w == -1) {
         // ECHILD: not a child process -- kill succeeded but can't wait
-        if (errno == ECHILD) return ProcessResult::kSuccess;
+        if (errno == ECHILD)
+          return ProcessResult::kSuccess;
         return ProcessResult::kWaitError;
       }
       return ProcessResult::kSuccess;
@@ -324,11 +335,11 @@ inline ProcessResult TerminateProcess(pid_t pid, uint32_t attempts = 3) {
  * @param attempts Maximum retry count (default 3).
  * @return kSuccess, kNotFound, kFailed, or kWaitError.
  */
-inline ProcessResult TerminateProcessByName(const char* name,
-                                            uint32_t attempts = 3) {
+inline ProcessResult TerminateProcessByName(const char* name, uint32_t attempts = 3) {
   pid_t pid;
   ProcessResult r = FindPidByName(name, pid);
-  if (r != ProcessResult::kSuccess) return r;
+  if (r != ProcessResult::kSuccess)
+    return r;
   return TerminateProcess(pid, attempts);
 }
 
@@ -338,8 +349,7 @@ inline ProcessResult TerminateProcessByName(const char* name,
  * @return kSuccess if signal sent, kFailed otherwise.
  */
 inline ProcessResult KillProcess(pid_t pid) {
-  return (kill(pid, SIGKILL) == 0) ? ProcessResult::kSuccess
-                                   : ProcessResult::kFailed;
+  return (kill(pid, SIGKILL) == 0) ? ProcessResult::kSuccess : ProcessResult::kFailed;
 }
 
 /**
@@ -369,10 +379,12 @@ inline char ReadProcessState(pid_t pid) {
   }
 
   const char* state_line = strstr(buf, "State:");
-  if (!state_line) return '\0';
+  if (!state_line)
+    return '\0';
 
   const char* p = state_line + 6;
-  while (*p == ' ' || *p == '\t') ++p;
+  while (*p == ' ' || *p == '\t')
+    ++p;
   return *p;
 }
 
@@ -389,7 +401,8 @@ class PipeGuard {
 
   /// @brief Create a pipe. Returns false on failure.
   bool Create() {
-    if (pipe(fd_) != 0) return false;  // NOLINT
+    if (pipe(fd_) != 0)
+      return false;  // NOLINT
     return true;
   }
 
@@ -397,17 +410,34 @@ class PipeGuard {
   int WriteEnd() const { return fd_[1]; }
 
   void CloseRead() {
-    if (fd_[0] >= 0) { close(fd_[0]); fd_[0] = -1; }  // NOLINT
+    if (fd_[0] >= 0) {
+      close(fd_[0]);
+      fd_[0] = -1;
+    }  // NOLINT
   }
   void CloseWrite() {
-    if (fd_[1] >= 0) { close(fd_[1]); fd_[1] = -1; }  // NOLINT
+    if (fd_[1] >= 0) {
+      close(fd_[1]);
+      fd_[1] = -1;
+    }  // NOLINT
   }
-  void CloseAll() { CloseRead(); CloseWrite(); }
+  void CloseAll() {
+    CloseRead();
+    CloseWrite();
+  }
 
   /// @brief Release read-end ownership (caller takes responsibility).
-  int ReleaseRead() { int r = fd_[0]; fd_[0] = -1; return r; }
+  int ReleaseRead() {
+    int r = fd_[0];
+    fd_[0] = -1;
+    return r;
+  }
   /// @brief Release write-end ownership.
-  int ReleaseWrite() { int r = fd_[1]; fd_[1] = -1; return r; }
+  int ReleaseWrite() {
+    int r = fd_[1];
+    fd_[1] = -1;
+    return r;
+  }
 
   PipeGuard(const PipeGuard&) = delete;
   PipeGuard& operator=(const PipeGuard&) = delete;
@@ -419,7 +449,8 @@ class PipeGuard {
 /// @brief Set a file descriptor to non-blocking mode.
 inline bool SetNonBlocking(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
-  if (flags < 0) return false;
+  if (flags < 0)
+    return false;
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
@@ -433,32 +464,25 @@ inline bool SetNonBlocking(int fd) {
 struct SubprocessConfig {
   static constexpr uint32_t kDefaultBufSize = 4096;
 
-  const char* const* argv;       ///< NULL-terminated argument array
-  const char* working_dir;       ///< chdir before exec (nullptr = inherit)
-  bool capture_stdout;           ///< Redirect child stdout to pipe
-  bool capture_stderr;           ///< Redirect child stderr to pipe
-  bool merge_stderr;             ///< Merge stderr into stdout pipe
+  const char* const* argv;  ///< NULL-terminated argument array
+  const char* working_dir;  ///< chdir before exec (nullptr = inherit)
+  bool capture_stdout;      ///< Redirect child stdout to pipe
+  bool capture_stderr;      ///< Redirect child stderr to pipe
+  bool merge_stderr;        ///< Merge stderr into stdout pipe
 
   SubprocessConfig()
-      : argv(nullptr),
-        working_dir(nullptr),
-        capture_stdout(false),
-        capture_stderr(false),
-        merge_stderr(false) {}
+      : argv(nullptr), working_dir(nullptr), capture_stdout(false), capture_stderr(false), merge_stderr(false) {}
 };
 
 /// @brief Wait result from WaitProcess.
 struct WaitResult {
-  bool exited;          ///< true if child exited normally
-  int exit_code;        ///< Exit code (valid if exited==true)
-  bool signaled;        ///< true if child was killed by signal
-  int term_signal;      ///< Signal number (valid if signaled==true)
-  bool timed_out;       ///< true if wait timed out
+  bool exited;      ///< true if child exited normally
+  int exit_code;    ///< Exit code (valid if exited==true)
+  bool signaled;    ///< true if child was killed by signal
+  int term_signal;  ///< Signal number (valid if signaled==true)
+  bool timed_out;   ///< true if wait timed out
 
-  WaitResult()
-      : exited(false), exit_code(-1),
-        signaled(false), term_signal(0),
-        timed_out(false) {}
+  WaitResult() : exited(false), exit_code(-1), signaled(false), term_signal(0), timed_out(false) {}
 };
 
 /**
@@ -487,8 +511,10 @@ class Subprocess {
   Subprocess() : pid_(-1), stdout_fd_(-1), stderr_fd_(-1) {}
 
   ~Subprocess() {
-    if (stdout_fd_ >= 0) close(stdout_fd_);  // NOLINT
-    if (stderr_fd_ >= 0) close(stderr_fd_);  // NOLINT
+    if (stdout_fd_ >= 0)
+      close(stdout_fd_);  // NOLINT
+    if (stderr_fd_ >= 0)
+      close(stderr_fd_);  // NOLINT
     if (pid_ > 0 && IsProcessAlive(pid_)) {
       kill(pid_, SIGKILL);
       int status;
@@ -500,10 +526,7 @@ class Subprocess {
   Subprocess(const Subprocess&) = delete;
   Subprocess& operator=(const Subprocess&) = delete;
 
-  Subprocess(Subprocess&& other)
-      : pid_(other.pid_),
-        stdout_fd_(other.stdout_fd_),
-        stderr_fd_(other.stderr_fd_) {
+  Subprocess(Subprocess&& other) : pid_(other.pid_), stdout_fd_(other.stdout_fd_), stderr_fd_(other.stderr_fd_) {
     other.pid_ = -1;
     other.stdout_fd_ = -1;
     other.stderr_fd_ = -1;
@@ -512,8 +535,10 @@ class Subprocess {
   Subprocess& operator=(Subprocess&& other) {
     if (this != &other) {
       // Clean up current state
-      if (stdout_fd_ >= 0) close(stdout_fd_);  // NOLINT
-      if (stderr_fd_ >= 0) close(stderr_fd_);  // NOLINT
+      if (stdout_fd_ >= 0)
+        close(stdout_fd_);  // NOLINT
+      if (stderr_fd_ >= 0)
+        close(stderr_fd_);  // NOLINT
       if (pid_ > 0 && IsProcessAlive(pid_)) {
         kill(pid_, SIGKILL);
         int status;
@@ -535,19 +560,23 @@ class Subprocess {
    * @return kSuccess on success, kFailed on fork/pipe/exec error.
    */
   ProcessResult Start(const SubprocessConfig& cfg) {
-    if (!cfg.argv || !cfg.argv[0]) return ProcessResult::kFailed;
+    if (!cfg.argv || !cfg.argv[0])
+      return ProcessResult::kFailed;
 
     detail::PipeGuard stdout_pipe, stderr_pipe;
 
     if (cfg.capture_stdout || cfg.merge_stderr) {
-      if (!stdout_pipe.Create()) return ProcessResult::kFailed;
+      if (!stdout_pipe.Create())
+        return ProcessResult::kFailed;
     }
     if (cfg.capture_stderr && !cfg.merge_stderr) {
-      if (!stderr_pipe.Create()) return ProcessResult::kFailed;
+      if (!stderr_pipe.Create())
+        return ProcessResult::kFailed;
     }
 
     pid_t child = fork();
-    if (child < 0) return ProcessResult::kFailed;
+    if (child < 0)
+      return ProcessResult::kFailed;
 
     if (child == 0) {
       // -- Child process --
@@ -563,7 +592,8 @@ class Subprocess {
       }
 
       if (cfg.working_dir) {
-        if (chdir(cfg.working_dir) != 0) _exit(127);
+        if (chdir(cfg.working_dir) != 0)
+          _exit(127);
       }
 
       if (cfg.capture_stdout || cfg.merge_stderr) {
@@ -610,9 +640,7 @@ class Subprocess {
    * @param buf_size Buffer size.
    * @return Bytes read, 0 if no data available or pipe closed, -1 on error.
    */
-  int ReadStdout(char* buf, size_t buf_size) {
-    return ReadFd(stdout_fd_, buf, buf_size);
-  }
+  int ReadStdout(char* buf, size_t buf_size) { return ReadFd(stdout_fd_, buf, buf_size); }
 
   /**
    * @brief Read from child's stderr pipe.
@@ -620,25 +648,19 @@ class Subprocess {
    * @param buf_size Buffer size.
    * @return Bytes read, 0 if no data available or pipe closed, -1 on error.
    */
-  int ReadStderr(char* buf, size_t buf_size) {
-    return ReadFd(stderr_fd_, buf, buf_size);
-  }
+  int ReadStderr(char* buf, size_t buf_size) { return ReadFd(stderr_fd_, buf, buf_size); }
 
   /**
    * @brief Read all available stdout into a std::string (blocking until EOF).
    * @return Captured output string.
    */
-  std::string ReadAllStdout() {
-    return ReadAllFd(stdout_fd_);
-  }
+  std::string ReadAllStdout() { return ReadAllFd(stdout_fd_); }
 
   /**
    * @brief Read all available stderr into a std::string (blocking until EOF).
    * @return Captured output string.
    */
-  std::string ReadAllStderr() {
-    return ReadAllFd(stderr_fd_);
-  }
+  std::string ReadAllStderr() { return ReadAllFd(stderr_fd_); }
 
   /**
    * @brief Wait for child process to exit.
@@ -675,7 +697,8 @@ class Subprocess {
         pid_ = -1;
         return wr;
       }
-      if (w < 0) break;  // error
+      if (w < 0)
+        break;  // error
       detail::SleepMs(kPollIntervalMs);
       elapsed += kPollIntervalMs;
     }
@@ -690,18 +713,16 @@ class Subprocess {
    * @return kSuccess if sent, kFailed otherwise.
    */
   ProcessResult Signal(int signo) {
-    if (pid_ <= 0) return ProcessResult::kFailed;
-    return (kill(pid_, signo) == 0) ? ProcessResult::kSuccess
-                                    : ProcessResult::kFailed;
+    if (pid_ <= 0)
+      return ProcessResult::kFailed;
+    return (kill(pid_, signo) == 0) ? ProcessResult::kSuccess : ProcessResult::kFailed;
   }
 
   /// @brief Get child PID (-1 if not started or already waited).
   pid_t GetPid() const { return pid_; }
 
   /// @brief Check if child is still running.
-  bool IsRunning() const {
-    return pid_ > 0 && IsProcessAlive(pid_);
-  }
+  bool IsRunning() const { return pid_ > 0 && IsProcessAlive(pid_); }
 
  private:
   pid_t pid_;
@@ -709,10 +730,12 @@ class Subprocess {
   int stderr_fd_;
 
   static int ReadFd(int fd, char* buf, size_t buf_size) {
-    if (fd < 0 || buf_size == 0) return -1;
+    if (fd < 0 || buf_size == 0)
+      return -1;
     ssize_t n = read(fd, buf, buf_size);
     if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return 0;
       return -1;
     }
     return static_cast<int>(n);
@@ -720,7 +743,8 @@ class Subprocess {
 
   static std::string ReadAllFd(int fd) {
     std::string result;
-    if (fd < 0) return result;
+    if (fd < 0)
+      return result;
 
     // Switch to blocking for drain
     int flags = fcntl(fd, F_GETFL, 0);
@@ -731,7 +755,8 @@ class Subprocess {
     char buf[4096];
     for (;;) {
       ssize_t n = read(fd, buf, sizeof(buf));
-      if (n <= 0) break;
+      if (n <= 0)
+        break;
       result.append(buf, static_cast<size_t>(n));
     }
     return result;
@@ -770,9 +795,7 @@ class Subprocess {
  *   osp::RunCommand(argv, output, code);
  * @endcode
  */
-inline ProcessResult RunCommand(const char* const* argv,
-                                std::string& output,
-                                int& exit_code) {
+inline ProcessResult RunCommand(const char* const* argv, std::string& output, int& exit_code) {
   SubprocessConfig cfg;
   cfg.argv = argv;
   cfg.capture_stdout = true;
@@ -780,7 +803,8 @@ inline ProcessResult RunCommand(const char* const* argv,
 
   Subprocess proc;
   ProcessResult r = proc.Start(cfg);
-  if (r != ProcessResult::kSuccess) return r;
+  if (r != ProcessResult::kSuccess)
+    return r;
 
   output = proc.ReadAllStdout();
   WaitResult wr = proc.Wait();

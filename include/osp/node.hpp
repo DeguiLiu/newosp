@@ -58,12 +58,7 @@ namespace osp {
 // Node Error
 // ============================================================================
 
-enum class NodeError : uint8_t {
-  kAlreadyStarted = 0,
-  kNotStarted,
-  kSubscriptionFull,
-  kPublishFailed
-};
+enum class NodeError : uint8_t { kAlreadyStarted = 0, kNotStarted, kSubscriptionFull, kPublishFailed };
 
 // ============================================================================
 // Node Configuration Constants
@@ -93,8 +88,7 @@ class Publisher {
  public:
   Publisher() noexcept : bus_(nullptr), sender_id_(0) {}
 
-  Publisher(AsyncBus<PayloadVariant>& bus, uint32_t sender_id) noexcept
-      : bus_(&bus), sender_id_(sender_id) {}
+  Publisher(AsyncBus<PayloadVariant>& bus, uint32_t sender_id) noexcept : bus_(&bus), sender_id_(sender_id) {}
 
   /** @brief Publish a message with default (MEDIUM) priority. */
   bool Publish(const T& msg) noexcept {
@@ -117,8 +111,7 @@ class Publisher {
   /** @brief Publish rvalue with explicit priority. */
   bool PublishWithPriority(T&& msg, MessagePriority priority) noexcept {
     OSP_ASSERT(bus_ != nullptr);
-    return bus_->PublishWithPriority(
-        PayloadVariant(std::move(msg)), sender_id_, priority);
+    return bus_->PublishWithPriority(PayloadVariant(std::move(msg)), sender_id_, priority);
   }
 
   /** @brief Check if this publisher is bound to a bus. */
@@ -213,7 +206,8 @@ class Node {
    * @brief Stop the node and unsubscribe all callbacks.
    */
   void Stop() noexcept {
-    if (!started_ && handle_count_ == 0) return;
+    if (!started_ && handle_count_ == 0)
+      return;
 
     for (uint32_t i = 0; i < handle_count_; ++i) {
       bus_ptr_->Unsubscribe(handles_[i]);
@@ -236,8 +230,7 @@ class Node {
    */
   template <typename T>
   bool Publish(T&& msg) noexcept {
-    return bus_ptr_->Publish(
-        PayloadVariant(std::forward<T>(msg)), id_);
+    return bus_ptr_->Publish(PayloadVariant(std::forward<T>(msg)), id_);
   }
 
   /**
@@ -245,8 +238,7 @@ class Node {
    */
   template <typename T>
   bool PublishWithPriority(T&& msg, MessagePriority priority) noexcept {
-    return bus_ptr_->PublishWithPriority(
-        PayloadVariant(std::forward<T>(msg)), id_, priority);
+    return bus_ptr_->PublishWithPriority(PayloadVariant(std::forward<T>(msg)), id_, priority);
   }
 
   /**
@@ -263,8 +255,7 @@ class Node {
    */
   template <typename T>
   bool Publish(T&& msg, const char* topic) noexcept {
-    return bus_ptr_->PublishTopic(
-        PayloadVariant(std::forward<T>(msg)), id_, topic);
+    return bus_ptr_->PublishTopic(PayloadVariant(std::forward<T>(msg)), id_, topic);
   }
 
   /**
@@ -272,8 +263,7 @@ class Node {
    */
   template <typename T>
   bool PublishWithPriority(T&& msg, const char* topic, MessagePriority priority) noexcept {
-    return bus_ptr_->PublishTopicWithPriority(
-        PayloadVariant(std::forward<T>(msg)), id_, topic, priority);
+    return bus_ptr_->PublishTopicWithPriority(PayloadVariant(std::forward<T>(msg)), id_, topic, priority);
   }
 
   // ======================== Subscribe ========================
@@ -298,14 +288,12 @@ class Node {
     }
 
     SubscriptionHandle handle =
-        bus_ptr_->template Subscribe<T>(
-            [cb = std::forward<Func>(callback)](
-                const EnvelopeType& env) noexcept {
-              const T* data = std::get_if<T>(&env.payload);
-              if (data != nullptr) {
-                cb(*data, env.header);
-              }
-            });
+        bus_ptr_->template Subscribe<T>([cb = std::forward<Func>(callback)](const EnvelopeType& env) noexcept {
+          const T* data = std::get_if<T>(&env.payload);
+          if (data != nullptr) {
+            cb(*data, env.header);
+          }
+        });
 
     if (!handle.IsValid()) {
       return expected<void, NodeError>::error(NodeError::kSubscriptionFull);
@@ -334,19 +322,17 @@ class Node {
 
     uint32_t topic_hash = Fnv1a32(topic);
 
-    SubscriptionHandle handle =
-        bus_ptr_->template Subscribe<T>(
-            [cb = std::forward<Func>(callback), topic_hash](
-                const EnvelopeType& env) noexcept {
-              // Topic filter: only deliver if topic_hash matches
-              if (env.header.topic_hash != topic_hash) {
-                return;
-              }
-              const T* data = std::get_if<T>(&env.payload);
-              if (data != nullptr) {
-                cb(*data, env.header);
-              }
-            });
+    SubscriptionHandle handle = bus_ptr_->template Subscribe<T>(
+        [cb = std::forward<Func>(callback), topic_hash](const EnvelopeType& env) noexcept {
+          // Topic filter: only deliver if topic_hash matches
+          if (env.header.topic_hash != topic_hash) {
+            return;
+          }
+          const T* data = std::get_if<T>(&env.payload);
+          if (data != nullptr) {
+            cb(*data, env.header);
+          }
+        });
 
     if (!handle.IsValid()) {
       return expected<void, NodeError>::error(NodeError::kSubscriptionFull);
@@ -368,14 +354,12 @@ class Node {
     }
 
     SubscriptionHandle handle =
-        bus_ptr_->template Subscribe<T>(
-            [cb = std::forward<Func>(callback)](
-                const EnvelopeType& env) noexcept {
-              const T* data = std::get_if<T>(&env.payload);
-              if (data != nullptr) {
-                cb(*data);
-              }
-            });
+        bus_ptr_->template Subscribe<T>([cb = std::forward<Func>(callback)](const EnvelopeType& env) noexcept {
+          const T* data = std::get_if<T>(&env.payload);
+          if (data != nullptr) {
+            cb(*data);
+          }
+        });
 
     if (!handle.IsValid()) {
       return expected<void, NodeError>::error(NodeError::kSubscriptionFull);
@@ -399,9 +383,7 @@ class Node {
    *
    * @return Number of messages processed.
    */
-  uint32_t SpinOnce() noexcept {
-    return bus_ptr_->ProcessBatch();
-  }
+  uint32_t SpinOnce() noexcept { return bus_ptr_->ProcessBatch(); }
 
   // ======================== Publisher Factory ========================
 

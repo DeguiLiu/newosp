@@ -47,10 +47,11 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
+#include <cstdint>
+
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <thread>
 #include <type_traits>
 #include <variant>
@@ -67,9 +68,10 @@ namespace osp {
  * Used for topic-based routing. Returns 0 for nullptr input.
  */
 constexpr uint32_t Fnv1a32(const char* str) noexcept {
-  if (str == nullptr) return 0;
+  if (str == nullptr)
+    return 0;
   uint32_t hash = 2166136261u;
-  while (*str) {
+  while (*str != '\0') {
     hash ^= static_cast<uint32_t>(*str++);
     hash *= 16777619u;
   }
@@ -113,9 +115,9 @@ overloaded(Ts...) -> overloaded<Ts...>;
 // ============================================================================
 
 enum class MessagePriority : uint8_t {
-  kLow = 0,     /** Dropped when queue >= 60% full */
-  kMedium = 1,  /** Dropped when queue >= 80% full */
-  kHigh = 2     /** Dropped when queue >= 99% full */
+  kLow = 0,    /** Dropped when queue >= 60% full */
+  kMedium = 1, /** Dropped when queue >= 80% full */
+  kHigh = 2    /** Dropped when queue >= 99% full */
 };
 
 // ============================================================================
@@ -130,17 +132,13 @@ struct MessageHeader {
   MessagePriority priority;
 
   MessageHeader() noexcept
-      : msg_id(0), timestamp_us(0), sender_id(0), topic_hash(0),
-        priority(MessagePriority::kMedium) {}
+      : msg_id(0), timestamp_us(0), sender_id(0), topic_hash(0), priority(MessagePriority::kMedium) {}
 
-  MessageHeader(uint64_t id, uint64_t ts, uint32_t sender,
-                MessagePriority prio) noexcept
+  MessageHeader(uint64_t id, uint64_t ts, uint32_t sender, MessagePriority prio) noexcept
       : msg_id(id), timestamp_us(ts), sender_id(sender), topic_hash(0), priority(prio) {}
 
-  MessageHeader(uint64_t id, uint64_t ts, uint32_t sender,
-                uint32_t topic, MessagePriority prio) noexcept
-      : msg_id(id), timestamp_us(ts), sender_id(sender), topic_hash(topic),
-        priority(prio) {}
+  MessageHeader(uint64_t id, uint64_t ts, uint32_t sender, uint32_t topic, MessagePriority prio) noexcept
+      : msg_id(id), timestamp_us(ts), sender_id(sender), topic_hash(topic), priority(prio) {}
 };
 
 // ============================================================================
@@ -154,8 +152,7 @@ struct MessageEnvelope {
 
   MessageEnvelope() noexcept : header(), payload() {}
 
-  MessageEnvelope(const MessageHeader& hdr, PayloadVariant&& pl) noexcept
-      : header(hdr), payload(std::move(pl)) {}
+  MessageEnvelope(const MessageHeader& hdr, PayloadVariant&& pl) noexcept : header(hdr), payload(std::move(pl)) {}
 
   MessageEnvelope(MessageEnvelope&&) noexcept = default;
   MessageEnvelope& operator=(MessageEnvelope&&) noexcept = default;
@@ -167,11 +164,7 @@ struct MessageEnvelope {
 // Bus Error
 // ============================================================================
 
-enum class BusError : uint8_t {
-  kQueueFull = 0,
-  kOverflowDetected,
-  kCallbacksFull
-};
+enum class BusError : uint8_t { kQueueFull = 0, kOverflowDetected, kCallbacksFull };
 
 using BusErrorCallback = void (*)(BusError, uint64_t);
 
@@ -183,7 +176,7 @@ struct SubscriptionHandle {
   uint32_t type_index;
   uint32_t callback_id;
 
-  bool IsValid() const noexcept { return callback_id != UINT32_MAX; }
+  [[nodiscard]] bool IsValid() const noexcept { return callback_id != UINT32_MAX; }
 
   static SubscriptionHandle Invalid() noexcept { return {0, UINT32_MAX}; }
 };
@@ -230,9 +223,7 @@ struct VariantIndexImpl<T, I, std::variant<>> {
 template <typename T, size_t I, typename First, typename... Rest>
 struct VariantIndexImpl<T, I, std::variant<First, Rest...>> {
   static constexpr size_t value =
-      std::is_same<T, First>::value
-          ? I
-          : VariantIndexImpl<T, I + 1, std::variant<Rest...>>::value;
+      std::is_same<T, First>::value ? I : VariantIndexImpl<T, I + 1, std::variant<Rest...>>::value;
 };
 
 }  // namespace detail
@@ -268,9 +259,7 @@ class SpinLock {
 
   void unlock() noexcept { flag_.clear(std::memory_order_release); }
 
-  bool try_lock() noexcept {
-    return !flag_.test_and_set(std::memory_order_acquire);
-  }
+  bool try_lock() noexcept { return !flag_.test_and_set(std::memory_order_acquire); }
 
  private:
   static constexpr uint32_t kMaxBackoff = 1024;
@@ -310,9 +299,7 @@ class SharedSpinLock {
       int32_t state = state_.load(std::memory_order_relaxed);
       // Only acquire if no writer is active (state >= 0)
       if (state >= 0 &&
-          state_.compare_exchange_weak(state, state + 1,
-                                       std::memory_order_acquire,
-                                       std::memory_order_relaxed)) {
+          state_.compare_exchange_weak(state, state + 1, std::memory_order_acquire, std::memory_order_relaxed)) {
         return;
       }
       Backoff(backoff);
@@ -320,9 +307,7 @@ class SharedSpinLock {
   }
 
   /** @brief Release shared (reader) lock. */
-  void unlock_shared() noexcept {
-    state_.fetch_sub(1, std::memory_order_release);
-  }
+  void unlock_shared() noexcept { state_.fetch_sub(1, std::memory_order_release); }
 
   /** @brief Acquire exclusive (writer) lock. */
   void lock() noexcept {
@@ -330,9 +315,7 @@ class SharedSpinLock {
     // Step 1: Acquire writer flag (transition 0 -> -1)
     for (;;) {
       int32_t expected = 0;
-      if (state_.compare_exchange_weak(expected, kWriterActive,
-                                       std::memory_order_acquire,
-                                       std::memory_order_relaxed)) {
+      if (state_.compare_exchange_weak(expected, kWriterActive, std::memory_order_acquire, std::memory_order_relaxed)) {
         return;
       }
       Backoff(backoff);
@@ -340,9 +323,7 @@ class SharedSpinLock {
   }
 
   /** @brief Release exclusive (writer) lock. */
-  void unlock() noexcept {
-    state_.store(0, std::memory_order_release);
-  }
+  void unlock() noexcept { state_.store(0, std::memory_order_release); }
 
  private:
   static constexpr int32_t kWriterActive = -1;
@@ -377,10 +358,8 @@ struct VariantIndex;
 
 template <typename T, typename... Types>
 struct VariantIndex<T, std::variant<Types...>> {
-  static constexpr size_t value =
-      detail::VariantIndexImpl<T, 0, std::variant<Types...>>::value;
-  static_assert(value != static_cast<size_t>(-1),
-                "Type not found in PayloadVariant");
+  static constexpr size_t value = detail::VariantIndexImpl<T, 0, std::variant<Types...>>::value;
+  static_assert(value != static_cast<size_t>(-1), "Type not found in PayloadVariant");
 };
 
 // ============================================================================
@@ -404,21 +383,17 @@ class AsyncBus {
   static constexpr size_t kCallbackBufSize = 4 * sizeof(void*);
   using CallbackType = FixedFunction<void(const EnvelopeType&), kCallbackBufSize>;
 
-  static constexpr uint32_t kQueueDepth =
-      static_cast<uint32_t>(OSP_BUS_QUEUE_DEPTH);
+  static constexpr uint32_t kQueueDepth = static_cast<uint32_t>(OSP_BUS_QUEUE_DEPTH);
   static constexpr uint32_t kBufferMask = kQueueDepth - 1;
-  static constexpr uint32_t kBatchSize =
-      static_cast<uint32_t>(OSP_BUS_BATCH_SIZE);
+  static constexpr uint32_t kBatchSize = static_cast<uint32_t>(OSP_BUS_BATCH_SIZE);
 
   static constexpr uint32_t kLowThreshold = (kQueueDepth * 60) / 100;
   static constexpr uint32_t kMediumThreshold = (kQueueDepth * 80) / 100;
   static constexpr uint32_t kHighThreshold = (kQueueDepth * 99) / 100;
 
-  static constexpr uint64_t kMsgIdWrapThreshold =
-      UINT64_MAX - 10000;
+  static constexpr uint64_t kMsgIdWrapThreshold = UINT64_MAX - 10000;
 
-  static_assert((kQueueDepth & (kQueueDepth - 1)) == 0,
-                "Queue depth must be power of 2");
+  static_assert((kQueueDepth & (kQueueDepth - 1)) == 0, "Queue depth must be power of 2");
 
   /** @brief Meyer's singleton - one bus per PayloadVariant type */
   static AsyncBus& Instance() noexcept {
@@ -441,26 +416,21 @@ class AsyncBus {
    * @return true if published, false if dropped.
    */
   bool Publish(PayloadVariant&& payload, uint32_t sender_id) noexcept {
-    return PublishInternal(std::move(payload), sender_id,
-                           SteadyNowUs(), MessagePriority::kMedium, 0);
+    return PublishInternal(std::move(payload), sender_id, SteadyNowUs(), MessagePriority::kMedium, 0);
   }
 
   /**
    * @brief Publish a message with specified priority.
    */
-  bool PublishWithPriority(PayloadVariant&& payload, uint32_t sender_id,
-                            MessagePriority priority) noexcept {
-    return PublishInternal(std::move(payload), sender_id,
-                           SteadyNowUs(), priority, 0);
+  bool PublishWithPriority(PayloadVariant&& payload, uint32_t sender_id, MessagePriority priority) noexcept {
+    return PublishInternal(std::move(payload), sender_id, SteadyNowUs(), priority, 0);
   }
 
   /**
    * @brief Publish with pre-computed timestamp (for latency-sensitive paths).
    */
-  bool PublishFast(PayloadVariant&& payload, uint32_t sender_id,
-                    uint64_t timestamp_us) noexcept {
-    return PublishInternal(std::move(payload), sender_id,
-                           timestamp_us, MessagePriority::kMedium, 0);
+  bool PublishFast(PayloadVariant&& payload, uint32_t sender_id, uint64_t timestamp_us) noexcept {
+    return PublishInternal(std::move(payload), sender_id, timestamp_us, MessagePriority::kMedium, 0);
   }
 
   /**
@@ -470,21 +440,18 @@ class AsyncBus {
    * @param topic Topic string (null-terminated).
    * @return true if published, false if dropped.
    */
-  bool PublishTopic(PayloadVariant&& payload, uint32_t sender_id,
-                     const char* topic) noexcept {
+  bool PublishTopic(PayloadVariant&& payload, uint32_t sender_id, const char* topic) noexcept {
     uint32_t topic_hash = Fnv1a32(topic);
-    return PublishInternal(std::move(payload), sender_id,
-                           SteadyNowUs(), MessagePriority::kMedium, topic_hash);
+    return PublishInternal(std::move(payload), sender_id, SteadyNowUs(), MessagePriority::kMedium, topic_hash);
   }
 
   /**
    * @brief Publish a message with topic and priority.
    */
-  bool PublishTopicWithPriority(PayloadVariant&& payload, uint32_t sender_id,
-                                  const char* topic, MessagePriority priority) noexcept {
+  bool PublishTopicWithPriority(PayloadVariant&& payload, uint32_t sender_id, const char* topic,
+                                MessagePriority priority) noexcept {
     uint32_t topic_hash = Fnv1a32(topic);
-    return PublishInternal(std::move(payload), sender_id,
-                           SteadyNowUs(), priority, topic_hash);
+    return PublishInternal(std::move(payload), sender_id, SteadyNowUs(), priority, topic_hash);
   }
 
   // ======================== Subscribe API ========================
@@ -500,10 +467,8 @@ class AsyncBus {
    */
   template <typename T, typename Func>
   SubscriptionHandle Subscribe(Func&& func) noexcept {
-    constexpr size_t type_idx =
-        VariantIndex<T, PayloadVariant>::value;
-    static_assert(type_idx < OSP_BUS_MAX_MESSAGE_TYPES,
-                  "Type index exceeds OSP_BUS_MAX_MESSAGE_TYPES");
+    constexpr size_t type_idx = VariantIndex<T, PayloadVariant>::value;
+    static_assert(type_idx < OSP_BUS_MAX_MESSAGE_TYPES, "Type index exceeds OSP_BUS_MAX_MESSAGE_TYPES");
 
     callback_spin_lock_.lock();
 
@@ -532,8 +497,10 @@ class AsyncBus {
    * @return true if the callback was found and removed.
    */
   bool Unsubscribe(const SubscriptionHandle& handle) noexcept {
-    if (!handle.IsValid()) return false;
-    if (handle.type_index >= OSP_BUS_MAX_MESSAGE_TYPES) return false;
+    if (!handle.IsValid())
+      return false;
+    if (handle.type_index >= OSP_BUS_MAX_MESSAGE_TYPES)
+      return false;
 
     CallbackType old_callback;
     {
@@ -541,8 +508,7 @@ class AsyncBus {
 
       CallbackSlot& slot = callback_table_[handle.type_index];
       for (uint32_t i = 0; i < OSP_BUS_MAX_CALLBACKS_PER_TYPE; ++i) {
-        if (slot.entries[i].active &&
-            slot.entries[i].id == handle.callback_id) {
+        if (slot.entries[i].active && slot.entries[i].id == handle.callback_id) {
           slot.entries[i].active = false;
           old_callback = std::move(slot.entries[i].callback);
           slot.entries[i].callback = nullptr;
@@ -577,28 +543,26 @@ class AsyncBus {
       uint32_t expected_seq = cons_pos + 1;
       uint32_t seq = node.sequence.load(std::memory_order_acquire);
 
-      if (seq != expected_seq) break;
+      if (seq != expected_seq)
+        break;
 
       // Prefetch next ring buffer slot for reduced cache miss latency
 #ifdef __GNUC__
       if (i + 1 < kBatchSize) {
-        __builtin_prefetch(
-            &ring_buffer_[(cons_pos + 1) & kBufferMask], 0, 1);
+        __builtin_prefetch(&ring_buffer_[(cons_pos + 1) & kBufferMask], 0, 1);
       }
 #endif
 
       DispatchMessage(node.envelope);
 
-      node.sequence.store(cons_pos + kQueueDepth,
-                          std::memory_order_release);
+      node.sequence.store(cons_pos + kQueueDepth, std::memory_order_release);
       ++cons_pos;
       ++processed;
     }
 
     if (processed > 0) {
       consumer_pos_.store(cons_pos, std::memory_order_relaxed);
-      stats_.messages_processed.fetch_add(processed,
-                                          std::memory_order_relaxed);
+      stats_.messages_processed.fetch_add(processed, std::memory_order_relaxed);
     }
     return processed;
   }
@@ -630,31 +594,27 @@ class AsyncBus {
       uint32_t expected_seq = cons_pos + 1;
       uint32_t seq = node.sequence.load(std::memory_order_acquire);
 
-      if (seq != expected_seq) break;
+      if (seq != expected_seq)
+        break;
 
 #ifdef __GNUC__
       if (i + 1 < kBatchSize) {
-        __builtin_prefetch(
-            &ring_buffer_[(cons_pos + 1) & kBufferMask], 0, 1);
+        __builtin_prefetch(&ring_buffer_[(cons_pos + 1) & kBufferMask], 0, 1);
       }
 #endif
 
       // Direct dispatch: no callback table, no FixedFunction, no lock
       const auto& hdr = node.envelope.header;
-      std::visit([&visitor, &hdr](const auto& data) {
-        visitor(data, hdr);
-      }, node.envelope.payload);
+      std::visit([&visitor, &hdr](const auto& data) { visitor(data, hdr); }, node.envelope.payload);
 
-      node.sequence.store(cons_pos + kQueueDepth,
-                          std::memory_order_release);
+      node.sequence.store(cons_pos + kQueueDepth, std::memory_order_release);
       ++cons_pos;
       ++processed;
     }
 
     if (processed > 0) {
       consumer_pos_.store(cons_pos, std::memory_order_relaxed);
-      stats_.messages_processed.fetch_add(processed,
-                                          std::memory_order_relaxed);
+      stats_.messages_processed.fetch_add(processed, std::memory_order_relaxed);
     }
     return processed;
   }
@@ -669,26 +629,26 @@ class AsyncBus {
   }
 
   /** @brief Queue utilization as percentage (0-100). */
-  uint32_t UtilizationPercent() const noexcept {
-    return (Depth() * 100) / kQueueDepth;
-  }
+  uint32_t UtilizationPercent() const noexcept { return (Depth() * 100) / kQueueDepth; }
 
   /** @brief Current backpressure level based on queue depth. */
   BackpressureLevel GetBackpressureLevel() const noexcept {
     uint32_t depth = Depth();
-    if (depth >= kQueueDepth) return BackpressureLevel::kFull;
-    if (depth >= (kQueueDepth * 90) / 100) return BackpressureLevel::kCritical;
-    if (depth >= (kQueueDepth * 75) / 100) return BackpressureLevel::kWarning;
+    if (depth >= kQueueDepth)
+      return BackpressureLevel::kFull;
+    if (depth >= (kQueueDepth * 90) / 100)
+      return BackpressureLevel::kCritical;
+    if (depth >= (kQueueDepth * 75) / 100)
+      return BackpressureLevel::kWarning;
     return BackpressureLevel::kNormal;
   }
 
   /** @brief Get a snapshot of bus statistics. */
   BusStatisticsSnapshot GetStatistics() const noexcept {
-    return BusStatisticsSnapshot{
-        stats_.messages_published.load(std::memory_order_relaxed),
-        stats_.messages_dropped.load(std::memory_order_relaxed),
-        stats_.messages_processed.load(std::memory_order_relaxed),
-        stats_.admission_rechecks.load(std::memory_order_relaxed)};
+    return BusStatisticsSnapshot{stats_.messages_published.load(std::memory_order_relaxed),
+                                 stats_.messages_dropped.load(std::memory_order_relaxed),
+                                 stats_.messages_processed.load(std::memory_order_relaxed),
+                                 stats_.admission_rechecks.load(std::memory_order_relaxed)};
   }
 
   /** @brief Reset all statistics counters. */
@@ -750,22 +710,17 @@ class AsyncBus {
 
   // ======================== Constructor ========================
 
-  AsyncBus() noexcept
-      : producer_pos_(0),
-        cached_consumer_pos_(0),
-        consumer_pos_(0),
-        next_msg_id_(1),
-        next_callback_id_(1) {
+  AsyncBus() noexcept : producer_pos_(0), cached_consumer_pos_(0), consumer_pos_(0), next_msg_id_(1) {
     for (uint32_t i = 0; i < kQueueDepth; ++i) {
       ring_buffer_[i].sequence.store(i, std::memory_order_relaxed);
     }
   }
 
   ~AsyncBus() = default;
-  AsyncBus(const AsyncBus&) = delete;
-  AsyncBus& operator=(const AsyncBus&) = delete;
-  AsyncBus(AsyncBus&&) = delete;
-  AsyncBus& operator=(AsyncBus&&) = delete;
+  AsyncBus(const AsyncBus&) = delete;             // NOLINT(modernize-use-equals-delete)
+  AsyncBus& operator=(const AsyncBus&) = delete;  // NOLINT(modernize-use-equals-delete)
+  AsyncBus(AsyncBus&&) = delete;                  // NOLINT(modernize-use-equals-delete)
+  AsyncBus& operator=(AsyncBus&&) = delete;       // NOLINT(modernize-use-equals-delete)
 
   // ======================== Internal Helpers ========================
 
@@ -781,9 +736,8 @@ class AsyncBus {
     }
   }
 
-  bool PublishInternal(PayloadVariant&& payload, uint32_t sender_id,
-                        uint64_t timestamp_us,
-                        MessagePriority priority, uint32_t topic_hash) noexcept {
+  bool PublishInternal(PayloadVariant&& payload, uint32_t sender_id, uint64_t timestamp_us, MessagePriority priority,
+                       uint32_t topic_hash) noexcept {
     // Message ID overflow check
     uint64_t current_id = next_msg_id_.load(std::memory_order_relaxed);
     if (OSP_UNLIKELY(current_id >= kMsgIdWrapThreshold)) {
@@ -794,14 +748,12 @@ class AsyncBus {
     // Admission control with cached consumer position
     uint32_t threshold = GetThresholdForPriority(priority);
     uint32_t prod = producer_pos_.load(std::memory_order_relaxed);
-    uint32_t cached_cons =
-        cached_consumer_pos_.load(std::memory_order_relaxed);
+    uint32_t cached_cons = cached_consumer_pos_.load(std::memory_order_relaxed);
     uint32_t estimated_depth = prod - cached_cons;
 
     if (estimated_depth >= threshold) {
       // Re-read real consumer position
-      uint32_t real_cons =
-          consumer_pos_.load(std::memory_order_acquire);
+      uint32_t real_cons = consumer_pos_.load(std::memory_order_acquire);
       cached_consumer_pos_.store(real_cons, std::memory_order_relaxed);
       stats_.admission_rechecks.fetch_add(1, std::memory_order_relaxed);
 
@@ -814,8 +766,8 @@ class AsyncBus {
     }
 
     // CAS loop to claim a producer slot (MPSC)
-    uint32_t prod_pos;
-    RingBufferNode* target;
+    uint32_t prod_pos = 0;
+    RingBufferNode* target = nullptr;
 
     do {
       prod_pos = producer_pos_.load(std::memory_order_relaxed);
@@ -827,15 +779,12 @@ class AsyncBus {
         ReportError(BusError::kQueueFull, current_id);
         return false;
       }
-    } while (!producer_pos_.compare_exchange_weak(
-        prod_pos, prod_pos + 1,
-        std::memory_order_acq_rel, std::memory_order_relaxed));
+    } while (!producer_pos_.compare_exchange_weak(prod_pos, prod_pos + 1, std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed));
 
     // Fill envelope
-    uint64_t msg_id =
-        next_msg_id_.fetch_add(1, std::memory_order_relaxed);
-    target->envelope.header =
-        MessageHeader{msg_id, timestamp_us, sender_id, topic_hash, priority};
+    uint64_t msg_id = next_msg_id_.fetch_add(1, std::memory_order_relaxed);
+    target->envelope.header = MessageHeader{msg_id, timestamp_us, sender_id, topic_hash, priority};
     target->envelope.payload = std::move(payload);
 
     // Publish (make visible to consumer)
@@ -847,7 +796,8 @@ class AsyncBus {
 
   void DispatchMessage(const EnvelopeType& envelope) noexcept {
     uint32_t type_idx = static_cast<uint32_t>(envelope.payload.index());
-    if (type_idx >= OSP_BUS_MAX_MESSAGE_TYPES) return;
+    if (type_idx >= OSP_BUS_MAX_MESSAGE_TYPES)
+      return;
 
     callback_spin_lock_.lock_shared();
 
@@ -867,8 +817,7 @@ class AsyncBus {
   }
 
   void ReportError(BusError error, uint64_t msg_id) const noexcept {
-    BusErrorCallback cb =
-        error_callback_.load(std::memory_order_acquire);
+    BusErrorCallback cb = error_callback_.load(std::memory_order_acquire);
     if (cb != nullptr) {
       cb(error, msg_id);
     }
@@ -877,8 +826,7 @@ class AsyncBus {
   // ======================== Data Members ========================
   // Aligned to prevent false sharing between producer and consumer.
 
-  alignas(osp::kCacheLineSize)
-      std::array<RingBufferNode, kQueueDepth> ring_buffer_;
+  alignas(osp::kCacheLineSize) std::array<RingBufferNode, kQueueDepth> ring_buffer_;
 
   alignas(osp::kCacheLineSize) std::atomic<uint32_t> producer_pos_;
   std::atomic<uint32_t> cached_consumer_pos_;
@@ -886,7 +834,7 @@ class AsyncBus {
   alignas(osp::kCacheLineSize) std::atomic<uint32_t> consumer_pos_;
 
   alignas(osp::kCacheLineSize) std::atomic<uint64_t> next_msg_id_;
-  uint32_t next_callback_id_;
+  uint32_t next_callback_id_{1};
 
   BusStatistics stats_;
   std::array<CallbackSlot, OSP_BUS_MAX_MESSAGE_TYPES> callback_table_;

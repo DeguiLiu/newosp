@@ -75,9 +75,10 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
+#include <cstdint>
+
 #include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <mutex>
 #include <thread>
 
@@ -95,9 +96,9 @@ using WatchdogSlotId = NewType<uint32_t, WatchdogSlotIdTag>;
 // ============================================================================
 
 enum class WatchdogError : uint8_t {
-  kSlotsFull = 0,         ///< All watchdog slots are occupied.
-  kInvalidTimeout,        ///< Timeout value is zero or invalid.
-  kNotRegistered,         ///< Slot ID not found or already unregistered.
+  kSlotsFull = 0,   ///< All watchdog slots are occupied.
+  kInvalidTimeout,  ///< Timeout value is zero or invalid.
+  kNotRegistered,   ///< Slot ID not found or already unregistered.
 };
 
 // ============================================================================
@@ -180,11 +181,9 @@ class ThreadWatchdog final {
    * @param timeout_ms  Timeout period in milliseconds (must be > 0).
    * @return RegResult on success, or WatchdogError on failure.
    */
-  expected<RegResult, WatchdogError> Register(const char* name,
-                                              uint32_t timeout_ms) noexcept {
+  expected<RegResult, WatchdogError> Register(const char* name, uint32_t timeout_ms) noexcept {
     if (timeout_ms == 0U) {
-      return expected<RegResult, WatchdogError>::error(
-          WatchdogError::kInvalidTimeout);
+      return expected<RegResult, WatchdogError>::error(WatchdogError::kInvalidTimeout);
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -196,13 +195,11 @@ class ThreadWatchdog final {
         slots_[i].heartbeat.Beat();  // Initialize with current time
         slots_[i].timed_out = false;
         slots_[i].active.store(true, std::memory_order_release);
-        return expected<RegResult, WatchdogError>::success(
-            RegResult{WatchdogSlotId(i), &slots_[i].heartbeat});
+        return expected<RegResult, WatchdogError>::success(RegResult{WatchdogSlotId(i), &slots_[i].heartbeat});
       }
     }
 
-    return expected<RegResult, WatchdogError>::error(
-        WatchdogError::kSlotsFull);
+    return expected<RegResult, WatchdogError>::error(WatchdogError::kSlotsFull);
   }
 
   /**
@@ -216,15 +213,13 @@ class ThreadWatchdog final {
   expected<void, WatchdogError> Unregister(WatchdogSlotId id) noexcept {
     const uint32_t idx = id.value();
     if (idx >= MaxThreads) {
-      return expected<void, WatchdogError>::error(
-          WatchdogError::kNotRegistered);
+      return expected<void, WatchdogError>::error(WatchdogError::kNotRegistered);
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!slots_[idx].active.load(std::memory_order_relaxed)) {
-      return expected<void, WatchdogError>::error(
-          WatchdogError::kNotRegistered);
+      return expected<void, WatchdogError>::error(WatchdogError::kNotRegistered);
     }
 
     slots_[idx].active.store(false, std::memory_order_release);
@@ -281,8 +276,7 @@ class ThreadWatchdog final {
         }
 
         const uint64_t last_beat = slots_[i].heartbeat.LastBeatUs();
-        const bool is_timed_out = (now > last_beat) &&
-            ((now - last_beat) > slots_[i].timeout_us);
+        const bool is_timed_out = (now > last_beat) && ((now - last_beat) > slots_[i].timeout_us);
 
         if (is_timed_out && !slots_[i].timed_out) {
           slots_[i].timed_out = true;
@@ -312,14 +306,10 @@ class ThreadWatchdog final {
 
     // Phase 2: Execute callbacks outside lock
     for (uint32_t i = 0U; i < timeout_count; ++i) {
-      timeout_pending[i].fn(timeout_pending[i].slot_id,
-                            timeout_pending[i].name.c_str(),
-                            timeout_pending[i].ctx);
+      timeout_pending[i].fn(timeout_pending[i].slot_id, timeout_pending[i].name.c_str(), timeout_pending[i].ctx);
     }
     for (uint32_t i = 0U; i < recover_count; ++i) {
-      recover_pending[i].fn(recover_pending[i].slot_id,
-                            recover_pending[i].name.c_str(),
-                            recover_pending[i].ctx);
+      recover_pending[i].fn(recover_pending[i].slot_id, recover_pending[i].name.c_str(), recover_pending[i].ctx);
     }
 
     return total_timed_out;
@@ -374,8 +364,7 @@ class ThreadWatchdog final {
     std::lock_guard<std::mutex> lock(mutex_);
     uint32_t count = 0U;
     for (uint32_t i = 0U; i < MaxThreads; ++i) {
-      if (slots_[i].active.load(std::memory_order_acquire) &&
-          slots_[i].timed_out) {
+      if (slots_[i].active.load(std::memory_order_acquire) && slots_[i].timed_out) {
         ++count;
       }
     }
@@ -440,8 +429,7 @@ class ThreadWatchdog final {
       return;
     }
     bool expected = false;
-    if (!auto_check_running_.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel)) {
+    if (!auto_check_running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       return;  // Already running
     }
     auto_check_thread_ = std::thread([this, interval_ms]() {
@@ -460,8 +448,7 @@ class ThreadWatchdog final {
    */
   void StopAutoCheck() noexcept {
     bool expected = true;
-    if (!auto_check_running_.compare_exchange_strong(
-            expected, false, std::memory_order_acq_rel)) {
+    if (!auto_check_running_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
       return;  // Another thread is already stopping or not running
     }
     if (auto_check_thread_.joinable()) {
@@ -472,9 +459,9 @@ class ThreadWatchdog final {
  private:
   struct Slot {
     std::atomic<bool> active{false};
-    ThreadHeartbeat heartbeat;            ///< Heartbeat signal (in platform.hpp).
+    ThreadHeartbeat heartbeat;  ///< Heartbeat signal (in platform.hpp).
     uint64_t timeout_us{0};
-    bool timed_out{false};                ///< Protected by mutex_.
+    bool timed_out{false};  ///< Protected by mutex_.
     FixedString<32> name;
   };
 
@@ -509,10 +496,10 @@ class WatchdogGuard final {
    *
    * If wd is nullptr, the guard is a no-op (IsValid() returns false).
    */
-  explicit WatchdogGuard(ThreadWatchdog<MaxThreads>* wd, const char* name,
-                         uint32_t timeout_ms) noexcept
+  explicit WatchdogGuard(ThreadWatchdog<MaxThreads>* wd, const char* name, uint32_t timeout_ms) noexcept
       : wd_(wd), hb_(nullptr), id_(WatchdogSlotId(0)), valid_(false) {
-    if (wd_ == nullptr) return;
+    if (wd_ == nullptr)
+      return;
     auto result = wd_->Register(name, timeout_ms);
     if (result.has_value()) {
       id_ = result.value().id;

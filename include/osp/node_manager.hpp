@@ -35,15 +35,16 @@
 #define OSP_NODE_MANAGER_HPP_
 
 #include "osp/platform.hpp"
-#include "osp/vocabulary.hpp"
 #include "osp/socket.hpp"
 #include "osp/timer.hpp"
+#include "osp/vocabulary.hpp"
 
 #if OSP_HAS_NETWORK
 
+#include <cstring>
+
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <mutex>
 #include <thread>
 
@@ -117,8 +118,14 @@ struct NodeEntry {
   bool is_listener;  // true = we accepted this connection
 
   NodeEntry() noexcept
-      : node_id(0), socket(), listener(), remote_host(), remote_port(0),
-        last_heartbeat_us(0), active(false), is_listener(false) {}
+      : node_id(0),
+        socket(),
+        listener(),
+        remote_host(),
+        remote_port(0),
+        last_heartbeat_us(0),
+        active(false),
+        is_listener(false) {}
 };
 
 // ============================================================================
@@ -128,11 +135,15 @@ struct NodeEntry {
 template <uint32_t MaxNodes = OSP_NODE_MANAGER_MAX_NODES>
 class NodeManager {
  public:
-  explicit NodeManager(const NodeManagerConfig& cfg = {},
-                       TimerScheduler<>* scheduler = nullptr) noexcept
-      : config_(cfg), running_(false), next_node_id_(1),
-        node_count_(0), disconnect_fn_(nullptr), disconnect_ctx_(nullptr),
-        scheduler_(scheduler), timer_task_id_(0) {}
+  explicit NodeManager(const NodeManagerConfig& cfg = {}, TimerScheduler<>* scheduler = nullptr) noexcept
+      : config_(cfg),
+        running_(false),
+        next_node_id_(1),
+        node_count_(0),
+        disconnect_fn_(nullptr),
+        disconnect_ctx_(nullptr),
+        scheduler_(scheduler),
+        timer_task_id_(0) {}
 
   ~NodeManager() { Stop(); }
 
@@ -153,37 +164,31 @@ class NodeManager {
 
     NodeEntry* slot = FindSlot();
     if (slot == nullptr) {
-      return expected<uint16_t, NodeManagerError>::error(
-          NodeManagerError::kTableFull);
+      return expected<uint16_t, NodeManagerError>::error(NodeManagerError::kTableFull);
     }
 
     auto listener_r = TcpListener::Create();
     if (!listener_r.has_value()) {
-      return expected<uint16_t, NodeManagerError>::error(
-          NodeManagerError::kBindFailed);
+      return expected<uint16_t, NodeManagerError>::error(NodeManagerError::kBindFailed);
     }
 
     // Set SO_REUSEADDR
     int32_t opt = 1;
-    ::setsockopt(listener_r.value().Fd(), SOL_SOCKET, SO_REUSEADDR, &opt,
-                 static_cast<socklen_t>(sizeof(opt)));
+    ::setsockopt(listener_r.value().Fd(), SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
 
     auto addr_r = SocketAddress::FromIpv4("0.0.0.0", port);
     if (!addr_r.has_value()) {
-      return expected<uint16_t, NodeManagerError>::error(
-          NodeManagerError::kBindFailed);
+      return expected<uint16_t, NodeManagerError>::error(NodeManagerError::kBindFailed);
     }
 
     auto bind_r = listener_r.value().Bind(addr_r.value());
     if (!bind_r.has_value()) {
-      return expected<uint16_t, NodeManagerError>::error(
-          NodeManagerError::kBindFailed);
+      return expected<uint16_t, NodeManagerError>::error(NodeManagerError::kBindFailed);
     }
 
     auto listen_r = listener_r.value().Listen(8);
     if (!listen_r.has_value()) {
-      return expected<uint16_t, NodeManagerError>::error(
-          NodeManagerError::kBindFailed);
+      return expected<uint16_t, NodeManagerError>::error(NodeManagerError::kBindFailed);
     }
 
     // Store listener in the node entry
@@ -205,33 +210,28 @@ class NodeManager {
    * @param port Remote port number.
    * @return The assigned node_id for the connection, or NodeManagerError.
    */
-  expected<uint16_t, NodeManagerError> Connect(const char* host,
-                                                uint16_t port) noexcept {
+  expected<uint16_t, NodeManagerError> Connect(const char* host, uint16_t port) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
 
     NodeEntry* slot = FindSlot();
     if (slot == nullptr) {
-      return expected<uint16_t, NodeManagerError>::error(
-          NodeManagerError::kTableFull);
+      return expected<uint16_t, NodeManagerError>::error(NodeManagerError::kTableFull);
     }
 
     auto sock_r = TcpSocket::Create();
     if (!sock_r.has_value()) {
-      return expected<uint16_t, NodeManagerError>::error(
-          NodeManagerError::kConnectionFailed);
+      return expected<uint16_t, NodeManagerError>::error(NodeManagerError::kConnectionFailed);
     }
     TcpSocket sock = static_cast<TcpSocket&&>(sock_r.value());
 
     auto addr_r = SocketAddress::FromIpv4(host, port);
     if (!addr_r.has_value()) {
-      return expected<uint16_t, NodeManagerError>::error(
-          NodeManagerError::kConnectionFailed);
+      return expected<uint16_t, NodeManagerError>::error(NodeManagerError::kConnectionFailed);
     }
 
     auto conn_r = sock.Connect(addr_r.value());
     if (!conn_r.has_value()) {
-      return expected<uint16_t, NodeManagerError>::error(
-          NodeManagerError::kConnectionFailed);
+      return expected<uint16_t, NodeManagerError>::error(NodeManagerError::kConnectionFailed);
     }
 
     // Disable Nagle's algorithm for low-latency heartbeats
@@ -259,8 +259,7 @@ class NodeManager {
 
     NodeEntry* node = FindNode(node_id);
     if (node == nullptr) {
-      return expected<void, NodeManagerError>::error(
-          NodeManagerError::kNotFound);
+      return expected<void, NodeManagerError>::error(NodeManagerError::kNotFound);
     }
 
     if (node->is_listener) {
@@ -325,8 +324,7 @@ class NodeManager {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (running_.load()) {
-      return expected<void, NodeManagerError>::error(
-          NodeManagerError::kAlreadyRunning);
+      return expected<void, NodeManagerError>::error(NodeManagerError::kAlreadyRunning);
     }
 
     running_.store(true);
@@ -337,8 +335,7 @@ class NodeManager {
         timer_task_id_ = r.value();
       } else {
         running_.store(false);
-        return expected<void, NodeManagerError>::error(
-            NodeManagerError::kNotRunning);
+        return expected<void, NodeManagerError>::error(NodeManagerError::kNotRunning);
       }
     } else {
       heartbeat_thread_ = std::thread([this]() { HeartbeatLoop(); });
@@ -379,9 +376,7 @@ class NodeManager {
    * @brief Check if the heartbeat thread is running.
    * @return true if running, false otherwise.
    */
-  bool IsRunning() const noexcept {
-    return running_.load();
-  }
+  bool IsRunning() const noexcept { return running_.load(); }
 
   // ==========================================================================
   // Iteration
@@ -456,7 +451,9 @@ class NodeManager {
 
   void HeartbeatLoop() noexcept {
     while (running_.load()) {
-      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+      if (heartbeat_ != nullptr) {
+        heartbeat_->Beat();
+      }
       const uint64_t start_us = SteadyNowUs();
 
       uint16_t disconnected_ids[MaxNodes];
@@ -515,8 +512,8 @@ class NodeManager {
   uint32_t CollectTimeouts(uint16_t* out_ids) noexcept {
     uint32_t count = 0U;
     const uint64_t now = SteadyNowUs();
-    const uint64_t timeout_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) *
-                                config_.heartbeat_timeout_count * 1000U;
+    const uint64_t timeout_us =
+        static_cast<uint64_t>(config_.heartbeat_interval_ms) * config_.heartbeat_timeout_count * 1000U;
 
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (nodes_[i].active && !nodes_[i].is_listener) {
@@ -540,14 +537,16 @@ class NodeManager {
 
   NodeEntry* FindSlot() noexcept {
     for (uint32_t i = 0; i < MaxNodes; ++i) {
-      if (!nodes_[i].active) return &nodes_[i];
+      if (!nodes_[i].active)
+        return &nodes_[i];
     }
     return nullptr;
   }
 
   NodeEntry* FindNode(uint16_t id) noexcept {
     for (uint32_t i = 0; i < MaxNodes; ++i) {
-      if (nodes_[i].active && nodes_[i].node_id == id) return &nodes_[i];
+      if (nodes_[i].active && nodes_[i].node_id == id)
+        return &nodes_[i];
     }
     return nullptr;
   }

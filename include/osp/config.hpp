@@ -94,8 +94,10 @@ inline bool ExtCaseEqual(const char* a, const char* b) noexcept {
   while (*a != '\0' && *b != '\0') {
     char la = (*a >= 'A' && *a <= 'Z') ? static_cast<char>(*a + 32) : *a;
     char lb = (*b >= 'A' && *b <= 'Z') ? static_cast<char>(*b + 32) : *b;
-    if (la != lb) return false;
-    ++a; ++b;
+    if (la != lb)
+      return false;
+    ++a;
+    ++b;
   }
   return *a == *b;
 }
@@ -105,24 +107,19 @@ inline bool ExtCaseEqual(const char* a, const char* b) noexcept {
 struct IniBackend {
   static constexpr ConfigFormat kFormat = ConfigFormat::kIni;
   static bool MatchesExtension(const char* ext) noexcept {
-    return detail::ExtCaseEqual(ext, "ini") ||
-           detail::ExtCaseEqual(ext, "cfg") ||
-           detail::ExtCaseEqual(ext, "conf");
+    return detail::ExtCaseEqual(ext, "ini") || detail::ExtCaseEqual(ext, "cfg") || detail::ExtCaseEqual(ext, "conf");
   }
 };
 
 struct JsonBackend {
   static constexpr ConfigFormat kFormat = ConfigFormat::kJson;
-  static bool MatchesExtension(const char* ext) noexcept {
-    return detail::ExtCaseEqual(ext, "json");
-  }
+  static bool MatchesExtension(const char* ext) noexcept { return detail::ExtCaseEqual(ext, "json"); }
 };
 
 struct YamlBackend {
   static constexpr ConfigFormat kFormat = ConfigFormat::kYaml;
   static bool MatchesExtension(const char* ext) noexcept {
-    return detail::ExtCaseEqual(ext, "yaml") ||
-           detail::ExtCaseEqual(ext, "yml");
+    return detail::ExtCaseEqual(ext, "yaml") || detail::ExtCaseEqual(ext, "yml");
   }
 };
 
@@ -138,43 +135,44 @@ class ConfigStore {
  public:
   // --- Typed Getters ---
 
-  const char* GetString(const char* section, const char* key,
-                        const char* default_val = "") const {
+  const char* GetString(const char* section, const char* key, const char* default_val = "") const {
     const Entry* e = FindEntry(section, key);
     return (e != nullptr) ? e->value : default_val;
   }
 
-  int32_t GetInt(const char* section, const char* key,
-                 int32_t default_val = 0) const {
+  int32_t GetInt(const char* section, const char* key, int32_t default_val = 0) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) return default_val;
+    if (e == nullptr)
+      return default_val;
     char* end = nullptr;
     long val = std::strtol(e->value, &end, 10);
     return (end == e->value) ? default_val : static_cast<int32_t>(val);
   }
 
-  uint16_t GetPort(const char* section, const char* key,
-                   uint16_t default_val = 0) const {
+  uint16_t GetPort(const char* section, const char* key, uint16_t default_val = 0) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) return default_val;
+    if (e == nullptr)
+      return default_val;
     char* end = nullptr;
     long val = std::strtol(e->value, &end, 10);
-    if (end == e->value) return default_val;
-    if (val < 0) return 0;
-    if (val > 65535) return 65535;
+    if (end == e->value)
+      return default_val;
+    if (val < 0)
+      return 0;
+    if (val > 65535)
+      return 65535;
     return static_cast<uint16_t>(val);
   }
 
-  bool GetBool(const char* section, const char* key,
-               bool default_val = false) const {
+  bool GetBool(const char* section, const char* key, bool default_val = false) const {
     const Entry* e = FindEntry(section, key);
     return (e != nullptr) ? ParseBool(e->value) : default_val;
   }
 
-  double GetDouble(const char* section, const char* key,
-                   double default_val = 0.0) const {
+  double GetDouble(const char* section, const char* key, double default_val = 0.0) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) return default_val;
+    if (e == nullptr)
+      return default_val;
     char* end = nullptr;
     double val = std::strtod(e->value, &end);
     return (end == e->value) ? default_val : val;
@@ -184,11 +182,11 @@ class ConfigStore {
 
   optional<int32_t> FindInt(const char* section, const char* key) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr) return {};
+    if (e == nullptr)
+      return {};
     char* end = nullptr;
     long val = std::strtol(e->value, &end, 10);
-    return (end == e->value) ? optional<int32_t>{}
-                             : optional<int32_t>{static_cast<int32_t>(val)};
+    return (end == e->value) ? optional<int32_t>{} : optional<int32_t>{static_cast<int32_t>(val)};
   }
 
   optional<bool> FindBool(const char* section, const char* key) const {
@@ -201,14 +199,13 @@ class ConfigStore {
   bool HasSection(const char* section) const {
     OSP_ASSERT(section != nullptr);
     for (uint32_t i = 0; i < count_; ++i) {
-      if (StrCaseEqual(entries_[i].section, section)) return true;
+      if (StrCaseEqual(entries_[i].section, section))
+        return true;
     }
     return false;
   }
 
-  bool HasKey(const char* section, const char* key) const {
-    return FindEntry(section, key) != nullptr;
-  }
+  bool HasKey(const char* section, const char* key) const { return FindEntry(section, key) != nullptr; }
 
   uint32_t EntryCount() const noexcept { return count_; }
 
@@ -228,13 +225,13 @@ class ConfigStore {
 
   bool AddEntry(const char* section, const char* key, const char* value) {
     for (uint32_t i = 0; i < count_; ++i) {
-      if (StrCaseEqual(entries_[i].section, section) &&
-          StrCaseEqual(entries_[i].key, key)) {
+      if (StrCaseEqual(entries_[i].section, section) && StrCaseEqual(entries_[i].key, key)) {
         SafeCopy(entries_[i].value, value, kMaxValueLen);
         return true;
       }
     }
-    if (count_ >= kMaxEntries) return false;
+    if (count_ >= kMaxEntries)
+      return false;
     Entry& e = entries_[count_];
     SafeCopy(e.section, section, kMaxKeyLen);
     SafeCopy(e.key, key, kMaxKeyLen);
@@ -243,8 +240,7 @@ class ConfigStore {
     return true;
   }
 
-  static expected<uint32_t, ConfigError> ReadFileToBuffer(
-      const char* path, char* buf, uint32_t buf_size) {
+  static expected<uint32_t, ConfigError> ReadFileToBuffer(const char* path, char* buf, uint32_t buf_size) {
     FILE* f = std::fopen(path, "r");
     if (f == nullptr)
       return expected<uint32_t, ConfigError>::error(ConfigError::kFileNotFound);
@@ -257,8 +253,7 @@ class ConfigStore {
   const Entry* FindEntry(const char* section, const char* key) const {
     OSP_ASSERT(section != nullptr && key != nullptr);
     for (uint32_t i = 0; i < count_; ++i) {
-      if (StrCaseEqual(entries_[i].section, section) &&
-          StrCaseEqual(entries_[i].key, key))
+      if (StrCaseEqual(entries_[i].section, section) && StrCaseEqual(entries_[i].key, key))
         return &entries_[i];
     }
     return nullptr;
@@ -268,34 +263,44 @@ class ConfigStore {
     while (*a != '\0' && *b != '\0') {
       char la = (*a >= 'A' && *a <= 'Z') ? static_cast<char>(*a + 32) : *a;
       char lb = (*b >= 'A' && *b <= 'Z') ? static_cast<char>(*b + 32) : *b;
-      if (la != lb) return false;
-      ++a; ++b;
+      if (la != lb)
+        return false;
+      ++a;
+      ++b;
     }
     return *a == *b;
   }
 
   static void SafeCopy(char* dst, const char* src, uint32_t dst_size) noexcept {
-    if (src == nullptr) { dst[0] = '\0'; return; }
+    if (src == nullptr) {
+      dst[0] = '\0';
+      return;
+    }
     uint32_t i = 0;
-    while (i < (dst_size - 1U) && src[i] != '\0') { dst[i] = src[i]; ++i; }
+    while (i < (dst_size - 1U) && src[i] != '\0') {
+      dst[i] = src[i];
+      ++i;
+    }
     dst[i] = '\0';
   }
 
   static bool ParseBool(const char* str) noexcept {
-    if (str == nullptr) return false;
-    return StrCaseEqual(str, "true") || StrCaseEqual(str, "1") ||
-           StrCaseEqual(str, "yes") || StrCaseEqual(str, "on");
+    if (str == nullptr)
+      return false;
+    return StrCaseEqual(str, "true") || StrCaseEqual(str, "1") || StrCaseEqual(str, "yes") || StrCaseEqual(str, "on");
   }
 
   static const char* GetExtension(const char* path) noexcept {
     const char* dot = nullptr;
     for (const char* p = path; *p != '\0'; ++p) {
-      if (*p == '.') dot = p;
+      if (*p == '.')
+        dot = p;
     }
     return (dot != nullptr) ? dot + 1 : nullptr;
   }
 
-  template <typename> friend struct ConfigParser;
+  template <typename>
+  friend struct ConfigParser;
 };
 
 // ============================================================================
@@ -308,8 +313,7 @@ struct ConfigParser {
   static expected<void, ConfigError> ParseFile(ConfigStore&, const char*) {
     return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
   }
-  static expected<void, ConfigError> ParseBuffer(ConfigStore&, const char*,
-                                                  uint32_t) {
+  static expected<void, ConfigError> ParseBuffer(ConfigStore&, const char*, uint32_t) {
     return expected<void, ConfigError>::error(ConfigError::kFormatNotSupported);
   }
 };
@@ -319,8 +323,7 @@ struct ConfigParser {
 #ifdef OSP_CONFIG_INI_ENABLED
 template <>
 struct ConfigParser<IniBackend> {
-  static expected<void, ConfigError> ParseFile(ConfigStore& store,
-                                                const char* path) {
+  static expected<void, ConfigError> ParseFile(ConfigStore& store, const char* path) {
     // Check file existence before loading (inicpp silently ignores missing files)
     {
       FILE* f = std::fopen(path, "r");
@@ -332,17 +335,17 @@ struct ConfigParser<IniBackend> {
     try {
       ini::IniFile ini_file;
       ini_file.Load(path);
-      
+
       // Iterate through all sections and fields
       for (const auto& section_pair : ini_file) {
         const std::string& section_name = section_pair.first;
         const auto& section = section_pair.second;
-        
+
         for (const auto& field_pair : section) {
           const std::string& field_name = field_pair.first;
           const auto& field = field_pair.second;
           std::string value = field.template As<std::string>();
-          
+
           if (!store.AddEntry(section_name.c_str(), field_name.c_str(), value.c_str())) {
             return expected<void, ConfigError>::error(ConfigError::kBufferFull);
           }
@@ -354,23 +357,22 @@ struct ConfigParser<IniBackend> {
     }
   }
 
-  static expected<void, ConfigError> ParseBuffer(ConfigStore& store,
-                                                  const char* data, uint32_t) {
+  static expected<void, ConfigError> ParseBuffer(ConfigStore& store, const char* data, uint32_t) {
     try {
       ini::IniFile ini_file;
       std::string data_str(data);
       ini_file.Decode(data_str);
-      
+
       // Iterate through all sections and fields
       for (const auto& section_pair : ini_file) {
         const std::string& section_name = section_pair.first;
         const auto& section = section_pair.second;
-        
+
         for (const auto& field_pair : section) {
           const std::string& field_name = field_pair.first;
           const auto& field = field_pair.second;
           std::string value = field.template As<std::string>();
-          
+
           if (!store.AddEntry(section_name.c_str(), field_name.c_str(), value.c_str())) {
             return expected<void, ConfigError>::error(ConfigError::kBufferFull);
           }
@@ -389,16 +391,15 @@ struct ConfigParser<IniBackend> {
 #ifdef OSP_CONFIG_JSON_ENABLED
 template <>
 struct ConfigParser<JsonBackend> {
-  static expected<void, ConfigError> ParseFile(ConfigStore& store,
-                                                const char* path) {
+  static expected<void, ConfigError> ParseFile(ConfigStore& store, const char* path) {
     char buf[OSP_CONFIG_MAX_FILE_SIZE];
     auto r = ConfigStore::ReadFileToBuffer(path, buf, sizeof(buf));
-    if (!r.has_value()) return expected<void, ConfigError>::error(r.get_error());
+    if (!r.has_value())
+      return expected<void, ConfigError>::error(r.get_error());
     return ParseBuffer(store, buf, r.value());
   }
 
-  static expected<void, ConfigError> ParseBuffer(ConfigStore& store,
-                                                  const char* data, uint32_t) {
+  static expected<void, ConfigError> ParseBuffer(ConfigStore& store, const char* data, uint32_t) {
     auto j = nlohmann::json::parse(data, nullptr, false);
     if (j.is_discarded() || !j.is_object())
       return expected<void, ConfigError>::error(ConfigError::kParseError);
@@ -444,17 +445,15 @@ struct ConfigParser<JsonBackend> {
 #ifdef OSP_CONFIG_YAML_ENABLED
 template <>
 struct ConfigParser<YamlBackend> {
-  static expected<void, ConfigError> ParseFile(ConfigStore& store,
-                                                const char* path) {
+  static expected<void, ConfigError> ParseFile(ConfigStore& store, const char* path) {
     char buf[OSP_CONFIG_MAX_FILE_SIZE];
     auto r = ConfigStore::ReadFileToBuffer(path, buf, sizeof(buf));
-    if (!r.has_value()) return expected<void, ConfigError>::error(r.get_error());
+    if (!r.has_value())
+      return expected<void, ConfigError>::error(r.get_error());
     return ParseBuffer(store, buf, r.value());
   }
 
-  static expected<void, ConfigError> ParseBuffer(ConfigStore& store,
-                                                  const char* data,
-                                                  uint32_t size) {
+  static expected<void, ConfigError> ParseBuffer(ConfigStore& store, const char* data, uint32_t size) {
     std::string yaml_str(data, size);
     auto root = fkyaml::node::deserialize(yaml_str);
     if (root.is_null() || !root.is_mapping())
@@ -511,15 +510,14 @@ class Config final : public ConfigStore {
  public:
   Config() = default;
 
-  expected<void, ConfigError> LoadFile(
-      const char* path, ConfigFormat format = ConfigFormat::kAuto) {
+  expected<void, ConfigError> LoadFile(const char* path, ConfigFormat format = ConfigFormat::kAuto) {
     OSP_ASSERT(path != nullptr);
-    if (format == ConfigFormat::kAuto) format = DetectFormat(path);
+    if (format == ConfigFormat::kAuto)
+      format = DetectFormat(path);
     return DispatchFile<Backends...>(path, format);
   }
 
-  expected<void, ConfigError> LoadBuffer(const char* data, uint32_t size,
-                                          ConfigFormat format) {
+  expected<void, ConfigError> LoadBuffer(const char* data, uint32_t size, ConfigFormat format) {
     OSP_ASSERT(data != nullptr);
     return DispatchBuffer<Backends...>(data, size, format);
   }
@@ -527,8 +525,7 @@ class Config final : public ConfigStore {
  private:
   // --- Recursive dispatch (file) ---
   template <typename First, typename... Rest>
-  expected<void, ConfigError> DispatchFile(const char* path,
-                                            ConfigFormat format) {
+  expected<void, ConfigError> DispatchFile(const char* path, ConfigFormat format) {
     if (First::kFormat == format)
       return ConfigParser<First>::ParseFile(*this, path);
     if constexpr (sizeof...(Rest) > 0)
@@ -538,8 +535,7 @@ class Config final : public ConfigStore {
 
   // --- Recursive dispatch (buffer) ---
   template <typename First, typename... Rest>
-  expected<void, ConfigError> DispatchBuffer(const char* data, uint32_t size,
-                                              ConfigFormat format) {
+  expected<void, ConfigError> DispatchBuffer(const char* data, uint32_t size, ConfigFormat format) {
     if (First::kFormat == format)
       return ConfigParser<First>::ParseBuffer(*this, data, size);
     if constexpr (sizeof...(Rest) > 0)
@@ -550,14 +546,17 @@ class Config final : public ConfigStore {
   // --- Auto-detect from file extension ---
   ConfigFormat DetectFormat(const char* path) const noexcept {
     const char* ext = GetExtension(path);
-    if (ext == nullptr) return Head::kFormat;
+    if (ext == nullptr)
+      return Head::kFormat;
     return DetectExt<Backends...>(ext);
   }
 
   template <typename First, typename... Rest>
   ConfigFormat DetectExt(const char* ext) const noexcept {
-    if (First::MatchesExtension(ext)) return First::kFormat;
-    if constexpr (sizeof...(Rest) > 0) return DetectExt<Rest...>(ext);
+    if (First::MatchesExtension(ext))
+      return First::kFormat;
+    if constexpr (sizeof...(Rest) > 0)
+      return DetectExt<Rest...>(ext);
     return Head::kFormat;
   }
 
@@ -573,8 +572,7 @@ using MultiConfig = Config<
 #ifdef OSP_CONFIG_INI_ENABLED
     IniBackend
 #endif
-#if defined(OSP_CONFIG_INI_ENABLED) && \
-    (defined(OSP_CONFIG_JSON_ENABLED) || defined(OSP_CONFIG_YAML_ENABLED))
+#if defined(OSP_CONFIG_INI_ENABLED) && (defined(OSP_CONFIG_JSON_ENABLED) || defined(OSP_CONFIG_YAML_ENABLED))
     ,
 #endif
 #ifdef OSP_CONFIG_JSON_ENABLED

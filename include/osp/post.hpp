@@ -35,14 +35,15 @@
 #ifndef OSP_POST_HPP_
 #define OSP_POST_HPP_
 
+#include "osp/app.hpp"
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
-#include "osp/app.hpp"
+
+#include <cstdint>
+#include <cstring>
 
 #include <atomic>
 #include <chrono>
-#include <cstdint>
-#include <cstring>
 #include <thread>
 
 namespace osp {
@@ -51,14 +52,7 @@ namespace osp {
 // Post Error
 // ============================================================================
 
-enum class PostError : uint8_t {
-  kAppNotFound,
-  kInstanceNotFound,
-  kQueueFull,
-  kTimeout,
-  kNotRegistered,
-  kSendFailed
-};
+enum class PostError : uint8_t { kAppNotFound, kInstanceNotFound, kQueueFull, kTimeout, kNotRegistered, kSendFailed };
 
 // ============================================================================
 // Application Registry
@@ -75,8 +69,7 @@ enum class PostError : uint8_t {
 //   - No internal mutex — relies on phase-based access pattern.
 class AppRegistry {
  public:
-  using PostFn = bool (*)(void* app, uint16_t ins_id, uint16_t event,
-                          const void* data, uint32_t len,
+  using PostFn = bool (*)(void* app, uint16_t ins_id, uint16_t event, const void* data, uint32_t len,
                           ResponseChannel* response_ch);
 
   static AppRegistry& Instance() noexcept {
@@ -85,14 +78,16 @@ class AppRegistry {
   }
 
   bool Register(uint16_t app_id, void* app_ptr, PostFn post_fn) noexcept {
-    if (app_ptr == nullptr || post_fn == nullptr) return false;
+    if (app_ptr == nullptr || post_fn == nullptr)
+      return false;
     // Check duplicate
     for (uint32_t i = 0; i < entries_.size(); ++i) {
       if (entries_[i].app_id == app_id) {
         return false;
       }
     }
-    if (entries_.full()) return false;
+    if (entries_.full())
+      return false;
     AppEntry entry;
     entry.app_ptr = app_ptr;
     entry.post_fn = post_fn;
@@ -110,15 +105,13 @@ class AppRegistry {
     return false;
   }
 
-  bool PostLocal(uint32_t dst_iid, uint16_t event,
-                 const void* data, uint32_t len,
+  bool PostLocal(uint32_t dst_iid, uint16_t event, const void* data, uint32_t len,
                  ResponseChannel* response_ch = nullptr) noexcept {
     uint16_t app_id = GetAppId(dst_iid);
     uint16_t ins_id = GetInsId(dst_iid);
     for (uint32_t i = 0; i < entries_.size(); ++i) {
       if (entries_[i].app_id == app_id) {
-        return entries_[i].post_fn(entries_[i].app_ptr, ins_id, event,
-                                   data, len, response_ch);
+        return entries_[i].post_fn(entries_[i].app_ptr, ins_id, event, data, len, response_ch);
       }
     }
     return false;
@@ -146,14 +139,12 @@ class AppRegistry {
 
 template <typename InstanceImpl, uint16_t MaxInstances>
 bool RegisterApp(Application<InstanceImpl, MaxInstances>& app) noexcept {
-  return AppRegistry::Instance().Register(
-      app.AppId(), &app,
-      [](void* ptr, uint16_t ins_id, uint16_t event,
-         const void* data, uint32_t len,
-         ResponseChannel* response_ch) -> bool {
-        auto* a = static_cast<Application<InstanceImpl, MaxInstances>*>(ptr);
-        return a->Post(ins_id, event, data, len, response_ch);
-      });
+  return AppRegistry::Instance().Register(app.AppId(), &app,
+                                          [](void* ptr, uint16_t ins_id, uint16_t event, const void* data, uint32_t len,
+                                             ResponseChannel* response_ch) -> bool {
+                                            auto* a = static_cast<Application<InstanceImpl, MaxInstances>*>(ptr);
+                                            return a->Post(ins_id, event, data, len, response_ch);
+                                          });
 }
 
 template <typename InstanceImpl, uint16_t MaxInstances>
@@ -165,9 +156,7 @@ bool UnregisterApp(Application<InstanceImpl, MaxInstances>& app) noexcept {
 // OspPost - Unified message delivery
 // ============================================================================
 
-inline bool OspPost(uint32_t dst_iid, uint16_t event,
-                    const void* data, uint32_t len,
-                    uint16_t dst_node = 0) noexcept {
+inline bool OspPost(uint32_t dst_iid, uint16_t event, const void* data, uint32_t len, uint16_t dst_node = 0) noexcept {
   if (dst_node != 0) {
     // Remote delivery - stub for now
     return false;
@@ -196,13 +185,9 @@ inline bool OspPost(uint32_t dst_iid, uint16_t event,
  * @param timeout_ms Timeout in milliseconds.
  * @return Number of bytes written to ack_buf on success, or PostError.
  */
-inline expected<uint32_t, PostError> OspSendAndWait(
-    uint32_t dst_iid, uint16_t event,
-    const void* data, uint32_t len,
-    void* ack_buf, uint32_t ack_buf_size,
-    uint16_t dst_node = 0,
-    int timeout_ms = 2000) noexcept {
-
+inline expected<uint32_t, PostError> OspSendAndWait(uint32_t dst_iid, uint16_t event, const void* data, uint32_t len,
+                                                    void* ack_buf, uint32_t ack_buf_size, uint16_t dst_node = 0,
+                                                    int timeout_ms = 2000) noexcept {
   if (dst_node != 0) {
     return expected<uint32_t, PostError>::error(PostError::kSendFailed);
   }
@@ -211,8 +196,7 @@ inline expected<uint32_t, PostError> OspSendAndWait(
   ResponseChannel channel;
 
   // Post the message with the response channel attached
-  if (!AppRegistry::Instance().PostLocal(dst_iid, event, data, len,
-                                          &channel)) {
+  if (!AppRegistry::Instance().PostLocal(dst_iid, event, data, len, &channel)) {
     return expected<uint32_t, PostError>::error(PostError::kAppNotFound);
   }
 
@@ -220,10 +204,8 @@ inline expected<uint32_t, PostError> OspSendAndWait(
   {
     std::unique_lock<std::mutex> lock(channel.mtx);
     if (!channel.replied) {
-      auto deadline = std::chrono::steady_clock::now() +
-                      std::chrono::milliseconds(timeout_ms);
-      channel.cv.wait_until(lock, deadline,
-                            [&channel]() { return channel.replied; });
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+      channel.cv.wait_until(lock, deadline, [&channel]() { return channel.replied; });
     }
   }
 

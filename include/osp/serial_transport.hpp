@@ -79,21 +79,21 @@ enum class SerialError : uint8_t {
 
 /// @brief Port health state for industrial safety monitoring
 enum class SerialPortHealth : uint8_t {
-  kHealthy = 0U,    ///< Normal operation
-  kDegraded = 1U,   ///< Error rate above warning threshold
-  kFailed = 2U,     ///< Error rate above critical threshold or no communication
+  kHealthy = 0U,   ///< Normal operation
+  kDegraded = 1U,  ///< Error rate above warning threshold
+  kFailed = 2U,    ///< Error rate above critical threshold or no communication
 };
 
 // ============================================================================
 // Serial Frame Constants (MISRA C++: Named constants, no magic numbers)
 // ============================================================================
 
-inline constexpr uint16_t kSerialSyncWord   = 0xAA55U;
-inline constexpr uint16_t kSerialMagic      = 0x4F53U;  // "OS"
-inline constexpr uint16_t kSerialAckMagic   = 0x4F41U;  // "OA"
-inline constexpr uint8_t  kSerialTailByte   = 0x0DU;
-inline constexpr uint8_t  kSerialSyncByte1  = 0xAAU;
-inline constexpr uint8_t  kSerialSyncByte2  = 0x55U;
+inline constexpr uint16_t kSerialSyncWord = 0xAA55U;
+inline constexpr uint16_t kSerialMagic = 0x4F53U;     // "OS"
+inline constexpr uint16_t kSerialAckMagic = 0x4F41U;  // "OA"
+inline constexpr uint8_t kSerialTailByte = 0x0DU;
+inline constexpr uint8_t kSerialSyncByte1 = 0xAAU;
+inline constexpr uint8_t kSerialSyncByte2 = 0x55U;
 
 /// Header: sync(2) + magic(2) + msg_len(2) + seq(2) + type(2) = 10 bytes
 inline constexpr uint32_t kSerialHeaderSize = 10U;
@@ -121,8 +121,7 @@ inline constexpr uint32_t kSerialCrcSize = 2U;
 // Compile-time validation of frame size constraints (MISRA C++: static_assert)
 static_assert(OSP_SERIAL_MAX_FRAME_SIZE >= kSerialMinFrameSize,
               "OSP_SERIAL_MAX_FRAME_SIZE must be >= kSerialMinFrameSize");
-static_assert(OSP_SERIAL_MAX_FRAME_SIZE <= 65535U,
-              "OSP_SERIAL_MAX_FRAME_SIZE must fit in uint16_t msg_len field");
+static_assert(OSP_SERIAL_MAX_FRAME_SIZE <= 65535U, "OSP_SERIAL_MAX_FRAME_SIZE must fit in uint16_t msg_len field");
 
 // ============================================================================
 // Reliability Config
@@ -145,8 +144,8 @@ struct SerialConfig {
   uint32_t baud_rate = 115200U;
   uint8_t data_bits = 8U;
   uint8_t stop_bits = 1U;
-  uint8_t parity = 0U;              // 0=None, 1=Odd, 2=Even
-  uint8_t flow_control = 0U;        // 0=None, 1=HW(RTS/CTS), 2=SW(XON/XOFF)
+  uint8_t parity = 0U;        // 0=None, 1=Odd, 2=Even
+  uint8_t flow_control = 0U;  // 0=None, 1=HW(RTS/CTS), 2=SW(XON/XOFF)
   uint32_t inter_byte_timeout_ms = 50U;
   uint32_t frame_max_size = OSP_SERIAL_MAX_FRAME_SIZE;
   ReliabilityConfig reliability;
@@ -158,9 +157,9 @@ struct SerialConfig {
   uint32_t failed_error_threshold = 30U;    ///< Errors per window for failed state
 
   // Rate limiting (prevent bus flooding)
-  uint32_t max_frames_per_second = 1000U;   ///< 0 = unlimited
-  uint32_t write_retry_count = 3U;          ///< Max retries for WriteAll
-  uint32_t write_retry_delay_us = 1000U;    ///< Backoff delay between retries
+  uint32_t max_frames_per_second = 1000U;  ///< 0 = unlimited
+  uint32_t write_retry_count = 3U;         ///< Max retries for WriteAll
+  uint32_t write_retry_delay_us = 1000U;   ///< Backoff delay between retries
 };
 
 // Compile-time validation of config struct
@@ -184,8 +183,8 @@ struct SerialStatistics {
   uint64_t seq_gaps = 0U;
   uint64_t retransmits = 0U;
   uint64_t ack_timeouts = 0U;
-  uint64_t rate_limit_drops = 0U;       ///< Frames dropped due to rate limiting
-  uint64_t write_retries = 0U;          ///< Total write retry attempts
+  uint64_t rate_limit_drops = 0U;  ///< Frames dropped due to rate limiting
+  uint64_t write_retries = 0U;     ///< Total write retry attempts
 };
 
 // ============================================================================
@@ -198,8 +197,7 @@ struct SerialStatistics {
 /// @param type_index Message type index
 /// @param seq Sequence number
 /// @param ctx User context pointer
-using SerialRxCallback = void (*)(const void* payload, uint32_t size,
-                                   uint16_t type_index, uint16_t seq, void* ctx);
+using SerialRxCallback = void (*)(const void* payload, uint32_t size, uint16_t type_index, uint16_t seq, void* ctx);
 
 // ============================================================================
 // CRC-CCITT (0x1021) Lookup Table
@@ -224,38 +222,28 @@ class Crc16Ccitt {
 
  private:
   static constexpr uint16_t kTable[256] = {
-    0x0000U, 0x1021U, 0x2042U, 0x3063U, 0x4084U, 0x50A5U, 0x60C6U, 0x70E7U,
-    0x8108U, 0x9129U, 0xA14AU, 0xB16BU, 0xC18CU, 0xD1ADU, 0xE1CEU, 0xF1EFU,
-    0x1231U, 0x0210U, 0x3273U, 0x2252U, 0x52B5U, 0x4294U, 0x72F7U, 0x62D6U,
-    0x9339U, 0x8318U, 0xB37BU, 0xA35AU, 0xD3BDU, 0xC39CU, 0xF3FFU, 0xE3DEU,
-    0x2462U, 0x3443U, 0x0420U, 0x1401U, 0x64E6U, 0x74C7U, 0x44A4U, 0x5485U,
-    0xA56AU, 0xB54BU, 0x8528U, 0x9509U, 0xE5EEU, 0xF5CFU, 0xC5ACU, 0xD58DU,
-    0x3653U, 0x2672U, 0x1611U, 0x0630U, 0x76D7U, 0x66F6U, 0x5695U, 0x46B4U,
-    0xB75BU, 0xA77AU, 0x9719U, 0x8738U, 0xF7DFU, 0xE7FEU, 0xD79DU, 0xC7BCU,
-    0x48C4U, 0x58E5U, 0x6886U, 0x78A7U, 0x0840U, 0x1861U, 0x2802U, 0x3823U,
-    0xC9CCU, 0xD9EDU, 0xE98EU, 0xF9AFU, 0x8948U, 0x9969U, 0xA90AU, 0xB92BU,
-    0x5AF5U, 0x4AD4U, 0x7AB7U, 0x6A96U, 0x1A71U, 0x0A50U, 0x3A33U, 0x2A12U,
-    0xDBFDU, 0xCBDCU, 0xFBBFU, 0xEB9EU, 0x9B79U, 0x8B58U, 0xBB3BU, 0xAB1AU,
-    0x6CA6U, 0x7C87U, 0x4CE4U, 0x5CC5U, 0x2C22U, 0x3C03U, 0x0C60U, 0x1C41U,
-    0xEDAEU, 0xFD8FU, 0xCDECU, 0xDDCDU, 0xAD2AU, 0xBD0BU, 0x8D68U, 0x9D49U,
-    0x7E97U, 0x6EB6U, 0x5ED5U, 0x4EF4U, 0x3E13U, 0x2E32U, 0x1E51U, 0x0E70U,
-    0xFF9FU, 0xEFBEU, 0xDFDDU, 0xCFFCU, 0xBF1BU, 0xAF3AU, 0x9F59U, 0x8F78U,
-    0x9188U, 0x81A9U, 0xB1CAU, 0xA1EBU, 0xD10CU, 0xC12DU, 0xF14EU, 0xE16FU,
-    0x1080U, 0x00A1U, 0x30C2U, 0x20E3U, 0x5004U, 0x4025U, 0x7046U, 0x6067U,
-    0x83B9U, 0x9398U, 0xA3FBU, 0xB3DAU, 0xC33DU, 0xD31CU, 0xE37FU, 0xF35EU,
-    0x02B1U, 0x1290U, 0x22F3U, 0x32D2U, 0x4235U, 0x5214U, 0x6277U, 0x7256U,
-    0xB5EAU, 0xA5CBU, 0x95A8U, 0x8589U, 0xF56EU, 0xE54FU, 0xD52CU, 0xC50DU,
-    0x34E2U, 0x24C3U, 0x14A0U, 0x0481U, 0x7466U, 0x6447U, 0x5424U, 0x4405U,
-    0xA7DBU, 0xB7FAU, 0x8799U, 0x97B8U, 0xE75FU, 0xF77EU, 0xC71DU, 0xD73CU,
-    0x26D3U, 0x36F2U, 0x0691U, 0x16B0U, 0x6657U, 0x7676U, 0x4615U, 0x5634U,
-    0xD94CU, 0xC96DU, 0xF90EU, 0xE92FU, 0x99C8U, 0x89E9U, 0xB98AU, 0xA9ABU,
-    0x5844U, 0x4865U, 0x7806U, 0x6827U, 0x18C0U, 0x08E1U, 0x3882U, 0x28A3U,
-    0xCB7DU, 0xDB5CU, 0xEB3FU, 0xFB1EU, 0x8BF9U, 0x9BD8U, 0xABBBU, 0xBB9AU,
-    0x4A75U, 0x5A54U, 0x6A37U, 0x7A16U, 0x0AF1U, 0x1AD0U, 0x2AB3U, 0x3A92U,
-    0xFD2EU, 0xED0FU, 0xDD6CU, 0xCD4DU, 0xBDAAU, 0xAD8BU, 0x9DE8U, 0x8DC9U,
-    0x7C26U, 0x6C07U, 0x5C64U, 0x4C45U, 0x3CA2U, 0x2C83U, 0x1CE0U, 0x0CC1U,
-    0xEF1FU, 0xFF3EU, 0xCF5DU, 0xDF7CU, 0xAF9BU, 0xBFBAU, 0x8FD9U, 0x9FF8U,
-    0x6E17U, 0x7E36U, 0x4E55U, 0x5E74U, 0x2E93U, 0x3EB2U, 0x0ED1U, 0x1EF0U,
+      0x0000U, 0x1021U, 0x2042U, 0x3063U, 0x4084U, 0x50A5U, 0x60C6U, 0x70E7U, 0x8108U, 0x9129U, 0xA14AU, 0xB16BU,
+      0xC18CU, 0xD1ADU, 0xE1CEU, 0xF1EFU, 0x1231U, 0x0210U, 0x3273U, 0x2252U, 0x52B5U, 0x4294U, 0x72F7U, 0x62D6U,
+      0x9339U, 0x8318U, 0xB37BU, 0xA35AU, 0xD3BDU, 0xC39CU, 0xF3FFU, 0xE3DEU, 0x2462U, 0x3443U, 0x0420U, 0x1401U,
+      0x64E6U, 0x74C7U, 0x44A4U, 0x5485U, 0xA56AU, 0xB54BU, 0x8528U, 0x9509U, 0xE5EEU, 0xF5CFU, 0xC5ACU, 0xD58DU,
+      0x3653U, 0x2672U, 0x1611U, 0x0630U, 0x76D7U, 0x66F6U, 0x5695U, 0x46B4U, 0xB75BU, 0xA77AU, 0x9719U, 0x8738U,
+      0xF7DFU, 0xE7FEU, 0xD79DU, 0xC7BCU, 0x48C4U, 0x58E5U, 0x6886U, 0x78A7U, 0x0840U, 0x1861U, 0x2802U, 0x3823U,
+      0xC9CCU, 0xD9EDU, 0xE98EU, 0xF9AFU, 0x8948U, 0x9969U, 0xA90AU, 0xB92BU, 0x5AF5U, 0x4AD4U, 0x7AB7U, 0x6A96U,
+      0x1A71U, 0x0A50U, 0x3A33U, 0x2A12U, 0xDBFDU, 0xCBDCU, 0xFBBFU, 0xEB9EU, 0x9B79U, 0x8B58U, 0xBB3BU, 0xAB1AU,
+      0x6CA6U, 0x7C87U, 0x4CE4U, 0x5CC5U, 0x2C22U, 0x3C03U, 0x0C60U, 0x1C41U, 0xEDAEU, 0xFD8FU, 0xCDECU, 0xDDCDU,
+      0xAD2AU, 0xBD0BU, 0x8D68U, 0x9D49U, 0x7E97U, 0x6EB6U, 0x5ED5U, 0x4EF4U, 0x3E13U, 0x2E32U, 0x1E51U, 0x0E70U,
+      0xFF9FU, 0xEFBEU, 0xDFDDU, 0xCFFCU, 0xBF1BU, 0xAF3AU, 0x9F59U, 0x8F78U, 0x9188U, 0x81A9U, 0xB1CAU, 0xA1EBU,
+      0xD10CU, 0xC12DU, 0xF14EU, 0xE16FU, 0x1080U, 0x00A1U, 0x30C2U, 0x20E3U, 0x5004U, 0x4025U, 0x7046U, 0x6067U,
+      0x83B9U, 0x9398U, 0xA3FBU, 0xB3DAU, 0xC33DU, 0xD31CU, 0xE37FU, 0xF35EU, 0x02B1U, 0x1290U, 0x22F3U, 0x32D2U,
+      0x4235U, 0x5214U, 0x6277U, 0x7256U, 0xB5EAU, 0xA5CBU, 0x95A8U, 0x8589U, 0xF56EU, 0xE54FU, 0xD52CU, 0xC50DU,
+      0x34E2U, 0x24C3U, 0x14A0U, 0x0481U, 0x7466U, 0x6447U, 0x5424U, 0x4405U, 0xA7DBU, 0xB7FAU, 0x8799U, 0x97B8U,
+      0xE75FU, 0xF77EU, 0xC71DU, 0xD73CU, 0x26D3U, 0x36F2U, 0x0691U, 0x16B0U, 0x6657U, 0x7676U, 0x4615U, 0x5634U,
+      0xD94CU, 0xC96DU, 0xF90EU, 0xE92FU, 0x99C8U, 0x89E9U, 0xB98AU, 0xA9ABU, 0x5844U, 0x4865U, 0x7806U, 0x6827U,
+      0x18C0U, 0x08E1U, 0x3882U, 0x28A3U, 0xCB7DU, 0xDB5CU, 0xEB3FU, 0xFB1EU, 0x8BF9U, 0x9BD8U, 0xABBBU, 0xBB9AU,
+      0x4A75U, 0x5A54U, 0x6A37U, 0x7A16U, 0x0AF1U, 0x1AD0U, 0x2AB3U, 0x3A92U, 0xFD2EU, 0xED0FU, 0xDD6CU, 0xCD4DU,
+      0xBDAAU, 0xAD8BU, 0x9DE8U, 0x8DC9U, 0x7C26U, 0x6C07U, 0x5C64U, 0x4C45U, 0x3CA2U, 0x2C83U, 0x1CE0U, 0x0CC1U,
+      0xEF1FU, 0xFF3EU, 0xCF5DU, 0xDF7CU, 0xAF9BU, 0xBFBAU, 0x8FD9U, 0x9FF8U, 0x6E17U, 0x7E36U, 0x4E55U, 0x5E74U,
+      0x2E93U, 0x3EB2U, 0x0ED1U, 0x1EF0U,
   };
 };
 
@@ -272,11 +260,20 @@ class SerialTransport {
   /// @brief Construct serial transport with given configuration
   /// @param cfg Serial port configuration
   explicit SerialTransport(const SerialConfig& cfg) noexcept
-      : cfg_(cfg), fd_(-1), tx_seq_(0U), rx_expected_seq_(0U),
-        rx_state_(RxState::kIdle), rx_pos_(0U),
-        rx_cb_(nullptr), rx_ctx_(nullptr), stats_{},
-        last_byte_time_ms_(0U), last_tx_time_ms_(0U), last_rx_time_ms_(0U),
-        frame_count_window_start_ms_(0U), frames_sent_in_window_(0U),
+      : cfg_(cfg),
+        fd_(-1),
+        tx_seq_(0U),
+        rx_expected_seq_(0U),
+        rx_state_(RxState::kIdle),
+        rx_pos_(0U),
+        rx_cb_(nullptr),
+        rx_ctx_(nullptr),
+        stats_{},
+        last_byte_time_ms_(0U),
+        last_tx_time_ms_(0U),
+        last_rx_time_ms_(0U),
+        frame_count_window_start_ms_(0U),
+        frames_sent_in_window_(0U),
         error_count_in_window_(0U) {}
 
   ~SerialTransport() { Close(); }
@@ -345,9 +342,7 @@ class SerialTransport {
   /// @param payload Pointer to payload data (may be nullptr if size is 0)
   /// @param size Payload size in bytes
   /// @return Success or error code
-  expected<void, SerialError> Send(uint16_t type_index,
-                                    const void* payload,
-                                    uint32_t size) noexcept {
+  expected<void, SerialError> Send(uint16_t type_index, const void* payload, uint32_t size) noexcept {
     if (fd_ < 0) {
       return expected<void, SerialError>::error(SerialError::kPortNotOpen);
     }
@@ -494,15 +489,17 @@ class SerialTransport {
   ///
   /// @return Number of bytes pushed to ring buffer.
   uint32_t ReadToRing() noexcept {
-    if (fd_ < 0) return 0U;
+    if (fd_ < 0)
+      return 0U;
     const uint32_t space = rx_ring_.Available();
-    if (space == 0U) return 0U;
+    if (space == 0U)
+      return 0U;
     uint8_t tmp[256];
     const uint32_t to_read = std::min(space, static_cast<uint32_t>(sizeof(tmp)));
     const ssize_t n = ::read(fd_, tmp, to_read);
-    if (n <= 0) return 0U;
-    const uint32_t pushed = static_cast<uint32_t>(
-        rx_ring_.PushBatch(tmp, static_cast<size_t>(n)));
+    if (n <= 0)
+      return 0U;
+    const uint32_t pushed = static_cast<uint32_t>(rx_ring_.PushBatch(tmp, static_cast<size_t>(n)));
     stats_.bytes_received += static_cast<uint64_t>(pushed);
     return pushed;
   }
@@ -562,9 +559,7 @@ class SerialTransport {
   SerialStatistics GetStatistics() const noexcept { return stats_; }
 
   /// @brief Reset all statistics counters
-  void ResetStatistics() noexcept {
-    std::memset(&stats_, 0, sizeof(stats_));
-  }
+  void ResetStatistics() noexcept { std::memset(&stats_, 0, sizeof(stats_)); }
 
   // ------------------------------------------------------------------
   // Health Monitoring (IEC 61508)
@@ -598,9 +593,7 @@ class SerialTransport {
 
   /// @brief Check if port is healthy
   /// @return true if health status is kHealthy
-  bool IsHealthy() const noexcept {
-    return GetHealth() == SerialPortHealth::kHealthy;
-  }
+  bool IsHealthy() const noexcept { return GetHealth() == SerialPortHealth::kHealthy; }
 
  private:
   // ------------------------------------------------------------------
@@ -697,7 +690,7 @@ class SerialTransport {
           // Parse msg_len
           rx_msg_len_ = ReadLE16(rx_buf_ + 4U);
           // Sanity check
-          const uint32_t total = static_cast<uint32_t>(rx_msg_len_) + 1U; // +tail
+          const uint32_t total = static_cast<uint32_t>(rx_msg_len_) + 1U;  // +tail
           const uint32_t min_msg_len = kSerialHeaderSize + kSerialCrcSize;
           if (total > cfg_.frame_max_size || rx_msg_len_ < min_msg_len) {
             ++stats_.oversize_errors;
@@ -856,8 +849,8 @@ class SerialTransport {
     }
 
     // Raw mode
-    tio.c_iflag &= static_cast<tcflag_t>(~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR |
-                      IGNCR | ICRNL | IXON | IXOFF | IXANY));
+    tio.c_iflag &=
+        static_cast<tcflag_t>(~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON | IXOFF | IXANY));
     tio.c_oflag &= static_cast<tcflag_t>(~OPOST);
     tio.c_lflag &= static_cast<tcflag_t>(~(ECHO | ECHONL | ICANON | ISIG | IEXTEN));
     tio.c_cflag &= static_cast<tcflag_t>(~(CSIZE | PARENB | PARODD | CSTOPB));
@@ -883,9 +876,9 @@ class SerialTransport {
     }
 
     // Parity (MISRA C++: Explicit comparison)
-    if (cfg_.parity == 1U) {       // Odd
+    if (cfg_.parity == 1U) {  // Odd
       tio.c_cflag |= static_cast<tcflag_t>(PARENB | PARODD);
-    } else if (cfg_.parity == 2U) { // Even
+    } else if (cfg_.parity == 2U) {  // Even
       tio.c_cflag |= PARENB;
     } else {
       // No parity (default)
@@ -969,8 +962,7 @@ class SerialTransport {
   /// @param len Length of data in bytes
   /// @param seq Sequence number (for future ACK/retry logic)
   /// @return Success or error code
-  expected<void, SerialError> WriteAll(const uint8_t* data, uint32_t len,
-                                        uint16_t /*seq*/) noexcept {
+  expected<void, SerialError> WriteAll(const uint8_t* data, uint32_t len, uint16_t /*seq*/) noexcept {
     OSP_ASSERT(data != nullptr);
     OSP_ASSERT(len > 0U);
 
@@ -1021,8 +1013,7 @@ class SerialTransport {
   /// @return 16-bit value
   static uint16_t ReadLE16(const uint8_t* p) noexcept {
     OSP_ASSERT(p != nullptr);
-    return static_cast<uint16_t>(static_cast<uint16_t>(p[0]) |
-           static_cast<uint16_t>(static_cast<uint16_t>(p[1]) << 8));
+    return static_cast<uint16_t>(static_cast<uint16_t>(p[0]) | static_cast<uint16_t>(static_cast<uint16_t>(p[1]) << 8));
   }
 
   // ------------------------------------------------------------------

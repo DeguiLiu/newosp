@@ -49,11 +49,12 @@
 #ifndef OSP_EXECUTOR_HPP_
 #define OSP_EXECUTOR_HPP_
 
-#include "osp/platform.hpp"
 #include "osp/node.hpp"
+#include "osp/platform.hpp"
+
+#include <cstdint>
 
 #include <atomic>
-#include <cstdint>
 #include <thread>
 
 #if defined(OSP_PLATFORM_LINUX)
@@ -86,9 +87,7 @@ namespace osp {
  */
 struct YieldSleepStrategy {
   /** @brief Called when the executor is idle (no messages processed). */
-  void OnIdle() noexcept {
-    std::this_thread::yield();
-  }
+  void OnIdle() noexcept { std::this_thread::yield(); }
 
   /** @brief Called when the executor is busy (messages processed). */
   void OnBusy() noexcept {
@@ -116,11 +115,10 @@ struct PreciseSleepStrategy {
    * @param min_sleep_ns Minimum sleep duration in nanoseconds (default 100us).
    * @param max_sleep_ns Maximum sleep duration in nanoseconds (default 10ms).
    */
-  explicit PreciseSleepStrategy(
-      uint64_t default_sleep_ns = 1000000ULL,   // 1ms
-      uint64_t min_sleep_ns = 100000ULL,        // 100us
-      uint64_t max_sleep_ns = 10000000ULL       // 10ms
-  ) noexcept
+  explicit PreciseSleepStrategy(uint64_t default_sleep_ns = 1000000ULL,  // 1ms
+                                uint64_t min_sleep_ns = 100000ULL,       // 100us
+                                uint64_t max_sleep_ns = 10000000ULL      // 10ms
+                                ) noexcept
       : default_sleep_ns_(default_sleep_ns),
         min_sleep_ns_(min_sleep_ns),
         max_sleep_ns_(max_sleep_ns),
@@ -134,9 +132,7 @@ struct PreciseSleepStrategy {
    *
    * @param abs_ns Absolute wakeup time in nanoseconds (from SteadyNowNs()).
    */
-  void SetNextWakeup(uint64_t abs_ns) noexcept {
-    next_wakeup_ns_ = abs_ns;
-  }
+  void SetNextWakeup(uint64_t abs_ns) noexcept { next_wakeup_ns_ = abs_ns; }
 
   /**
    * @brief Sleep when idle, either until next_wakeup_ns or for default duration.
@@ -284,9 +280,7 @@ class SingleThreadExecutor {
    *
    * @return Number of messages processed.
    */
-  uint32_t SpinOnce() noexcept {
-    return BusType::Instance().ProcessBatch();
-  }
+  uint32_t SpinOnce() noexcept { return BusType::Instance().ProcessBatch(); }
 
   /**
    * @brief Stop the executor.
@@ -294,16 +288,12 @@ class SingleThreadExecutor {
    * Sets the running flag to false. If Spin() is active on another thread,
    * it will exit after the current iteration completes.
    */
-  void Stop() noexcept {
-    running_.store(false, std::memory_order_release);
-  }
+  void Stop() noexcept { running_.store(false, std::memory_order_release); }
 
   // ======================== Accessors ========================
 
   /** @brief Check if the executor is currently spinning. */
-  bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_acquire);
-  }
+  bool IsRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
   /** @brief Get the number of registered nodes. */
   uint32_t NodeCount() const noexcept { return node_count_; }
@@ -342,8 +332,7 @@ class StaticExecutor {
     }
   }
 
-  explicit StaticExecutor(const SleepStrategy& sleep) noexcept
-      : node_count_(0), running_(false), sleep_(sleep) {
+  explicit StaticExecutor(const SleepStrategy& sleep) noexcept : node_count_(0), running_(false), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -430,9 +419,7 @@ class StaticExecutor {
   // ======================== Accessors ========================
 
   /** @brief Check if the dispatcher thread is running. */
-  bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_acquire);
-  }
+  bool IsRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
   /** @brief Get the number of registered nodes. */
   uint32_t NodeCount() const noexcept { return node_count_; }
@@ -449,7 +436,9 @@ class StaticExecutor {
    */
   void DispatchLoop() noexcept {
     while (running_.load(std::memory_order_relaxed)) {
-      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+      if (heartbeat_ != nullptr) {
+        heartbeat_->Beat();
+      }
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
@@ -491,8 +480,7 @@ class PinnedExecutor {
    * @brief Construct a pinned executor bound to the specified CPU core.
    * @param cpu_core The CPU core index to pin the dispatcher thread to.
    */
-  explicit PinnedExecutor(int32_t cpu_core) noexcept
-      : node_count_(0), running_(false), cpu_core_(cpu_core), sleep_() {
+  explicit PinnedExecutor(int32_t cpu_core) noexcept : node_count_(0), running_(false), cpu_core_(cpu_core), sleep_() {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -573,9 +561,7 @@ class PinnedExecutor {
   // ======================== Accessors ========================
 
   /** @brief Check if the dispatcher thread is running. */
-  bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_acquire);
-  }
+  bool IsRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
   /** @brief Set heartbeat for external watchdog monitoring. */
   void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
@@ -586,7 +572,9 @@ class PinnedExecutor {
    */
   void DispatchLoop() noexcept {
     while (running_.load(std::memory_order_relaxed)) {
-      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+      if (heartbeat_ != nullptr) {
+        heartbeat_->Beat();
+      }
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
@@ -648,11 +636,11 @@ class PinnedExecutor {
  * and CPU affinity for realtime execution contexts.
  */
 struct RealtimeConfig {
-  int32_t sched_policy = 0;       // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
-  int32_t sched_priority = 0;     // SCHED_FIFO: 1-99, higher = more priority
-  bool lock_memory = false;   // mlockall(MCL_CURRENT | MCL_FUTURE)
-  uint32_t stack_size = 0;    // 0=system default, non-zero=preallocated stack
-  int32_t cpu_affinity = -1;      // -1=no binding, >=0=bind to specific CPU core
+  int32_t sched_policy = 0;    // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
+  int32_t sched_priority = 0;  // SCHED_FIFO: 1-99, higher = more priority
+  bool lock_memory = false;    // mlockall(MCL_CURRENT | MCL_FUTURE)
+  uint32_t stack_size = 0;     // 0=system default, non-zero=preallocated stack
+  int32_t cpu_affinity = -1;   // -1=no binding, >=0=bind to specific CPU core
 };
 
 // ============================================================================
@@ -755,9 +743,7 @@ class RealtimeExecutor {
       pthread_attr_destroy(&attr);
 
       if (rc != 0) {
-        (void)std::fprintf(stderr,
-                           "RealtimeExecutor: pthread_create failed (errno=%d)\n",
-                           rc);
+        (void)std::fprintf(stderr, "RealtimeExecutor: pthread_create failed (errno=%d)\n", rc);
         running_.store(false, std::memory_order_release);
         return;
       }
@@ -805,9 +791,7 @@ class RealtimeExecutor {
   // ======================== Accessors ========================
 
   /** @brief Check if the dispatcher thread is running. */
-  bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_acquire);
-  }
+  bool IsRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
   /** @brief Get the number of registered nodes. */
   uint32_t NodeCount() const noexcept { return node_count_; }
@@ -824,7 +808,9 @@ class RealtimeExecutor {
    */
   void DispatchLoop() noexcept {
     while (running_.load(std::memory_order_relaxed)) {
-      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+      if (heartbeat_ != nullptr) {
+        heartbeat_->Beat();
+      }
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
@@ -848,9 +834,7 @@ class RealtimeExecutor {
     if (cfg.lock_memory) {
       int32_t rc = mlockall(MCL_CURRENT | MCL_FUTURE);
       if (rc != 0) {
-        (void)std::fprintf(stderr,
-                           "RealtimeExecutor: mlockall failed (errno=%d)\n",
-                           errno);
+        (void)std::fprintf(stderr, "RealtimeExecutor: mlockall failed (errno=%d)\n", errno);
       }
     }
 

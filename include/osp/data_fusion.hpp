@@ -37,12 +37,13 @@
 #ifndef OSP_DATA_FUSION_HPP_
 #define OSP_DATA_FUSION_HPP_
 
-#include "osp/platform.hpp"
 #include "osp/bus.hpp"
+#include "osp/platform.hpp"
+
+#include <cstdint>
 
 #include <array>
 #include <atomic>
-#include <cstdint>
 #include <mutex>
 #include <tuple>
 #include <type_traits>
@@ -55,12 +56,7 @@ namespace osp {
 // Data Fusion Error
 // ============================================================================
 
-enum class DataFusionError : uint8_t {
-  kCallbackNotSet = 0,
-  kAlreadyActive,
-  kNotActive,
-  kWindowTimeout
-};
+enum class DataFusionError : uint8_t { kCallbackNotSet = 0, kAlreadyActive, kNotActive, kWindowTimeout };
 
 // ============================================================================
 // Detail: compile-time helpers for parameter pack iteration
@@ -74,8 +70,7 @@ struct PackIndex;
 
 template <typename T, typename First, typename... Rest>
 struct PackIndex<T, First, Rest...> {
-  static constexpr size_t value =
-      std::is_same<T, First>::value ? 0 : 1 + PackIndex<T, Rest...>::value;
+  static constexpr size_t value = std::is_same<T, First>::value ? 0 : 1 + PackIndex<T, Rest...>::value;
 };
 
 template <typename T>
@@ -91,31 +86,23 @@ struct SubscribeHelper;
 template <typename PayloadVariant>
 struct SubscribeHelper<PayloadVariant> {
   template <typename Self>
-  static void DoSubscribe(Self* /*self*/,
-                           AsyncBus<PayloadVariant>& /*bus*/,
-                           SubscriptionHandle* /*handles*/) {}
+  static void DoSubscribe(Self* /*self*/, AsyncBus<PayloadVariant>& /*bus*/, SubscriptionHandle* /*handles*/) {}
 };
 
 template <typename PayloadVariant, typename First, typename... Rest>
 struct SubscribeHelper<PayloadVariant, First, Rest...> {
   template <typename Self>
-  static void DoSubscribe(Self* self,
-                           AsyncBus<PayloadVariant>& bus,
-                           SubscriptionHandle* handles) {
+  static void DoSubscribe(Self* self, AsyncBus<PayloadVariant>& bus, SubscriptionHandle* handles) {
     constexpr size_t idx = PackIndex<First, First, Rest...>::value;
     // The handle index for First is: total_count - remaining_count
-    constexpr size_t handle_idx = sizeof...(Rest) == 0
-        ? (self->kNumTypes - 1)
-        : (self->kNumTypes - 1 - sizeof...(Rest));
+    constexpr size_t handle_idx =
+        sizeof...(Rest) == 0 ? (self->kNumTypes - 1) : (self->kNumTypes - 1 - sizeof...(Rest));
     (void)idx;
 
     handles[handle_idx] = bus.template Subscribe<First>(
-        [self](const MessageEnvelope<PayloadVariant>& env) {
-          self->template OnMessage<First>(env);
-        });
+        [self](const MessageEnvelope<PayloadVariant>& env) { self->template OnMessage<First>(env); });
 
-    SubscribeHelper<PayloadVariant, Rest...>::DoSubscribe(
-        self, bus, handles);
+    SubscribeHelper<PayloadVariant, Rest...>::DoSubscribe(self, bus, handles);
   }
 };
 
@@ -141,8 +128,7 @@ template <typename PayloadVariant, typename... MsgTypes>
 class FusedSubscription {
  public:
   static constexpr size_t kNumTypes = sizeof...(MsgTypes);
-  static_assert(kNumTypes >= 2,
-                "FusedSubscription requires at least 2 message types");
+  static_assert(kNumTypes >= 2, "FusedSubscription requires at least 2 message types");
 
   using FusedTuple = std::tuple<MsgTypes...>;
   using Callback = void (*)(const FusedTuple&);
@@ -166,14 +152,15 @@ class FusedSubscription {
    * @brief Start listening on the bus for all MsgTypes.
    * @return DataFusionError on failure, or no error (returns true on success).
    */
-  bool Activate(AsyncBus<PayloadVariant>& bus,
-                DataFusionError* err = nullptr) noexcept {
+  bool Activate(AsyncBus<PayloadVariant>& bus, DataFusionError* err = nullptr) noexcept {
     if (callback_ == nullptr) {
-      if (err) *err = DataFusionError::kCallbackNotSet;
+      if (err)
+        *err = DataFusionError::kCallbackNotSet;
       return false;
     }
     if (active_.load(std::memory_order_acquire)) {
-      if (err) *err = DataFusionError::kAlreadyActive;
+      if (err)
+        *err = DataFusionError::kAlreadyActive;
       return false;
     }
 
@@ -186,10 +173,10 @@ class FusedSubscription {
   /**
    * @brief Stop listening on the bus.
    */
-  bool Deactivate(AsyncBus<PayloadVariant>& bus,
-                  DataFusionError* err = nullptr) noexcept {
+  bool Deactivate(AsyncBus<PayloadVariant>& bus, DataFusionError* err = nullptr) noexcept {
     if (!active_.load(std::memory_order_acquire)) {
-      if (err) *err = DataFusionError::kNotActive;
+      if (err)
+        *err = DataFusionError::kNotActive;
       return false;
     }
 
@@ -205,14 +192,10 @@ class FusedSubscription {
   }
 
   /** @brief Whether the subscription is currently active. */
-  bool IsActive() const noexcept {
-    return active_.load(std::memory_order_acquire);
-  }
+  bool IsActive() const noexcept { return active_.load(std::memory_order_acquire); }
 
   /** @brief Number of times the fusion callback has fired. */
-  uint32_t FireCount() const noexcept {
-    return fire_count_.load(std::memory_order_relaxed);
-  }
+  uint32_t FireCount() const noexcept { return fire_count_.load(std::memory_order_relaxed); }
 
   /**
    * @brief Called internally when a message of type T arrives.
@@ -236,7 +219,8 @@ class FusedSubscription {
  protected:
   void TryFire() noexcept {
     for (uint32_t i = 0; i < kNumTypes; ++i) {
-      if (!received_[i]) return;
+      if (!received_[i])
+        return;
     }
 
     // All received -- fire callback and reset
@@ -252,15 +236,13 @@ class FusedSubscription {
   }
 
   /** @brief Store timestamp from envelope header for the given type index. */
-  void StoreTimestamp(uint32_t idx,
-                      const MessageEnvelope<PayloadVariant>& env) noexcept {
+  void StoreTimestamp(uint32_t idx, const MessageEnvelope<PayloadVariant>& env) noexcept {
     timestamps_[idx] = env.header.timestamp_us;
   }
 
  private:
   template <size_t... Is>
-  void SubscribeAll(AsyncBus<PayloadVariant>& bus,
-                    std::index_sequence<Is...>) noexcept {
+  void SubscribeAll(AsyncBus<PayloadVariant>& bus, std::index_sequence<Is...>) noexcept {
     // Use fold expression to subscribe to each type
     (SubscribeOne<Is>(bus), ...);
   }
@@ -269,9 +251,7 @@ class FusedSubscription {
   void SubscribeOne(AsyncBus<PayloadVariant>& bus) noexcept {
     using MsgType = std::tuple_element_t<I, FusedTuple>;
     handles_[I] = bus.template Subscribe<MsgType>(
-        [this](const MessageEnvelope<PayloadVariant>& env) {
-          this->template OnMessage<MsgType>(env);
-        });
+        [this](const MessageEnvelope<PayloadVariant>& env) { this->template OnMessage<MsgType>(env); });
   }
 
  protected:
@@ -313,8 +293,7 @@ template <typename PayloadVariant, typename... MsgTypes>
 class TimeSynchronizer {
  public:
   static constexpr size_t kNumTypes = sizeof...(MsgTypes);
-  static_assert(kNumTypes >= 2,
-                "TimeSynchronizer requires at least 2 message types");
+  static_assert(kNumTypes >= 2, "TimeSynchronizer requires at least 2 message types");
 
   using FusedTuple = std::tuple<MsgTypes...>;
   using Callback = void (*)(const FusedTuple&);
@@ -336,9 +315,7 @@ class TimeSynchronizer {
   void SetCallback(Callback cb) noexcept { callback_ = cb; }
 
   /** @brief Set the time window in microseconds. */
-  void SetTimeWindow(uint64_t window_us) noexcept {
-    window_us_ = window_us;
-  }
+  void SetTimeWindow(uint64_t window_us) noexcept { window_us_ = window_us; }
 
   /** @brief Get the current time window. */
   uint64_t GetTimeWindow() const noexcept { return window_us_; }
@@ -346,14 +323,15 @@ class TimeSynchronizer {
   /**
    * @brief Start listening on the bus.
    */
-  bool Activate(AsyncBus<PayloadVariant>& bus,
-                DataFusionError* err = nullptr) noexcept {
+  bool Activate(AsyncBus<PayloadVariant>& bus, DataFusionError* err = nullptr) noexcept {
     if (callback_ == nullptr) {
-      if (err) *err = DataFusionError::kCallbackNotSet;
+      if (err)
+        *err = DataFusionError::kCallbackNotSet;
       return false;
     }
     if (active_.load(std::memory_order_acquire)) {
-      if (err) *err = DataFusionError::kAlreadyActive;
+      if (err)
+        *err = DataFusionError::kAlreadyActive;
       return false;
     }
 
@@ -365,10 +343,10 @@ class TimeSynchronizer {
   /**
    * @brief Stop listening on the bus.
    */
-  bool Deactivate(AsyncBus<PayloadVariant>& bus,
-                  DataFusionError* err = nullptr) noexcept {
+  bool Deactivate(AsyncBus<PayloadVariant>& bus, DataFusionError* err = nullptr) noexcept {
     if (!active_.load(std::memory_order_acquire)) {
-      if (err) *err = DataFusionError::kNotActive;
+      if (err)
+        *err = DataFusionError::kNotActive;
       return false;
     }
 
@@ -384,19 +362,13 @@ class TimeSynchronizer {
   }
 
   /** @brief Whether the synchronizer is currently active. */
-  bool IsActive() const noexcept {
-    return active_.load(std::memory_order_acquire);
-  }
+  bool IsActive() const noexcept { return active_.load(std::memory_order_acquire); }
 
   /** @brief Number of times the fusion callback has fired. */
-  uint32_t FireCount() const noexcept {
-    return fire_count_.load(std::memory_order_relaxed);
-  }
+  uint32_t FireCount() const noexcept { return fire_count_.load(std::memory_order_relaxed); }
 
   /** @brief Number of times data was dropped due to window timeout. */
-  uint32_t TimeoutCount() const noexcept {
-    return timeout_count_.load(std::memory_order_relaxed);
-  }
+  uint32_t TimeoutCount() const noexcept { return timeout_count_.load(std::memory_order_relaxed); }
 
   /**
    * @brief Called internally when a message of type T arrives.
@@ -422,8 +394,7 @@ class TimeSynchronizer {
 
  private:
   template <size_t... Is>
-  void SubscribeAll(AsyncBus<PayloadVariant>& bus,
-                    std::index_sequence<Is...>) noexcept {
+  void SubscribeAll(AsyncBus<PayloadVariant>& bus, std::index_sequence<Is...>) noexcept {
     (SubscribeOne<Is>(bus), ...);
   }
 
@@ -431,18 +402,14 @@ class TimeSynchronizer {
   void SubscribeOne(AsyncBus<PayloadVariant>& bus) noexcept {
     using MsgType = std::tuple_element_t<I, FusedTuple>;
     handles_[I] = bus.template Subscribe<MsgType>(
-        [this](const MessageEnvelope<PayloadVariant>& env) {
-          this->template OnMessage<MsgType>(env);
-        });
+        [this](const MessageEnvelope<PayloadVariant>& env) { this->template OnMessage<MsgType>(env); });
   }
 
   /** @brief Drop any received data that is outside the time window. */
   void DropStaleData(uint64_t current_ts) noexcept {
     for (uint32_t i = 0; i < kNumTypes; ++i) {
       if (received_[i]) {
-        uint64_t diff = (current_ts >= timestamps_[i])
-                            ? (current_ts - timestamps_[i])
-                            : (timestamps_[i] - current_ts);
+        uint64_t diff = (current_ts >= timestamps_[i]) ? (current_ts - timestamps_[i]) : (timestamps_[i] - current_ts);
         if (diff > window_us_) {
           received_[i] = false;
           timeout_count_.fetch_add(1, std::memory_order_relaxed);
@@ -454,15 +421,18 @@ class TimeSynchronizer {
   /** @brief Try to fire the callback if all types received within window. */
   void TryFire() noexcept {
     for (uint32_t i = 0; i < kNumTypes; ++i) {
-      if (!received_[i]) return;
+      if (!received_[i])
+        return;
     }
 
     // Verify all timestamps are within the window
     uint64_t min_ts = timestamps_[0];
     uint64_t max_ts = timestamps_[0];
     for (uint32_t i = 1; i < kNumTypes; ++i) {
-      if (timestamps_[i] < min_ts) min_ts = timestamps_[i];
-      if (timestamps_[i] > max_ts) max_ts = timestamps_[i];
+      if (timestamps_[i] < min_ts)
+        min_ts = timestamps_[i];
+      if (timestamps_[i] > max_ts)
+        max_ts = timestamps_[i];
     }
 
     if ((max_ts - min_ts) > window_us_) {

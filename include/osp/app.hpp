@@ -48,15 +48,15 @@
 #ifndef OSP_APP_HPP_
 #define OSP_APP_HPP_
 
-
 #include "osp/hsm.hpp"
 #include "osp/mem_pool.hpp"
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
-#include <atomic>
 #include <cstdint>
 #include <cstring>
+
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 
@@ -89,8 +89,8 @@ constexpr uint16_t GetInsId(uint32_t iid) noexcept {
 
 // Special instance IDs
 constexpr uint16_t kInsPending = 0;
-constexpr uint16_t kInsDaemon  = 0xFFFC;
-constexpr uint16_t kInsEach    = 0xFFFF;
+constexpr uint16_t kInsDaemon = 0xFFFC;
+constexpr uint16_t kInsEach = 0xFFFF;
 
 // ============================================================================
 // ResponseChannel - for synchronous request-response (OspSendAndWait)
@@ -124,27 +124,21 @@ struct ResponseChannel {
 // Instance Coarse State (backward-compatible with uint16_t CurState())
 // ============================================================================
 
-enum class InstanceState : uint16_t {
-  kCreated      = 0,
-  kInitializing = 1,
-  kReady        = 2,
-  kError        = 3,
-  kDestroying   = 4
-};
+enum class InstanceState : uint16_t { kCreated = 0, kInitializing = 1, kReady = 2, kError = 3, kDestroying = 4 };
 
 // ============================================================================
 // Instance Detailed State (maps 1:1 to HSM leaf states)
 // ============================================================================
 
 enum class InstanceDetailedState : uint8_t {
-  kCreated      = 0,
+  kCreated = 0,
   kInitializing = 1,
-  kIdle         = 2,
-  kProcessing   = 3,
-  kSuspended    = 4,
-  kRecoverable  = 5,
-  kFatal        = 6,
-  kDestroying   = 7
+  kIdle = 2,
+  kProcessing = 3,
+  kSuspended = 4,
+  kRecoverable = 5,
+  kFatal = 6,
+  kDestroying = 7
 };
 
 // ============================================================================
@@ -152,16 +146,16 @@ enum class InstanceDetailedState : uint8_t {
 // ============================================================================
 
 enum class InstanceHsmEvent : uint32_t {
-  kInsEvtInitialize   = 0x1001,
-  kInsEvtInitDone     = 0x1002,
-  kInsEvtInitFail     = 0x1003,
-  kInsEvtSuspend      = 0x1004,
-  kInsEvtResume       = 0x1005,
-  kInsEvtMarkError    = 0x1006,
-  kInsEvtRecover      = 0x1007,
-  kInsEvtDestroy      = 0x1008,
-  kInsEvtMessage      = 0x1009,
-  kInsEvtMsgDone      = 0x100A,
+  kInsEvtInitialize = 0x1001,
+  kInsEvtInitDone = 0x1002,
+  kInsEvtInitFail = 0x1003,
+  kInsEvtSuspend = 0x1004,
+  kInsEvtResume = 0x1005,
+  kInsEvtMarkError = 0x1006,
+  kInsEvtRecover = 0x1007,
+  kInsEvtDestroy = 0x1008,
+  kInsEvtMessage = 0x1009,
+  kInsEvtMsgDone = 0x100A,
 };
 
 // ============================================================================
@@ -193,11 +187,19 @@ struct InstanceHsmContext {
   bool error_is_fatal;
 
   InstanceHsmContext() noexcept
-      : sm(nullptr), instance(nullptr),
-        idx_root(-1), idx_created(-1), idx_initializing(-1),
-        idx_ready(-1), idx_idle(-1), idx_processing(-1),
-        idx_suspended(-1), idx_error(-1), idx_recoverable(-1),
-        idx_fatal(-1), idx_destroying(-1),
+      : sm(nullptr),
+        instance(nullptr),
+        idx_root(-1),
+        idx_created(-1),
+        idx_initializing(-1),
+        idx_ready(-1),
+        idx_idle(-1),
+        idx_processing(-1),
+        idx_suspended(-1),
+        idx_error(-1),
+        idx_recoverable(-1),
+        idx_fatal(-1),
+        idx_destroying(-1),
         error_is_fatal(false) {}
 };
 
@@ -210,8 +212,7 @@ namespace instance_hsm {
 
 using E = InstanceHsmEvent;
 
-inline TransitionResult StateRoot(InstanceHsmContext& ctx,
-                                  const Event& event) {
+inline TransitionResult StateRoot(InstanceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(E::kInsEvtDestroy)) {
     return ctx.sm->RequestTransition(ctx.idx_destroying);
   }
@@ -224,16 +225,14 @@ inline TransitionResult StateRoot(InstanceHsmContext& ctx,
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateCreated(InstanceHsmContext& ctx,
-                                     const Event& event) {
+inline TransitionResult StateCreated(InstanceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(E::kInsEvtInitialize)) {
     return ctx.sm->RequestTransition(ctx.idx_initializing);
   }
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateInitializing(InstanceHsmContext& ctx,
-                                          const Event& event) {
+inline TransitionResult StateInitializing(InstanceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(E::kInsEvtInitDone)) {
     return ctx.sm->RequestTransition(ctx.idx_idle);
   }
@@ -244,64 +243,55 @@ inline TransitionResult StateInitializing(InstanceHsmContext& ctx,
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateReady(InstanceHsmContext& ctx,
-                                   const Event& event) {
+inline TransitionResult StateReady(InstanceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(E::kInsEvtSuspend)) {
     return ctx.sm->RequestTransition(ctx.idx_suspended);
   }
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateIdle(InstanceHsmContext& ctx,
-                                  const Event& event) {
+inline TransitionResult StateIdle(InstanceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(E::kInsEvtMessage)) {
     return ctx.sm->RequestTransition(ctx.idx_processing);
   }
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateProcessing(InstanceHsmContext& ctx,
-                                        const Event& event) {
+inline TransitionResult StateProcessing(InstanceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(E::kInsEvtMsgDone)) {
     return ctx.sm->RequestTransition(ctx.idx_idle);
   }
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateSuspended(InstanceHsmContext& ctx,
-                                       const Event& event) {
+inline TransitionResult StateSuspended(InstanceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(E::kInsEvtResume)) {
     return ctx.sm->RequestTransition(ctx.idx_idle);
   }
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateError(InstanceHsmContext& /*ctx*/,
-                                   const Event& /*event*/) {
+inline TransitionResult StateError(InstanceHsmContext& /*ctx*/, const Event& /*event*/) {
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateRecoverable(InstanceHsmContext& ctx,
-                                         const Event& event) {
+inline TransitionResult StateRecoverable(InstanceHsmContext& ctx, const Event& event) {
   if (event.id == static_cast<uint32_t>(E::kInsEvtRecover)) {
     return ctx.sm->RequestTransition(ctx.idx_idle);
   }
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateFatal(InstanceHsmContext& /*ctx*/,
-                                   const Event& /*event*/) {
+inline TransitionResult StateFatal(InstanceHsmContext& /*ctx*/, const Event& /*event*/) {
   return TransitionResult::kUnhandled;
 }
 
-inline TransitionResult StateDestroying(InstanceHsmContext& /*ctx*/,
-                                        const Event& /*event*/) {
+inline TransitionResult StateDestroying(InstanceHsmContext& /*ctx*/, const Event& /*event*/) {
   return TransitionResult::kHandled;
 }
 
 }  // namespace instance_hsm
 }  // namespace detail
-
 
 // ============================================================================
 // Instance base class (HSM-driven lifecycle, no virtual dispatch)
@@ -317,9 +307,7 @@ using InstanceSmType = StateMachine<InstanceHsmContext, kInstanceHsmMaxStates>;
 class Instance {
  public:
   Instance() noexcept
-      : ins_id_(0), response_channel_(nullptr),
-        legacy_state_(0), legacy_state_set_(false),
-        hsm_initialized_(false) {
+      : ins_id_(0), response_channel_(nullptr), legacy_state_(0), legacy_state_set_(false), hsm_initialized_(false) {
     InitHsm();
   }
 
@@ -333,8 +321,7 @@ class Instance {
   }
 
   /// Default OnMessage (no-op). Derived classes hide this with their own.
-  void OnMessage(uint16_t /*event*/, const void* /*data*/,
-                 uint32_t /*len*/) noexcept {}
+  void OnMessage(uint16_t /*event*/, const void* /*data*/, uint32_t /*len*/) noexcept {}
 
   // ======================== HSM Lifecycle API ========================
 
@@ -343,26 +330,18 @@ class Instance {
     DispatchHsmEvent(InstanceHsmEvent::kInsEvtInitDone);
   }
 
-  void Suspend() noexcept {
-    DispatchHsmEvent(InstanceHsmEvent::kInsEvtSuspend);
-  }
+  void Suspend() noexcept { DispatchHsmEvent(InstanceHsmEvent::kInsEvtSuspend); }
 
-  void Resume() noexcept {
-    DispatchHsmEvent(InstanceHsmEvent::kInsEvtResume);
-  }
+  void Resume() noexcept { DispatchHsmEvent(InstanceHsmEvent::kInsEvtResume); }
 
   void MarkError(bool fatal) noexcept {
     hsm_ctx_.error_is_fatal = fatal;
     DispatchHsmEvent(InstanceHsmEvent::kInsEvtMarkError);
   }
 
-  void Recover() noexcept {
-    DispatchHsmEvent(InstanceHsmEvent::kInsEvtRecover);
-  }
+  void Recover() noexcept { DispatchHsmEvent(InstanceHsmEvent::kInsEvtRecover); }
 
-  void Destroy() noexcept {
-    DispatchHsmEvent(InstanceHsmEvent::kInsEvtDestroy);
-  }
+  void Destroy() noexcept { DispatchHsmEvent(InstanceHsmEvent::kInsEvtDestroy); }
 
   // ======================== State Query ========================
 
@@ -384,16 +363,17 @@ class Instance {
     }
     const auto* hsm = GetHsm();
     int32_t cur = hsm->CurrentState();
-    if (cur == hsm_ctx_.idx_created) return InstanceState::kCreated;
-    if (cur == hsm_ctx_.idx_initializing) return InstanceState::kInitializing;
-    if (cur == hsm_ctx_.idx_idle ||
-        cur == hsm_ctx_.idx_processing ||
-        cur == hsm_ctx_.idx_suspended ||
-        cur == hsm_ctx_.idx_ready) return InstanceState::kReady;
-    if (cur == hsm_ctx_.idx_recoverable ||
-        cur == hsm_ctx_.idx_fatal ||
-        cur == hsm_ctx_.idx_error) return InstanceState::kError;
-    if (cur == hsm_ctx_.idx_destroying) return InstanceState::kDestroying;
+    if (cur == hsm_ctx_.idx_created)
+      return InstanceState::kCreated;
+    if (cur == hsm_ctx_.idx_initializing)
+      return InstanceState::kInitializing;
+    if (cur == hsm_ctx_.idx_idle || cur == hsm_ctx_.idx_processing || cur == hsm_ctx_.idx_suspended ||
+        cur == hsm_ctx_.idx_ready)
+      return InstanceState::kReady;
+    if (cur == hsm_ctx_.idx_recoverable || cur == hsm_ctx_.idx_fatal || cur == hsm_ctx_.idx_error)
+      return InstanceState::kError;
+    if (cur == hsm_ctx_.idx_destroying)
+      return InstanceState::kDestroying;
     return InstanceState::kCreated;
   }
 
@@ -403,24 +383,34 @@ class Instance {
     }
     const auto* hsm = GetHsm();
     int32_t cur = hsm->CurrentState();
-    if (cur == hsm_ctx_.idx_created) return InstanceDetailedState::kCreated;
-    if (cur == hsm_ctx_.idx_initializing) return InstanceDetailedState::kInitializing;
-    if (cur == hsm_ctx_.idx_idle) return InstanceDetailedState::kIdle;
-    if (cur == hsm_ctx_.idx_processing) return InstanceDetailedState::kProcessing;
-    if (cur == hsm_ctx_.idx_suspended) return InstanceDetailedState::kSuspended;
-    if (cur == hsm_ctx_.idx_recoverable) return InstanceDetailedState::kRecoverable;
-    if (cur == hsm_ctx_.idx_fatal) return InstanceDetailedState::kFatal;
-    if (cur == hsm_ctx_.idx_destroying) return InstanceDetailedState::kDestroying;
+    if (cur == hsm_ctx_.idx_created)
+      return InstanceDetailedState::kCreated;
+    if (cur == hsm_ctx_.idx_initializing)
+      return InstanceDetailedState::kInitializing;
+    if (cur == hsm_ctx_.idx_idle)
+      return InstanceDetailedState::kIdle;
+    if (cur == hsm_ctx_.idx_processing)
+      return InstanceDetailedState::kProcessing;
+    if (cur == hsm_ctx_.idx_suspended)
+      return InstanceDetailedState::kSuspended;
+    if (cur == hsm_ctx_.idx_recoverable)
+      return InstanceDetailedState::kRecoverable;
+    if (cur == hsm_ctx_.idx_fatal)
+      return InstanceDetailedState::kFatal;
+    if (cur == hsm_ctx_.idx_destroying)
+      return InstanceDetailedState::kDestroying;
     return InstanceDetailedState::kCreated;
   }
 
   const char* DetailedStateName() const noexcept {
-    if (!hsm_initialized_) return "Created";
+    if (!hsm_initialized_)
+      return "Created";
     return GetHsm()->CurrentStateName();
   }
 
   bool IsInState(int32_t state_index) const noexcept {
-    if (!hsm_initialized_) return false;
+    if (!hsm_initialized_)
+      return false;
     return GetHsm()->IsInState(state_index);
   }
 
@@ -430,36 +420,30 @@ class Instance {
   void SetInsId(uint16_t id) noexcept { ins_id_ = id; }
 
   bool Reply(const void* data, uint32_t len) noexcept {
-    if (response_channel_ == nullptr) return false;
+    if (response_channel_ == nullptr)
+      return false;
     response_channel_->Reply(data, len);
     return true;
   }
 
-  bool HasPendingReply() const noexcept {
-    return response_channel_ != nullptr;
-  }
+  bool HasPendingReply() const noexcept { return response_channel_ != nullptr; }
 
-  void SetResponseChannel(ResponseChannel* ch) noexcept {
-    response_channel_ = ch;
-  }
+  void SetResponseChannel(ResponseChannel* ch) noexcept { response_channel_ = ch; }
 
   const InstanceHsmContext& HsmContext() const noexcept { return hsm_ctx_; }
 
   // ======================== HSM Message Dispatch ========================
 
   /// Called by Application::ProcessOne() before OnMessage().
-  void BeginMessage() noexcept {
-    DispatchHsmEvent(InstanceHsmEvent::kInsEvtMessage);
-  }
+  void BeginMessage() noexcept { DispatchHsmEvent(InstanceHsmEvent::kInsEvtMessage); }
 
   /// Called by Application::ProcessOne() after OnMessage().
-  void EndMessage() noexcept {
-    DispatchHsmEvent(InstanceHsmEvent::kInsEvtMsgDone);
-  }
+  void EndMessage() noexcept { DispatchHsmEvent(InstanceHsmEvent::kInsEvtMsgDone); }
 
  private:
   void DispatchHsmEvent(InstanceHsmEvent evt_id) noexcept {
-    if (!hsm_initialized_) return;
+    if (!hsm_initialized_)
+      return;
     Event evt{static_cast<uint32_t>(evt_id), nullptr};
     GetHsm()->Dispatch(evt);
     legacy_state_set_ = false;
@@ -472,50 +456,27 @@ class Instance {
     hsm_ctx_.sm = hsm;
     hsm_ctx_.instance = this;
 
-    hsm_ctx_.idx_root = hsm->AddState({
-        "Root", -1,
-        detail::instance_hsm::StateRoot,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_created = hsm->AddState({
-        "Created", hsm_ctx_.idx_root,
-        detail::instance_hsm::StateCreated,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_initializing = hsm->AddState({
-        "Initializing", hsm_ctx_.idx_root,
-        detail::instance_hsm::StateInitializing,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_ready = hsm->AddState({
-        "Ready", hsm_ctx_.idx_root,
-        detail::instance_hsm::StateReady,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_idle = hsm->AddState({
-        "Idle", hsm_ctx_.idx_ready,
-        detail::instance_hsm::StateIdle,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_processing = hsm->AddState({
-        "Processing", hsm_ctx_.idx_ready,
-        detail::instance_hsm::StateProcessing,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_suspended = hsm->AddState({
-        "Suspended", hsm_ctx_.idx_ready,
-        detail::instance_hsm::StateSuspended,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_error = hsm->AddState({
-        "Error", hsm_ctx_.idx_root,
-        detail::instance_hsm::StateError,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_recoverable = hsm->AddState({
-        "Recoverable", hsm_ctx_.idx_error,
-        detail::instance_hsm::StateRecoverable,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_fatal = hsm->AddState({
-        "Fatal", hsm_ctx_.idx_error,
-        detail::instance_hsm::StateFatal,
-        nullptr, nullptr, nullptr});
-    hsm_ctx_.idx_destroying = hsm->AddState({
-        "Destroying", hsm_ctx_.idx_root,
-        detail::instance_hsm::StateDestroying,
-        nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_root = hsm->AddState({"Root", -1, detail::instance_hsm::StateRoot, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_created =
+        hsm->AddState({"Created", hsm_ctx_.idx_root, detail::instance_hsm::StateCreated, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_initializing = hsm->AddState(
+        {"Initializing", hsm_ctx_.idx_root, detail::instance_hsm::StateInitializing, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_ready =
+        hsm->AddState({"Ready", hsm_ctx_.idx_root, detail::instance_hsm::StateReady, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_idle =
+        hsm->AddState({"Idle", hsm_ctx_.idx_ready, detail::instance_hsm::StateIdle, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_processing = hsm->AddState(
+        {"Processing", hsm_ctx_.idx_ready, detail::instance_hsm::StateProcessing, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_suspended = hsm->AddState(
+        {"Suspended", hsm_ctx_.idx_ready, detail::instance_hsm::StateSuspended, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_error =
+        hsm->AddState({"Error", hsm_ctx_.idx_root, detail::instance_hsm::StateError, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_recoverable = hsm->AddState(
+        {"Recoverable", hsm_ctx_.idx_error, detail::instance_hsm::StateRecoverable, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_fatal =
+        hsm->AddState({"Fatal", hsm_ctx_.idx_error, detail::instance_hsm::StateFatal, nullptr, nullptr, nullptr});
+    hsm_ctx_.idx_destroying = hsm->AddState(
+        {"Destroying", hsm_ctx_.idx_root, detail::instance_hsm::StateDestroying, nullptr, nullptr, nullptr});
 
     hsm->SetInitialState(hsm_ctx_.idx_created);
     hsm->Start();
@@ -546,8 +507,7 @@ class Instance {
 #define OSP_APP_MSG_INLINE_SIZE 48U
 #endif
 
-static_assert((OSP_APP_MSG_INLINE_SIZE % 8) == 0,
-              "OSP_APP_MSG_INLINE_SIZE must be 8-byte aligned");
+static_assert((OSP_APP_MSG_INLINE_SIZE % 8) == 0, "OSP_APP_MSG_INLINE_SIZE must be 8-byte aligned");
 
 struct alignas(8) AppMessage {
   static constexpr uint32_t kMaxDataLen = 0x00FFFFFFU;
@@ -560,28 +520,23 @@ struct alignas(8) AppMessage {
   ResponseChannel* response_channel;
 
   union alignas(8) {
-    uint8_t  inline_data[OSP_APP_MSG_INLINE_SIZE];
+    uint8_t inline_data[OSP_APP_MSG_INLINE_SIZE];
     const void* ext_ptr;
   } payload;
 
-  bool IsExternal() const noexcept {
-    return (flags_and_len & kExternalFlag) != 0;
-  }
+  bool IsExternal() const noexcept { return (flags_and_len & kExternalFlag) != 0; }
 
-  uint32_t DataLen() const noexcept {
-    return flags_and_len >> kLenShift;
-  }
+  uint32_t DataLen() const noexcept { return flags_and_len >> kLenShift; }
 
-  const void* Data() const noexcept {
-    return IsExternal() ? payload.ext_ptr : payload.inline_data;
-  }
+  const void* Data() const noexcept { return IsExternal() ? payload.ext_ptr : payload.inline_data; }
 
   void Store(const void* data, uint32_t len) noexcept {
     if (data == nullptr || len == 0) {
       flags_and_len = 0;
       return;
     }
-    if (len > kMaxDataLen) len = kMaxDataLen;
+    if (len > kMaxDataLen)
+      len = kMaxDataLen;
 
     if (len <= OSP_APP_MSG_INLINE_SIZE) {
       flags_and_len = (len << kLenShift);
@@ -626,16 +581,11 @@ inline constexpr uint32_t kAppNameMaxLen = 31;
 
 template <typename InstanceImpl, uint16_t MaxInstances = OSP_APP_MAX_INSTANCES>
 class Application {
-  static_assert(std::is_base_of<Instance, InstanceImpl>::value,
-                "InstanceImpl must derive from osp::Instance");
+  static_assert(std::is_base_of<Instance, InstanceImpl>::value, "InstanceImpl must derive from osp::Instance");
 
  public:
   Application(uint16_t app_id, const char* name) noexcept
-      : app_id_(app_id),
-        name_(TruncateToCapacity, name),
-        instance_count_(0),
-        queue_head_(0),
-        queue_tail_(0) {
+      : app_id_(app_id), name_(TruncateToCapacity, name), instance_count_(0), queue_head_(0), queue_tail_(0) {
     for (uint16_t i = 0; i < MaxInstances; ++i) {
       instances_[i] = nullptr;
     }
@@ -658,8 +608,7 @@ class Application {
       if (instances_[i] == nullptr) {
         InstanceImpl* inst = pool_.Create();
         if (inst == nullptr) {
-          return expected<uint16_t, AppError>::error(
-              AppError::kInstancePoolFull);
+          return expected<uint16_t, AppError>::error(AppError::kInstancePoolFull);
         }
         uint16_t ins_id = static_cast<uint16_t>(i + 1);
         inst->SetInsId(ins_id);
@@ -688,8 +637,7 @@ class Application {
   // Post a message to this application's queue. Thread-safe (MPSC).
   // NOTE: if len > OSP_APP_MSG_INLINE_SIZE, only the pointer is stored —
   // caller must keep the buffer alive until ProcessOne() consumes it.
-  bool Post(uint16_t ins_id, uint16_t event, const void* data,
-            uint32_t len,
+  bool Post(uint16_t ins_id, uint16_t event, const void* data, uint32_t len,
             ResponseChannel* response_ch = nullptr) noexcept {
     std::lock_guard<std::mutex> lock(post_mutex_);
     uint32_t tail = queue_tail_.load(std::memory_order_relaxed);
@@ -755,7 +703,8 @@ class Application {
   uint32_t InstanceCount() const noexcept { return instance_count_; }
 
   InstanceImpl* GetInstance(uint16_t ins_id) noexcept {
-    if (ins_id == 0 || ins_id > MaxInstances) return nullptr;
+    if (ins_id == 0 || ins_id > MaxInstances)
+      return nullptr;
     return instances_[ins_id - 1];
   }
 

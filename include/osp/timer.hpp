@@ -50,9 +50,10 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
+#include <cstdint>
+
 #include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <mutex>
 #include <thread>
 
@@ -95,38 +96,28 @@ class ManualTickSource {
   /**
    * @brief Get current time in nanoseconds (ticks * tick_period_ns).
    */
-  static uint64_t NowNs() noexcept {
-    return ticks_.load(std::memory_order_acquire) * tick_period_ns_;
-  }
+  static uint64_t NowNs() noexcept { return ticks_.load(std::memory_order_acquire) * tick_period_ns_; }
 
   /**
    * @brief Advance tick counter by 1 (called from ISR or test driver).
    */
-  static void Tick() noexcept {
-    ticks_.fetch_add(1U, std::memory_order_release);
-  }
+  static void Tick() noexcept { ticks_.fetch_add(1U, std::memory_order_release); }
 
   /**
    * @brief Set the duration of each tick in nanoseconds.
    * @param ns  Tick period (default 1ms = 1000000ns).
    */
-  static void SetTickPeriodNs(uint64_t ns) noexcept {
-    tick_period_ns_ = ns;
-  }
+  static void SetTickPeriodNs(uint64_t ns) noexcept { tick_period_ns_ = ns; }
 
   /**
    * @brief Reset tick counter to zero (for test isolation).
    */
-  static void Reset() noexcept {
-    ticks_.store(0U, std::memory_order_release);
-  }
+  static void Reset() noexcept { ticks_.store(0U, std::memory_order_release); }
 
   /**
    * @brief Get raw tick count.
    */
-  static uint64_t GetTicks() noexcept {
-    return ticks_.load(std::memory_order_acquire);
-  }
+  static uint64_t GetTicks() noexcept { return ticks_.load(std::memory_order_acquire); }
 
  private:
   static inline std::atomic<uint64_t> ticks_{0U};
@@ -232,24 +223,19 @@ class TimerScheduler final {
    *         - kInvalidPeriod if period_ms == 0.
    *         - kSlotsFull     if all task slots are occupied.
    */
-  expected<TimerTaskId, TimerError> Add(uint32_t period_ms,
-                                        TimerTaskFn fn,
-                                        void* ctx = nullptr) {
+  expected<TimerTaskId, TimerError> Add(uint32_t period_ms, TimerTaskFn fn, void* ctx = nullptr) {
     if (period_ms == 0U) {
-      return expected<TimerTaskId, TimerError>::error(
-          TimerError::kInvalidPeriod);
+      return expected<TimerTaskId, TimerError>::error(TimerError::kInvalidPeriod);
     }
     if (fn == nullptr) {
-      return expected<TimerTaskId, TimerError>::error(
-          TimerError::kInvalidPeriod);
+      return expected<TimerTaskId, TimerError>::error(TimerError::kInvalidPeriod);
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
 
     for (uint32_t i = 0U; i < MaxTasks; ++i) {
       if (!slots_[i].active) {
-        const uint64_t period_ns =
-            static_cast<uint64_t>(period_ms) * kNsPerMs;
+        const uint64_t period_ns = static_cast<uint64_t>(period_ms) * kNsPerMs;
         slots_[i].fn = fn;
         slots_[i].ctx = ctx;
         slots_[i].period_ns = period_ns;
@@ -257,8 +243,7 @@ class TimerScheduler final {
         slots_[i].id = next_id_++;
         slots_[i].active = true;
         slots_[i].one_shot = false;
-        return expected<TimerTaskId, TimerError>::success(
-            TimerTaskId(slots_[i].id));
+        return expected<TimerTaskId, TimerError>::success(TimerTaskId(slots_[i].id));
       }
     }
 
@@ -280,24 +265,19 @@ class TimerScheduler final {
    *         - kInvalidPeriod if delay_ms == 0.
    *         - kSlotsFull     if all task slots are occupied.
    */
-  expected<TimerTaskId, TimerError> AddOneShot(uint32_t delay_ms,
-                                                TimerTaskFn fn,
-                                                void* ctx = nullptr) {
+  expected<TimerTaskId, TimerError> AddOneShot(uint32_t delay_ms, TimerTaskFn fn, void* ctx = nullptr) {
     if (delay_ms == 0U) {
-      return expected<TimerTaskId, TimerError>::error(
-          TimerError::kInvalidPeriod);
+      return expected<TimerTaskId, TimerError>::error(TimerError::kInvalidPeriod);
     }
     if (fn == nullptr) {
-      return expected<TimerTaskId, TimerError>::error(
-          TimerError::kInvalidPeriod);
+      return expected<TimerTaskId, TimerError>::error(TimerError::kInvalidPeriod);
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
 
     for (uint32_t i = 0U; i < MaxTasks; ++i) {
       if (!slots_[i].active) {
-        const uint64_t delay_ns =
-            static_cast<uint64_t>(delay_ms) * kNsPerMs;
+        const uint64_t delay_ns = static_cast<uint64_t>(delay_ms) * kNsPerMs;
         slots_[i].fn = fn;
         slots_[i].ctx = ctx;
         slots_[i].period_ns = delay_ns;
@@ -305,8 +285,7 @@ class TimerScheduler final {
         slots_[i].id = next_id_++;
         slots_[i].active = true;
         slots_[i].one_shot = true;
-        return expected<TimerTaskId, TimerError>::success(
-            TimerTaskId(slots_[i].id));
+        return expected<TimerTaskId, TimerError>::success(TimerTaskId(slots_[i].id));
       }
     }
 
@@ -371,9 +350,7 @@ class TimerScheduler final {
   /**
    * @brief Query whether the scheduler thread is currently running.
    */
-  bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_acquire);
-  }
+  bool IsRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
   /**
    * @brief Count the number of currently active timer tasks.
@@ -421,10 +398,13 @@ class TimerScheduler final {
     uint64_t min_remaining = UINT64_MAX;
     const uint64_t now = TickSource::NowNs();
     for (uint32_t i = 0U; i < MaxTasks; ++i) {
-      if (!slots_[i].active) continue;
-      if (slots_[i].next_fire_ns <= now) return 0U;
+      if (!slots_[i].active)
+        continue;
+      if (slots_[i].next_fire_ns <= now)
+        return 0U;
       uint64_t remaining = slots_[i].next_fire_ns - now;
-      if (remaining < min_remaining) min_remaining = remaining;
+      if (remaining < min_remaining)
+        min_remaining = remaining;
     }
     return min_remaining;
   }
@@ -459,7 +439,7 @@ class TimerScheduler final {
   // Constants
   // --------------------------------------------------------------------------
 
-  static constexpr uint64_t kNsPerMs = 1000000ULL;           ///< ns per ms
+  static constexpr uint64_t kNsPerMs = 1000000ULL;          ///< ns per ms
   static constexpr uint64_t kDefaultSleepNs = 10000000ULL;  ///< 10ms default sleep
   static constexpr uint64_t kMinSleepNs = 1000000ULL;       ///< 1ms minimum sleep
   static constexpr uint64_t kMaxSleepNs = 10000000ULL;      ///< 10ms maximum sleep
@@ -468,12 +448,12 @@ class TimerScheduler final {
   // Data Members
   // --------------------------------------------------------------------------
 
-  TaskSlot slots_[MaxTasks]{};              ///< Embedded task slot array.
-  uint32_t next_id_ = 1;                   ///< Monotonically increasing ID.
-  std::atomic<bool> running_{false};        ///< Scheduler thread active flag.
-  std::thread worker_;                      ///< Background scheduler thread.
-  mutable std::mutex mutex_;                ///< Guards slots_ and next_id_.
-  ThreadHeartbeat* heartbeat_{nullptr};     ///< External watchdog heartbeat.
+  TaskSlot slots_[MaxTasks]{};           ///< Embedded task slot array.
+  uint32_t next_id_ = 1;                 ///< Monotonically increasing ID.
+  std::atomic<bool> running_{false};     ///< Scheduler thread active flag.
+  std::thread worker_;                   ///< Background scheduler thread.
+  mutable std::mutex mutex_;             ///< Guards slots_ and next_id_.
+  ThreadHeartbeat* heartbeat_{nullptr};  ///< External watchdog heartbeat.
 
   // --------------------------------------------------------------------------
   // Scheduler Loop (collect-release-execute pattern)
@@ -492,7 +472,9 @@ class TimerScheduler final {
    */
   void ScheduleLoop() {
     while (running_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+      if (heartbeat_ != nullptr) {
+        heartbeat_->Beat();
+      }
 
       PendingTask pending[MaxTasks];
       uint32_t pending_count = 0U;
@@ -531,10 +513,7 @@ class TimerScheduler final {
           // Compute remaining time for sleep calculation
           if (slots_[i].active) {
             const uint64_t after = TickSource::NowNs();
-            const uint64_t remaining =
-                (slots_[i].next_fire_ns > after)
-                    ? (slots_[i].next_fire_ns - after)
-                    : 0U;
+            const uint64_t remaining = (slots_[i].next_fire_ns > after) ? (slots_[i].next_fire_ns - after) : 0U;
             if (remaining < min_remaining) {
               min_remaining = remaining;
             }
@@ -549,9 +528,7 @@ class TimerScheduler final {
       }
 
       // Phase 3: Precise sleep until next task
-      uint64_t sleep_ns = (min_remaining == UINT64_MAX)
-                              ? kDefaultSleepNs
-                              : min_remaining;
+      uint64_t sleep_ns = (min_remaining == UINT64_MAX) ? kDefaultSleepNs : min_remaining;
       if (sleep_ns > kMaxSleepNs) {
         sleep_ns = kMaxSleepNs;
       }

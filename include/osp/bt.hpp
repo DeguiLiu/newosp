@@ -49,6 +49,7 @@
 #include "osp/platform.hpp"
 
 #include <cstdint>
+
 #include <array>
 
 // ============================================================================
@@ -85,11 +86,11 @@ enum class NodeStatus : uint8_t {
  * @brief Convert NodeStatus to human-readable string.
  */
 inline constexpr const char* NodeStatusToString(NodeStatus s) noexcept {
-  return (s == NodeStatus::kSuccess) ? "SUCCESS"
-       : (s == NodeStatus::kFailure) ? "FAILURE"
-       : (s == NodeStatus::kRunning) ? "RUNNING"
-       : (s == NodeStatus::kIdle)    ? "IDLE"
-       : "UNKNOWN";
+  return (s == NodeStatus::kSuccess)   ? "SUCCESS"
+         : (s == NodeStatus::kFailure) ? "FAILURE"
+         : (s == NodeStatus::kRunning) ? "RUNNING"
+         : (s == NodeStatus::kIdle)    ? "IDLE"
+                                       : "UNKNOWN";
 }
 
 // ============================================================================
@@ -107,28 +108,20 @@ inline constexpr const char* NodeStatusToString(NodeStatus s) noexcept {
  * - kInverter:  Decorator: inverts child result (SUCCESS <-> FAILURE)
  * - kRepeat:    Decorator: repeats child execution N times
  */
-enum class NodeType : uint8_t {
-  kAction = 0,
-  kCondition,
-  kSequence,
-  kSelector,
-  kParallel,
-  kInverter,
-  kRepeat
-};
+enum class NodeType : uint8_t { kAction = 0, kCondition, kSequence, kSelector, kParallel, kInverter, kRepeat };
 
 /**
  * @brief Convert NodeType to human-readable string.
  */
 inline constexpr const char* NodeTypeToString(NodeType t) noexcept {
-  return (t == NodeType::kAction)    ? "ACTION"
-       : (t == NodeType::kCondition) ? "CONDITION"
-       : (t == NodeType::kSequence)  ? "SEQUENCE"
-       : (t == NodeType::kSelector)  ? "SELECTOR"
-       : (t == NodeType::kParallel)  ? "PARALLEL"
-       : (t == NodeType::kInverter)  ? "INVERTER"
-       : (t == NodeType::kRepeat)    ? "REPEAT"
-       : "UNKNOWN";
+  return (t == NodeType::kAction)      ? "ACTION"
+         : (t == NodeType::kCondition) ? "CONDITION"
+         : (t == NodeType::kSequence)  ? "SEQUENCE"
+         : (t == NodeType::kSelector)  ? "SELECTOR"
+         : (t == NodeType::kParallel)  ? "PARALLEL"
+         : (t == NodeType::kInverter)  ? "INVERTER"
+         : (t == NodeType::kRepeat)    ? "REPEAT"
+                                       : "UNKNOWN";
 }
 
 // ============================================================================
@@ -147,14 +140,14 @@ struct BtNode {
   /// Tick callback: returns execution status. Used by Action/Condition nodes.
   using TickFn = NodeStatus (*)(Context& ctx);
 
-  NodeType type;                            ///< Node type
-  const char* name;                         ///< Node name (static lifetime)
-  TickFn tick_fn;                           ///< Tick function (leaf nodes only)
-  int32_t parent_index;                     ///< Parent index (-1 for root)
-  int32_t children[OSP_BT_MAX_CHILDREN];    ///< Child indices (-1 = unused)
-  uint32_t child_count;                     ///< Number of active children
-  uint32_t success_threshold;               ///< Parallel: required successes
-  uint32_t repeat_count;                    ///< Repeat: iteration count (0 = infinite)
+  NodeType type;                          ///< Node type
+  const char* name;                       ///< Node name (static lifetime)
+  TickFn tick_fn;                         ///< Tick function (leaf nodes only)
+  int32_t parent_index;                   ///< Parent index (-1 for root)
+  int32_t children[OSP_BT_MAX_CHILDREN];  ///< Child indices (-1 = unused)
+  uint32_t child_count;                   ///< Number of active children
+  uint32_t success_threshold;             ///< Parallel: required successes
+  uint32_t repeat_count;                  ///< Repeat: iteration count (0 = infinite)
 };
 
 // ============================================================================
@@ -187,11 +180,7 @@ class BehaviorTree final {
    * @param name Tree name for debugging (must have static lifetime).
    */
   explicit BehaviorTree(Context& ctx, const char* name = "bt") noexcept
-      : ctx_(ctx),
-        name_(name),
-        node_count_(0),
-        root_index_(-1),
-        last_status_(NodeStatus::kIdle) {
+      : ctx_(ctx), name_(name), node_count_(0), root_index_(-1), last_status_(NodeStatus::kIdle) {
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       repeat_counters_[i] = 0;
     }
@@ -209,8 +198,7 @@ class BehaviorTree final {
    * @brief Add an action leaf node.
    * @return Node index, or -1 if the tree is full.
    */
-  int32_t AddAction(const char* name, typename BtNode<Context>::TickFn fn,
-                    int32_t parent = -1) {
+  int32_t AddAction(const char* name, typename BtNode<Context>::TickFn fn, int32_t parent = -1) {
     return AddNode(NodeType::kAction, name, fn, parent);
   }
 
@@ -218,8 +206,7 @@ class BehaviorTree final {
    * @brief Add a condition leaf node.
    * @return Node index, or -1 if the tree is full.
    */
-  int32_t AddCondition(const char* name, typename BtNode<Context>::TickFn fn,
-                       int32_t parent = -1) {
+  int32_t AddCondition(const char* name, typename BtNode<Context>::TickFn fn, int32_t parent = -1) {
     return AddNode(NodeType::kCondition, name, fn, parent);
   }
 
@@ -244,8 +231,7 @@ class BehaviorTree final {
    * @param success_threshold Number of children that must succeed.
    * @return Node index, or -1 if the tree is full.
    */
-  int32_t AddParallel(const char* name, uint32_t success_threshold,
-                      int32_t parent = -1) {
+  int32_t AddParallel(const char* name, uint32_t success_threshold, int32_t parent = -1) {
     int32_t idx = AddNode(NodeType::kParallel, name, nullptr, parent);
     if (idx >= 0) {
       nodes_[idx].success_threshold = success_threshold;
@@ -279,8 +265,7 @@ class BehaviorTree final {
    * @param node_index Index returned by an Add*() call.
    */
   void SetRoot(int32_t node_index) {
-    OSP_ASSERT(node_index >= 0 &&
-               static_cast<uint32_t>(node_index) < node_count_);
+    OSP_ASSERT(node_index >= 0 && static_cast<uint32_t>(node_index) < node_count_);
     root_index_ = node_index;
   }
 
@@ -420,8 +405,7 @@ class BehaviorTree final {
       return NodeStatus::kSuccess;
     }
 
-    uint32_t max_allowed_failures =
-        node.child_count - node.success_threshold;
+    uint32_t max_allowed_failures = node.child_count - node.success_threshold;
     if (failure_count > max_allowed_failures) {
       return NodeStatus::kFailure;
     }
@@ -494,8 +478,7 @@ class BehaviorTree final {
    * @brief Allocate a new node in the flat array.
    * @return Node index, or -1 if the tree is full.
    */
-  int32_t AddNode(NodeType type, const char* name,
-                  typename BtNode<Context>::TickFn fn, int32_t parent) {
+  int32_t AddNode(NodeType type, const char* name, typename BtNode<Context>::TickFn fn, int32_t parent) {
     if (OSP_UNLIKELY(node_count_ >= MaxNodes)) {
       return -1;
     }

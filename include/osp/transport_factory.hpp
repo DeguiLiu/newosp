@@ -158,8 +158,7 @@ class TransportFactory final {
     if (host == nullptr || host[0] == '\0') {
       return true;  // Empty host defaults to local
     }
-    return (std::strcmp(host, "127.0.0.1") == 0) ||
-           (std::strcmp(host, "localhost") == 0);
+    return (std::strcmp(host, "127.0.0.1") == 0) || (std::strcmp(host, "localhost") == 0);
   }
 };
 
@@ -209,8 +208,7 @@ class TransportSelector final {
    * @return true if resolved type is kInproc, kShm, or kUnix
    */
   bool IsLocal() const noexcept {
-    return resolved_type_ == TransportType::kInproc ||
-           resolved_type_ == TransportType::kShm ||
+    return resolved_type_ == TransportType::kInproc || resolved_type_ == TransportType::kShm ||
            resolved_type_ == TransportType::kUnix;
   }
 

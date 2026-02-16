@@ -32,9 +32,9 @@
 #ifndef OSP_QOS_HPP_
 #define OSP_QOS_HPP_
 
-#include <cstdint>
-
 #include "osp/platform.hpp"
+
+#include <cstdint>
 
 namespace osp {
 
@@ -54,16 +54,16 @@ enum class ReliabilityPolicy : uint8_t {
  * @brief QoS history depth policy.
  */
 enum class HistoryPolicy : uint8_t {
-  kKeepLast,    // Keep last N messages
-  kKeepAll      // Keep all messages (until queue full)
+  kKeepLast,  // Keep last N messages
+  kKeepAll    // Keep all messages (until queue full)
 };
 
 /**
  * @brief QoS durability policy.
  */
 enum class DurabilityPolicy : uint8_t {
-  kVolatile,        // No late-joiner support
-  kTransientLocal   // Late joiners get cached messages
+  kVolatile,       // No late-joiner support
+  kTransientLocal  // Late joiners get cached messages
 };
 
 // ============================================================================
@@ -79,28 +79,22 @@ struct QosProfile {
   ReliabilityPolicy reliability = ReliabilityPolicy::kBestEffort;
   HistoryPolicy history = HistoryPolicy::kKeepLast;
   DurabilityPolicy durability = DurabilityPolicy::kVolatile;
-  uint32_t history_depth = 10;      // KeepLast mode message count
-  uint32_t deadline_ms = 0;         // 0=no deadline, >0=message timeout discard
-  uint32_t lifespan_ms = 0;         // 0=no lifespan, >0=message expiry discard
+  uint32_t history_depth = 10;  // KeepLast mode message count
+  uint32_t deadline_ms = 0;     // 0=no deadline, >0=message timeout discard
+  uint32_t lifespan_ms = 0;     // 0=no lifespan, >0=message expiry discard
 
   /**
    * @brief Equality comparison.
    */
   constexpr bool operator==(const QosProfile& other) const {
-    return reliability == other.reliability &&
-           history == other.history &&
-           durability == other.durability &&
-           history_depth == other.history_depth &&
-           deadline_ms == other.deadline_ms &&
-           lifespan_ms == other.lifespan_ms;
+    return reliability == other.reliability && history == other.history && durability == other.durability &&
+           history_depth == other.history_depth && deadline_ms == other.deadline_ms && lifespan_ms == other.lifespan_ms;
   }
 
   /**
    * @brief Inequality comparison.
    */
-  constexpr bool operator!=(const QosProfile& other) const {
-    return !(*this == other);
-  }
+  constexpr bool operator!=(const QosProfile& other) const { return !(*this == other); }
 };
 
 // ============================================================================
@@ -112,27 +106,24 @@ struct QosProfile {
  *
  * Suitable for high-frequency sensor readings where only the latest value matters.
  */
-constexpr QosProfile QosSensorData{
-  ReliabilityPolicy::kBestEffort,
-  HistoryPolicy::kKeepLast,
-  DurabilityPolicy::kVolatile,
-  1,   // only keep latest value
-  0, 0
-};
+constexpr QosProfile QosSensorData{ReliabilityPolicy::kBestEffort,
+                                   HistoryPolicy::kKeepLast,
+                                   DurabilityPolicy::kVolatile,
+                                   1,  // only keep latest value
+                                   0,
+                                   0};
 
 /**
  * @brief QoS for control commands: reliable, keep all, 100ms deadline.
  *
  * Suitable for critical control commands that must be delivered reliably.
  */
-constexpr QosProfile QosControlCommand{
-  ReliabilityPolicy::kReliable,
-  HistoryPolicy::kKeepAll,
-  DurabilityPolicy::kVolatile,
-  0,
-  100,  // 100ms deadline
-  0
-};
+constexpr QosProfile QosControlCommand{ReliabilityPolicy::kReliable,
+                                       HistoryPolicy::kKeepAll,
+                                       DurabilityPolicy::kVolatile,
+                                       0,
+                                       100,  // 100ms deadline
+                                       0};
 
 /**
  * @brief Default QoS profile: best-effort, keep last 10, volatile.
@@ -145,12 +136,12 @@ constexpr QosProfile QosSystemDefault{};
  * Suitable for sensor data that must be delivered reliably with bounded history.
  */
 constexpr QosProfile QosReliableSensor{
-  ReliabilityPolicy::kReliable,
-  HistoryPolicy::kKeepLast,
-  DurabilityPolicy::kVolatile,
-  5,
-  0,
-  1000  // 1s lifespan
+    ReliabilityPolicy::kReliable,
+    HistoryPolicy::kKeepLast,
+    DurabilityPolicy::kVolatile,
+    5,
+    0,
+    1000  // 1s lifespan
 };
 
 // ============================================================================

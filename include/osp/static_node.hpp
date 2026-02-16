@@ -56,6 +56,7 @@
 
 #include <cstdint>
 #include <cstring>
+
 #include <utility>
 
 namespace osp {
@@ -118,8 +119,7 @@ class StaticNode {
    * @param handler Handler instance (stored by value).
    * @param bus Reference to the bus instance to use.
    */
-  StaticNode(const char* name, uint32_t id, Handler handler,
-             BusType& bus) noexcept
+  StaticNode(const char* name, uint32_t id, Handler handler, BusType& bus) noexcept
       : bus_ptr_(&bus),
         handler_(static_cast<Handler&&>(handler)),
         id_(id),
@@ -136,8 +136,7 @@ class StaticNode {
    * @param handler Handler instance (stored by value).
    * @param topic Topic string for filtering (null-terminated).
    */
-  StaticNode(const char* name, uint32_t id, Handler handler,
-             const char* topic) noexcept
+  StaticNode(const char* name, uint32_t id, Handler handler, const char* topic) noexcept
       : bus_ptr_(&BusType::Instance()),
         handler_(static_cast<Handler&&>(handler)),
         id_(id),
@@ -155,8 +154,7 @@ class StaticNode {
    * @param topic Topic string for filtering (null-terminated).
    * @param bus Reference to the bus instance to use.
    */
-  StaticNode(const char* name, uint32_t id, Handler handler,
-             const char* topic, BusType& bus) noexcept
+  StaticNode(const char* name, uint32_t id, Handler handler, const char* topic, BusType& bus) noexcept
       : bus_ptr_(&bus),
         handler_(static_cast<Handler&&>(handler)),
         id_(id),
@@ -211,8 +209,7 @@ class StaticNode {
     }
 
     // Subscribe for each type in the variant
-    bool ok = SubscribeAll(
-        std::make_index_sequence<std::variant_size_v<PayloadVariant>>{});
+    bool ok = SubscribeAll(std::make_index_sequence<std::variant_size_v<PayloadVariant>>{});
     if (!ok) {
       // Rollback any partial subscriptions
       UnsubscribeAll();
@@ -227,7 +224,8 @@ class StaticNode {
    * @brief Stop the node and unsubscribe all callbacks.
    */
   void Stop() noexcept {
-    if (!started_ && handle_count_ == 0) return;
+    if (!started_ && handle_count_ == 0)
+      return;
 
     UnsubscribeAll();
     started_ = false;
@@ -243,8 +241,7 @@ class StaticNode {
    */
   template <typename T>
   bool Publish(T&& msg) noexcept {
-    return bus_ptr_->Publish(
-        PayloadVariant(std::forward<T>(msg)), id_);
+    return bus_ptr_->Publish(PayloadVariant(std::forward<T>(msg)), id_);
   }
 
   /**
@@ -252,8 +249,7 @@ class StaticNode {
    */
   template <typename T>
   bool PublishWithPriority(T&& msg, MessagePriority priority) noexcept {
-    return bus_ptr_->PublishWithPriority(
-        PayloadVariant(std::forward<T>(msg)), id_, priority);
+    return bus_ptr_->PublishWithPriority(PayloadVariant(std::forward<T>(msg)), id_, priority);
   }
 
   /**
@@ -265,8 +261,7 @@ class StaticNode {
    */
   template <typename T>
   bool Publish(T&& msg, const char* topic) noexcept {
-    return bus_ptr_->PublishTopic(
-        PayloadVariant(std::forward<T>(msg)), id_, topic);
+    return bus_ptr_->PublishTopic(PayloadVariant(std::forward<T>(msg)), id_, topic);
   }
 
   // ======================== Processing ========================
@@ -345,17 +340,16 @@ class StaticNode {
     uint32_t topic_hash = topic_hash_;
 
     SubscriptionHandle handle =
-        bus_ptr_->template Subscribe<T>(
-            [handler_ptr, topic_hash](const EnvelopeType& env) noexcept {
-              // Topic filter: skip if topic_hash is set and does not match
-              if (topic_hash != 0 && env.header.topic_hash != topic_hash) {
-                return;
-              }
-              const T* data = std::get_if<T>(&env.payload);
-              if (OSP_LIKELY(data != nullptr)) {
-                (*handler_ptr)(*data, env.header);
-              }
-            });
+        bus_ptr_->template Subscribe<T>([handler_ptr, topic_hash](const EnvelopeType& env) noexcept {
+          // Topic filter: skip if topic_hash is set and does not match
+          if (topic_hash != 0 && env.header.topic_hash != topic_hash) {
+            return;
+          }
+          const T* data = std::get_if<T>(&env.payload);
+          if (OSP_LIKELY(data != nullptr)) {
+            (*handler_ptr)(*data, env.header);
+          }
+        });
 
     if (!handle.IsValid()) {
       return false;

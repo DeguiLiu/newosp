@@ -79,11 +79,9 @@ static constexpr uint32_t kInvalidIndex = UINT32_MAX;
 
 template <uint32_t BlockSize, uint32_t MaxBlocks>
 class FixedPool {
-  static_assert(BlockSize >= sizeof(uint32_t),
-                "BlockSize must be >= sizeof(uint32_t)");
+  static_assert(BlockSize >= sizeof(uint32_t), "BlockSize must be >= sizeof(uint32_t)");
   static_assert(MaxBlocks > 0, "MaxBlocks must be > 0");
-  static_assert(MaxBlocks < detail::kInvalidIndex,
-                "MaxBlocks must be < UINT32_MAX");
+  static_assert(MaxBlocks < detail::kInvalidIndex, "MaxBlocks must be < UINT32_MAX");
 
  public:
   /// @brief Construct pool and initialize embedded free list.
@@ -130,8 +128,7 @@ class FixedPool {
   expected<void*, MemPoolError> AllocateChecked() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (free_head_ == detail::kInvalidIndex) {
-      return expected<void*, MemPoolError>::error(
-          MemPoolError::kPoolExhausted);
+      return expected<void*, MemPoolError>::error(MemPoolError::kPoolExhausted);
     }
     uint32_t idx = free_head_;
     free_head_ = LoadIndex(idx);
@@ -167,9 +164,7 @@ class FixedPool {
   /// @brief Check if a pointer belongs to this pool's address range and is
   ///        block-aligned.
   /// @return true for both allocated and free blocks within the pool.
-  bool OwnsPointer(const void* ptr) const {
-    return OwnsPointerUnlocked(ptr);
-  }
+  bool OwnsPointer(const void* ptr) const { return OwnsPointerUnlocked(ptr); }
 
   /// @brief Number of free blocks available.
   uint32_t FreeCount() const {
@@ -193,14 +188,11 @@ class FixedPool {
   static constexpr size_t AlignedBlockSize() { return kAlignedBlockSize; }
 
   /// @brief Get pointer to block at given index.
-  void* BlockPtr(uint32_t idx) {
-    return &storage_[idx * kAlignedBlockSize];
-  }
+  void* BlockPtr(uint32_t idx) { return &storage_[idx * kAlignedBlockSize]; }
 
   /// @brief Convert a pointer back to a block index.
   uint32_t PtrToIndex(const void* ptr) const {
-    auto offset = static_cast<size_t>(
-        static_cast<const uint8_t*>(ptr) - storage_);
+    auto offset = static_cast<size_t>(static_cast<const uint8_t*>(ptr) - storage_);
     return static_cast<uint32_t>(offset / kAlignedBlockSize);
   }
 
@@ -221,17 +213,14 @@ class FixedPool {
   /// @brief Print pool state to stdout for debugging.
   void DumpState(const char* label = "FixedPool") const {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::printf(
-        "[%s] capacity=%u used=%u free=%u block_size=%u aligned_size=%zu\n",
-        label, MaxBlocks, used_count_, MaxBlocks - used_count_, BlockSize,
-        kAlignedBlockSize);
+    std::printf("[%s] capacity=%u used=%u free=%u block_size=%u aligned_size=%zu\n", label, MaxBlocks, used_count_,
+                MaxBlocks - used_count_, BlockSize, kAlignedBlockSize);
   }
 
  private:
   // Round up BlockSize to the nearest multiple of alignof(max_align_t).
   static constexpr size_t kAlignedBlockSize =
-      (BlockSize + alignof(std::max_align_t) - 1) &
-      ~(alignof(std::max_align_t) - 1);
+      (BlockSize + alignof(std::max_align_t) - 1) & ~(alignof(std::max_align_t) - 1);
 
   // Inline storage -- zero heap allocation.
   alignas(std::max_align_t) uint8_t storage_[kAlignedBlockSize * MaxBlocks];
@@ -242,21 +231,17 @@ class FixedPool {
   bool allocated_[MaxBlocks];
 
   /// @brief Check if a block index is currently allocated (unlocked version).
-  bool IsAllocatedUnlocked(uint32_t idx) const {
-    return allocated_[idx];
-  }
+  bool IsAllocatedUnlocked(uint32_t idx) const { return allocated_[idx]; }
 
   /// @brief Store next-free index into a block (strict aliasing safe).
   void StoreIndex(uint32_t block_idx, uint32_t next_idx) {
-    std::memcpy(&storage_[block_idx * kAlignedBlockSize], &next_idx,
-                sizeof(uint32_t));
+    std::memcpy(&storage_[block_idx * kAlignedBlockSize], &next_idx, sizeof(uint32_t));
   }
 
   /// @brief Load next-free index from a block (strict aliasing safe).
   uint32_t LoadIndex(uint32_t block_idx) const {
     uint32_t idx;
-    std::memcpy(&idx, &storage_[block_idx * kAlignedBlockSize],
-                sizeof(uint32_t));
+    std::memcpy(&idx, &storage_[block_idx * kAlignedBlockSize], sizeof(uint32_t));
     return idx;
   }
 
@@ -287,8 +272,8 @@ class FixedPool {
 
 template <typename T, uint32_t MaxObjects>
 class ObjectPool {
-  static constexpr uint32_t kBlockSize = static_cast<uint32_t>(
-      sizeof(T) > sizeof(uint32_t) ? sizeof(T) : sizeof(uint32_t));
+  static constexpr uint32_t kBlockSize =
+      static_cast<uint32_t>(sizeof(T) > sizeof(uint32_t) ? sizeof(T) : sizeof(uint32_t));
 
  public:
   ObjectPool() {
@@ -364,9 +349,7 @@ class ObjectPool {
   // --------------------------------------------------------------------------
 
   /// @brief Check if a pointer belongs to this pool.
-  bool OwnsPointer(const T* obj) const {
-    return pool_.OwnsPointer(obj);
-  }
+  bool OwnsPointer(const T* obj) const { return pool_.OwnsPointer(obj); }
 
   /// @brief Number of free slots available.
   uint32_t FreeCount() const { return pool_.FreeCount(); }
@@ -382,9 +365,7 @@ class ObjectPool {
   // --------------------------------------------------------------------------
 
   /// @brief Print pool state to stdout for debugging.
-  void DumpState(const char* label = "ObjectPool") const {
-    pool_.DumpState(label);
-  }
+  void DumpState(const char* label = "ObjectPool") const { pool_.DumpState(label); }
 
  private:
   FixedPool<kBlockSize, MaxObjects> pool_;

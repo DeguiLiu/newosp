@@ -36,10 +36,11 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
-#include <array>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
+
+#include <array>
+#include <chrono>
 
 namespace osp {
 
@@ -47,13 +48,7 @@ namespace osp {
 // Error Enum
 // ============================================================================
 
-enum class ConnectionError : uint8_t {
-  kPoolFull,
-  kNotFound,
-  kInvalidId,
-  kAlreadyExists,
-  kTimeout
-};
+enum class ConnectionError : uint8_t { kPoolFull, kNotFound, kInvalidId, kAlreadyExists, kTimeout };
 
 // ============================================================================
 // ConnectionId (strong type)
@@ -73,13 +68,7 @@ struct ConnectionId {
 // ConnectionState
 // ============================================================================
 
-enum class ConnectionState : uint8_t {
-  kIdle = 0,
-  kConnecting,
-  kConnected,
-  kDisconnecting,
-  kClosed
-};
+enum class ConnectionState : uint8_t { kIdle = 0, kConnecting, kConnected, kDisconnecting, kClosed };
 
 // ============================================================================
 // ConnectionInfo
@@ -88,11 +77,11 @@ enum class ConnectionState : uint8_t {
 struct ConnectionInfo {
   ConnectionId id;
   ConnectionState state;
-  uint64_t created_time_us;   // timestamp when created
-  uint64_t last_active_us;    // timestamp of last activity
-  uint32_t remote_ip;         // IPv4 in host byte order
+  uint64_t created_time_us;  // timestamp when created
+  uint64_t last_active_us;   // timestamp of last activity
+  uint32_t remote_ip;        // IPv4 in host byte order
   uint16_t remote_port;
-  char label[32];             // optional human-readable label
+  char label[32];  // optional human-readable label
 };
 
 // ============================================================================
@@ -119,12 +108,9 @@ class ConnectionPool {
    * @param label       Optional human-readable label (truncated to 31 chars)
    * @return ConnectionId on success, ConnectionError on failure
    */
-  expected<ConnectionId, ConnectionError> Add(uint32_t remote_ip,
-                                              uint16_t remote_port,
-                                              const char* label = nullptr) {
+  expected<ConnectionId, ConnectionError> Add(uint32_t remote_ip, uint16_t remote_port, const char* label = nullptr) {
     if (count_ >= MaxConnections) {
-      return expected<ConnectionId, ConnectionError>::error(
-          ConnectionError::kPoolFull);
+      return expected<ConnectionId, ConnectionError>::error(ConnectionError::kPoolFull);
     }
 
     // Find first inactive slot
@@ -158,8 +144,7 @@ class ConnectionPool {
     }
 
     // Should not reach here if count_ < MaxConnections, but be safe
-    return expected<ConnectionId, ConnectionError>::error(
-        ConnectionError::kPoolFull);
+    return expected<ConnectionId, ConnectionError>::error(ConnectionError::kPoolFull);
   }
 
   /**
@@ -169,14 +154,12 @@ class ConnectionPool {
    */
   expected<void, ConnectionError> Remove(ConnectionId id) {
     if (!id.IsValid()) {
-      return expected<void, ConnectionError>::error(
-          ConnectionError::kInvalidId);
+      return expected<void, ConnectionError>::error(ConnectionError::kInvalidId);
     }
 
     const int32_t idx = FindSlot(id);
     if (idx < 0) {
-      return expected<void, ConnectionError>::error(
-          ConnectionError::kNotFound);
+      return expected<void, ConnectionError>::error(ConnectionError::kNotFound);
     }
 
     slots_[static_cast<uint32_t>(idx)].active = false;
@@ -190,17 +173,14 @@ class ConnectionPool {
    * @param state New connection state
    * @return void on success, ConnectionError on failure
    */
-  expected<void, ConnectionError> SetState(ConnectionId id,
-                                           ConnectionState state) {
+  expected<void, ConnectionError> SetState(ConnectionId id, ConnectionState state) {
     if (!id.IsValid()) {
-      return expected<void, ConnectionError>::error(
-          ConnectionError::kInvalidId);
+      return expected<void, ConnectionError>::error(ConnectionError::kInvalidId);
     }
 
     const int32_t idx = FindSlot(id);
     if (idx < 0) {
-      return expected<void, ConnectionError>::error(
-          ConnectionError::kNotFound);
+      return expected<void, ConnectionError>::error(ConnectionError::kNotFound);
     }
 
     slots_[static_cast<uint32_t>(idx)].info.state = state;
@@ -214,14 +194,12 @@ class ConnectionPool {
    */
   expected<void, ConnectionError> Touch(ConnectionId id) {
     if (!id.IsValid()) {
-      return expected<void, ConnectionError>::error(
-          ConnectionError::kInvalidId);
+      return expected<void, ConnectionError>::error(ConnectionError::kInvalidId);
     }
 
     const int32_t idx = FindSlot(id);
     if (idx < 0) {
-      return expected<void, ConnectionError>::error(
-          ConnectionError::kNotFound);
+      return expected<void, ConnectionError>::error(ConnectionError::kNotFound);
     }
 
     slots_[static_cast<uint32_t>(idx)].info.last_active_us = SteadyNowUs();

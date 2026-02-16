@@ -42,11 +42,12 @@
 
 #include "osp/platform.hpp"
 
+#include <cstdint>
+#include <cstring>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cstdint>
-#include <cstring>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -71,23 +72,18 @@ namespace osp {
 ///   - Size / Available / IsEmpty / IsFull / Capacity may be called from
 ///     either side.
 ///   - Using multiple producers or multiple consumers is UNDEFINED BEHAVIOR.
-template <typename T, size_t BufferSize = 16, bool FakeTSO = false,
-          typename IndexT = size_t>
+template <typename T, size_t BufferSize = 16, bool FakeTSO = false, typename IndexT = size_t>
 class SpscRingbuffer {
  public:
   static_assert(BufferSize != 0, "Buffer size cannot be zero.");
-  static_assert((BufferSize & (BufferSize - 1)) == 0,
-                "Buffer size must be a power of 2.");
-  static_assert(sizeof(IndexT) <= sizeof(size_t),
-                "Index type size must not exceed size_t.");
-  static_assert(std::is_unsigned<IndexT>::value,
-                "Index type must be unsigned.");
+  static_assert((BufferSize & (BufferSize - 1)) == 0, "Buffer size must be a power of 2.");
+  static_assert(sizeof(IndexT) <= sizeof(size_t), "Index type size must not exceed size_t.");
+  static_assert(std::is_unsigned<IndexT>::value, "Index type must be unsigned.");
   static_assert(BufferSize <= ((std::numeric_limits<IndexT>::max)() >> 1),
                 "Buffer size is too large for the given indexing type.");
 
   /// Compile-time flag for optimized memcpy path selection.
-  static constexpr bool kTriviallyCopyable =
-      std::is_trivially_copyable<T>::value;
+  static constexpr bool kTriviallyCopyable = std::is_trivially_copyable<T>::value;
 
   SpscRingbuffer() noexcept {
     head_.value.store(0, std::memory_order_relaxed);
@@ -132,23 +128,18 @@ class SpscRingbuffer {
 
     while (written < count) {
       const IndexT cur_tail = tail_.value.load(AcquireOrder());
-      const IndexT space =
-          static_cast<IndexT>(BufferSize) - (cur_head - cur_tail);
+      const IndexT space = static_cast<IndexT>(BufferSize) - (cur_head - cur_tail);
       if (space == 0) {
         break;
       }
-      const size_t to_write =
-          std::min(count - written, static_cast<size_t>(space));
+      const size_t to_write = std::min(count - written, static_cast<size_t>(space));
       const size_t head_offset = cur_head & kMask;
 
       if constexpr (kTriviallyCopyable) {
-        const size_t first_part =
-            std::min(to_write, BufferSize - head_offset);
-        std::memcpy(&data_buff_[head_offset], buf + written,
-                     first_part * sizeof(T));
+        const size_t first_part = std::min(to_write, BufferSize - head_offset);
+        std::memcpy(&data_buff_[head_offset], buf + written, first_part * sizeof(T));
         if (to_write > first_part) {
-          std::memcpy(&data_buff_[0], buf + written + first_part,
-                       (to_write - first_part) * sizeof(T));
+          std::memcpy(&data_buff_[0], buf + written + first_part, (to_write - first_part) * sizeof(T));
         }
       } else {
         for (size_t i = 0; i < to_write; ++i) {
@@ -166,8 +157,7 @@ class SpscRingbuffer {
   /// @brief Clear buffer from producer side (sets head = tail).
   /// @note Only call from the producer thread.
   void ProducerClear() noexcept {
-    head_.value.store(tail_.value.load(std::memory_order_relaxed),
-                       std::memory_order_relaxed);
+    head_.value.store(tail_.value.load(std::memory_order_relaxed), std::memory_order_relaxed);
   }
 
   // ==== Consumer API ====
@@ -203,18 +193,14 @@ class SpscRingbuffer {
       if (available == 0) {
         break;
       }
-      const size_t to_read =
-          std::min(count - read, static_cast<size_t>(available));
+      const size_t to_read = std::min(count - read, static_cast<size_t>(available));
       const size_t tail_offset = cur_tail & kMask;
 
       if constexpr (kTriviallyCopyable) {
-        const size_t first_part =
-            std::min(to_read, BufferSize - tail_offset);
-        std::memcpy(buf + read, &data_buff_[tail_offset],
-                     first_part * sizeof(T));
+        const size_t first_part = std::min(to_read, BufferSize - tail_offset);
+        std::memcpy(buf + read, &data_buff_[tail_offset], first_part * sizeof(T));
         if (to_read > first_part) {
-          std::memcpy(buf + read + first_part, &data_buff_[0],
-                       (to_read - first_part) * sizeof(T));
+          std::memcpy(buf + read + first_part, &data_buff_[0], (to_read - first_part) * sizeof(T));
         }
       } else {
         for (size_t i = 0; i < to_read; ++i) {
@@ -236,11 +222,9 @@ class SpscRingbuffer {
     const IndexT cur_tail = tail_.value.load(std::memory_order_relaxed);
     const IndexT cur_head = head_.value.load(AcquireOrder());
     const IndexT available = cur_head - cur_tail;
-    const size_t to_discard =
-        std::min(count, static_cast<size_t>(available));
+    const size_t to_discard = std::min(count, static_cast<size_t>(available));
     if (to_discard > 0) {
-      tail_.value.store(cur_tail + static_cast<IndexT>(to_discard),
-                         ReleaseOrder());
+      tail_.value.store(cur_tail + static_cast<IndexT>(to_discard), ReleaseOrder());
     }
     return to_discard;
   }
@@ -271,30 +255,26 @@ class SpscRingbuffer {
   /// @brief Access the n-th element without bounds checking.
   /// @warning Undefined behavior if index >= Size().
   const T& operator[](size_t index) const noexcept {
-    return data_buff_[(tail_.value.load(std::memory_order_relaxed) + index) &
-                       kMask];
+    return data_buff_[(tail_.value.load(std::memory_order_relaxed) + index) & kMask];
   }
 
   /// @brief Clear buffer from consumer side (sets tail = head).
   /// @note Only call from the consumer thread.
   void ConsumerClear() noexcept {
-    tail_.value.store(head_.value.load(std::memory_order_relaxed),
-                       std::memory_order_relaxed);
+    tail_.value.store(head_.value.load(std::memory_order_relaxed), std::memory_order_relaxed);
   }
 
   // ==== Query API (either side) ====
 
   /// @brief Number of elements available to read.
   IndexT Size() const noexcept {
-    return head_.value.load(AcquireOrder()) -
-           tail_.value.load(std::memory_order_relaxed);
+    return head_.value.load(AcquireOrder()) - tail_.value.load(std::memory_order_relaxed);
   }
 
   /// @brief Number of free slots available for writing.
   IndexT Available() const noexcept {
     return static_cast<IndexT>(BufferSize) -
-           (head_.value.load(std::memory_order_relaxed) -
-            tail_.value.load(AcquireOrder()));
+           (head_.value.load(std::memory_order_relaxed) - tail_.value.load(AcquireOrder()));
   }
 
   bool IsEmpty() const noexcept { return Size() == 0; }
@@ -329,9 +309,9 @@ class SpscRingbuffer {
     std::atomic<IndexT> value{0};
   };
 
-  PaddedIndex head_;                                  // Producer writes
-  PaddedIndex tail_;                                  // Consumer writes
-  alignas(kCacheLineSize) std::array<T, BufferSize> data_buff_{}; // Ring storage
+  PaddedIndex head_;                                               // Producer writes
+  PaddedIndex tail_;                                               // Consumer writes
+  alignas(kCacheLineSize) std::array<T, BufferSize> data_buff_{};  // Ring storage
 };
 
 }  // namespace osp

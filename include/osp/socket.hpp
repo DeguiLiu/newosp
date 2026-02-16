@@ -40,6 +40,9 @@
 
 #if OSP_HAS_NETWORK
 
+#include <cerrno>
+#include <cstring>
+
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -47,9 +50,6 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
-
-#include <cstring>
-#include <cerrno>
 
 namespace osp {
 
@@ -97,34 +97,26 @@ class SocketAddress {
    * @param port Port number in host byte order
    * @return expected<SocketAddress, SocketError> on success; kInvalidFd on bad ip
    */
-  static expected<SocketAddress, SocketError> FromIpv4(const char* ip,
-                                                       uint16_t port) noexcept {
+  static expected<SocketAddress, SocketError> FromIpv4(const char* ip, uint16_t port) noexcept {
     SocketAddress sa;
     sa.addr_.sin_family = AF_INET;
     sa.addr_.sin_port = htons(port);
     if (::inet_pton(AF_INET, ip, &sa.addr_.sin_addr) != 1) {
-      return expected<SocketAddress, SocketError>::error(
-          SocketError::kInvalidFd);
+      return expected<SocketAddress, SocketError>::error(SocketError::kInvalidFd);
     }
     return expected<SocketAddress, SocketError>::success(sa);
   }
 
   /** @brief Raw pointer to the underlying sockaddr structure. */
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: POSIX sockaddr cast
-  const sockaddr* Raw() const noexcept {
-    return reinterpret_cast<const sockaddr*>(&addr_);
-  }
+  const sockaddr* Raw() const noexcept { return reinterpret_cast<const sockaddr*>(&addr_); }
 
   /** @brief Mutable raw pointer (used internally by Accept/RecvFrom). */
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: POSIX sockaddr cast
-  sockaddr* RawMut() noexcept {
-    return reinterpret_cast<sockaddr*>(&addr_);
-  }
+  sockaddr* RawMut() noexcept { return reinterpret_cast<sockaddr*>(&addr_); }
 
   /** @brief Size of the underlying sockaddr_in structure. */
-  socklen_t Size() const noexcept {
-    return static_cast<socklen_t>(sizeof(addr_));
-  }
+  socklen_t Size() const noexcept { return static_cast<socklen_t>(sizeof(addr_)); }
 
   /** @brief Return the port in host byte order. */
   uint16_t Port() const noexcept { return ntohs(addr_.sin_port); }
@@ -153,9 +145,7 @@ class TcpSocket {
   ~TcpSocket() { Close(); }
 
   // Move-only ---------------------------------------------------------------
-  TcpSocket(TcpSocket&& other) noexcept : fd_(other.fd_) {
-    other.fd_ = -1;
-  }
+  TcpSocket(TcpSocket&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
 
   TcpSocket& operator=(TcpSocket&& other) noexcept {
     if (this != &other) {
@@ -202,8 +192,7 @@ class TcpSocket {
     auto n = ::send(fd_, data, len, MSG_NOSIGNAL);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return expected<int32_t, SocketError>::error(
-            SocketError::kWouldBlock);
+        return expected<int32_t, SocketError>::error(SocketError::kWouldBlock);
       }
       return expected<int32_t, SocketError>::error(SocketError::kSendFailed);
     }
@@ -217,8 +206,7 @@ class TcpSocket {
     auto n = ::recv(fd_, buf, len, 0);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return expected<int32_t, SocketError>::error(
-            SocketError::kWouldBlock);
+        return expected<int32_t, SocketError>::error(SocketError::kWouldBlock);
       }
       return expected<int32_t, SocketError>::error(SocketError::kRecvFailed);
     }
@@ -249,8 +237,7 @@ class TcpSocket {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
     }
     int32_t opt = enable ? 1 : 0;
-    if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt,
-                     static_cast<socklen_t>(sizeof(opt))) < 0) {
+    if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt))) < 0) {
       return expected<void, SocketError>::error(SocketError::kSetOptFailed);
     }
     return expected<void, SocketError>::success();
@@ -261,8 +248,7 @@ class TcpSocket {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
     }
     int32_t opt = enable ? 1 : 0;
-    if (::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &opt,
-                     static_cast<socklen_t>(sizeof(opt))) < 0) {
+    if (::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &opt, static_cast<socklen_t>(sizeof(opt))) < 0) {
       return expected<void, SocketError>::error(SocketError::kSetOptFailed);
     }
     return expected<void, SocketError>::success();
@@ -307,9 +293,7 @@ class UdpSocket {
   ~UdpSocket() { Close(); }
 
   // Move-only ---------------------------------------------------------------
-  UdpSocket(UdpSocket&& other) noexcept : fd_(other.fd_) {
-    other.fd_ = -1;
-  }
+  UdpSocket(UdpSocket&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
 
   UdpSocket& operator=(UdpSocket&& other) noexcept {
     if (this != &other) {
@@ -349,8 +333,7 @@ class UdpSocket {
     return expected<void, SocketError>::success();
   }
 
-  expected<int32_t, SocketError> SendTo(const void* data, size_t len,
-                                        const SocketAddress& dest) noexcept {
+  expected<int32_t, SocketError> SendTo(const void* data, size_t len, const SocketAddress& dest) noexcept {
     if (fd_ < 0) {
       return expected<int32_t, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -361,8 +344,7 @@ class UdpSocket {
     return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));
   }
 
-  expected<int32_t, SocketError> RecvFrom(void* buf, size_t len,
-                                          SocketAddress& src) noexcept {
+  expected<int32_t, SocketError> RecvFrom(void* buf, size_t len, SocketAddress& src) noexcept {
     if (fd_ < 0) {
       return expected<int32_t, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -411,9 +393,7 @@ class TcpListener {
   ~TcpListener() { Close(); }
 
   // Move-only ---------------------------------------------------------------
-  TcpListener(TcpListener&& other) noexcept : fd_(other.fd_) {
-    other.fd_ = -1;
-  }
+  TcpListener(TcpListener&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
 
   TcpListener& operator=(TcpListener&& other) noexcept {
     if (this != &other) {
@@ -552,20 +532,14 @@ class UnixAddress {
 
   /** @brief Raw pointer to the underlying sockaddr structure. */
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: POSIX sockaddr cast
-  const sockaddr* Raw() const noexcept {
-    return reinterpret_cast<const sockaddr*>(&addr_);
-  }
+  const sockaddr* Raw() const noexcept { return reinterpret_cast<const sockaddr*>(&addr_); }
 
   /** @brief Mutable raw pointer (used internally by Accept). */
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- MISRA 5-2-8 deviation: POSIX sockaddr cast
-  sockaddr* RawMut() noexcept {
-    return reinterpret_cast<sockaddr*>(&addr_);
-  }
+  sockaddr* RawMut() noexcept { return reinterpret_cast<sockaddr*>(&addr_); }
 
   /** @brief Size of the underlying sockaddr_un structure. */
-  socklen_t Size() const noexcept {
-    return static_cast<socklen_t>(sizeof(addr_));
-  }
+  socklen_t Size() const noexcept { return static_cast<socklen_t>(sizeof(addr_)); }
 
  private:
   sockaddr_un addr_;
@@ -591,9 +565,7 @@ class UnixSocket {
   ~UnixSocket() { Close(); }
 
   // Move-only ---------------------------------------------------------------
-  UnixSocket(UnixSocket&& other) noexcept : fd_(other.fd_) {
-    other.fd_ = -1;
-  }
+  UnixSocket(UnixSocket&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
 
   UnixSocket& operator=(UnixSocket&& other) noexcept {
     if (this != &other) {
@@ -640,8 +612,7 @@ class UnixSocket {
     auto n = ::send(fd_, data, len, MSG_NOSIGNAL);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return expected<int32_t, SocketError>::error(
-            SocketError::kWouldBlock);
+        return expected<int32_t, SocketError>::error(SocketError::kWouldBlock);
       }
       return expected<int32_t, SocketError>::error(SocketError::kSendFailed);
     }
@@ -655,8 +626,7 @@ class UnixSocket {
     auto n = ::recv(fd_, buf, len, 0);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return expected<int32_t, SocketError>::error(
-            SocketError::kWouldBlock);
+        return expected<int32_t, SocketError>::error(SocketError::kWouldBlock);
       }
       return expected<int32_t, SocketError>::error(SocketError::kRecvFailed);
     }
@@ -722,9 +692,7 @@ class UnixListener {
   ~UnixListener() { Close(); }
 
   // Move-only ---------------------------------------------------------------
-  UnixListener(UnixListener&& other) noexcept : fd_(other.fd_) {
-    other.fd_ = -1;
-  }
+  UnixListener(UnixListener&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
 
   UnixListener& operator=(UnixListener&& other) noexcept {
     if (this != &other) {

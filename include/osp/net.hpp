@@ -43,13 +43,13 @@
 
 #include "osp/vocabulary.hpp"
 
+#include <cstring>
+
 #include <sockpp/inet_address.h>
 #include <sockpp/tcp_acceptor.h>
 #include <sockpp/tcp_connector.h>
 #include <sockpp/tcp_socket.h>
 #include <sockpp/udp_socket.h>
-
-#include <cstring>
 
 namespace osp {
 namespace net {
@@ -91,8 +91,7 @@ class TcpClient {
    * @param timeout_ms Connection timeout in milliseconds (0 = blocking)
    * @return TcpClient on success, NetError on failure
    */
-  static expected<TcpClient, NetError> Connect(const char* host, uint16_t port,
-                                                int32_t timeout_ms = 5000) noexcept {
+  static expected<TcpClient, NetError> Connect(const char* host, uint16_t port, int32_t timeout_ms = 5000) noexcept {
     // Create address
     auto addr_res = sockpp::inet_address::create(host, port);
     if (!addr_res) {
@@ -184,8 +183,7 @@ class TcpClient {
   friend class TcpServer;
 
   // Private constructor from tcp_socket (used by TcpServer::Accept)
-  explicit TcpClient(sockpp::tcp_socket&& sock) noexcept
-      : sock_(std::move(sock)) {}
+  explicit TcpClient(sockpp::tcp_socket&& sock) noexcept : sock_(std::move(sock)) {}
 
   sockpp::tcp_socket sock_;
 };
@@ -210,8 +208,7 @@ class TcpServer {
    * @param backlog Maximum pending connection queue size
    * @return TcpServer on success, NetError on failure
    */
-  static expected<TcpServer, NetError> Listen(uint16_t port,
-                                               int32_t backlog = 16) noexcept {
+  static expected<TcpServer, NetError> Listen(uint16_t port, int32_t backlog = 16) noexcept {
     TcpServer server;
 
     // Create address (bind to all interfaces)
@@ -245,8 +242,7 @@ class TcpServer {
 
     // Create TcpClient from the accepted tcp_socket
     // Use release() to move out of result
-    return expected<TcpClient, NetError>::success(
-        TcpClient(res.release()));
+    return expected<TcpClient, NetError>::success(TcpClient(res.release()));
   }
 
   /**
@@ -342,8 +338,7 @@ class UdpPeer {
    * @param port Destination port number
    * @return Number of bytes sent on success, NetError on failure
    */
-  expected<size_t, NetError> SendTo(const void* data, size_t len,
-                                     const char* host, uint16_t port) noexcept {
+  expected<size_t, NetError> SendTo(const void* data, size_t len, const char* host, uint16_t port) noexcept {
     if (!sock_.is_open()) {
       return expected<size_t, NetError>::error(NetError::kClosed);
     }
@@ -370,9 +365,8 @@ class UdpPeer {
    * @param from_port Pointer to store sender's port (can be nullptr)
    * @return Number of bytes received on success, NetError on failure
    */
-  expected<size_t, NetError> RecvFrom(void* buf, size_t len, char* from_host,
-                                       size_t host_len,
-                                       uint16_t* from_port) noexcept {
+  expected<size_t, NetError> RecvFrom(void* buf, size_t len, char* from_host, size_t host_len,
+                                      uint16_t* from_port) noexcept {
     if (!sock_.is_open()) {
       return expected<size_t, NetError>::error(NetError::kClosed);
     }

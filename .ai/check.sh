@@ -43,6 +43,13 @@ run_step "Format Check" "$SCRIPT_DIR/format.sh" --check
 # Step 2: Lint
 run_step "Lint (cpplint)" "$SCRIPT_DIR/lint.sh" || true
 
+# Step 2.5: Static Analysis (clang-tidy, optional)
+if command -v clang-tidy &>/dev/null; then
+  run_step "Static Analysis (clang-tidy)" "$SCRIPT_DIR/tidy.sh" || true
+else
+  echo "  Skipping clang-tidy (not installed)"
+fi
+
 # Step 3: Build
 BUILD_DIR="$PROJECT_ROOT/build"
 if $SANITIZER; then

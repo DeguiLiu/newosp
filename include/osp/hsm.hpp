@@ -44,6 +44,7 @@
 #define OSP_HSM_HPP_
 
 #include "osp/platform.hpp"
+
 #include <array>
 
 #ifndef OSP_HSM_MAX_DEPTH
@@ -100,12 +101,12 @@ struct StateConfig {
   using ExitFn = void (*)(Context& ctx);
   using GuardFn = bool (*)(const Context& ctx, const Event& event);
 
-  const char* name;       ///< State name for debugging (static lifetime).
-  int32_t parent_index;   ///< Index of parent state, -1 for root.
-  HandlerFn handler;      ///< Event handler function.
-  EntryFn on_entry;       ///< Entry action, nullptr if none.
-  ExitFn on_exit;         ///< Exit action, nullptr if none.
-  GuardFn guard;          ///< Guard condition, nullptr = no guard.
+  const char* name;      ///< State name for debugging (static lifetime).
+  int32_t parent_index;  ///< Index of parent state, -1 for root.
+  HandlerFn handler;     ///< Event handler function.
+  EntryFn on_entry;      ///< Entry action, nullptr if none.
+  ExitFn on_exit;        ///< Exit action, nullptr if none.
+  GuardFn guard;         ///< Guard condition, nullptr = no guard.
 };
 
 // ============================================================================
@@ -186,8 +187,7 @@ class StateMachine final {
    */
   void SetInitialState(int32_t state_index) noexcept {
     OSP_ASSERT(!started_);
-    OSP_ASSERT(state_index >= 0 &&
-               static_cast<uint32_t>(state_index) < state_count_);
+    OSP_ASSERT(state_index >= 0 && static_cast<uint32_t>(state_index) < state_count_);
     initial_state_ = state_index;
   }
 
@@ -405,8 +405,7 @@ class StateMachine final {
    *
    * The path is stored in order from 'from' outward (bottom-up).
    */
-  void BuildExitPath(int32_t from, int32_t lca,
-                     int32_t* path, uint32_t& len) const noexcept {
+  void BuildExitPath(int32_t from, int32_t lca, int32_t* path, uint32_t& len) const noexcept {
     len = 0;
     int32_t s = from;
     while (s >= 0 && s != lca) {
@@ -423,8 +422,7 @@ class StateMachine final {
    * The path is stored bottom-up (target first). Caller should iterate in
    * reverse to enter top-down.
    */
-  void BuildEntryPath(int32_t from_lca, int32_t to,
-                      int32_t* path, uint32_t& len) const noexcept {
+  void BuildEntryPath(int32_t from_lca, int32_t to, int32_t* path, uint32_t& len) const noexcept {
     len = 0;
     int32_t s = to;
     while (s >= 0 && s != from_lca) {

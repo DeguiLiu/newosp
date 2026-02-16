@@ -72,14 +72,7 @@ namespace log {
  *
  * Ordered from least to most severe. kOff disables all logging.
  */
-enum class Level : uint8_t {
-  kDebug = 0,
-  kInfo  = 1,
-  kWarn  = 2,
-  kError = 3,
-  kFatal = 4,
-  kOff   = 5
-};
+enum class Level : uint8_t { kDebug = 0, kInfo = 1, kWarn = 2, kError = 3, kFatal = 4, kOff = 5 };
 
 // ============================================================================
 // Internal Detail
@@ -116,12 +109,18 @@ inline bool& InitializedRef() noexcept {
  */
 inline const char* LevelTag(Level level) noexcept {
   switch (level) {
-    case Level::kDebug: return "DEBUG";
-    case Level::kInfo:  return "INFO ";
-    case Level::kWarn:  return "WARN ";
-    case Level::kError: return "ERROR";
-    case Level::kFatal: return "FATAL";
-    default:            return "?????";
+    case Level::kDebug:
+      return "DEBUG";
+    case Level::kInfo:
+      return "INFO ";
+    case Level::kWarn:
+      return "WARN ";
+    case Level::kError:
+      return "ERROR";
+    case Level::kFatal:
+      return "FATAL";
+    default:
+      return "?????";
   }
 }
 
@@ -141,28 +140,15 @@ inline void FormatTimestamp(char* buf, size_t bufsz) noexcept {
 
   int ms = static_cast<int>(ts.tv_nsec / 1000000L);
 
-  (void)snprintf(buf, bufsz,
-                 "%04d-%02d-%02d %02d:%02d:%02d.%03d",
-                 tm_local.tm_year + 1900,
-                 tm_local.tm_mon + 1,
-                 tm_local.tm_mday,
-                 tm_local.tm_hour,
-                 tm_local.tm_min,
-                 tm_local.tm_sec,
-                 ms);
+  (void)snprintf(buf, bufsz, "%04d-%02d-%02d %02d:%02d:%02d.%03d", tm_local.tm_year + 1900, tm_local.tm_mon + 1,
+                 tm_local.tm_mday, tm_local.tm_hour, tm_local.tm_min, tm_local.tm_sec, ms);
 #else
   // Fallback: standard C time (second-resolution only)
   std::time_t now = std::time(nullptr);
   struct std::tm* tm_local = std::localtime(&now);
   if (tm_local != nullptr) {
-    (void)snprintf(buf, bufsz,
-                   "%04d-%02d-%02d %02d:%02d:%02d.000",
-                   tm_local->tm_year + 1900,
-                   tm_local->tm_mon + 1,
-                   tm_local->tm_mday,
-                   tm_local->tm_hour,
-                   tm_local->tm_min,
-                   tm_local->tm_sec);
+    (void)snprintf(buf, bufsz, "%04d-%02d-%02d %02d:%02d:%02d.000", tm_local->tm_year + 1900, tm_local->tm_mon + 1,
+                   tm_local->tm_mday, tm_local->tm_hour, tm_local->tm_min, tm_local->tm_sec);
   } else {
     (void)snprintf(buf, bufsz, "0000-00-00 00:00:00.000");
   }
@@ -248,8 +234,7 @@ inline bool IsInitialized() noexcept {
  * @param fmt      Printf-style format string.
  * @param ...      Format arguments.
  */
-inline void LogWrite(Level level, const char* category, const char* file,
-                     int line, const char* fmt, ...) noexcept {
+inline void LogWrite(Level level, const char* category, const char* file, int line, const char* fmt, ...) noexcept {
   // --- Runtime level gate ---
   if (static_cast<uint8_t>(level) < static_cast<uint8_t>(detail::LogLevelRef())) {
     return;
@@ -269,10 +254,7 @@ inline void LogWrite(Level level, const char* category, const char* file,
   // --- Output ---
 #ifdef NDEBUG
   // Release: no file:line
-  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n",
-                     ts_buf,
-                     detail::LevelTag(level),
-                     category ? category : "-",
+  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n", ts_buf, detail::LevelTag(level), category ? category : "-",
                      msg_buf);
 #else
   // Debug: include file:line
@@ -284,13 +266,8 @@ inline void LogWrite(Level level, const char* category, const char* file,
       basename = slash + 1;
     }
   }
-  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%d)\n",
-                     ts_buf,
-                     detail::LevelTag(level),
-                     category ? category : "-",
-                     msg_buf,
-                     basename ? basename : "?",
-                     line);
+  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%d)\n", ts_buf, detail::LevelTag(level), category ? category : "-",
+                     msg_buf, basename ? basename : "?", line);
 #endif
 
   // --- Fatal: flush and abort ---
@@ -306,8 +283,8 @@ inline void LogWrite(Level level, const char* category, const char* file,
  * Same logic as LogWrite but accepts a pre-started va_list instead of
  * variadic arguments. The caller is responsible for va_start/va_end.
  */
-inline void LogWriteVa(Level level, const char* category, const char* file,
-                       int line, const char* fmt, va_list args) noexcept {
+inline void LogWriteVa(Level level, const char* category, const char* file, int line, const char* fmt,
+                       va_list args) noexcept {
   if (static_cast<uint8_t>(level) < static_cast<uint8_t>(detail::LogLevelRef())) {
     return;
   }
@@ -319,10 +296,7 @@ inline void LogWriteVa(Level level, const char* category, const char* file,
   (void)vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
 
 #ifdef NDEBUG
-  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n",
-                     ts_buf,
-                     detail::LevelTag(level),
-                     category ? category : "-",
+  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n", ts_buf, detail::LevelTag(level), category ? category : "-",
                      msg_buf);
 #else
   const char* basename = file;
@@ -332,13 +306,8 @@ inline void LogWriteVa(Level level, const char* category, const char* file,
       basename = slash + 1;
     }
   }
-  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%d)\n",
-                     ts_buf,
-                     detail::LevelTag(level),
-                     category ? category : "-",
-                     msg_buf,
-                     basename ? basename : "?",
-                     line);
+  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%d)\n", ts_buf, detail::LevelTag(level), category ? category : "-",
+                     msg_buf, basename ? basename : "?", line);
 #endif
 
   if (level == Level::kFatal) {
@@ -366,11 +335,11 @@ inline void LogWriteVa(Level level, const char* category, const char* file,
  *   5 = kOff   (disables all logging)
  */
 #ifndef OSP_LOG_MIN_LEVEL
-  #ifdef NDEBUG
-    #define OSP_LOG_MIN_LEVEL 1
-  #else
-    #define OSP_LOG_MIN_LEVEL 0
-  #endif
+#ifdef NDEBUG
+#define OSP_LOG_MIN_LEVEL 1
+#else
+#define OSP_LOG_MIN_LEVEL 0
+#endif
 #endif
 
 // ============================================================================
@@ -383,56 +352,51 @@ inline void LogWriteVa(Level level, const char* category, const char* file,
  * @param fmt  Printf-style format string.
  * @param ...  Format arguments.
  */
-#define OSP_LOG_DEBUG(cat, fmt, ...)                                         \
-  do {                                                                      \
-    if (OSP_LOG_MIN_LEVEL <= 0) {                                           \
-      ::osp::log::LogWrite(::osp::log::Level::kDebug, cat,                 \
-                           __FILE__, __LINE__, fmt, ##__VA_ARGS__);         \
-    }                                                                       \
+#define OSP_LOG_DEBUG(cat, fmt, ...)                                                                \
+  do {                                                                                              \
+    if (OSP_LOG_MIN_LEVEL <= 0) {                                                                   \
+      ::osp::log::LogWrite(::osp::log::Level::kDebug, cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+    }                                                                                               \
   } while (0)
 
 /**
  * @brief Log an INFO message with category.
  */
-#define OSP_LOG_INFO(cat, fmt, ...)                                         \
-  do {                                                                      \
-    if (OSP_LOG_MIN_LEVEL <= 1) {                                           \
-      ::osp::log::LogWrite(::osp::log::Level::kInfo, cat,                  \
-                           __FILE__, __LINE__, fmt, ##__VA_ARGS__);         \
-    }                                                                       \
+#define OSP_LOG_INFO(cat, fmt, ...)                                                                \
+  do {                                                                                             \
+    if (OSP_LOG_MIN_LEVEL <= 1) {                                                                  \
+      ::osp::log::LogWrite(::osp::log::Level::kInfo, cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+    }                                                                                              \
   } while (0)
 
 /**
  * @brief Log a WARN message with category.
  */
-#define OSP_LOG_WARN(cat, fmt, ...)                                         \
-  do {                                                                      \
-    if (OSP_LOG_MIN_LEVEL <= 2) {                                           \
-      ::osp::log::LogWrite(::osp::log::Level::kWarn, cat,                  \
-                           __FILE__, __LINE__, fmt, ##__VA_ARGS__);         \
-    }                                                                       \
+#define OSP_LOG_WARN(cat, fmt, ...)                                                                \
+  do {                                                                                             \
+    if (OSP_LOG_MIN_LEVEL <= 2) {                                                                  \
+      ::osp::log::LogWrite(::osp::log::Level::kWarn, cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+    }                                                                                              \
   } while (0)
 
 /**
  * @brief Log an ERROR message with category.
  */
-#define OSP_LOG_ERROR(cat, fmt, ...)                                        \
-  do {                                                                      \
-    if (OSP_LOG_MIN_LEVEL <= 3) {                                           \
-      ::osp::log::LogWrite(::osp::log::Level::kError, cat,                 \
-                           __FILE__, __LINE__, fmt, ##__VA_ARGS__);         \
-    }                                                                       \
+#define OSP_LOG_ERROR(cat, fmt, ...)                                                                \
+  do {                                                                                              \
+    if (OSP_LOG_MIN_LEVEL <= 3) {                                                                   \
+      ::osp::log::LogWrite(::osp::log::Level::kError, cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+    }                                                                                               \
   } while (0)
 
 /**
  * @brief Log a FATAL message with category, then abort.
  */
-#define OSP_LOG_FATAL(cat, fmt, ...)                                        \
-  do {                                                                      \
-    if (OSP_LOG_MIN_LEVEL <= 4) {                                           \
-      ::osp::log::LogWrite(::osp::log::Level::kFatal, cat,                 \
-                           __FILE__, __LINE__, fmt, ##__VA_ARGS__);         \
-    }                                                                       \
+#define OSP_LOG_FATAL(cat, fmt, ...)                                                                \
+  do {                                                                                              \
+    if (OSP_LOG_MIN_LEVEL <= 4) {                                                                   \
+      ::osp::log::LogWrite(::osp::log::Level::kFatal, cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+    }                                                                                               \
   } while (0)
 
 #endif  // OSP_LOG_HPP_

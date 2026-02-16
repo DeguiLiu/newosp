@@ -37,22 +37,22 @@
 #define OSP_DISCOVERY_HPP_
 
 #include "osp/platform.hpp"
-#include "osp/vocabulary.hpp"
 #include "osp/timer.hpp"
+#include "osp/vocabulary.hpp"
 
 #if OSP_HAS_NETWORK
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include <cstring>
 
+#include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
-#include <cstring>
+#include <fcntl.h>
 #include <mutex>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 
 namespace osp {
 
@@ -74,14 +74,13 @@ enum class DiscoveryError : uint8_t {
 // ============================================================================
 
 struct DiscoveredNode {
-  FixedString<63> name;           // Node name
-  FixedString<63> address;        // IP address
-  uint16_t port;           // Service port
-  uint64_t last_seen_us;   // Last heartbeat time (microseconds)
-  bool alive;              // Is alive
+  FixedString<63> name;     // Node name
+  FixedString<63> address;  // IP address
+  uint16_t port;            // Service port
+  uint64_t last_seen_us;    // Last heartbeat time (microseconds)
+  bool alive;               // Is alive
 
-  DiscoveredNode() noexcept
-      : name(), address(), port(0), last_seen_us(0), alive(false) {}
+  DiscoveredNode() noexcept : name(), address(), port(0), last_seen_us(0), alive(false) {}
 };
 
 // ============================================================================
@@ -89,13 +88,12 @@ struct DiscoveredNode {
 // ============================================================================
 
 struct TopicInfo {
-  FixedString<63> name;        // Topic name
-  FixedString<63> type_name;   // Type name (e.g. "SensorData")
+  FixedString<63> name;       // Topic name
+  FixedString<63> type_name;  // Type name (e.g. "SensorData")
   uint16_t publisher_port;
-  bool is_publisher;    // true=publisher, false=subscriber
+  bool is_publisher;  // true=publisher, false=subscriber
 
-  TopicInfo() noexcept
-      : name(), type_name(), publisher_port(0), is_publisher(false) {}
+  TopicInfo() noexcept : name(), type_name(), publisher_port(0), is_publisher(false) {}
 };
 
 // ============================================================================
@@ -103,13 +101,12 @@ struct TopicInfo {
 // ============================================================================
 
 struct ServiceInfo {
-  FixedString<63> name;        // Service name
+  FixedString<63> name;  // Service name
   FixedString<63> request_type;
   FixedString<63> response_type;
   uint16_t port;
 
-  ServiceInfo() noexcept
-      : name(), request_type(), response_type(), port(0) {}
+  ServiceInfo() noexcept : name(), request_type(), response_type(), port(0) {}
 };
 
 // ============================================================================
@@ -128,11 +125,9 @@ class StaticDiscovery {
    * @param port Service port.
    * @return Success or DiscoveryError.
    */
-  expected<void, DiscoveryError> AddNode(const char* name, const char* address,
-                                          uint16_t port) noexcept {
+  expected<void, DiscoveryError> AddNode(const char* name, const char* address, uint16_t port) noexcept {
     if (count_ >= MaxNodes) {
-      return expected<void, DiscoveryError>::error(
-          DiscoveryError::kSocketFailed);
+      return expected<void, DiscoveryError>::error(DiscoveryError::kSocketFailed);
     }
 
     DiscoveredNode& node = nodes_[count_];
@@ -184,8 +179,7 @@ class StaticDiscovery {
    * @param callback Function pointer to invoke for each node.
    * @param ctx User context pointer passed to callback.
    */
-  void ForEach(void (*callback)(const DiscoveredNode&, void*),
-               void* ctx) const noexcept {
+  void ForEach(void (*callback)(const DiscoveredNode&, void*), void* ctx) const noexcept {
     for (uint32_t i = 0; i < count_; ++i) {
       callback(nodes_[i], ctx);
     }
@@ -228,8 +222,7 @@ class MulticastDiscovery {
     uint32_t timeout_ms = OSP_DISCOVERY_TIMEOUT_MS;
   };
 
-  explicit MulticastDiscovery(const Config& cfg = {},
-                              TimerScheduler<>* scheduler = nullptr) noexcept
+  explicit MulticastDiscovery(const Config& cfg = {}, TimerScheduler<>* scheduler = nullptr) noexcept
       : config_(cfg),
         sockfd_(-1),
         running_(false),
@@ -290,22 +283,19 @@ class MulticastDiscovery {
    */
   expected<void, DiscoveryError> Start() noexcept {
     if (running_.load(std::memory_order_acquire)) {
-      return expected<void, DiscoveryError>::error(
-          DiscoveryError::kAlreadyRunning);
+      return expected<void, DiscoveryError>::error(DiscoveryError::kAlreadyRunning);
     }
 
     // Create UDP socket
     sockfd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd_ < 0) {
-      return expected<void, DiscoveryError>::error(
-          DiscoveryError::kSocketFailed);
+      return expected<void, DiscoveryError>::error(DiscoveryError::kSocketFailed);
     }
 
     // Set SO_REUSEADDR
     constexpr int32_t kSoReuseAddrValue = 1;
     int32_t opt = kSoReuseAddrValue;
-    ::setsockopt(sockfd_, SOL_SOCKET, SO_REUSEADDR, &opt,
-                 static_cast<socklen_t>(sizeof(opt)));
+    ::setsockopt(sockfd_, SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
 
     // Bind to multicast port
     sockaddr_in bind_addr{};
@@ -315,8 +305,7 @@ class MulticastDiscovery {
 
     // MISRA C++ Rule 5-2-4 deviation: reinterpret_cast required by POSIX
     // socket API (bind/sendto/recvfrom expect sockaddr*).
-    if (::bind(sockfd_, reinterpret_cast<sockaddr*>(&bind_addr),
-               sizeof(bind_addr)) < 0) {
+    if (::bind(sockfd_, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
       ::close(sockfd_);
       sockfd_ = -1;
       return expected<void, DiscoveryError>::error(DiscoveryError::kBindFailed);
@@ -324,21 +313,17 @@ class MulticastDiscovery {
 
     // Join multicast group
     ip_mreq mreq{};
-    if (::inet_pton(AF_INET, config_.multicast_group, &mreq.imr_multiaddr) !=
-        1) {
+    if (::inet_pton(AF_INET, config_.multicast_group, &mreq.imr_multiaddr) != 1) {
       ::close(sockfd_);
       sockfd_ = -1;
-      return expected<void, DiscoveryError>::error(
-          DiscoveryError::kMulticastJoinFailed);
+      return expected<void, DiscoveryError>::error(DiscoveryError::kMulticastJoinFailed);
     }
     mreq.imr_interface.s_addr = htonl(INADDR_ANY);
 
-    if (::setsockopt(sockfd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
-                     sizeof(mreq)) < 0) {
+    if (::setsockopt(sockfd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
       ::close(sockfd_);
       sockfd_ = -1;
-      return expected<void, DiscoveryError>::error(
-          DiscoveryError::kMulticastJoinFailed);
+      return expected<void, DiscoveryError>::error(DiscoveryError::kMulticastJoinFailed);
     }
 
     // Set socket to non-blocking for receive thread
@@ -356,7 +341,8 @@ class MulticastDiscovery {
 
       // Check timeouts ~3x per timeout period
       uint32_t timeout_check_ms = config_.timeout_ms / 3U;
-      if (timeout_check_ms == 0U) timeout_check_ms = 1U;
+      if (timeout_check_ms == 0U)
+        timeout_check_ms = 1U;
       auto to_r = scheduler_->Add(timeout_check_ms, TimeoutTick, this);
       if (to_r.has_value()) {
         timeout_task_id_ = to_r.value();
@@ -376,7 +362,8 @@ class MulticastDiscovery {
    * @brief Stop discovery and join threads.
    */
   void Stop() noexcept {
-    if (!running_.load(std::memory_order_acquire)) return;
+    if (!running_.load(std::memory_order_acquire))
+      return;
 
     running_.store(false, std::memory_order_release);
 
@@ -404,9 +391,7 @@ class MulticastDiscovery {
   }
 
   /** @brief Check if discovery is running. */
-  bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_acquire);
-  }
+  bool IsRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
   /**
    * @brief Find a node by name.
@@ -467,8 +452,7 @@ class MulticastDiscovery {
     {
       std::lock_guard<std::mutex> lock(self->mutex_);
       if (self->sockfd_ >= 0) {
-        ::sendto(self->sockfd_, packet, kAnnounceSize, 0,
-                 reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
+        ::sendto(self->sockfd_, packet, kAnnounceSize, 0, reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
       }
     }
   }
@@ -485,7 +469,9 @@ class MulticastDiscovery {
     mcast_addr.sin_port = htons(config_.port);
 
     while (running_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+      if (heartbeat_ != nullptr) {
+        heartbeat_->Beat();
+      }
       // Build announce packet
       uint8_t packet[kAnnounceSize];
       std::memcpy(packet, &kAnnounceMagic, 4);
@@ -497,14 +483,12 @@ class MulticastDiscovery {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (sockfd_ >= 0) {
-          ::sendto(sockfd_, packet, kAnnounceSize, 0,
-                   reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
+          ::sendto(sockfd_, packet, kAnnounceSize, 0, reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
         }
       }
 
       // Sleep for announce interval
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(config_.announce_interval_ms));
+      std::this_thread::sleep_for(std::chrono::milliseconds(config_.announce_interval_ms));
     }
   }
 
@@ -513,7 +497,9 @@ class MulticastDiscovery {
     constexpr uint32_t kSleepIntervalMs = 100;
 
     while (running_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+      if (heartbeat_ != nullptr) {
+        heartbeat_->Beat();
+      }
       sockaddr_in sender_addr{};
       socklen_t addr_len = sizeof(sender_addr);
 
@@ -521,9 +507,7 @@ class MulticastDiscovery {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (sockfd_ >= 0) {
-          n = ::recvfrom(sockfd_, packet, sizeof(packet), 0,
-                         reinterpret_cast<sockaddr*>(&sender_addr),
-                         &addr_len);
+          n = ::recvfrom(sockfd_, packet, sizeof(packet), 0, reinterpret_cast<sockaddr*>(&sender_addr), &addr_len);
         }
       }
 
@@ -545,7 +529,8 @@ class MulticastDiscovery {
     // Validate magic
     uint32_t magic;
     std::memcpy(&magic, packet, 4);
-    if (magic != kAnnounceMagic) return;
+    if (magic != kAnnounceMagic)
+      return;
 
     // Extract name and port
     char name_buf[64];
@@ -589,7 +574,8 @@ class MulticastDiscovery {
         }
       }
 
-      if (slot == MaxNodes) return;  // No free slots
+      if (slot == MaxNodes)
+        return;  // No free slots
 
       bool is_new = !nodes_[slot].alive;
 
@@ -636,8 +622,7 @@ class MulticastDiscovery {
 
       for (uint32_t i = 0; i < MaxNodes; ++i) {
         if (nodes_[i].alive) {
-          if (now > nodes_[i].last_seen_us &&
-              (now - nodes_[i].last_seen_us) > timeout_us) {
+          if (now > nodes_[i].last_seen_us && (now - nodes_[i].last_seen_us) > timeout_us) {
             nodes_[i].alive = false;
             --node_count_;
             if (leave_cb != nullptr) {
@@ -696,12 +681,10 @@ class TopicAwareDiscovery {
     ServiceInfo services[kMaxServicesPerNode];
     uint32_t service_count;
 
-    DiscoveryEntry() noexcept
-        : node(), topics{}, topic_count(0), services{}, service_count(0) {}
+    DiscoveryEntry() noexcept : node(), topics{}, topic_count(0), services{}, service_count(0) {}
   };
 
-  TopicAwareDiscovery() noexcept
-      : local_topic_count_(0), local_service_count_(0) {}
+  TopicAwareDiscovery() noexcept : local_topic_count_(0), local_service_count_(0) {}
 
   /**
    * @brief Add a local topic advertisement.
@@ -711,8 +694,7 @@ class TopicAwareDiscovery {
   expected<void, DiscoveryError> AddLocalTopic(const TopicInfo& topic) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (local_topic_count_ >= MaxTopicsPerNode) {
-      return expected<void, DiscoveryError>::error(
-          DiscoveryError::kSocketFailed);
+      return expected<void, DiscoveryError>::error(DiscoveryError::kSocketFailed);
     }
     local_topics_[local_topic_count_++] = topic;
     return expected<void, DiscoveryError>::success();
@@ -726,8 +708,7 @@ class TopicAwareDiscovery {
   expected<void, DiscoveryError> AddLocalService(const ServiceInfo& svc) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (local_service_count_ >= kMaxServicesPerNode) {
-      return expected<void, DiscoveryError>::error(
-          DiscoveryError::kSocketFailed);
+      return expected<void, DiscoveryError>::error(DiscoveryError::kSocketFailed);
     }
     local_services_[local_service_count_++] = svc;
     return expected<void, DiscoveryError>::success();
@@ -740,13 +721,11 @@ class TopicAwareDiscovery {
    * @param max_results Maximum number of results to return.
    * @return Number of publishers found.
    */
-  uint32_t FindPublishers(const char* topic_name, TopicInfo* out,
-                          uint32_t max_results) const noexcept {
+  uint32_t FindPublishers(const char* topic_name, TopicInfo* out, uint32_t max_results) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     uint32_t count = 0;
     for (uint32_t i = 0; i < local_topic_count_ && count < max_results; ++i) {
-      if (local_topics_[i].is_publisher &&
-          std::strcmp(local_topics_[i].name.c_str(), topic_name) == 0) {
+      if (local_topics_[i].is_publisher && std::strcmp(local_topics_[i].name.c_str(), topic_name) == 0) {
         out[count++] = local_topics_[i];
       }
     }
@@ -760,13 +739,11 @@ class TopicAwareDiscovery {
    * @param max_results Maximum number of results to return.
    * @return Number of subscribers found.
    */
-  uint32_t FindSubscribers(const char* topic_name, TopicInfo* out,
-                           uint32_t max_results) const noexcept {
+  uint32_t FindSubscribers(const char* topic_name, TopicInfo* out, uint32_t max_results) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     uint32_t count = 0;
     for (uint32_t i = 0; i < local_topic_count_ && count < max_results; ++i) {
-      if (!local_topics_[i].is_publisher &&
-          std::strcmp(local_topics_[i].name.c_str(), topic_name) == 0) {
+      if (!local_topics_[i].is_publisher && std::strcmp(local_topics_[i].name.c_str(), topic_name) == 0) {
         out[count++] = local_topics_[i];
       }
     }

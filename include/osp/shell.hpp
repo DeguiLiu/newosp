@@ -46,12 +46,13 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
-#include <atomic>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#include <atomic>
 #include <mutex>
 #include <thread>
 
@@ -152,10 +153,10 @@ inline ssize_t ShellPosixRead(int fd, void* buf, size_t len) {
 /// @brief Session state used internally by all shell backends.
 struct ShellSession {
   // --- I/O abstraction ---
-  int read_fd = -1;             ///< Read file descriptor.
-  int write_fd = -1;            ///< Write file descriptor (may differ for Console).
+  int read_fd = -1;   ///< Read file descriptor.
+  int write_fd = -1;  ///< Write file descriptor (may differ for Console).
   ShellWriteFn write_fn = nullptr;
-  ShellReadFn  read_fn = nullptr;
+  ShellReadFn read_fn = nullptr;
 
   // --- Line editing ---
   char line_buf[OSP_SHELL_LINE_BUF_SIZE] = {};
@@ -163,10 +164,10 @@ struct ShellSession {
 
   // --- History ring buffer ---
   char history[OSP_SHELL_HISTORY_SIZE][OSP_SHELL_LINE_BUF_SIZE] = {};
-  uint32_t hist_count = 0;      ///< Total entries stored.
-  uint32_t hist_head = 0;       ///< Next write position.
-  uint32_t hist_browse = 0;     ///< Current browse position.
-  bool hist_browsing = false;   ///< Currently navigating history.
+  uint32_t hist_count = 0;     ///< Total entries stored.
+  uint32_t hist_head = 0;      ///< Next write position.
+  uint32_t hist_browse = 0;    ///< Current browse position.
+  bool hist_browsing = false;  ///< Currently navigating history.
 
   // --- ESC sequence state ---
   enum class EscState : uint8_t { kNone = 0, kEsc, kBracket };
@@ -183,8 +184,8 @@ struct ShellSession {
   // --- Control ---
   std::thread thread;
   std::atomic<bool> active{false};
-  bool telnet_mode = false;     ///< true = TCP (enable IAC filtering).
-  bool skip_next_lf = false;    ///< CRLF dedup (replaces MSG_PEEK).
+  bool telnet_mode = false;   ///< true = TCP (enable IAC filtering).
+  bool skip_next_lf = false;  ///< CRLF dedup (replaces MSG_PEEK).
 };
 
 /// @brief Returns a reference to the thread-local current session pointer.
@@ -197,9 +198,8 @@ inline ShellSession*& CurrentSession() noexcept {
 ///
 /// Consolidates the repeated session setup code used by DebugShell,
 /// ConsoleShell, and UartShell into a single helper.
-inline void ShellSessionInit(ShellSession& s, int read_fd, int write_fd,
-                         ShellWriteFn write_fn, ShellReadFn read_fn,
-                         bool telnet_mode) noexcept {
+inline void ShellSessionInit(ShellSession& s, int read_fd, int write_fd, ShellWriteFn write_fn, ShellReadFn read_fn,
+                             bool telnet_mode) noexcept {
   s.read_fd = read_fd;
   s.write_fd = write_fd;
   s.write_fn = write_fn;
@@ -239,9 +239,7 @@ inline void ShellSessionWrite(ShellSession& s, const void* buf, size_t len) {
 // ============================================================================
 
 /// @brief Replace the current terminal line with new content.
-inline void ReplaceLine(ShellSession& s,
-                         const char* new_line,
-                         uint32_t new_len) {
+inline void ReplaceLine(ShellSession& s, const char* new_line, uint32_t new_len) {
   // Erase current line on terminal.
   for (uint32_t i = 0; i < s.line_pos; ++i) {
     ShellSessionWrite(s, "\b \b", 3);
@@ -260,42 +258,42 @@ inline void ReplaceLine(ShellSession& s,
 
 /// @brief Push the current line into the history ring buffer.
 inline void PushHistory(ShellSession& s) {
-  if (s.line_pos == 0) return;
+  if (s.line_pos == 0)
+    return;
   s.line_buf[s.line_pos] = '\0';
   // Skip consecutive duplicates.
   if (s.hist_count > 0) {
-    const uint32_t last =
-        (s.hist_head + OSP_SHELL_HISTORY_SIZE - 1) % OSP_SHELL_HISTORY_SIZE;
-    if (std::strcmp(s.history[last], s.line_buf) == 0) return;
+    const uint32_t last = (s.hist_head + OSP_SHELL_HISTORY_SIZE - 1) % OSP_SHELL_HISTORY_SIZE;
+    if (std::strcmp(s.history[last], s.line_buf) == 0)
+      return;
   }
   std::memcpy(s.history[s.hist_head], s.line_buf, s.line_pos + 1);
   s.hist_head = (s.hist_head + 1) % OSP_SHELL_HISTORY_SIZE;
-  if (s.hist_count < OSP_SHELL_HISTORY_SIZE) ++s.hist_count;
+  if (s.hist_count < OSP_SHELL_HISTORY_SIZE)
+    ++s.hist_count;
 }
 
 /// @brief Navigate to the previous (older) history entry.
 inline void HistoryUp(ShellSession& s) {
-  if (s.hist_count == 0) return;
+  if (s.hist_count == 0)
+    return;
   if (!s.hist_browsing) {
     s.hist_browse = s.hist_head;
     s.hist_browsing = true;
   }
-  const uint32_t oldest = (s.hist_count < OSP_SHELL_HISTORY_SIZE)
-                               ? 0
-                               : s.hist_head;
-  if (s.hist_browse == oldest) return;
-  s.hist_browse =
-      (s.hist_browse + OSP_SHELL_HISTORY_SIZE - 1) % OSP_SHELL_HISTORY_SIZE;
-  const uint32_t len =
-      static_cast<uint32_t>(std::strlen(s.history[s.hist_browse]));
+  const uint32_t oldest = (s.hist_count < OSP_SHELL_HISTORY_SIZE) ? 0 : s.hist_head;
+  if (s.hist_browse == oldest)
+    return;
+  s.hist_browse = (s.hist_browse + OSP_SHELL_HISTORY_SIZE - 1) % OSP_SHELL_HISTORY_SIZE;
+  const uint32_t len = static_cast<uint32_t>(std::strlen(s.history[s.hist_browse]));
   ReplaceLine(s, s.history[s.hist_browse], len);
 }
 
 /// @brief Navigate to the next (newer) history entry, or back to empty line.
 inline void HistoryDown(ShellSession& s) {
-  if (!s.hist_browsing) return;
-  const uint32_t newest =
-      (s.hist_head + OSP_SHELL_HISTORY_SIZE - 1) % OSP_SHELL_HISTORY_SIZE;
+  if (!s.hist_browsing)
+    return;
+  const uint32_t newest = (s.hist_head + OSP_SHELL_HISTORY_SIZE - 1) % OSP_SHELL_HISTORY_SIZE;
   if (s.hist_browse == newest || s.hist_browse == s.hist_head) {
     // Back to current (empty) line.
     s.hist_browsing = false;
@@ -303,8 +301,7 @@ inline void HistoryDown(ShellSession& s) {
     return;
   }
   s.hist_browse = (s.hist_browse + 1) % OSP_SHELL_HISTORY_SIZE;
-  const uint32_t len =
-      static_cast<uint32_t>(std::strlen(s.history[s.hist_browse]));
+  const uint32_t len = static_cast<uint32_t>(std::strlen(s.history[s.hist_browse]));
   ReplaceLine(s, s.history[s.hist_browse], len);
 }
 
@@ -380,9 +377,7 @@ class GlobalCmdRegistry final {
    * @return success on OK; ShellError::kRegistryFull or kDuplicateName on
    *         failure.
    */
-  [[nodiscard]] inline expected<void, ShellError> Register(const char* name,
-                                             ShellCmdFn fn,
-                                             const char* desc) noexcept;
+  [[nodiscard]] inline expected<void, ShellError> Register(const char* name, ShellCmdFn fn, const char* desc) noexcept;
 
   /**
    * @brief Find a command by exact name.
@@ -401,16 +396,13 @@ class GlobalCmdRegistry final {
    * @param buf_size Size of @p out_buf in bytes.
    * @return Number of matching commands.
    */
-  [[nodiscard]] inline uint32_t AutoComplete(const char* prefix,
-                               char* out_buf,
-                               uint32_t buf_size) const noexcept;
+  [[nodiscard]] inline uint32_t AutoComplete(const char* prefix, char* out_buf, uint32_t buf_size) const noexcept;
 
   /**
    * @brief Iterate over all registered commands.
    * @param visitor Callback invoked once per command.
    */
-  inline void ForEach(
-      function_ref<void(const ShellCmd&)> visitor) const noexcept;
+  inline void ForEach(function_ref<void(const ShellCmd&)> visitor) const noexcept;
 
   /// @brief Return the number of registered commands.
   [[nodiscard]] uint32_t Count() const noexcept { return count_; }
@@ -430,10 +422,8 @@ class GlobalCmdRegistry final {
 // GlobalCmdRegistry inline implementation
 // ----------------------------------------------------------------------------
 
-inline expected<void, ShellError> GlobalCmdRegistry::Register(
-    const char* name,
-    ShellCmdFn fn,
-    const char* desc) noexcept {
+inline expected<void, ShellError> GlobalCmdRegistry::Register(const char* name, ShellCmdFn fn,
+                                                              const char* desc) noexcept {
   std::lock_guard<std::mutex> lock(mtx_);
   // Duplicate check
   for (uint32_t i = 0; i < count_; ++i) {
@@ -451,8 +441,7 @@ inline expected<void, ShellError> GlobalCmdRegistry::Register(
   return expected<void, ShellError>::success();
 }
 
-inline const ShellCmd* GlobalCmdRegistry::Find(
-    const char* name) const noexcept {
+inline const ShellCmd* GlobalCmdRegistry::Find(const char* name) const noexcept {
   // Read-only scan; safe after registration phase.
   for (uint32_t i = 0; i < count_; ++i) {
     if (std::strcmp(cmds_[i].name, name) == 0) {
@@ -462,16 +451,12 @@ inline const ShellCmd* GlobalCmdRegistry::Find(
   return nullptr;
 }
 
-inline uint32_t GlobalCmdRegistry::AutoComplete(const char* prefix,
-                                                char* out_buf,
-                                                uint32_t buf_size) const
-    noexcept {
+inline uint32_t GlobalCmdRegistry::AutoComplete(const char* prefix, char* out_buf, uint32_t buf_size) const noexcept {
   if (buf_size == 0 || prefix == nullptr || out_buf == nullptr) {
     return 0;
   }
 
-  const uint32_t prefix_len =
-      static_cast<uint32_t>(std::strlen(prefix));
+  const uint32_t prefix_len = static_cast<uint32_t>(std::strlen(prefix));
 
   // Collect indices of matching commands.
   uint32_t match_indices[kMaxCommands];
@@ -511,15 +496,13 @@ inline uint32_t GlobalCmdRegistry::AutoComplete(const char* prefix,
     common_len = j;
   }
 
-  const uint32_t copy_len =
-      (common_len < buf_size - 1) ? common_len : (buf_size - 1);
+  const uint32_t copy_len = (common_len < buf_size - 1) ? common_len : (buf_size - 1);
   std::memcpy(out_buf, first, copy_len);
   out_buf[copy_len] = '\0';
   return match_count;
 }
 
-inline void GlobalCmdRegistry::ForEach(
-    function_ref<void(const ShellCmd&)> visitor) const noexcept {
+inline void GlobalCmdRegistry::ForEach(function_ref<void(const ShellCmd&)> visitor) const noexcept {
   for (uint32_t i = 0; i < count_; ++i) {
     visitor(cmds_[i]);
   }
@@ -543,9 +526,7 @@ static constexpr uint32_t kMaxArgs = OSP_SHELL_MAX_ARGS;
  * @param argv   Output array of argument pointers; must hold kMaxArgs entries.
  * @return Number of arguments parsed (argc).
  */
-inline int ShellSplit(char* cmd,
-                      uint32_t length,
-                      char* argv[kMaxArgs]) {
+inline int ShellSplit(char* cmd, uint32_t length, char* argv[kMaxArgs]) {
   int argc = 0;
   uint32_t i = 0;
 
@@ -595,8 +576,7 @@ inline int ShellSplit(char* cmd,
 inline void TabComplete(ShellSession& s, const char* prompt) noexcept {
   s.line_buf[s.line_pos] = '\0';
   char completion[64] = {};
-  const uint32_t matches = GlobalCmdRegistry::Instance().AutoComplete(
-      s.line_buf, completion, sizeof(completion));
+  const uint32_t matches = GlobalCmdRegistry::Instance().AutoComplete(s.line_buf, completion, sizeof(completion));
 
   if (matches == 1) {
     uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
@@ -644,14 +624,13 @@ inline void TabComplete(ShellSession& s, const char* prompt) noexcept {
  *        line editing logic.
  * @return true if the line is ready for execution (Enter pressed).
  */
-[[nodiscard]] inline bool ProcessByte(ShellSession& s,
-                         uint8_t raw_byte,
-                         const char* prompt) noexcept {
+[[nodiscard]] inline bool ProcessByte(ShellSession& s, uint8_t raw_byte, const char* prompt) noexcept {
   // IAC filtering (telnet mode only).
   char ch;
   if (s.telnet_mode) {
     ch = FilterIac(s, raw_byte);
-    if (ch == '\0') return false;
+    if (ch == '\0')
+      return false;
   } else {
     ch = static_cast<char>(raw_byte);
   }
@@ -659,7 +638,8 @@ inline void TabComplete(ShellSession& s, const char* prompt) noexcept {
   // CRLF dedup: skip \n after \r.
   if (s.skip_next_lf) {
     s.skip_next_lf = false;
-    if (ch == '\n') return false;
+    if (ch == '\n')
+      return false;
   }
 
   // ESC sequence state machine.
@@ -675,11 +655,18 @@ inline void TabComplete(ShellSession& s, const char* prompt) noexcept {
     case ShellSession::EscState::kBracket:
       s.esc_state = ShellSession::EscState::kNone;
       switch (ch) {
-        case 'A': HistoryUp(s); return false;
-        case 'B': HistoryDown(s); return false;
-        case 'C': return false;  // Right arrow (reserved)
-        case 'D': return false;  // Left arrow (reserved)
-        default: return false;
+        case 'A':
+          HistoryUp(s);
+          return false;
+        case 'B':
+          HistoryDown(s);
+          return false;
+        case 'C':
+          return false;  // Right arrow (reserved)
+        case 'D':
+          return false;  // Left arrow (reserved)
+        default:
+          return false;
       }
 
     case ShellSession::EscState::kNone:
@@ -726,14 +713,14 @@ inline void TabComplete(ShellSession& s, const char* prompt) noexcept {
 
   if (ch == '\r' || ch == '\n') {
     ShellSessionWrite(s, "\r\n");
-    if (ch == '\r') s.skip_next_lf = true;
+    if (ch == '\r')
+      s.skip_next_lf = true;
     s.hist_browsing = false;
     return true;
   }
 
   // Printable characters.
-  if (ch >= 0x20 &&
-      s.line_pos < static_cast<uint32_t>(OSP_SHELL_LINE_BUF_SIZE - 1)) {
+  if (ch >= 0x20 && s.line_pos < static_cast<uint32_t>(OSP_SHELL_LINE_BUF_SIZE - 1)) {
     s.line_buf[s.line_pos++] = ch;
     ShellSessionWrite(s, &ch, 1);
   }
@@ -750,7 +737,8 @@ inline void ShellExecuteLine(ShellSession& s) {
   s.line_buf[s.line_pos] = '\0';
   char* argv[kMaxArgs] = {};
   int argc = ShellSplit(s.line_buf, s.line_pos, argv);
-  if (argc == 0) return;
+  if (argc == 0)
+    return;
 
   const ShellCmd* cmd = GlobalCmdRegistry::Instance().Find(argv[0]);
   if (cmd != nullptr) {
@@ -759,8 +747,7 @@ inline void ShellExecuteLine(ShellSession& s) {
     CurrentSession() = nullptr;
   } else {
     char msg[160];
-    int n = std::snprintf(msg, sizeof(msg),
-                          "unknown command: %s\r\n", argv[0]);
+    int n = std::snprintf(msg, sizeof(msg), "unknown command: %s\r\n", argv[0]);
     if (n > 0) {
       ShellSessionWrite(s, msg, static_cast<size_t>(n));
     }
@@ -796,8 +783,7 @@ class ShellAutoReg {
  *   OSP_SHELL_CMD(reboot, "Reboot the system");
  * @endcode
  */
-#define OSP_SHELL_CMD(cmd, desc) \
-  static ::osp::ShellAutoReg OSP_CONCAT(_shell_reg_, cmd)(#cmd, cmd, desc)
+#define OSP_SHELL_CMD(cmd, desc) static ::osp::ShellAutoReg OSP_CONCAT(_shell_reg_, cmd)(#cmd, cmd, desc)
 
 // ============================================================================
 // Built-in "help" command
@@ -810,11 +796,11 @@ namespace detail {
  */
 inline int ShellBuiltinHelp(int /*argc*/, char* /*argv*/[]) {
   ShellSession* sess = CurrentSession();
-  if (sess == nullptr) return -1;
+  if (sess == nullptr)
+    return -1;
   char buf[256];
   GlobalCmdRegistry::Instance().ForEach([&](const ShellCmd& cmd) {
-    int n = std::snprintf(buf, sizeof(buf), "  %-16s - %s\r\n",
-                          cmd.name, cmd.desc ? cmd.desc : "");
+    int n = std::snprintf(buf, sizeof(buf), "  %-16s - %s\r\n", cmd.name, cmd.desc ? cmd.desc : "");
     if (n > 0) {
       ShellSessionWrite(*sess, buf, static_cast<size_t>(n));
     }
@@ -825,8 +811,7 @@ inline int ShellBuiltinHelp(int /*argc*/, char* /*argv*/[]) {
 /// @brief Auto-register the built-in help command.
 inline bool RegisterHelpOnce() noexcept {
   static const bool done = []() {
-    (void)GlobalCmdRegistry::Instance().Register("help", ShellBuiltinHelp,
-                                           "List all commands");
+    (void)GlobalCmdRegistry::Instance().Register("help", ShellBuiltinHelp, "List all commands");
     return true;
   }();
   return done;
@@ -870,11 +855,8 @@ inline int ShellPrintf(const char* fmt, ...) {
   va_end(args);
 
   if (n > 0) {
-    int to_send = (n < static_cast<int>(sizeof(buf)))
-                      ? n
-                      : static_cast<int>(sizeof(buf) - 1);
-    ssize_t sent = sess->write_fn(sess->write_fd, buf,
-                                  static_cast<size_t>(to_send));
+    int to_send = (n < static_cast<int>(sizeof(buf))) ? n : static_cast<int>(sizeof(buf) - 1);
+    ssize_t sent = sess->write_fn(sess->write_fd, buf, static_cast<size_t>(to_send));
     return static_cast<int>(sent);
   }
   return -1;
@@ -908,20 +890,15 @@ class DebugShell final {
  public:
   /// @brief Shell configuration.
   struct Config {
-    uint16_t port;            ///< TCP listen port.
-    uint32_t max_connections; ///< Maximum concurrent sessions.
-    const char* prompt;       ///< Prompt string sent to clients.
-    const char* banner;       ///< Banner shown on connect (nullptr = none).
-    const char* username;     ///< Auth username (nullptr = no auth).
-    const char* password;     ///< Auth password.
+    uint16_t port;             ///< TCP listen port.
+    uint32_t max_connections;  ///< Maximum concurrent sessions.
+    const char* prompt;        ///< Prompt string sent to clients.
+    const char* banner;        ///< Banner shown on connect (nullptr = none).
+    const char* username;      ///< Auth username (nullptr = no auth).
+    const char* password;      ///< Auth password.
 
     Config() noexcept
-        : port(5090),
-          max_connections(2),
-          prompt("osp> "),
-          banner(nullptr),
-          username(nullptr),
-          password(nullptr) {}
+        : port(5090), max_connections(2), prompt("osp> "), banner(nullptr), username(nullptr), password(nullptr) {}
   };
 
   /**
@@ -973,9 +950,7 @@ class DebugShell final {
       ;
 
   /// @brief Check whether the shell is currently running.
-  [[nodiscard]] bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_relaxed);
-  }
+  [[nodiscard]] bool IsRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
 
   /** @brief Set heartbeat for external watchdog monitoring (accept thread). */
   void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
@@ -1030,8 +1005,7 @@ inline expected<void, ShellError> DebugShell::Start() {
 
   // Allow address reuse.
   int opt = 1;
-  (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt,
-                      sizeof(opt));
+  (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
   struct sockaddr_in addr;
   std::memset(&addr, 0, sizeof(addr));
@@ -1039,8 +1013,7 @@ inline expected<void, ShellError> DebugShell::Start() {
   addr.sin_addr.s_addr = htonl(INADDR_ANY);
   addr.sin_port = htons(cfg_.port);
 
-  if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr),
-             sizeof(addr)) < 0) {
+  if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
     return expected<void, ShellError>::error(ShellError::kPortInUse);
   }
 
@@ -1117,7 +1090,9 @@ inline void DebugShell::Stop() {
 
 inline void DebugShell::AcceptLoop() {
   while (running_.load(std::memory_order_relaxed)) {
-    if (heartbeat_ != nullptr) { heartbeat_->Beat(); }
+    if (heartbeat_ != nullptr) {
+      heartbeat_->Beat();
+    }
 
     // Use poll() to avoid blocking forever in accept().
     // close(listen_fd_) in Stop() does NOT reliably unblock accept() on Linux.
@@ -1125,18 +1100,18 @@ inline void DebugShell::AcceptLoop() {
     pfd.fd = listen_fd_;
     pfd.events = POLLIN;
     int pr = ::poll(&pfd, 1, 200);
-    if (pr == 0) continue;            // Timeout -- re-check running_ flag.
+    if (pr == 0)
+      continue;  // Timeout -- re-check running_ flag.
     if (pr < 0) {
-      if (errno == EINTR) continue;
-      break;                          // Fatal poll error.
+      if (errno == EINTR)
+        continue;
+      break;  // Fatal poll error.
     }
 
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
 
-    int client_fd = ::accept(listen_fd_,
-                             reinterpret_cast<struct sockaddr*>(&client_addr),
-                             &addr_len);
+    int client_fd = ::accept(listen_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len);
     if (client_fd < 0) {
       // accept() returns -1 when listen_fd_ is closed during Stop().
       break;
@@ -1156,13 +1131,11 @@ inline void DebugShell::AcceptLoop() {
           sessions_[i].thread.join();
         }
         // Initialize session for TCP telnet.
-        detail::ShellSessionInit(sessions_[i], client_fd, client_fd,
-                            detail::ShellTcpWrite, detail::ShellTcpRead, true);
+        detail::ShellSessionInit(sessions_[i], client_fd, client_fd, detail::ShellTcpWrite, detail::ShellTcpRead, true);
         sessions_[i].authenticated = (cfg_.username == nullptr);
         sessions_[i].auth_attempts = 0;
         sessions_[i].active.store(true, std::memory_order_release);
-        sessions_[i].thread =
-            std::thread([this, i]() { SessionLoop(sessions_[i]); });
+        sessions_[i].thread = std::thread([this, i]() { SessionLoop(sessions_[i]); });
         placed = true;
         break;
       }
@@ -1182,8 +1155,7 @@ inline bool DebugShell::RunAuth(Session& s) {
   char user_buf[64] = {};
   char pass_buf[64] = {};
 
-  while (s.auth_attempts < kMaxAuthAttempts &&
-         s.active.load(std::memory_order_acquire) &&
+  while (s.auth_attempts < kMaxAuthAttempts && s.active.load(std::memory_order_acquire) &&
          running_.load(std::memory_order_relaxed)) {
     // Username prompt.
     detail::ShellSessionWrite(s, "Username: ");
@@ -1191,17 +1163,21 @@ inline bool DebugShell::RunAuth(Session& s) {
     while (upos < sizeof(user_buf) - 1) {
       uint8_t byte;
       ssize_t n = s.read_fn(s.read_fd, &byte, 1);
-      if (n <= 0) return false;
+      if (n <= 0)
+        return false;
       // Filter IAC bytes.
       char ch = detail::FilterIac(s, byte);
-      if (ch == '\0') continue;
+      if (ch == '\0')
+        continue;
       if (ch == '\r' || ch == '\n') {
-        if (ch == '\r') s.skip_next_lf = true;
+        if (ch == '\r')
+          s.skip_next_lf = true;
         break;
       }
       if (s.skip_next_lf) {
         s.skip_next_lf = false;
-        if (ch == '\n') continue;
+        if (ch == '\n')
+          continue;
       }
       if (ch == 0x7F || ch == 0x08) {
         if (upos > 0) {
@@ -1224,16 +1200,20 @@ inline bool DebugShell::RunAuth(Session& s) {
     while (ppos < sizeof(pass_buf) - 1) {
       uint8_t byte;
       ssize_t n = s.read_fn(s.read_fd, &byte, 1);
-      if (n <= 0) return false;
+      if (n <= 0)
+        return false;
       char ch = detail::FilterIac(s, byte);
-      if (ch == '\0') continue;
+      if (ch == '\0')
+        continue;
       if (ch == '\r' || ch == '\n') {
-        if (ch == '\r') s.skip_next_lf = true;
+        if (ch == '\r')
+          s.skip_next_lf = true;
         break;
       }
       if (s.skip_next_lf) {
         s.skip_next_lf = false;
-        if (ch == '\n') continue;
+        if (ch == '\n')
+          continue;
       }
       if (ch == 0x7F || ch == 0x08) {
         if (ppos > 0) {
@@ -1251,8 +1231,7 @@ inline bool DebugShell::RunAuth(Session& s) {
     detail::ShellSessionWrite(s, "\r\n");
 
     // Verify credentials.
-    if (std::strcmp(user_buf, cfg_.username) == 0 &&
-        std::strcmp(pass_buf, cfg_.password) == 0) {
+    if (std::strcmp(user_buf, cfg_.username) == 0 && std::strcmp(pass_buf, cfg_.password) == 0) {
       s.authenticated = true;
       detail::ShellSessionWrite(s, "\r\nAuthenticated.\r\n\r\n");
       return true;
@@ -1269,12 +1248,7 @@ inline void DebugShell::SessionLoop(Session& s) {
   // Note: read_fd is NOT set to -1 here to avoid a data race with Stop().
   // Stop() calls shutdown(read_fd) to unblock recv(), then join() ensures
   // the session thread has exited before cleaning up.
-  OSP_SCOPE_EXIT(
-    if (s.read_fd >= 0) {
-      ::close(s.read_fd);
-    }
-    s.active.store(false, std::memory_order_release);
-  );
+  OSP_SCOPE_EXIT(if (s.read_fd >= 0) { ::close(s.read_fd); } s.active.store(false, std::memory_order_release););
 
   // Telnet IAC negotiation: WILL SGA + WILL ECHO.
   SendIac(s.read_fd, 0xFB, 0x03);  // WILL Suppress Go Ahead
@@ -1295,8 +1269,7 @@ inline void DebugShell::SessionLoop(Session& s) {
   // Send initial prompt.
   detail::ShellSessionWrite(s, cfg_.prompt);
 
-  while (running_.load(std::memory_order_relaxed) &&
-         s.active.load(std::memory_order_acquire)) {
+  while (running_.load(std::memory_order_relaxed) && s.active.load(std::memory_order_acquire)) {
     // Use poll() with timeout so the thread can check running_ periodically
     // even if no data arrives.  Pure blocking recv() can hang during shutdown
     // if the client disconnects while the kernel hasn't signaled the server fd.
@@ -1304,19 +1277,23 @@ inline void DebugShell::SessionLoop(Session& s) {
     pfd.fd = s.read_fd;
     pfd.events = POLLIN;
     int pr = ::poll(&pfd, 1, 200);
-    if (pr == 0) continue;  // Timeout -- re-check running_ flag.
+    if (pr == 0)
+      continue;  // Timeout -- re-check running_ flag.
     if (pr < 0) {
-      if (errno == EINTR) continue;
+      if (errno == EINTR)
+        continue;
       break;
     }
 
     uint8_t byte;
     ssize_t n = s.read_fn(s.read_fd, &byte, 1);
     if (n < 0) {
-      if (errno == EINTR) continue;
+      if (errno == EINTR)
+        continue;
       break;
     }
-    if (n == 0) break;
+    if (n == 0)
+      break;
 
     if (detail::ProcessByte(s, byte, cfg_.prompt)) {
       detail::ShellExecuteLine(s);
@@ -1343,11 +1320,8 @@ inline int DebugShell::Printf(const char* fmt, ...) {
   va_end(args);
 
   if (n > 0) {
-    int to_send = (n < static_cast<int>(sizeof(buf)))
-                      ? n
-                      : static_cast<int>(sizeof(buf) - 1);
-    ssize_t sent = sess->write_fn(sess->write_fd, buf,
-                                   static_cast<size_t>(to_send));
+    int to_send = (n < static_cast<int>(sizeof(buf))) ? n : static_cast<int>(sizeof(buf) - 1);
+    ssize_t sent = sess->write_fn(sess->write_fd, buf, static_cast<size_t>(to_send));
     return static_cast<int>(sent);
   }
   return -1;
@@ -1372,16 +1346,10 @@ class ConsoleShell final {
     int write_fd;
     bool raw_mode;
 
-    Config() noexcept
-        : prompt("osp> "),
-          read_fd(STDIN_FILENO),
-          write_fd(STDOUT_FILENO),
-          raw_mode(true) {}
+    Config() noexcept : prompt("osp> "), read_fd(STDIN_FILENO), write_fd(STDOUT_FILENO), raw_mode(true) {}
   };
 
-  explicit ConsoleShell(const Config& cfg = Config{}) : cfg_(cfg) {
-    detail::RegisterHelpOnce();
-  }
+  explicit ConsoleShell(const Config& cfg = Config{}) : cfg_(cfg) { detail::RegisterHelpOnce(); }
 
   ~ConsoleShell() { Stop(); }
 
@@ -1397,9 +1365,7 @@ class ConsoleShell final {
   /// @brief Run the shell synchronously (blocking).
   inline void Run() noexcept;
 
-  [[nodiscard]] bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_relaxed);
-  }
+  [[nodiscard]] bool IsRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
 
  private:
   Config cfg_;
@@ -1419,14 +1385,15 @@ class ConsoleShell final {
 // ----------------------------------------------------------------------------
 
 inline void ConsoleShell::SetRawMode() noexcept {
-  if (!cfg_.raw_mode) return;
-  if (::tcgetattr(cfg_.read_fd, &orig_termios_) != 0) return;
+  if (!cfg_.raw_mode)
+    return;
+  if (::tcgetattr(cfg_.read_fd, &orig_termios_) != 0)
+    return;
   termios_saved_ = true;
 
   struct termios raw = orig_termios_;
   raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON | ISIG | IEXTEN);
-  raw.c_iflag &= ~static_cast<tcflag_t>(IXON | IXOFF | ICRNL | INLCR |
-                                          IGNCR);
+  raw.c_iflag &= ~static_cast<tcflag_t>(IXON | IXOFF | ICRNL | INLCR | IGNCR);
   raw.c_oflag &= ~static_cast<tcflag_t>(OPOST);
   raw.c_cc[VMIN] = 0;
   raw.c_cc[VTIME] = 0;
@@ -1447,8 +1414,8 @@ inline expected<void, ShellError> ConsoleShell::Start() noexcept {
 
   SetRawMode();
 
-  detail::ShellSessionInit(session_, cfg_.read_fd, cfg_.write_fd,
-                       detail::ShellPosixWrite, detail::ShellPosixRead, false);
+  detail::ShellSessionInit(session_, cfg_.read_fd, cfg_.write_fd, detail::ShellPosixWrite, detail::ShellPosixRead,
+                           false);
 
   running_.store(true, std::memory_order_release);
   thread_ = std::thread([this]() { RunLoop(); });
@@ -1457,7 +1424,8 @@ inline expected<void, ShellError> ConsoleShell::Start() noexcept {
 }
 
 inline void ConsoleShell::Stop() noexcept {
-  if (!running_.load(std::memory_order_relaxed)) return;
+  if (!running_.load(std::memory_order_relaxed))
+    return;
   running_.store(false, std::memory_order_release);
   session_.active.store(false, std::memory_order_release);
 
@@ -1470,8 +1438,8 @@ inline void ConsoleShell::Stop() noexcept {
 inline void ConsoleShell::Run() noexcept {
   SetRawMode();
 
-  detail::ShellSessionInit(session_, cfg_.read_fd, cfg_.write_fd,
-                       detail::ShellPosixWrite, detail::ShellPosixRead, false);
+  detail::ShellSessionInit(session_, cfg_.read_fd, cfg_.write_fd, detail::ShellPosixWrite, detail::ShellPosixRead,
+                           false);
   running_.store(true, std::memory_order_release);
 
   RunLoop();
@@ -1484,22 +1452,24 @@ inline void ConsoleShell::RunLoop() noexcept {
   auto& s = session_;
   detail::ShellSessionWrite(s, cfg_.prompt);
 
-  while (running_.load(std::memory_order_relaxed) &&
-         s.active.load(std::memory_order_acquire)) {
+  while (running_.load(std::memory_order_relaxed) && s.active.load(std::memory_order_acquire)) {
     struct pollfd pfd;
     pfd.fd = s.read_fd;
     pfd.events = POLLIN;
     int pr = ::poll(&pfd, 1, 100);
-    if (pr == 0) continue;
+    if (pr == 0)
+      continue;
     if (pr < 0) {
-      if (errno == EINTR) continue;
+      if (errno == EINTR)
+        continue;
       break;
     }
 
     uint8_t byte;
     ssize_t n = s.read_fn(s.read_fd, &byte, 1);
     if (n <= 0) {
-      if (n < 0 && errno == EINTR) continue;
+      if (n < 0 && errno == EINTR)
+        continue;
       break;
     }
 
@@ -1532,16 +1502,10 @@ class UartShell final {
     const char* prompt;
     int override_fd;  ///< For testing: use this fd instead of opening device.
 
-    Config() noexcept
-        : device("/dev/ttyS0"),
-          baudrate(115200),
-          prompt("osp> "),
-          override_fd(-1) {}
+    Config() noexcept : device("/dev/ttyS0"), baudrate(115200), prompt("osp> "), override_fd(-1) {}
   };
 
-  explicit UartShell(const Config& cfg = Config{}) : cfg_(cfg) {
-    detail::RegisterHelpOnce();
-  }
+  explicit UartShell(const Config& cfg = Config{}) : cfg_(cfg) { detail::RegisterHelpOnce(); }
 
   ~UartShell() { Stop(); }
 
@@ -1554,9 +1518,7 @@ class UartShell final {
   /// @brief Stop the UART shell.
   inline void Stop() noexcept;
 
-  [[nodiscard]] bool IsRunning() const noexcept {
-    return running_.load(std::memory_order_relaxed);
-  }
+  [[nodiscard]] bool IsRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
 
  private:
   Config cfg_;
@@ -1570,12 +1532,18 @@ class UartShell final {
 
   static constexpr speed_t BaudToSpeed(uint32_t baud) noexcept {
     switch (baud) {
-      case 9600:   return B9600;
-      case 19200:  return B19200;
-      case 38400:  return B38400;
-      case 57600:  return B57600;
-      case 115200: return B115200;
-      default:     return B115200;
+      case 9600:
+        return B9600;
+      case 19200:
+        return B19200;
+      case 38400:
+        return B38400;
+      case 57600:
+        return B57600;
+      case 115200:
+        return B115200;
+      default:
+        return B115200;
     }
   }
 };
@@ -1621,8 +1589,7 @@ inline expected<void, ShellError> UartShell::Start() noexcept {
     tty.c_cflag &= ~static_cast<tcflag_t>(PARENB | CSTOPB | CRTSCTS);
 
     tty.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO | ECHOE | ISIG);
-    tty.c_iflag &= ~static_cast<tcflag_t>(IXON | IXOFF | IXANY |
-                                            ICRNL | INLCR | IGNCR);
+    tty.c_iflag &= ~static_cast<tcflag_t>(IXON | IXOFF | IXANY | ICRNL | INLCR | IGNCR);
     tty.c_oflag &= ~static_cast<tcflag_t>(OPOST);
 
     tty.c_cc[VMIN] = 1;
@@ -1635,8 +1602,7 @@ inline expected<void, ShellError> UartShell::Start() noexcept {
     fd_guard.release();  // Success -- keep the fd open.
   }
 
-  detail::ShellSessionInit(session_, uart_fd_, uart_fd_,
-                       detail::ShellPosixWrite, detail::ShellPosixRead, false);
+  detail::ShellSessionInit(session_, uart_fd_, uart_fd_, detail::ShellPosixWrite, detail::ShellPosixRead, false);
 
   running_.store(true, std::memory_order_release);
   thread_ = std::thread([this]() { RunLoop(); });
@@ -1645,7 +1611,8 @@ inline expected<void, ShellError> UartShell::Start() noexcept {
 }
 
 inline void UartShell::Stop() noexcept {
-  if (!running_.load(std::memory_order_relaxed)) return;
+  if (!running_.load(std::memory_order_relaxed))
+    return;
   running_.store(false, std::memory_order_release);
   session_.active.store(false, std::memory_order_release);
 
@@ -1663,22 +1630,24 @@ inline void UartShell::RunLoop() noexcept {
   auto& s = session_;
   detail::ShellSessionWrite(s, cfg_.prompt);
 
-  while (running_.load(std::memory_order_relaxed) &&
-         s.active.load(std::memory_order_acquire)) {
+  while (running_.load(std::memory_order_relaxed) && s.active.load(std::memory_order_acquire)) {
     struct pollfd pfd;
     pfd.fd = s.read_fd;
     pfd.events = POLLIN;
     int pr = ::poll(&pfd, 1, 200);
-    if (pr == 0) continue;
+    if (pr == 0)
+      continue;
     if (pr < 0) {
-      if (errno == EINTR) continue;
+      if (errno == EINTR)
+        continue;
       break;
     }
 
     uint8_t byte;
     ssize_t n = s.read_fn(s.read_fd, &byte, 1);
     if (n <= 0) {
-      if (n < 0 && errno == EINTR) continue;
+      if (n < 0 && errno == EINTR)
+        continue;
       break;
     }
 

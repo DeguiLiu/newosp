@@ -37,9 +37,10 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
-#include <atomic>
 #include <csignal>
 #include <cstdint>
+
+#include <atomic>
 #include <unistd.h>
 
 namespace osp {
@@ -185,8 +186,7 @@ class ShutdownManager final {
    */
   expected<void, ShutdownError> Register(ShutdownFn fn) noexcept {
     if (!valid_) {
-      return expected<void, ShutdownError>::error(
-          ShutdownError::kAlreadyInstantiated);
+      return expected<void, ShutdownError>::error(ShutdownError::kAlreadyInstantiated);
     }
     if (fn == nullptr) {
       return expected<void, ShutdownError>::error(ShutdownError::kCallbacksFull);
@@ -207,12 +207,10 @@ class ShutdownManager final {
    */
   expected<void, ShutdownError> InstallSignalHandlers() noexcept {
     if (!valid_) {
-      return expected<void, ShutdownError>::error(
-          ShutdownError::kAlreadyInstantiated);
+      return expected<void, ShutdownError>::error(ShutdownError::kAlreadyInstantiated);
     }
     if (pipe_fd_[1] < 0) {
-      return expected<void, ShutdownError>::error(
-          ShutdownError::kPipeCreationFailed);
+      return expected<void, ShutdownError>::error(ShutdownError::kPipeCreationFailed);
     }
 
     struct sigaction sa;
@@ -221,12 +219,10 @@ class ShutdownManager final {
     sa.sa_flags = SA_RESTART;
 
     if (::sigaction(SIGINT, &sa, nullptr) != 0) {
-      return expected<void, ShutdownError>::error(
-          ShutdownError::kSignalInstallFailed);
+      return expected<void, ShutdownError>::error(ShutdownError::kSignalInstallFailed);
     }
     if (::sigaction(SIGTERM, &sa, nullptr) != 0) {
-      return expected<void, ShutdownError>::error(
-          ShutdownError::kSignalInstallFailed);
+      return expected<void, ShutdownError>::error(ShutdownError::kSignalInstallFailed);
     }
 
     return expected<void, ShutdownError>::success();
@@ -277,9 +273,7 @@ class ShutdownManager final {
    * @brief Check if shutdown has been requested.
    * @return true if shutdown was signaled or Quit() was called.
    */
-  bool IsShutdownRequested() const noexcept {
-    return shutdown_flag_.load();
-  }
+  bool IsShutdownRequested() const noexcept { return shutdown_flag_.load(); }
 
  private:
   // ==========================================================================
