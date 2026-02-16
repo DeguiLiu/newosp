@@ -1008,6 +1008,20 @@ sensor.AdvertiseTo<SensorData>({"tcp://0.0.0.0:9001"});
 sensor.Publish(SensorData{25.0f});  // 本地 + 远程同时发布
 ```
 
+**TCP 发送: short write 与 EAGAIN 处理** (v0.4.1):
+
+`TcpTransport::SendAll()` 采用同步循环发送，处理 TCP short write (部分写入)。
+v0.4.1 新增 EAGAIN/EWOULDBLOCK 区分:
+
+- `SocketError::kWouldBlock`: 内核发送缓冲区满，瞬态错误
+- `SendAll()` 对 EAGAIN 进行有限重试 (yield + 最多 16 次)，重试耗尽返回 `TransportError::kWouldBlock` 而**不断开连接**
+- 致命错误 (EPIPE, ECONNRESET 等) 仍返回 `kSendFailed` 并标记连接断开
+
+**已知限制**: SendAll 是同步阻塞的，重试期间调用线程被阻塞。高吞吐 TCP
+场景 (如远程传感器流) 应考虑用户态发送缓冲 (SPSC 字节环形缓冲 + EPOLLOUT
+事件驱动异步刷写) 替代同步重试。当前方案适用于 newosp 主要场景: 同机
+shm_transport 优先，TCP 作为远程低频备选。
+
 ---
 
 ### 7.5 shm_transport.hpp -- 共享内存 IPC

@@ -49,6 +49,7 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <cerrno>
 
 namespace osp {
 
@@ -72,7 +73,8 @@ enum class SocketError : uint8_t {
   kAcceptFailed,
   kAlreadyClosed,
   kSetOptFailed,
-  kPathTooLong
+  kPathTooLong,
+  kWouldBlock  ///< EAGAIN/EWOULDBLOCK -- transient, caller may retry.
 };
 
 // ============================================================================
@@ -199,6 +201,10 @@ class TcpSocket {
     }
     auto n = ::send(fd_, data, len, MSG_NOSIGNAL);
     if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return expected<int32_t, SocketError>::error(
+            SocketError::kWouldBlock);
+      }
       return expected<int32_t, SocketError>::error(SocketError::kSendFailed);
     }
     return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));
@@ -210,6 +216,10 @@ class TcpSocket {
     }
     auto n = ::recv(fd_, buf, len, 0);
     if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return expected<int32_t, SocketError>::error(
+            SocketError::kWouldBlock);
+      }
       return expected<int32_t, SocketError>::error(SocketError::kRecvFailed);
     }
     return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));
@@ -629,6 +639,10 @@ class UnixSocket {
     }
     auto n = ::send(fd_, data, len, MSG_NOSIGNAL);
     if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return expected<int32_t, SocketError>::error(
+            SocketError::kWouldBlock);
+      }
       return expected<int32_t, SocketError>::error(SocketError::kSendFailed);
     }
     return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));
@@ -640,6 +654,10 @@ class UnixSocket {
     }
     auto n = ::recv(fd_, buf, len, 0);
     if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return expected<int32_t, SocketError>::error(
+            SocketError::kWouldBlock);
+      }
       return expected<int32_t, SocketError>::error(SocketError::kRecvFailed);
     }
     return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));

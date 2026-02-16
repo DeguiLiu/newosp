@@ -63,7 +63,8 @@ enum class TransportError : uint8_t {
   kSerializationError,
   kInvalidFrame,
   kBufferFull,
-  kNotConnected
+  kNotConnected,
+  kWouldBlock  ///< Kernel send/recv buffer full (EAGAIN). Transient error.
 };
 
 // ============================================================================
@@ -751,15 +752,40 @@ class TcpTransport {
    * @brief Send exactly len bytes over the socket.
    * @param data Pointer to the data to send.
    * @param len Number of bytes to send.
-   * @return Success or TransportError::kSendFailed.
+   * @return Success, kSendFailed (fatal), or kWouldBlock (kernel buffer full
+   *         after retries exhausted).
+   *
+   * @note  Current implementation is synchronous with bounded EAGAIN retry.
+   *        On EAGAIN the call yields and retries up to kMaxEagainRetries times.
+   *        If the kernel send buffer is still full after retries, kWouldBlock
+   *        is returned WITHOUT marking the connection as failed -- the caller
+   *        may retry later or implement a user-space send buffer.
+   *
+   *        **Known limitation**: This approach blocks the calling thread during
+   *        retries. For high-throughput TCP scenarios, an async send buffer
+   *        (SPSC byte ring + EPOLLOUT-driven flush) should replace this
+   *        synchronous retry loop. See docs/design_zh.md transport section.
    */
   expected<void, TransportError> SendAll(const void* data,
                                           uint32_t len) noexcept {
+    static constexpr uint32_t kMaxEagainRetries = 16;
     const uint8_t* ptr = static_cast<const uint8_t*>(data);
     uint32_t remaining = len;
+    uint32_t eagain_count = 0;
     while (remaining > 0) {
       auto r = socket_.Send(ptr, remaining);
       if (!r.has_value()) {
+        if (r.get_error() == SocketError::kWouldBlock) {
+          if (++eagain_count > kMaxEagainRetries) {
+            // Kernel send buffer persistently full -- report to caller
+            // without tearing down the connection.
+            return expected<void, TransportError>::error(
+                TransportError::kWouldBlock);
+          }
+          std::this_thread::yield();
+          continue;
+        }
+        // Fatal socket error (EPIPE, ECONNRESET, etc.)
         connected_ = false;
         return expected<void, TransportError>::error(
             TransportError::kSendFailed);
@@ -772,6 +798,7 @@ class TcpTransport {
       uint32_t sent = static_cast<uint32_t>(r.value());
       ptr += sent;
       remaining -= sent;
+      eagain_count = 0;  // Reset on progress.
     }
     return expected<void, TransportError>::success();
   }
@@ -780,14 +807,25 @@ class TcpTransport {
    * @brief Receive exactly len bytes from the socket.
    * @param data Pointer to the receive buffer.
    * @param len Number of bytes to receive.
-   * @return Success or TransportError::kRecvFailed.
+   * @return Success, kRecvFailed (fatal), or kWouldBlock (no data after
+   *         retries exhausted).
    */
   expected<void, TransportError> RecvAll(void* data, uint32_t len) noexcept {
+    static constexpr uint32_t kMaxEagainRetries = 16;
     uint8_t* ptr = static_cast<uint8_t*>(data);
     uint32_t remaining = len;
+    uint32_t eagain_count = 0;
     while (remaining > 0) {
       auto r = socket_.Recv(ptr, remaining);
       if (!r.has_value()) {
+        if (r.get_error() == SocketError::kWouldBlock) {
+          if (++eagain_count > kMaxEagainRetries) {
+            return expected<void, TransportError>::error(
+                TransportError::kWouldBlock);
+          }
+          std::this_thread::yield();
+          continue;
+        }
         connected_ = false;
         return expected<void, TransportError>::error(
             TransportError::kRecvFailed);
