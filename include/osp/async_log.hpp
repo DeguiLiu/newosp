@@ -338,6 +338,7 @@ struct AsyncLogContext {
 
   std::atomic<bool> running{false};
   std::atomic<bool> shutdown{false};
+  std::atomic<bool> atexit_registered{false};
 
   LogSinkFn sink{nullptr};
   void* sink_context{nullptr};
@@ -489,27 +490,45 @@ inline void WriterLoop() noexcept {
 // Public API
 // ============================================================================
 
+// Forward declaration (StopAsync is referenced by atexit in StartAsync).
+inline void StopAsync() noexcept;
+
 /**
  * @brief Start the async logging backend.
  *
  * Spawns the writer thread. Idempotent (safe to call multiple times).
+ * Automatically called on first async log write -- users typically do
+ * not need to call this directly unless a custom sink is needed.
  */
 inline void StartAsync(const AsyncLogConfig& config = {}) noexcept {
   auto& ctx = detail::AsyncLogContext::Instance();
-  if (ctx.running.load(std::memory_order_acquire)) {
-    return;  // Already running.
+
+  // CAS to ensure only one thread starts the writer.
+  bool expected = false;
+  if (!ctx.running.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel)) {
+    return;  // Already running (another thread won the race).
   }
 
   ctx.sink = config.sink;
   ctx.sink_context = config.sink_context;
   ctx.shutdown.store(false, std::memory_order_release);
-  ctx.running.store(true, std::memory_order_release);
 
   ctx.writer_thread = std::thread(detail::WriterLoop);
+
+  // Register atexit handler (once) for graceful drain on process exit.
+  bool atexit_expected = false;
+  if (ctx.atexit_registered.compare_exchange_strong(
+          atexit_expected, true, std::memory_order_acq_rel)) {
+    (void)std::atexit(StopAsync);
+  }
 }
 
 /**
  * @brief Stop the async logging backend. Drains remaining entries.
+ *
+ * Automatically called via atexit() -- users typically do not need
+ * to call this directly.
  */
 inline void StopAsync() noexcept {
   auto& ctx = detail::AsyncLogContext::Instance();
@@ -594,13 +613,9 @@ inline void AsyncLogWrite(Level level, const char* category, const char* file,
 
   auto& ctx = detail::AsyncLogContext::Instance();
 
-  // --- Async not started: fallback to sync ---
+  // --- Auto-start: first async log call spawns the writer thread ---
   if (!ctx.running.load(std::memory_order_acquire)) {
-    va_list args;
-    va_start(args, fmt);
-    LogWriteVa(level, category, file, line, fmt, args);
-    va_end(args);
-    return;
+    StartAsync();
   }
 
   // --- Acquire per-thread SPSC buffer ---
@@ -643,8 +658,15 @@ inline void AsyncLogWrite(Level level, const char* category, const char* file,
 }  // namespace osp
 
 // ============================================================================
-// Macro Redefinition (optional: override log.hpp macros for async routing)
+// Macro Redefinition -- Route DEBUG/INFO/WARN to async path
 // ============================================================================
+//
+// When OSP_LOG_SYNC_ONLY is defined, all log macros remain sync (from log.hpp).
+// This can be useful for debugging or platforms where a background thread is
+// undesirable.  Define it project-wide via CMake:
+//   target_compile_definitions(my_target PRIVATE OSP_LOG_SYNC_ONLY)
+//
+#ifndef OSP_LOG_SYNC_ONLY
 
 // Undef the sync macros from log.hpp for DEBUG/INFO/WARN only.
 // ERROR and FATAL remain sync (crash-safe).
@@ -675,5 +697,7 @@ inline void AsyncLogWrite(Level level, const char* category, const char* file,
                                 __FILE__, __LINE__, fmt, ##__VA_ARGS__);    \
     }                                                                       \
   } while (0)
+
+#endif  // OSP_LOG_SYNC_ONLY
 
 #endif  // OSP_ASYNC_LOG_HPP_

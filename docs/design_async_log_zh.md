@@ -252,12 +252,18 @@ AsyncLog: written=10342 dropped=17 fallbacks=0 enabled=true
 
 ## 6. 公共 API
 
-### 6.1 配置与生命周期
+### 6.1 生命周期 (自动管理)
+
+异步日志的生命周期由框架自动管理, 用户无需手动调用:
+
+- **自动启动**: 首次调用 `OSP_LOG_INFO/WARN/DEBUG` 时, `AsyncLogWrite()` 内部通过 CAS 原子自启动 writer thread
+- **自动停止**: `atexit(StopAsync)` 确保进程退出前 drain 所有缓冲
+- **强制同步模式**: 定义 `OSP_LOG_SYNC_ONLY` 宏后, 所有日志走同步路径, 不启动写线程
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
-| `StartAsync` | `void StartAsync(const AsyncLogConfig& = {}) noexcept` | 启动异步后端 (幂等) |
-| `StopAsync` | `void StopAsync() noexcept` | 停止并 drain 剩余 entry (幂等) |
+| `StartAsync` | `void StartAsync(const AsyncLogConfig& = {}) noexcept` | 自动调用; 仅需自定义 sink 时手动调用 |
+| `StopAsync` | `void StopAsync() noexcept` | 自动调用 (atexit); 通常不需手动调用 |
 | `IsAsyncEnabled` | `bool IsAsyncEnabled() noexcept` | 查询运行状态 |
 | `SetSink` | `void SetSink(LogSinkFn fn, void* ctx = nullptr) noexcept` | 设置输出 sink |
 | `GetAsyncStats` | `AsyncLogStats GetAsyncStats() noexcept` | 获取运行时统计 |
@@ -297,6 +303,7 @@ using LogSinkFn = void (*)(const LogEntry* entries, uint32_t count, void* contex
 | `OSP_ASYNC_LOG_MAX_THREADS` | 8 | 最大并发日志线程数 |
 | `OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S` | 10 | 丢弃统计上报间隔 (秒, 0=禁用) |
 | `OSP_LOG_MIN_LEVEL` | 0 (Debug) / 1 (Release) | 编译期最低日志级别 |
+| `OSP_LOG_SYNC_ONLY` | 未定义 | 定义后禁用异步路径, 所有日志同步写 |
 
 ---
 
@@ -382,27 +389,36 @@ async_log.hpp
 
 ## 12. 使用示例
 
-### 12.1 基本使用
+### 12.1 基本使用 (零配置)
 
 ```cpp
 #include "osp/async_log.hpp"  // 自动接管 OSP_LOG_XXX 宏
 
 int main() {
-    // 启动异步日志 (默认 stderr sink)
-    osp::log::StartAsync();
+    // 无需手动调用 StartAsync/StopAsync
+    // 首次 log 调用自动启动 writer thread, 进程退出自动 drain
 
-    // 正常使用宏 -- DEBUG/INFO/WARN 走异步, ERROR/FATAL 同步
     OSP_LOG_INFO("Main", "system started, version=%d", 1);
     OSP_LOG_WARN("Sensor", "temperature=%.1f exceeds threshold", 85.3);
     OSP_LOG_ERROR("Sensor", "hardware fault detected");  // 同步写, 崩溃安全
 
-    // 停止并 drain 所有缓冲
-    osp::log::StopAsync();
-    return 0;
+    return 0;  // atexit 自动调用 StopAsync(), drain 所有缓冲
 }
 ```
 
-### 12.2 自定义 Sink
+### 12.2 强制同步模式
+
+```cpp
+// CMakeLists.txt 或编译参数中定义:
+// target_compile_definitions(my_target PRIVATE OSP_LOG_SYNC_ONLY)
+#define OSP_LOG_SYNC_ONLY
+#include "osp/async_log.hpp"
+
+// 所有 OSP_LOG_* 宏保持同步写入, 不启动后台线程
+OSP_LOG_INFO("Main", "this goes to stderr synchronously");
+```
+
+### 12.3 自定义 Sink (高级用法)
 
 ```cpp
 void FileSink(const osp::log::LogEntry* entries, uint32_t count, void* ctx) {
@@ -420,10 +436,11 @@ int main() {
     osp::log::AsyncLogConfig cfg;
     cfg.sink = FileSink;
     cfg.sink_context = logfile;
-    osp::log::StartAsync(cfg);
+    osp::log::StartAsync(cfg);  // 提前配置自定义 sink
+    // 后续 log 调用使用 FileSink
     // ...
-    osp::log::StopAsync();
-    fclose(logfile);
+    // atexit 自动 StopAsync + drain
+    // 注意: logfile 需在 atexit 之后仍有效, 或手动 StopAsync 后 fclose
 }
 ```
 
@@ -472,6 +489,25 @@ va_list 中的参数 (栈上临时变量、寄存器值) 在函数返回后失�
 4. `writer_thread.join()` -- 主线程等待写线程结束
 5. `running.store(false)` -- 标记已停止
 
+### Q6: 为什么选择 auto-start + atexit 而非手动 Start/Stop?
+
+日志是基础设施, 用户不应关心其后台线程的生命周期:
+- **auto-start**: 首次 `AsyncLogWrite()` 调用时 CAS 原子自启动, 线程安全
+- **atexit(StopAsync)**: 进程退出前自动 drain, 无需用户干预
+- **OSP_LOG_SYNC_ONLY**: 编译期宏禁用异步路径, 用于调试或无后台线程的平台
+
+### Q7: 为什么选 Per-Thread SPSC 而非 MPSC?
+
+| 维度 | MPSC (CAS) | Per-Thread SPSC |
+|------|-----------|-----------------|
+| 生产者延迟 | CAS 重试 ~50-100ns | wait-free ~10-20ns |
+| 缓存行为 | 共享 tail 跨核弹跳 | 每线程独立, 零 false sharing |
+| 额外复杂度 | committed 标志 | 无 |
+| 内存 | 1 * N * entry_size | MaxThreads * N * entry_size |
+| 适用场景 | 线程数多/动态 | **线程数固定 (嵌入式 2-8)** |
+
+嵌入式场景线程数少且固定, SPSC 的 wait-free 确定性延迟更适合实时系统。
+
 ---
 
 ## 14. 版本历史
@@ -479,3 +515,4 @@ va_list 中的参数 (栈上临时变量、寄存器值) 在函数返回后失�
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v0.3.2 | 2026-02-16 | 初始实现: Per-Thread SPSC 异步日志 + 丢弃统计定时上报 |
+| v0.3.2+ | 2026-02-16 | 增强: auto-start + atexit + OSP_LOG_SYNC_ONLY |

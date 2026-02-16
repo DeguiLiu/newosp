@@ -116,18 +116,24 @@ TEST_CASE("AsyncLog: ERROR bypasses async path", "[async_log]") {
   CHECK(stats.entries_written == 0);
 }
 
-TEST_CASE("AsyncLog: fallback to sync when not started", "[async_log]") {
+TEST_CASE("AsyncLog: auto-start uses default stderr sink", "[async_log]") {
   g_test_sink.Reset();
   osp::log::ResetAsyncStats();
 
-  // Do NOT call StartAsync.
-  REQUIRE_FALSE(osp::log::IsAsyncEnabled());
+  // Do NOT call StartAsync with custom sink.
+  // First log call will auto-start with default stderr sink.
+  OSP_LOG_INFO("Test", "auto-start msg");
 
-  // This should fall back to sync LogWrite (stderr).
-  OSP_LOG_INFO("Test", "fallback msg");
+  // Give writer a chance to drain.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  // No entries in test sink (it was never set as the sink).
+  // No entries in test sink (auto-start uses stderr, not TestSink).
   CHECK(g_test_sink.count.load(std::memory_order_relaxed) == 0);
+
+  // But async should now be running (auto-started).
+  CHECK(osp::log::IsAsyncEnabled());
+
+  osp::log::StopAsync();
 }
 
 TEST_CASE("AsyncLog: drop policy on full queue", "[async_log]") {
