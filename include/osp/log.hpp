@@ -300,6 +300,53 @@ inline void LogWrite(Level level, const char* category, const char* file,
   }
 }
 
+/**
+ * @brief va_list variant of LogWrite, for use by async_log.hpp fallback path.
+ *
+ * Same logic as LogWrite but accepts a pre-started va_list instead of
+ * variadic arguments. The caller is responsible for va_start/va_end.
+ */
+inline void LogWriteVa(Level level, const char* category, const char* file,
+                       int line, const char* fmt, va_list args) noexcept {
+  if (static_cast<uint8_t>(level) < static_cast<uint8_t>(detail::LogLevelRef())) {
+    return;
+  }
+
+  char ts_buf[64];
+  detail::FormatTimestamp(ts_buf, sizeof(ts_buf));
+
+  char msg_buf[512];
+  (void)vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
+
+#ifdef NDEBUG
+  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n",
+                     ts_buf,
+                     detail::LevelTag(level),
+                     category ? category : "-",
+                     msg_buf);
+#else
+  const char* basename = file;
+  if (file != nullptr) {
+    const char* slash = std::strrchr(file, '/');
+    if (slash != nullptr) {
+      basename = slash + 1;
+    }
+  }
+  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%d)\n",
+                     ts_buf,
+                     detail::LevelTag(level),
+                     category ? category : "-",
+                     msg_buf,
+                     basename ? basename : "?",
+                     line);
+#endif
+
+  if (level == Level::kFatal) {
+    std::fflush(stderr);
+    std::abort();
+  }
+}
+
 }  // namespace log
 }  // namespace osp
 

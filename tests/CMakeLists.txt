@@ -46,6 +46,7 @@ set(OSP_TEST_CORE_SOURCES
     test_static_node.cpp
     test_process.cpp
     test_system_monitor.cpp
+    test_async_log.cpp
 )
 
 # Network test sources (depend on sockpp or use exceptions, incompatible with -fno-exceptions)
