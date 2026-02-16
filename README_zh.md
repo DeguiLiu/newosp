@@ -15,6 +15,7 @@
 - **兼容 `-fno-exceptions -fno-rtti`**: 适配资源受限的嵌入式 Linux 环境
 - **类型安全错误处理**: `expected<V,E>` 和 `optional<T>` 词汇类型，替代异常
 - **无锁消息传递**: MPSC/SPSC 环形缓冲区，CAS 发布，优先级准入控制
+- **异步日志**: Per-Thread SPSC wait-free 异步日志 (~200-300ns 热路径), 分级路由, 自动启停
 - **多传输后端**: TCP/UDP/Unix Domain Socket/共享内存/串口，`transport_factory` 自动选择
 - **实时调度**: `RealtimeExecutor` 支持 SCHED_FIFO、mlockall、CPU 亲和性绑定
 - **层次状态机 + 行为树**: 零堆分配 HSM (LCA 转换) 和缓存友好 BT (扁平数组存储)
@@ -24,7 +25,7 @@
 
 ## 模块
 
-### 基础层 (8 个)
+### 基础层 (9 个)
 
 | 模块 | 说明 |
 |------|------|
@@ -32,6 +33,7 @@
 | `vocabulary.hpp` | `expected`、`optional`、`FixedVector`、`FixedString`、`FixedFunction`、`function_ref`、`not_null`、`NewType`、`ScopeGuard` |
 | `config.hpp` | 多格式配置解析器 (INI/JSON/YAML)，基于模板的后端分发 |
 | `log.hpp` | 日志宏，编译期级别过滤 (stderr 后端) |
+| `async_log.hpp` | 异步日志后端 (Per-Thread SPSC, 分级路由, 背压丢弃上报, 自动启停) |
 | `timer.hpp` | 基于 `std::chrono::steady_clock` 的定时任务调度器 |
 | `shell.hpp` | 远程调试 Shell (telnet)，支持 TAB 补全、命令历史、`OSP_SHELL_CMD` 注册 |
 | `mem_pool.hpp` | 固定块内存池 (`FixedPool<BlockSize, MaxBlocks>`)，嵌入式空闲链表 |
@@ -226,6 +228,10 @@ shell_commands.hpp ──┬──> shell.hpp
                      ├──> fault_collector.hpp
                      ├──> node_manager_hsm.hpp
                      └──> bus.hpp
+
+async_log.hpp ──┬──> log.hpp
+                ├──> platform.hpp
+                └──> spsc_ringbuffer.hpp
 ```
 
 ## 构建
@@ -372,6 +378,7 @@ int main() {
 - [性能基准报告](docs/benchmark_report_zh.md) - 吞吐、延迟、内存占用实测数据
 - [激光雷达性能评估](docs/performance_analysis_lidar_zh.md) - 工业激光雷达场景适配分析
 - [变更日志](docs/changelog_zh.md) - P0 调整 + Phase 实施记录
+- [异步日志设计](docs/design_async_log_zh.md) - Per-Thread SPSC 异步日志架构、分级路由、背压策略
 - [示例指南](docs/examples_zh.md) - 示例用途与架构映射
 
 ## 设计模式
@@ -383,6 +390,7 @@ int main() {
 - **CRTP**: 无虚函数的可扩展 Shell 命令
 - **SBO 回调**: `FixedFunction<Sig, Cap>` 零堆分配
 - **无锁 MPSC**: `AsyncBus` 基于序列号的环形缓冲区 + CAS 发布
+- **Per-Thread SPSC 异步日志**: `async_log.hpp` wait-free 生产者, 分级路由, 背压丢弃上报
 - **基于类型的路由**: `std::variant` + `VariantIndex<T>` 编译期分发
 - **基础组件复用**: 上层模块统一使用 FixedString/FixedVector/SteadyNowUs，零重复实现
 

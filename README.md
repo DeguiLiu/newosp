@@ -15,6 +15,7 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 - **`-fno-exceptions -fno-rtti` compatible**: Designed for resource-constrained embedded Linux environments
 - **Type-safe error handling**: `expected<V,E>` and `optional<T>` vocabulary types, replacing exceptions
 - **Lock-free messaging**: MPSC/SPSC ring buffers, CAS publish, priority-based admission control
+- **Async logging**: Per-thread SPSC wait-free async log (~200-300ns hot path), severity-based routing, auto-start
 - **Multiple transport backends**: TCP/UDP/Unix Domain Socket/shared memory/serial, `transport_factory` auto-selection
 - **Real-time scheduling**: `RealtimeExecutor` with SCHED_FIFO, mlockall, CPU affinity binding
 - **HSM + Behavior Tree**: Zero-heap HSM (LCA transitions) and cache-friendly BT (flat array storage)
@@ -22,9 +23,9 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 - **Reliability infrastructure**: Software watchdog, fault collector, lifecycle nodes, QoS configuration
 - **Template-based design patterns**: Tag dispatch, variadic templates, CRTP, compile-time composition over virtual-function OOP
 
-## Modules (38 headers)
+## Modules (39 headers)
 
-### Foundation Layer (8)
+### Foundation Layer (9)
 
 | Module | Description |
 |--------|-------------|
@@ -32,6 +33,7 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 | `vocabulary.hpp` | `expected`, `optional`, `FixedVector`, `FixedString`, `FixedFunction`, `function_ref`, `not_null`, `NewType`, `ScopeGuard` |
 | `config.hpp` | Multi-format config parser (INI/JSON/YAML), template-based backend dispatch |
 | `log.hpp` | Logging macros, compile-time level filtering (stderr backend) |
+| `async_log.hpp` | Async logging backend (Per-Thread SPSC, severity routing, drop-stats reporting, auto-start) |
 | `timer.hpp` | Timer task scheduler based on `std::chrono::steady_clock` |
 | `shell.hpp` | Remote debug shell (telnet), TAB completion, command history |
 | `mem_pool.hpp` | Fixed-block memory pool (`FixedPool<BlockSize, MaxBlocks>`), embedded free list |
@@ -185,6 +187,10 @@ shell_commands.hpp ──┬──> shell.hpp
                      ├──> fault_collector.hpp
                      ├──> node_manager_hsm.hpp
                      └──> bus.hpp
+
+async_log.hpp ──┬──> log.hpp
+                ├──> platform.hpp
+                └──> spsc_ringbuffer.hpp
 ```
 
 ## Build
@@ -326,6 +332,7 @@ All dependencies are fetched automatically via CMake FetchContent:
 - Benchmark report: [docs/benchmark_report_zh.md](docs/benchmark_report_zh.md)
 - LiDAR performance analysis: [docs/performance_analysis_lidar_zh.md](docs/performance_analysis_lidar_zh.md)
 - Changelog: [docs/changelog_zh.md](docs/changelog_zh.md)
+- Async log design: [docs/design_async_log_zh.md](docs/design_async_log_zh.md)
 - Examples guide: [docs/examples_zh.md](docs/examples_zh.md)
 
 ## Design Patterns
@@ -337,6 +344,7 @@ This library uses template-based modern C++ patterns instead of traditional virt
 - **CRTP**: Extensible shell commands without virtual functions
 - **SBO Callback**: `FixedFunction<Sig, Cap>` with zero heap allocation
 - **Lock-free MPSC**: `AsyncBus` sequence-based ring buffer with CAS publish
+- **Per-Thread SPSC async log**: `async_log.hpp` wait-free producer, severity-based routing
 - **Type-based routing**: `std::variant` + `VariantIndex<T>` compile-time dispatch
 
 ## License

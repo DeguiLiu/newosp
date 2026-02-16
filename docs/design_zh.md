@@ -32,7 +32,7 @@
 
 ### 1.1 定位
 
-newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头文件基础设施库。提供嵌入式系统开发所需的核心基础能力: 配置管理、日志、定时调度、远程调试、内存池、消息总线、节点通信、工作线程池、共享内存 IPC、网络传输、串口通信、层次状态机、行为树、QoS 服务质量、生命周期节点、代码生成。
+newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头文件基础设施库。提供嵌入式系统开发所需的核心基础能力: 配置管理、日志 (含异步日志)、定时调度、远程调试、内存池、消息总线、节点通信、工作线程池、共享内存 IPC、网络传输、串口通信、层次状态机、行为树、QoS 服务质量、生命周期节点、代码生成。
 
 ### 1.2 适用场景
 
@@ -48,7 +48,7 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 
 - **语言**: C++17 (兼容 `-fno-exceptions -fno-rtti`)
 - **构建**: CMake >= 3.14, FetchContent 自动管理依赖
-- **测试**: Catch2 v3.5.2, 758+ test cases, ASan/TSan/UBSan clean
+- **测试**: Catch2 v3.5.2, 1078+ test cases, ASan/TSan/UBSan clean
 - **代码规范**: Google C++ Style (clang-format), cpplint, MISRA C++
 - **CI**: GitHub Actions (Ubuntu, GCC x Debug/Release, Sanitizers)
 
@@ -73,7 +73,7 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 目标平台:    ARM Cortex-A 系列 (Linux 4.x+)
 编译器:      GCC >= 7, Clang >= 5
 内存预算:    典型 ~100KB 静态 + <10KB 堆
-线程预算:    典型 4-8 线程 (定时器1 + Shell 3 + 工作线程 N)
+线程预算:    典型 4-8 线程 (定时器1 + Shell 3 + 异步日志 1 + 工作线程 N)
 缓存行:     64 字节 (ARM 标准)
 ```
 
@@ -164,6 +164,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
     |
     ├── config.hpp     (依赖 vocabulary: expected, optional, FixedString)
     ├── log.hpp        (独立，纯 C stdlib)
+    ├── async_log.hpp   (依赖 log.hpp + platform.hpp + spsc_ringbuffer.hpp)
     ├── timer.hpp      (依赖 vocabulary: expected, NewType)
     ├── shell.hpp      (依赖 vocabulary: function_ref, FixedFunction, expected)
     ├── mem_pool.hpp   (依赖 vocabulary: expected)
@@ -223,7 +224,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
     └────────────┘  └────────────┘
 ```
 
-### 3.4 模块总览 (38 个头文件)
+### 3.4 模块总览 (39 个头文件)
 
 | 层 | 模块 | 头文件 | 说明 |
 |----|------|--------|------|
@@ -231,6 +232,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 | 基础层 | Vocabulary | vocabulary.hpp | expected, FixedString/Vector, FixedFunction, ScopeGuard |
 | 基础层 | Config | config.hpp | INI/JSON/YAML 多格式配置 |
 | 基础层 | Log | log.hpp | stderr 日志宏 |
+| 基础层 | AsyncLog | async_log.hpp | 异步日志 (Per-Thread SPSC, 分级路由, 背压丢弃上报) |
 | 基础层 | Timer | timer.hpp | 定时调度器 |
 | 基础层 | Shell | shell.hpp | telnet 调试 Shell |
 | 基础层 | MemPool | mem_pool.hpp | 固定块内存池 |
@@ -353,6 +355,51 @@ OSP_LOG_INFO("sensor", "temp=%.1f from %u", t, id);
 - `OSP_LOG_MIN_LEVEL` 编译期裁剪 (Release 默认 kInfo)
 - 栈缓冲区 (ts 32B + msg 512B)，零堆分配
 - POSIX `fprintf` 保证原子写
+
+---
+
+### 4.4a async_log.hpp -- 异步日志
+
+基于 Per-Thread SPSC 环形缓冲的异步日志后端，零配置自动接管 `log.hpp` 宏。
+
+```cpp
+#include "osp/async_log.hpp"  // 自动接管 OSP_LOG_DEBUG/INFO/WARN
+
+OSP_LOG_INFO("Sensor", "temp=%.1f", 25.0);  // 异步 SPSC, ~200-300ns
+OSP_LOG_ERROR("Sensor", "fault!");           // 同步 fprintf, 崩溃安全
+// 首次调用自动启动写线程, 进程退出自动 drain
+```
+
+**分级路由**: ERROR/FATAL 走同步 `fprintf` (崩溃安全); DEBUG/INFO/WARN 走异步 SPSC 环形缓冲 (不阻塞业务线程)。
+
+**核心数据结构**:
+
+| 结构 | 大小 | 说明 |
+|------|------|------|
+| `LogEntry` | 320B | trivially_copyable, 5 cache lines, memcpy 批处理 |
+| `LogBuffer` (per-thread) | 80KB | `SpscRingbuffer<LogEntry, 256>` + slot 管理 |
+| `AsyncLogContext` | ~2KB | 全局单例, 原子计数器, sink 指针 |
+
+**线程模型**:
+- 生产者: 业务线程, `thread_local` 快路径 (~1ns), CAS 首次注册
+- 消费者: 后台写线程, round-robin 轮询, `PopBatch(32)` 批量消费
+- 退避策略: 三阶段自适应 (spin → yield → sleep 50us)
+
+**背压与丢弃上报**:
+- 队列满时丢弃非关键日志 (不阻塞生产者)
+- 定时 stderr 上报丢弃统计 (默认 10s 间隔)
+- `GetAsyncStats()` API 可集成 Shell 诊断命令
+
+**编译期配置**:
+
+| 宏 | 默认值 | 说明 |
+|----|--------|------|
+| `OSP_ASYNC_LOG_QUEUE_DEPTH` | 256 | 每线程 SPSC 深度 |
+| `OSP_ASYNC_LOG_MAX_THREADS` | 8 | 最大并发日志线程数 |
+| `OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S` | 10 | 丢弃上报间隔 (秒) |
+| `OSP_LOG_SYNC_ONLY` | 未定义 | 定义后禁用异步路径 |
+
+> 详细设计见 [design_async_log_zh.md](design_async_log_zh.md)
 
 ---
 
@@ -1738,6 +1785,7 @@ expected<V, E> 返回
 | IoPoller (64 fds) | ~2 KB | <1 KB | 0 |
 | LightSemaphore | <128 B | 0 | 0 |
 | TransportFactory | 0 (无状态) | 0 | 0 |
+| AsyncLog (8 threads) | ~652 KB | 0 | 1 |
 
 > 实测性能数据 (吞吐、延迟、sizeof、运行时 RSS) 见 [benchmark_report_zh.md](benchmark_report_zh.md)
 
@@ -1780,7 +1828,7 @@ expected<V, E> 返回
 - 每模块独立测试文件: `test_<module>.cpp`
 - 覆盖目标: 基础 API + 边界条件 + 多线程场景
 - Sanitizer 验证: 所有测试在 ASan/TSan/UBSan 下通过
-- 当前: 758+ test cases
+- 当前: 1078+ test cases
 
 ---
 
@@ -1804,6 +1852,7 @@ expected<V, E> 返回
 | ROS2 CallbackGroup | ROS2 rclcpp | Executor 分组调度 |
 | CyberRT DataFusion | CyberRT | FusedSubscription 多源对齐 |
 | 二级排队 (MPSC+SPSC) | consumer-producer | WorkerPool |
+| Per-Thread SPSC 异步日志 | spdlog + 自研 | async_log.hpp wait-free 热路径 |
 | 共享内存无锁队列 | cpp-ipc | ShmRingBuffer 进程间通信 |
 | 零拷贝 LoanedMessage | ROS2 Fast DDS | ShmTransport 共享内存发布 |
 | 自动传输选择 | CyberRT | TransportFactory 路由策略 |
@@ -1825,6 +1874,10 @@ expected<V, E> 返回
 | 宏 | 默认值 | 模块 | 说明 |
 |----|--------|------|------|
 | `OSP_LOG_MIN_LEVEL` | 0/1 | log.hpp | 编译期日志级别 |
+| `OSP_ASYNC_LOG_QUEUE_DEPTH` | 256 | async_log.hpp | 每线程 SPSC 队列深度 |
+| `OSP_ASYNC_LOG_MAX_THREADS` | 8 | async_log.hpp | 最大并发日志线程数 |
+| `OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S` | 10 | async_log.hpp | 丢弃统计上报间隔 (秒) |
+| `OSP_LOG_SYNC_ONLY` | 未定义 | async_log.hpp | 禁用异步路径 |
 | `OSP_CONFIG_MAX_FILE_SIZE` | 8192 | config.hpp | 最大配置文件大小 |
 | `OSP_BUS_QUEUE_DEPTH` | 4096 | bus.hpp | 环形缓冲区大小 |
 | `OSP_BUS_MAX_MESSAGE_TYPES` | 8 | bus.hpp | 最大消息类型数 |
@@ -1857,6 +1910,7 @@ expected<V, E> 返回
 | vocabulary | 局部对象，无共享 |
 | config | 加载后只读 |
 | log | fprintf 原子写 |
+| async_log | wait-free SPSC 生产者; 单消费者写线程; CAS 线程注册 |
 | timer | mutex 保护所有公有方法 |
 | shell | 注册表 mutex + 会话线程隔离 |
 | mem_pool | mutex 保护 alloc/free |
