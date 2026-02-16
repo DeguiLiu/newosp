@@ -55,6 +55,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
@@ -446,6 +447,21 @@ inline void ShellRunSession(ShellSession& s,
 
   while (running.load(std::memory_order_relaxed) &&
          s.active.load(std::memory_order_acquire)) {
+    // Poll with timeout so we periodically re-check the running flag.
+    // This avoids the need to close(fd) from another thread to unblock
+    // a blocking read(), which is a POSIX-undefined data race (TSan).
+    struct pollfd pfd;
+    pfd.fd = s.read_fd;
+    pfd.events = POLLIN;
+    int pr = ::poll(&pfd, 1, 200);
+    if (pr == 0) {
+      continue;  // Timeout -- re-check running flag.
+    }
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+
     char ch;
     ssize_t n = s.read_fn(s.read_fd, &ch, 1);
     if (n < 0) {
@@ -844,14 +860,10 @@ inline void DebugShell::Stop() {
     listen_fd_ = -1;
   }
 
-  // Close all active session sockets to unblock their recv().
+  // Mark all sessions inactive so poll-based session loops will exit.
   if (sessions_ != nullptr) {
     for (uint32_t i = 0; i < cfg_.max_connections; ++i) {
-      if (sessions_[i].read_fd >= 0) {
-        ::close(sessions_[i].read_fd);
-        sessions_[i].read_fd = -1;
-        sessions_[i].write_fd = -1;
-      }
+      sessions_[i].active.store(false, std::memory_order_release);
     }
   }
 
@@ -860,11 +872,16 @@ inline void DebugShell::Stop() {
     accept_thread_.join();
   }
 
-  // Join all session threads.
+  // Join all session threads, then close their sockets.
   if (sessions_ != nullptr) {
     for (uint32_t i = 0; i < cfg_.max_connections; ++i) {
       if (sessions_[i].thread.joinable()) {
         sessions_[i].thread.join();
+      }
+      if (sessions_[i].read_fd >= 0) {
+        ::close(sessions_[i].read_fd);
+        sessions_[i].read_fd = -1;
+        sessions_[i].write_fd = -1;
       }
     }
     delete[] sessions_;
@@ -1071,12 +1088,8 @@ inline void ConsoleShell::Stop() {
   running_.store(false, std::memory_order_release);
   session_.active.store(false, std::memory_order_release);
 
-  // For pipe-based testing: close the read fd to unblock read().
-  // Do NOT close real stdin (fd 0).
-  if (cfg_.read_fd >= 0 && cfg_.read_fd != STDIN_FILENO) {
-    ::close(cfg_.read_fd);
-  }
-
+  // Join first -- the session loop uses poll() with a 200ms timeout,
+  // so it will notice running_==false and exit within one poll cycle.
   if (session_.thread.joinable()) {
     session_.thread.join();
   }
@@ -1248,14 +1261,15 @@ inline void UartShell::Stop() {
   running_.store(false, std::memory_order_release);
   session_.active.store(false, std::memory_order_release);
 
-  // Close fd to unblock the read() in session loop.
+  // Join first -- poll() timeout in session loop handles exit.
+  if (session_.thread.joinable()) {
+    session_.thread.join();
+  }
+
+  // Close fd after thread has exited (TSan-safe).
   if (uart_fd_ >= 0 && owns_fd_) {
     ::close(uart_fd_);
     uart_fd_ = -1;
-  }
-
-  if (session_.thread.joinable()) {
-    session_.thread.join();
   }
 }
 
