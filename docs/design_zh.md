@@ -318,7 +318,8 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 ```cpp
 enum class ConfigError : uint8_t { kFileNotFound, kParseError, kFormatNotSupported, kBufferFull };
 enum class TimerError  : uint8_t { kSlotsFull, kInvalidPeriod, kNotRunning, kAlreadyRunning };
-enum class ShellError  : uint8_t { kRegistryFull, kDuplicateName, kPortInUse, kNotRunning };
+enum class ShellError  : uint8_t { kRegistryFull, kDuplicateName, kPortInUse, kNotRunning,
+                                   kAlreadyRunning, kAuthFailed, kDeviceOpenFailed };
 enum class MemPoolError: uint8_t { kPoolExhausted, kInvalidPointer };
 ```
 
@@ -439,20 +440,92 @@ uint64_t ns = sched.NsToNextTask();  // UINT64_MAX=无任务, 0=已过期
 
 ---
 
-### 4.6 shell.hpp -- 远程调试 Shell
+### 4.6 shell.hpp -- 多后端调试 Shell
 
-telnet 远程调试接口，支持命令注册、TAB 补全、历史记录。
+三后端调试 Shell: TCP telnet / 本地 Console / UART 串口，共享行编辑和命令执行逻辑。
 
-```cpp
-OSP_SHELL_CMD(stats, "Show system statistics") {
-    osp::DebugShell::Printf("uptime: %u seconds\n", get_uptime());
-    return 0;
-}
+```
+        ┌─────────────────────────────────────────────────────┐
+        │                  共享层 (detail::)                   │
+        │  ProcessByte ← FilterIac ← ESC FSM ← History       │
+        │  TabComplete   ExecuteLine   SessionWrite            │
+        │  WriteFn/ReadFn 函数指针抽象                          │
+        └────────┬──────────────┬──────────────┬──────────────┘
+                 │              │              │
+        ┌────────▼───┐  ┌──────▼─────┐  ┌────▼────────┐
+        │ DebugShell  │  │ConsoleShell│  │  UartShell   │
+        │ TCP telnet  │  │stdin/stdout│  │ /dev/ttyS*   │
+        │ IAC 过滤    │  │ termios raw│  │ baudrate cfg │
+        │ 多连接 auth │  │ poll(100ms)│  │ poll(200ms)  │
+        └─────────────┘  └────────────┘  └──────────────┘
 ```
 
-- Meyer's 单例命令注册表 (最多 64 个命令)
-- 线程局部 session 指针路由 `Printf()` 输出
-- 原始 POSIX socket (无外部依赖)
+**后端 I/O 抽象**:
+
+```cpp
+using ShellWriteFn = ssize_t (*)(int fd, const void* buf, size_t len);
+using ShellReadFn  = ssize_t (*)(int fd, void* buf, size_t len);
+// TCP: send/recv + MSG_NOSIGNAL     Console/UART: write/read (POSIX)
+```
+
+**字节处理流水线** (每字节经过):
+
+```
+raw byte ──> [FilterIac] ──> [skip_next_lf] ──> [ESC FSM] ──> [字符分类]
+              (telnet 专用)    (\r\n 去重)        (方向键)      (Enter/BS/Tab/Ctrl/打印)
+```
+
+**IAC 协议过滤** (4 状态, telnet 专用):
+- kNormal: 正常字节透传; 0xFF -> kIac
+- kIac: WILL/WONT/DO/DONT (0xFB-0xFE) -> kNego; SB (0xFA) -> kSub; IAC IAC -> literal 0xFF
+- kNego: 消耗 option byte -> kNormal
+- kSub: 等待 IAC SE 结束子协商 -> kNormal
+
+**ESC 序列解析** (3 状态):
+- kNone: 0x1B -> kEsc
+- kEsc: '[' -> kBracket; 其他 -> kNone
+- kBracket: 'A' = HistoryUp, 'B' = HistoryDown, 'C'/'D' = 预留 -> kNone
+
+**历史记录**: 环形缓冲 `history[16][256]`，head/count/browse 索引，跳过连续重复。
+
+**认证** (DebugShell 可选): username/password 配置，3 次失败断开，星号掩码密码输入。
+
+```cpp
+// TCP telnet (多连接 + 认证)
+osp::DebugShell::Config cfg;
+cfg.port = 5090;
+cfg.username = "admin";    // nullptr = 无认证
+cfg.password = "secret";
+osp::DebugShell shell(cfg);
+shell.Start();
+
+// 本地 Console (stdin/stdout raw mode)
+osp::ConsoleShell console;
+console.Start();           // 异步, 或 console.Run() 同步阻塞
+
+// UART 串口
+osp::UartShell::Config ucfg;
+ucfg.device = "/dev/ttyS0";
+ucfg.baudrate = 115200;
+osp::UartShell uart(ucfg);
+uart.Start();
+```
+
+**编译期配置宏**:
+
+| 宏 | 默认值 | 说明 |
+|----|--------|------|
+| `OSP_SHELL_LINE_BUF_SIZE` | 256 | 行缓冲大小 (字节) |
+| `OSP_SHELL_HISTORY_SIZE` | 16 | 历史记录条数 |
+| `OSP_SHELL_MAX_ARGS` | 16 | 命令最大参数数 |
+
+**线程安全**:
+- 注册表: mutex 保护
+- 会话线程: 各自独立 ShellSession，无共享可变状态
+- Stop(): `shutdown(SHUT_RDWR)` 安全唤醒 recv() 阻塞的会话线程
+- AcceptLoop: `poll()` + 200ms 超时，Stop() 时 close(listen_fd_) 即可退出
+- `[[nodiscard]]` 标注所有有返回值意义的公有函数
+- `ScopeGuard` / `OSP_SCOPE_EXIT` 管理 fd 生命周期
 
 ---
 
@@ -1758,7 +1831,7 @@ expected<V, E> 返回
 |------|----------|--------|--------|
 | Config (128 entries) | ~48 KB | 0 | 0 |
 | TimerScheduler(16) | ~1 KB | ~1 KB | 1 |
-| DebugShell(2 conn) | ~1 KB | ~4 KB | 3 |
+| DebugShell(2 conn) | ~9 KB | ~4 KB | 3 |
 | FixedPool<256,64> | 16 KB | 0 | 0 |
 | ShutdownManager | <256 B | 0 | 0 |
 | AsyncBus(4096) | ~320 KB | 0 | 0 |
@@ -1912,7 +1985,7 @@ expected<V, E> 返回
 | log | fprintf 原子写 |
 | async_log | wait-free SPSC 生产者; 单消费者写线程; CAS 线程注册 |
 | timer | mutex 保护所有公有方法 |
-| shell | 注册表 mutex + 会话线程隔离 |
+| shell | 注册表 mutex + 会话线程隔离 + shutdown(SHUT_RDWR) 安全关停 |
 | mem_pool | mutex 保护 alloc/free |
 | shutdown | 原子标志 + async-signal-safe pipe |
 | bus | 无锁 MPSC + SharedMutex 订阅 |
