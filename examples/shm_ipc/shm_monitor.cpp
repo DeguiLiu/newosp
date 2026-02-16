@@ -15,7 +15,7 @@
 // of the ShmChannel depth as the primary data source, with the
 // SpscRingbuffer pattern shown for the shell "shm_latest" command.
 //
-// Usage: ./osp_shm_monitor [channel_name] [shell_port]
+// Usage: ./osp_shm_monitor [channel_name] [shell_port] [--console]
 
 #include <atomic>
 #include <chrono>
@@ -241,24 +241,42 @@ int main(int argc, char* argv[]) {
       ? static_cast<uint16_t>(std::atoi(argv[2]))
       : 9527;
 
+  // Detect --console flag
+  bool use_console = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--console") == 0) {
+      use_console = true;
+    }
+  }
+
   g_state.channel_name = channel_name;
 
   osp::ShutdownManager shutdown;
   shutdown.InstallSignalHandlers();
 
-  // Start DebugShell
-  osp::DebugShell::Config shell_cfg;
-  shell_cfg.port = shell_port;
-  shell_cfg.max_connections = 4;
-  osp::DebugShell shell(shell_cfg);
+  // Create both shell types, start only one
+  osp::ConsoleShell console_shell({});
+  osp::DebugShell::Config tcp_cfg;
+  tcp_cfg.port = shell_port;
+  tcp_cfg.max_connections = 4;
+  osp::DebugShell tcp_shell(tcp_cfg);
 
-  auto shell_r = shell.Start();
-  if (!shell_r) {
-    OSP_LOG_ERROR("monitor", "shell start failed on port %u", shell_port);
-    return 1;
+  if (use_console) {
+    auto r = console_shell.Start();
+    if (!r) {
+      OSP_LOG_ERROR("monitor", "console shell start failed");
+      return 1;
+    }
+    OSP_LOG_INFO("monitor", "console shell started (stdin/stdout)");
+  } else {
+    auto r = tcp_shell.Start();
+    if (!r) {
+      OSP_LOG_ERROR("monitor", "shell start failed on port %u", shell_port);
+      return 1;
+    }
+    OSP_LOG_INFO("monitor", "shell started on port %u (telnet localhost %u)",
+                 shell_port, shell_port);
   }
-  OSP_LOG_INFO("monitor", "shell started on port %u (telnet localhost %u)",
-               shell_port, shell_port);
   OSP_LOG_INFO("monitor", "commands: shm_status, shm_stats, shm_latest, "
                "shm_peek, shm_config, shm_reset");
 
@@ -314,7 +332,11 @@ int main(int argc, char* argv[]) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
-  shell.Stop();
+  if (use_console) {
+    console_shell.Stop();
+  } else {
+    tcp_shell.Stop();
+  }
   OSP_LOG_INFO("monitor", "shutdown complete");
   return 0;
 }

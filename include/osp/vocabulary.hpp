@@ -61,6 +61,7 @@ enum class TimerError : uint8_t {
   kSlotsFull = 0,
   kInvalidPeriod,
   kNotRunning,
+  kBindFailed,
   kAlreadyRunning
 };
 
@@ -68,7 +69,8 @@ enum class ShellError : uint8_t {
   kRegistryFull = 0,
   kDuplicateName,
   kPortInUse,
-  kNotRunning
+  kNotRunning,
+  kBindFailed
 };
 
 enum class MemPoolError : uint8_t {

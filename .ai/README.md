@@ -1,131 +1,96 @@
-# newosp AI Tooling
+# newosp AI Knowledge Base
 
-This directory contains all AI-related configuration, tools, and documentation for the newosp project. These are optional and not required for normal library usage.
+本目录存放 newosp 项目的 AI 可读知识，用于辅助 AI 工具理解项目结构和设计决策。
 
-## Directory Structure
+## 项目概述
 
-```
-.ai/
-├── .clang-format      # Code formatting rules (Google C++ Style, C++17)
-├── CPPLINT.cfg        # Lint configuration (disabled checks documented inline)
-├── format.sh          # Auto-format all C++ files
-├── lint.sh            # Run cpplint on all C++ files
-├── check.sh           # Full quality gate (format + lint + build + test)
-├── server.py          # MCP documentation server for Claude Code / Cursor
-├── llms.txt           # Concise API index (17KB, llmstxt.org format)
-├── llms-full.txt      # Full API reference (77KB, all 38 modules)
-└── README.md          # This file
-```
+newosp 是面向工业级嵌入式平台 (ARM-Linux) 的 C++17 header-only 基础设施库。
 
-## Code Quality Scripts
+- 目标平台: ARM-Linux (GCC / Clang)
+- 编译标志: `-fno-exceptions -fno-rtti` (可选)
+- 核心原则: 零堆分配热路径、编译期分发、RAII 资源管理
 
-### Format (`format.sh`)
+## 模块清单 (42 个头文件)
 
-Format all C++ source files using clang-format with the project's style rules.
+### 基础层
+| 模块 | 头文件 | 职责 |
+|------|--------|------|
+| Platform | platform.hpp | 平台检测、OSP_ASSERT、编译器提示 |
+| Vocabulary | vocabulary.hpp | expected, optional, FixedFunction, FixedVector, FixedString, ScopeGuard |
+| SPSC | spsc_ringbuffer.hpp | Lock-free wait-free SPSC 环形缓冲 |
 
-```bash
-# Format all files in-place
-.ai/format.sh
+### 核心层
+| 模块 | 头文件 | 职责 |
+|------|--------|------|
+| Config | config.hpp | INI/JSON/YAML 配置解析 |
+| Log | log.hpp | stderr 日志宏 |
+| Timer | timer.hpp | 定时器调度 |
+| Shell | shell.hpp | 调试 Shell (TCP/stdin/UART 多后端) |
+| MemPool | mem_pool.hpp | 固定大小内存池 |
+| Shutdown | shutdown.hpp | pipe(2) 唤醒 + LIFO 回调 |
+| Bus | bus.hpp | 无锁 MPSC 消息总线 |
+| Node | node.hpp | Pub/Sub 节点 |
+| StaticNode | static_node.hpp | 编译期 Handler 绑定节点 |
+| WorkerPool | worker_pool.hpp | 工作线程池 |
+| Executor | executor.hpp | 调度器 (Single/Static/Pinned/Realtime) |
+| HSM | hsm.hpp | 层次状态机 |
+| BT | bt.hpp | 行为树 |
+| Semaphore | semaphore.hpp | 信号量 |
 
-# Check only (dry-run, exit 1 if changes needed)
-.ai/format.sh --check
+### 网络层
+| 模块 | 头文件 | 职责 |
+|------|--------|------|
+| Socket | socket.hpp | TCP/UDP 封装 (sockpp) |
+| Connection | connection.hpp | 连接管理 |
+| IoPoller | io_poller.hpp | epoll 事件循环 |
+| Transport | transport.hpp | 网络传输 (v0/v1 帧) |
+| ShmTransport | shm_transport.hpp | 共享内存 IPC |
+| DataFusion | data_fusion.hpp | 多源数据融合 |
+| Discovery | discovery.hpp | 节点发现 (静态+多播) |
+| Service | service.hpp | RPC 服务 |
+| NodeManager | node_manager.hpp | 节点管理+心跳 |
+| TransportFactory | transport_factory.hpp | 自动传输选择 |
 
-# Format specific directory
-.ai/format.sh include/osp/bus.hpp
-```
+### 应用层
+| 模块 | 头文件 | 职责 |
+|------|--------|------|
+| App | app.hpp | Application/Instance 两层模型 |
+| Post | post.hpp | 统一投递 + OspSendAndWait |
+| QoS | qos.hpp | QoS 配置 |
+| LifecycleNode | lifecycle_node.hpp | 生命周期节点 |
 
-Style: Google C++ Style Guide, C++17, 120 column limit. Config: `.ai/.clang-format`.
+### 诊断层
+| 模块 | 头文件 | 职责 |
+|------|--------|------|
+| ShellCommands | shell_commands.hpp | 14 个内置诊断命令桥接 |
+| Watchdog | watchdog.hpp | 线程看门狗 |
+| FaultCollector | fault_collector.hpp | 故障收集器 |
+| SystemMonitor | system_monitor.hpp | CPU/内存/磁盘监控 |
+| Process | process.hpp | 进程管理 |
 
-### Lint (`lint.sh`)
+## Shell 多后端架构 (v0.3.1)
 
-Run cpplint static analysis on all C++ files.
+shell.hpp 提供 3 种调试 shell 后端，共享同一命令注册表和 Printf 路由:
 
-```bash
-# Lint all files
-.ai/lint.sh
+| 后端 | 类 | 场景 |
+|------|-----|------|
+| TCP telnet | `DebugShell` | 有网络环境，telnet 远程调试 |
+| stdin/stdout | `ConsoleShell` | 无网络，SSH 或终端直连 |
+| UART serial | `UartShell` | 串口调试，开发板早期阶段 |
 
-# Lint + auto-fix whitespace issues
-.ai/lint.sh --fix
+I/O 抽象通过函数指针 (`ShellWriteFn`/`ShellReadFn`) 实现，非虚接口。
 
-# Lint specific directory
-.ai/lint.sh include/
-```
+## 关键设计决策
 
-Config: `.ai/CPPLINT.cfg`. Uses `--config` flag, no symlink needed.
+1. **无锁 MPSC Bus**: CAS-based sequence, 模板参数化 QueueDepth/BatchSize
+2. **FNV-1a Topic 路由**: Node 使用 32-bit hash 进行 topic 匹配
+3. **FixedFunction SBO**: 零 std::function，Small Buffer Optimization 回调
+4. **HSM LCA 转换**: 层次状态机使用最低公共祖先算法
+5. **Shell 函数指针 I/O**: 所有后端通过 read_fn/write_fn 抽象，无虚调用
 
-### Full Check (`check.sh`)
+## 测试覆盖
 
-Run the complete quality gate: format check + lint + cmake build + ctest.
-
-```bash
-# Full check (format + lint + build + test)
-.ai/check.sh
-
-# Quick check (skip tests)
-.ai/check.sh --quick
-
-# With AddressSanitizer + UndefinedBehaviorSanitizer
-.ai/check.sh --sanitizer
-```
-
-## MCP Documentation Server
-
-Provides on-demand API documentation to AI coding agents via Model Context Protocol.
-
-### Setup
-
-```bash
-# Install dependency (one-time)
-pip install 'mcp[cli]'
-
-# Register with Claude Code
-claude mcp add newosp-docs -- python3 /path/to/newosp/.ai/server.py
-
-# Or set newosp path via environment variable
-NEWOSP_ROOT=/path/to/newosp python3 .ai/server.py
-```
-
-### Available Tools
-
-| Tool | Usage | Description |
-|------|-------|-------------|
-| `list_modules()` | Get module overview | Lists all 38+ modules by category with brief descriptions |
-| `fetch_module_doc("bus")` | Get specific module API | Returns classes, functions, enums, and full source |
-| `fetch_design_doc("transport")` | Get design doc section | Fetches design document filtered by keyword |
-| `search_api("AsyncBus")` | Search across headers | Grep-like search with file and line context |
-| `list_examples()` | Browse examples | Lists all example programs with descriptions |
-
-### When to Use
-
-- `list_modules()` first to understand what's available
-- `fetch_module_doc()` when implementing features using specific modules
-- `search_api()` when looking for a specific class, function, or pattern
-- `fetch_design_doc()` for architecture decisions and design rationale
-
-## LLM Documentation Index
-
-For AI tools that read documentation directly (Cursor, Windsurf, ChatGPT):
-
-- `llms.txt` (17KB) - Concise overview: module descriptions, key APIs, quick start
-- `llms-full.txt` (77KB) - Complete reference: all classes, function signatures, parameters, thread safety
-
-These follow the [llmstxt.org](https://llmstxt.org) standard.
-
-## Configuration Files
-
-### .clang-format
-
-Google C++ Style Guide base with:
-- C++17 standard
-- 120 column limit
-- Include sorting: main header > project > C wrappers > C++ stdlib
-- Pointer alignment: left (`int* ptr`)
-
-### CPPLINT.cfg
-
-Disabled checks (with rationale documented in file):
-- `legal/copyright` - No copyright header requirement
-- `build/c++11` - Allow C++17 features freely
-- `runtime/references` - Allow non-const references (modern C++)
-- `whitespace/*` - Formatting handled by clang-format
-- Full list in `.ai/CPPLINT.cfg`
+- 框架: Catch2 v3.5.2
+- 正常模式: 1066+ tests
+- -fno-exceptions 模式: 393 tests
+- Sanitizer: ASan + UBSan + TSan

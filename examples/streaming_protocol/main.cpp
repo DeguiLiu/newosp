@@ -4,12 +4,14 @@
 //
 // Server-side nodes use StaticNode (compile-time handler dispatch).
 // Client node uses regular Node (dynamic callback + timer context).
+// Shell support: --console for stdin/stdout, default TCP on port 5093.
 
 #include "handlers.hpp"
 #include "messages.hpp"
 
 #include "osp/bus.hpp"
 #include "osp/log.hpp"
+#include "osp/shell.hpp"
 #include "osp/timer.hpp"
 
 #include <chrono>
@@ -17,15 +19,97 @@
 #include <cstring>
 #include <thread>
 
-int main() {
+// ============================================================================
+// Static pointers for shell command access
+// ============================================================================
+
+static ProtocolState* g_state = nullptr;
+static osp::AsyncBus<Payload>* g_bus = nullptr;
+
+// ============================================================================
+// Shell commands
+// ============================================================================
+
+static int cmd_proto_stats(int /*argc*/, char* /*argv*/[]) {
+  if (g_state == nullptr) {
+    osp::DebugShell::Printf("  protocol state not available\r\n");
+    return -1;
+  }
+  osp::DebugShell::Printf("  registered : %u\r\n", g_state->registered_count);
+  osp::DebugShell::Printf("  heartbeats : %u\r\n", g_state->heartbeat_count);
+  osp::DebugShell::Printf("  streams    : %u\r\n", g_state->stream_count);
+  osp::DebugShell::Printf("  errors     : %u\r\n", g_state->error_count);
+  return 0;
+}
+OSP_SHELL_CMD(cmd_proto_stats, "Show protocol statistics");
+
+static int cmd_bus(int /*argc*/, char* /*argv*/[]) {
+  if (g_bus == nullptr) {
+    osp::DebugShell::Printf("  bus not available\r\n");
+    return -1;
+  }
+  auto stats = g_bus->GetStatistics();
+  osp::DebugShell::Printf("  published  : %lu\r\n",
+                           static_cast<unsigned long>(stats.messages_published));
+  osp::DebugShell::Printf("  processed  : %lu\r\n",
+                           static_cast<unsigned long>(stats.messages_processed));
+  osp::DebugShell::Printf("  dropped    : %lu\r\n",
+                           static_cast<unsigned long>(stats.messages_dropped));
+  return 0;
+}
+OSP_SHELL_CMD(cmd_bus, "Show bus statistics");
+
+// ============================================================================
+// Main
+// ============================================================================
+
+int main(int argc, char* argv[]) {
   osp::log::Init();
   osp::log::SetLevel(osp::log::Level::kDebug);
   OSP_LOG_INFO("Proto", "=== streaming protocol demo start ===");
+
+  // -- Parse CLI: --console selects ConsoleShell, else DebugShell -----------
+  bool use_console = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--console") == 0) {
+      use_console = true;
+    }
+  }
+
+  // -- Shell setup ----------------------------------------------------------
+  osp::DebugShell::Config tcp_cfg;
+  tcp_cfg.port = 5093;
+  osp::DebugShell tcp_shell(tcp_cfg);
+
+  osp::ConsoleShell::Config con_cfg;
+  osp::ConsoleShell console_shell(con_cfg);
+
+  if (use_console) {
+    auto res = console_shell.Start();
+    if (!res) {
+      OSP_LOG_WARN("Proto", "console shell start failed");
+    } else {
+      OSP_LOG_INFO("Proto", "console shell started (stdin/stdout)");
+    }
+  } else {
+    auto res = tcp_shell.Start();
+    if (!res) {
+      OSP_LOG_WARN("Proto", "debug shell start failed on port %u",
+                   static_cast<unsigned>(tcp_cfg.port));
+    } else {
+      OSP_LOG_INFO("Proto", "debug shell started on port %u",
+                   static_cast<unsigned>(tcp_cfg.port));
+    }
+  }
 
   auto& bus = osp::AsyncBus<Payload>::Instance();
   bus.Reset();
 
   ProtocolState state;
+
+  // Expose to shell commands
+  g_state = &state;
+  g_bus = &bus;
 
   // -- Server-side: StaticNode (direct dispatch, zero overhead, inlinable) --
 
@@ -106,6 +190,16 @@ int main() {
                state.registered_count, state.heartbeat_count,
                state.stream_count, state.error_count);
   OSP_LOG_INFO("Proto", "=== streaming protocol demo end ===");
+
+  // -- Shell teardown -------------------------------------------------------
+  g_state = nullptr;
+  g_bus = nullptr;
+
+  if (use_console) {
+    console_shell.Stop();
+  } else {
+    tcp_shell.Stop();
+  }
 
   osp::log::Shutdown();
   return 0;
