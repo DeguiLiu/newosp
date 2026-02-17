@@ -17,42 +17,72 @@
 
 ### 模式 1: 进程内流水线 (DataDispatcher<InProcStore>)
 
-```
-InProcDispatcher<16016, 32>
-  +-- InProcStore (32 blocks x 16016B, 无锁 CAS 分配/释放)
-  +-- Pipeline (静态 DAG, 4 阶段)
-  |
-  |   entry (透传)
-  |     |
-  |   preprocess (强度过滤)
-  |     |
-  |     +-- logging (序列号检查 + 统计)
-  |     +-- fusion  (边界框)
-  |
-  +-- FaultCollector (超时/背压上报)
-  +-- ScanTimeout (周期性陈旧块回收)
-  +-- ForceCleanup (运行结束块恢复)
+```mermaid
+graph TB
+    subgraph InProcDispatcher["InProcDispatcher&lt;16016, 32&gt;"]
+        Store["InProcStore<br/>32 blocks × 16016B<br/>无锁 CAS 分配/释放"]
+
+        subgraph Pipeline["Pipeline (静态 DAG, 4 阶段)"]
+            Entry["entry<br/>(透传)"]
+            Preprocess["preprocess<br/>(强度过滤)"]
+            Logging["logging<br/>(序列号检查 + 统计)"]
+            Fusion["fusion<br/>(边界框)"]
+
+            Entry --> Preprocess
+            Preprocess --> Logging
+            Preprocess --> Fusion
+        end
+
+        Fault["FaultCollector<br/>(超时/背压上报)"]
+        Scan["ScanTimeout<br/>(周期性陈旧块回收)"]
+        Cleanup["ForceCleanup<br/>(运行结束块恢复)"]
+    end
 ```
 
 ### 模式 2: 跨进程 (DataDispatcher<ShmStore, ShmNotify>)
 
-```
-               ShmStore Pool (/osp_dd_pool)
-         32 blocks x 16016B, 基于 CAS 的引用计数
-                        |
-    +-------------------+-------------------+
-    |                   |                   |
-Producer            Consumer-Logging   Consumer-Fusion
-DataDispatcher      DataDispatcher     DataDispatcher
-<ShmStore,ShmNotify>  <ShmStore>         <ShmStore>
-    |                   |                   |
-    +-- ShmNotify ---> ShmSpmcByteChannel <--+
-    |   (8B NotifyMsg: block_id + payload_size)
-    |
-Monitor (DataDispatcher<ShmStore> + DebugShell)
-    +-- ConsumerSlot[8] (每消费者 holding_mask 用于崩溃恢复)
-    |
-Launcher (进程管理器)
+```mermaid
+graph TB
+    subgraph ShmPool["ShmStore Pool (/osp_dd_pool)<br/>32 blocks × 16016B, 基于 CAS 的引用计数"]
+        Blocks["DataBlock[32]<br/>ConsumerSlot[8]"]
+    end
+
+    subgraph Producer["Producer 进程"]
+        ProdDisp["DataDispatcher<br/>&lt;ShmStore, ShmNotify&gt;"]
+    end
+
+    subgraph ConsumerLog["Consumer-Logging 进程"]
+        LogDisp["DataDispatcher<br/>&lt;ShmStore&gt;"]
+    end
+
+    subgraph ConsumerFus["Consumer-Fusion 进程"]
+        FusDisp["DataDispatcher<br/>&lt;ShmStore&gt;"]
+    end
+
+    subgraph Monitor["Monitor 进程"]
+        MonDisp["DataDispatcher<br/>&lt;ShmStore&gt;"]
+        Shell["DebugShell<br/>(telnet 9600)"]
+    end
+
+    subgraph Launcher["Launcher 进程"]
+        ProcMgr["进程管理器<br/>(spawn/health/restart)"]
+    end
+
+    Channel["ShmSpmcByteChannel<br/>(8B NotifyMsg: block_id + payload_size)"]
+
+    ShmPool -.共享内存.-> ProdDisp
+    ShmPool -.共享内存.-> LogDisp
+    ShmPool -.共享内存.-> FusDisp
+    ShmPool -.共享内存.-> MonDisp
+
+    ProdDisp -->|ShmNotify| Channel
+    Channel -->|通知| LogDisp
+    Channel -->|通知| FusDisp
+
+    Launcher -.管理.-> Producer
+    Launcher -.管理.-> ConsumerLog
+    Launcher -.管理.-> ConsumerFus
+    Launcher -.管理.-> Monitor
 ```
 
 数据流:
