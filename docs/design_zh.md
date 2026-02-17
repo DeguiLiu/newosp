@@ -1980,7 +1980,7 @@ kFree --> kAllocated --> kReady --> kProcessing --> kDone --> kFree
 | Pipeline | ~512B |
 | 总计 | ~503KB |
 
-**与 SPMC 的关系**: 两者定位不同，共存互补。简单 1:N 分发用 SPMC，复杂流水线 + 生命周期管理用 DataDispatcher。详见 `docs/design_job_pool_zh2.md`。
+**与 SPMC 的关系**: 两者定位不同，共存互补。简单 1:N 分发用 SPMC，复杂流水线 + 生命周期管理用 DataDispatcher。详见 `docs/design_job_pool_zh.md`。
 
 ---
 

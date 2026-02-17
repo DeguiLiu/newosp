@@ -38,8 +38,8 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
-#include <cstdint>
 #include <climits>
+#include <cstdint>
 #include <cstring>
 
 #include <atomic>
@@ -285,9 +285,7 @@ class SharedMemorySegment final {
   }
 
   /// @brief Round up to page boundary (4 KB).
-  static uint32_t PageAlign(uint32_t size) noexcept {
-    return (size + 4095u) & ~4095u;
-  }
+  static uint32_t PageAlign(uint32_t size) noexcept { return (size + 4095u) & ~4095u; }
 
   int32_t fd_;
   void* addr_;
@@ -745,9 +743,7 @@ class ShmSpscByteRing final {
    * @brief Calculate minimum shared memory size for given data capacity.
    * @param data_capacity Desired data area size (will be rounded down to power of 2).
    */
-  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept {
-    return kHeaderSize + data_capacity;
-  }
+  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept { return kHeaderSize + data_capacity; }
 
   // ---- Producer API ----
 
@@ -853,7 +849,8 @@ class ShmSpscByteRing final {
 
   /// @brief Round down to the nearest power of 2.
   static uint32_t RoundDownPow2(uint32_t v) noexcept {
-    if (v == 0) return 0;
+    if (v == 0)
+      return 0;
     v |= v >> 1;
     v |= v >> 2;
     v |= v >> 4;
@@ -879,8 +876,7 @@ inline int FutexWait(uint32_t* addr, uint32_t expected_val, uint32_t timeout_ms)
   struct timespec ts;
   ts.tv_sec = static_cast<time_t>(timeout_ms / 1000);
   ts.tv_nsec = static_cast<long>((timeout_ms % 1000) * 1000000L);  // NOLINT
-  return static_cast<int>(
-      ::syscall(SYS_futex, addr, FUTEX_WAIT, expected_val, &ts, nullptr, 0));
+  return static_cast<int>(::syscall(SYS_futex, addr, FUTEX_WAIT, expected_val, &ts, nullptr, 0));
 }
 
 /// @brief Wake one waiter on a futex word.
@@ -939,8 +935,8 @@ class ShmByteChannel final {
    * @param name Channel name.
    * @param capacity Data area capacity in bytes (rounded down to power of 2).
    */
-  static expected<ShmByteChannel, ShmError> CreateWriter(
-      const char* name, uint32_t capacity = OSP_SHM_BYTE_RING_CAPACITY) noexcept {
+  static expected<ShmByteChannel, ShmError> CreateWriter(const char* name,
+                                                         uint32_t capacity = OSP_SHM_BYTE_RING_CAPACITY) noexcept {
     ShmByteChannel ch;
     ch.is_writer_ = true;
     uint32_t shm_size = ShmSpscByteRing::RequiredSize(capacity);
@@ -1007,9 +1003,7 @@ class ShmByteChannel final {
    * @param max_len Maximum payload size.
    * @return Payload length, or 0 if no data.
    */
-  uint32_t Read(void* data, uint32_t max_len) noexcept {
-    return ring_.Read(data, max_len);
-  }
+  uint32_t Read(void* data, uint32_t max_len) noexcept { return ring_.Read(data, max_len); }
 
   /**
    * @brief Wait for data using futex (microsecond-level latency).
@@ -1031,9 +1025,7 @@ class ShmByteChannel final {
   }
 
   /// @brief Notify waiting reader (explicit, for batch writes without per-write wake).
-  void Notify() noexcept {
-    detail::FutexWake(ring_.HeadPtr());
-  }
+  void Notify() noexcept { detail::FutexWake(ring_.HeadPtr()); }
 
   /// @brief Unlink the shared memory segment (writer only).
   void Unlink() noexcept {
@@ -1070,11 +1062,11 @@ class ShmByteChannel final {
 /// std::atomic<uint32_t>::is_always_lock_free is true (all ARM/x86),
 /// these are safe to use across processes via shared memory.
 struct ShmSpmcByteRingHeader {
-  uint32_t head;              ///< Producer write position (monotonically increasing)
-  uint32_t capacity;          ///< Data area size (must be power of 2)
-  uint32_t max_consumers;     ///< Maximum number of consumers
-  std::atomic<uint32_t> consumer_count;    ///< Active consumer count (atomic CAS)
-  uint32_t tails[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< Per-consumer read positions
+  uint32_t head;                                             ///< Producer write position (monotonically increasing)
+  uint32_t capacity;                                         ///< Data area size (must be power of 2)
+  uint32_t max_consumers;                                    ///< Maximum number of consumers
+  std::atomic<uint32_t> consumer_count;                      ///< Active consumer count (atomic CAS)
+  uint32_t tails[OSP_SHM_SPMC_MAX_CONSUMERS];                ///< Per-consumer read positions
   std::atomic<uint32_t> active[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< 1=active, 0=inactive
 };
 
@@ -1101,8 +1093,7 @@ static_assert(std::atomic<uint32_t>::is_always_lock_free,
  */
 class ShmSpmcByteRing final {
  public:
-  static constexpr uint32_t kHeaderSize =
-      static_cast<uint32_t>(sizeof(ShmSpmcByteRingHeader));
+  static constexpr uint32_t kHeaderSize = static_cast<uint32_t>(sizeof(ShmSpmcByteRingHeader));
 
   ShmSpmcByteRing() noexcept : header_(nullptr), data_(nullptr), mask_(0) {}
 
@@ -1113,7 +1104,7 @@ class ShmSpmcByteRing final {
    * @param max_consumers Maximum number of consumers (clamped to OSP_SHM_SPMC_MAX_CONSUMERS).
    */
   static ShmSpmcByteRing InitAt(void* shm_base, uint32_t total_size,
-                                 uint32_t max_consumers = OSP_SHM_SPMC_MAX_CONSUMERS) noexcept {
+                                uint32_t max_consumers = OSP_SHM_SPMC_MAX_CONSUMERS) noexcept {
     OSP_ASSERT(shm_base != nullptr);
     OSP_ASSERT(total_size > kHeaderSize);
     if (max_consumers > OSP_SHM_SPMC_MAX_CONSUMERS) {
@@ -1151,9 +1142,7 @@ class ShmSpmcByteRing final {
   }
 
   /// @brief Calculate minimum shared memory size for given data capacity.
-  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept {
-    return kHeaderSize + data_capacity;
-  }
+  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept { return kHeaderSize + data_capacity; }
 
   // ---- Consumer registration ----
 
@@ -1165,8 +1154,8 @@ class ShmSpmcByteRing final {
     // Atomic CAS loop to claim a slot
     for (uint32_t i = 0; i < header_->max_consumers; ++i) {
       uint32_t expected = 0;
-      if (header_->active[i].compare_exchange_strong(expected, 1,
-              std::memory_order_acq_rel, std::memory_order_relaxed)) {
+      if (header_->active[i].compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
+                                                     std::memory_order_relaxed)) {
         // Set tail to current head (consumer starts from "now")
         std::atomic_thread_fence(std::memory_order_acquire);
         header_->tails[i] = header_->head;
@@ -1179,20 +1168,16 @@ class ShmSpmcByteRing final {
 
   /// @brief Unregister a consumer, freeing its slot.
   void UnregisterConsumer(int32_t consumer_id) noexcept {
-    if (consumer_id < 0 ||
-        static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
+    if (consumer_id < 0 || static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
       return;
     }
-    if (header_->active[static_cast<uint32_t>(consumer_id)].exchange(
-            0, std::memory_order_acq_rel) == 1) {
+    if (header_->active[static_cast<uint32_t>(consumer_id)].exchange(0, std::memory_order_acq_rel) == 1) {
       header_->consumer_count.fetch_sub(1, std::memory_order_relaxed);
     }
   }
 
   /// @brief Number of active consumers.
-  uint32_t ConsumerCount() const noexcept {
-    return header_->consumer_count.load(std::memory_order_relaxed);
-  }
+  uint32_t ConsumerCount() const noexcept { return header_->consumer_count.load(std::memory_order_relaxed); }
 
   // ---- Producer API ----
 
@@ -1231,8 +1216,7 @@ class ShmSpmcByteRing final {
    * @return Payload length, or 0 if no data available.
    */
   uint32_t Read(int32_t consumer_id, void* out, uint32_t max_len) noexcept {
-    if (consumer_id < 0 ||
-        static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
+    if (consumer_id < 0 || static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
       return 0;
     }
     const uint32_t idx = static_cast<uint32_t>(consumer_id);
@@ -1262,8 +1246,7 @@ class ShmSpmcByteRing final {
 
   /// @brief Available bytes for reading for a specific consumer.
   uint32_t ReadableBytes(int32_t consumer_id) const noexcept {
-    if (consumer_id < 0 ||
-        static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
+    if (consumer_id < 0 || static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
       return 0;
     }
     const uint32_t idx = static_cast<uint32_t>(consumer_id);
@@ -1274,9 +1257,7 @@ class ShmSpmcByteRing final {
   }
 
   /// @brief Check if consumer has at least one complete message header.
-  bool HasData(int32_t consumer_id) const noexcept {
-    return ReadableBytes(consumer_id) >= 4;
-  }
+  bool HasData(int32_t consumer_id) const noexcept { return ReadableBytes(consumer_id) >= 4; }
 
   /// @brief Data area capacity in bytes.
   uint32_t Capacity() const noexcept { return header_ ? header_->capacity : 0; }
@@ -1285,9 +1266,7 @@ class ShmSpmcByteRing final {
   uint32_t* HeadPtr() noexcept { return &header_->head; }
 
   /// @brief Maximum consumers supported.
-  uint32_t MaxConsumers() const noexcept {
-    return header_ ? header_->max_consumers : 0;
-  }
+  uint32_t MaxConsumers() const noexcept { return header_ ? header_->max_consumers : 0; }
 
  private:
   /// @brief Find the slowest (minimum) tail among active consumers.
@@ -1328,7 +1307,8 @@ class ShmSpmcByteRing final {
   }
 
   static uint32_t RoundDownPow2(uint32_t v) noexcept {
-    if (v == 0) return 0;
+    if (v == 0)
+      return 0;
     v |= v >> 1;
     v |= v >> 2;
     v |= v >> 4;
@@ -1413,10 +1393,8 @@ class ShmSpmcByteChannel final {
       return expected<ShmSpmcByteChannel, ShmError>::error(result.get_error());
     }
     ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
-    ch.ring_ = ShmSpmcByteRing::InitAt(
-        ch.shm_segment_.Data(), ch.shm_segment_.Size(), max_consumers);
-    return expected<ShmSpmcByteChannel, ShmError>::success(
-        static_cast<ShmSpmcByteChannel&&>(ch));
+    ch.ring_ = ShmSpmcByteRing::InitAt(ch.shm_segment_.Data(), ch.shm_segment_.Size(), max_consumers);
+    return expected<ShmSpmcByteChannel, ShmError>::success(static_cast<ShmSpmcByteChannel&&>(ch));
   }
 
   /**
@@ -1433,10 +1411,8 @@ class ShmSpmcByteChannel final {
       return expected<ShmSpmcByteChannel, ShmError>::error(result.get_error());
     }
     ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
-    ch.ring_ = ShmSpmcByteRing::InitAt(
-        ch.shm_segment_.Data(), ch.shm_segment_.Size(), max_consumers);
-    return expected<ShmSpmcByteChannel, ShmError>::success(
-        static_cast<ShmSpmcByteChannel&&>(ch));
+    ch.ring_ = ShmSpmcByteRing::InitAt(ch.shm_segment_.Data(), ch.shm_segment_.Size(), max_consumers);
+    return expected<ShmSpmcByteChannel, ShmError>::success(static_cast<ShmSpmcByteChannel&&>(ch));
   }
 
   /**
@@ -1457,8 +1433,7 @@ class ShmSpmcByteChannel final {
     if (ch.consumer_id_ < 0) {
       return expected<ShmSpmcByteChannel, ShmError>::error(ShmError::kFull);
     }
-    return expected<ShmSpmcByteChannel, ShmError>::success(
-        static_cast<ShmSpmcByteChannel&&>(ch));
+    return expected<ShmSpmcByteChannel, ShmError>::success(static_cast<ShmSpmcByteChannel&&>(ch));
   }
 
   /**
@@ -1478,9 +1453,7 @@ class ShmSpmcByteChannel final {
    * @param max_len Maximum payload size.
    * @return Payload length, or 0 if no data.
    */
-  uint32_t Read(void* data, uint32_t max_len) noexcept {
-    return ring_.Read(consumer_id_, data, max_len);
-  }
+  uint32_t Read(void* data, uint32_t max_len) noexcept { return ring_.Read(consumer_id_, data, max_len); }
 
   /**
    * @brief Wait for data using futex (microsecond-level latency).
@@ -1499,9 +1472,7 @@ class ShmSpmcByteChannel final {
   }
 
   /// @brief Notify all waiting readers (explicit, for batch writes).
-  void Notify() noexcept {
-    detail::FutexWakeAll(ring_.HeadPtr());
-  }
+  void Notify() noexcept { detail::FutexWakeAll(ring_.HeadPtr()); }
 
   /// @brief Unlink the shared memory segment (writer only).
   void Unlink() noexcept {
