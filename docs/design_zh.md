@@ -261,7 +261,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
 | 网络传输 | IoPoller | io_poller.hpp | I/O 多路复用 (epoll/kqueue/poll) `[N]` |
 | 网络传输 | Connection | connection.hpp | 连接管理 |
 | 网络传输 | Transport | transport.hpp | 透明网络传输 `[N]` |
-| 网络传输 | ShmTransport | shm_transport.hpp | 共享内存 IPC `[N]` |
+| 网络传输 | ShmTransport | shm_transport.hpp | 共享内存 IPC (MPSC slot + SPSC byte-stream + futex) `[N]` |
 | 网络传输 | SerialTransport | serial_transport.hpp | 串口传输 |
 | 网络传输 | Net | net.hpp | sockpp 集成层 `[N]` |
 | 网络传输 | TransportFactory | transport_factory.hpp | 自动传输选择 `[N]` |
@@ -1026,31 +1026,51 @@ shm_transport 优先，TCP 作为远程低频备选。
 
 ### 7.5 shm_transport.hpp -- 共享内存 IPC
 
-借鉴 cpp-ipc 的共享内存无锁队列和 ROS2 的零拷贝设计。
+借鉴 cpp-ipc 的共享内存无锁队列、ROS2 的零拷贝设计和 cpp_py_shmbuf 的 SPSC 字节流环形缓冲区。
+
+提供两种互补的环形缓冲区:
+
+| 类型 | 模式 | 适用场景 | 消息格式 |
+|------|------|----------|----------|
+| ShmRingBuffer | MPSC slot-based | 小消息、多生产者 (控制指令、状态上报) | 固定 slot (SlotSize) |
+| ShmSpscByteRing | SPSC byte-stream | 大变长载荷 (LiDAR 点云、视频帧) | [4B 长度前缀][payload] |
 
 **架构**:
 
 ```
 Process A                          Process B
 ┌──────────────┐                  ┌──────────────┐
-│ ShmChannel   │                  │ ShmChannel   │
-│  (writer)    │                  │  (reader)    │
+│ ShmChannel   │  MPSC slot-based │ ShmChannel   │
+│ (writer)     │  (小消息/多生产者)│ (reader)     │
 └──────┬───────┘                  └──────┬───────┘
        │          Shared Memory          │
        v     /osp_shm_<name>             v
   ┌────────────────────────────────────────┐
-  │ ShmRingBuffer (lock-free SPSC)         │
+  │ ShmRingBuffer (CAS-based MPSC)         │
   │ [slot0][slot1]...[slotN]               │
   │ prod_pos_ (atomic, cache-line aligned) │
   │ cons_pos_ (atomic, cache-line aligned) │
-  │ eventfd for wakeup notification        │
+  └────────────────────────────────────────┘
+
+Process A                          Process B
+┌────────────────┐                ┌────────────────┐
+│ ShmByteChannel │  SPSC byte     │ ShmByteChannel │
+│ (writer)       │  (大载荷/futex)│ (reader)       │
+└──────┬─────────┘                └──────┬─────────┘
+       │          Shared Memory          │
+       v     /osp_shm_<name>             v
+  ┌────────────────────────────────────────┐
+  │ ShmSpscByteRing (SPSC byte-stream)     │
+  │ [head(4)][tail(4)][capacity(4)][rsv(4)]│
+  │ [data area: circular buffer]           │
+  │ futex(head) for wakeup notification    │
   └────────────────────────────────────────┘
 ```
 
 **核心接口**:
 
 ```cpp
-// 共享内存段 RAII 封装
+// 共享内存段 RAII 封装 (BuildName/MmapWithFallback/PageAlign 内部去重)
 class SharedMemorySegment {
   static expected<SharedMemorySegment, ShmError> Create(const char* name, uint32_t size);
   static expected<SharedMemorySegment, ShmError> CreateOrReplace(const char* name, uint32_t size);
@@ -1058,7 +1078,7 @@ class SharedMemorySegment {
   void Unlink() noexcept;
 };
 
-// 共享内存中的无锁环形缓冲区
+// MPSC slot-based 环形缓冲区 (小消息、多生产者)
 template <uint32_t SlotSize, uint32_t SlotCount>
 class ShmRingBuffer {
   static ShmRingBuffer* InitAt(void* shm_addr);
@@ -1068,17 +1088,56 @@ class ShmRingBuffer {
   uint32_t Depth() const noexcept;
 };
 
-// 命名通道
+// SPSC 字节流环形缓冲区 (大变长载荷: LiDAR/视频帧)
+class ShmSpscByteRing {
+  static ShmSpscByteRing InitAt(void* shm_base, uint32_t total_size);
+  static ShmSpscByteRing AttachAt(void* shm_base);
+  bool Write(const void* data, uint32_t len);     // [4B len][payload]
+  uint32_t Read(void* out, uint32_t max_len);      // 返回 payload 长度
+  uint32_t ReadableBytes() const noexcept;
+  uint32_t WriteableBytes() const noexcept;
+};
+
+// MPSC slot-based 命名通道 (polling 等待)
 template <uint32_t SlotSize, uint32_t SlotCount>
 class ShmChannel {
   static expected<ShmChannel, ShmError> CreateWriter(const char* name);
   static expected<ShmChannel, ShmError> CreateOrReplaceWriter(const char* name);
   static expected<ShmChannel, ShmError> OpenReader(const char* name);
-  bool Write(const void* data, uint32_t size);
-  bool Read(void* data, uint32_t& size);
-  bool WaitReadable(int timeout_ms);
+  expected<void, ShmError> Write(const void* data, uint32_t size);
+  expected<void, ShmError> Read(void* data, uint32_t& size);
+  expected<void, ShmError> WaitReadable(uint32_t timeout_ms);
+};
+
+// SPSC 字节流命名通道 (futex 低延迟唤醒)
+class ShmByteChannel {
+  static expected<ShmByteChannel, ShmError> CreateWriter(const char* name, uint32_t capacity);
+  static expected<ShmByteChannel, ShmError> CreateOrReplaceWriter(const char* name, uint32_t capacity);
+  static expected<ShmByteChannel, ShmError> OpenReader(const char* name);
+  expected<void, ShmError> Write(const void* data, uint32_t size);  // 自动 futex wake
+  uint32_t Read(void* data, uint32_t max_len);
+  expected<void, ShmError> WaitReadable(uint32_t timeout_ms);       // futex wait
 };
 ```
+
+**ShmSpscByteRing 设计要点**:
+
+- 单调递增 head/tail 索引 + power-of-2 bitmask 取模，无 buf_full 标志竞态
+- 16 字节 POD header (head, tail, capacity, reserved)，跨语言兼容 (Python ctypes 可直接读写)
+- 消息格式: `[4B LE length][payload]`，支持变长消息，不浪费 slot 尾部空间
+- `atomic_thread_fence(acquire/release)` 保证跨进程可见性
+
+**Futex 通知机制 (ShmByteChannel)**:
+
+ShmByteChannel 使用 Linux futex 替代 polling，将等待延迟从 ms 级降到 us 级:
+
+| 操作 | 机制 | 说明 |
+|------|------|------|
+| Writer.Write() | futex(FUTEX_WAKE) | 写入后自动唤醒等待的 reader |
+| Reader.WaitReadable() | futex(FUTEX_WAIT) | 在 head 字段上等待，head 变化即唤醒 |
+| Reader fast path | 直接检查 HasData() | 有数据时不进入 futex 系统调用 |
+
+futex 地址直接指向共享内存中的 head 字段，无需额外 fd (eventfd 无法跨进程共享)。
 
 **ARM 弱内存模型注意事项**:
 
@@ -1089,6 +1148,7 @@ class ShmChannel {
 | 消费者读取 `prod_pos_` | `acquire` | 与生产者 release 配对 |
 | 消费者读取 slot 数据 | 普通读 (非原子) | acquire 之后保证可见 |
 | `ref_count` 递减 | `acq_rel` | 最后一个 Release 需要看到所有写入 |
+| ShmSpscByteRing head/tail | `release`/`acquire` fence | 跨进程 SPSC 可见性 |
 
 避免默认 `seq_cst`，显式使用 `acquire/release` 配对，在 ARM 上可获得 3-5 倍性能提升。
 
@@ -1101,7 +1161,11 @@ class ShmChannel {
 工业场景中进程可能因 SIGKILL 或断电异常退出，残留 `/dev/shm/osp_shm_*` 文件。`CreateOrReplace` 先 `shm_unlink` 清除残留，再执行标准 `Create`:
 
 ```cpp
-auto result = ShmChannel<4096, 256>::CreateOrReplaceWriter("frame_ch");
+// MPSC slot-based
+auto result = ShmChannel<4096, 256>::CreateOrReplaceWriter("cmd_ch");
+
+// SPSC byte-stream (8 MB buffer for LiDAR point clouds)
+auto result = ShmByteChannel::CreateOrReplaceWriter("lidar_ch", 8 * 1024 * 1024);
 ```
 
 ---
@@ -1893,6 +1957,8 @@ expected<V, E> 返回
 | TcpTransport (per conn) | ~256 B | 0 | 0 |
 | ShmRingBuffer (256x4KB) | ~1 MB (共享内存) | 0 | 0 |
 | ShmChannel (per channel) | ~256 B | 0 | 0 |
+| ShmSpscByteRing (1MB default) | ~1 MB (共享内存) | 0 | 0 |
+| ShmByteChannel (per channel) | ~256 B | 0 | 0 |
 | SerialTransport (per port) | ~2 KB | 0 | 0 |
 | MulticastDiscovery | ~2 KB | ~1 KB | 1 |
 | Service/Client (per service) | ~512 B | 0 | 0 |
@@ -2016,8 +2082,9 @@ expected<V, E> 返回
 | `OSP_EXECUTOR_MAX_NODES` | 16 | executor.hpp | Executor 最大节点数 |
 | `OSP_TRANSPORT_MAX_FRAME_SIZE` | 4096 | transport.hpp | 最大帧大小 |
 | `OSP_CONNECTION_POOL_CAPACITY` | 32 | connection.hpp | 连接池默认容量 |
-| `OSP_SHM_SLOT_SIZE` | 4096 | shm_transport.hpp | 共享内存 slot 大小 |
-| `OSP_SHM_SLOT_COUNT` | 256 | shm_transport.hpp | 共享内存 slot 数量 |
+| `OSP_SHM_SLOT_SIZE` | 4096 | shm_transport.hpp | MPSC 共享内存 slot 大小 |
+| `OSP_SHM_SLOT_COUNT` | 256 | shm_transport.hpp | MPSC 共享内存 slot 数量 |
+| `OSP_SHM_BYTE_RING_CAPACITY` | 1048576 (1 MB) | shm_transport.hpp | SPSC 字节流默认容量 |
 | `OSP_SHM_HUGE_PAGES` | 未定义 | shm_transport.hpp | 定义后 mmap 使用 MAP_HUGETLB (透明回退) |
 | `OSP_DISCOVERY_PORT` | 9999 | discovery.hpp | 多播发现端口 |
 | `OSP_HEARTBEAT_INTERVAL_MS` | 1000 | node_manager.hpp | 心跳间隔 |
@@ -2049,7 +2116,7 @@ expected<V, E> 返回
 | io_poller | 单线程 (事件循环线程) |
 | connection | mutex 保护连接池操作 |
 | transport | TcpTransport 单线程; NetworkNode 继承 Node 线程安全性 |
-| shm_transport | ShmRingBuffer 无锁 CAS; ShmChannel 单写多读 |
+| shm_transport | ShmRingBuffer 无锁 CAS (MPSC); ShmSpscByteRing 无锁 SPSC; ShmByteChannel futex 通知 |
 | serial_transport | NATIVE_SYNC 单线程; IoPoller 事件循环线程安全 |
 | hsm | 单线程 Dispatch; guard/handler 不可重入 |
 | bt | 单线程 Tick; 叶节点回调不可重入 |

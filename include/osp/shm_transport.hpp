@@ -24,10 +24,11 @@
 
 /**
  * @file shm_transport.hpp
- * @brief Shared memory IPC transport with lock-free ring buffer.
+ * @brief Shared memory IPC transport with lock-free ring buffers.
  *
- * Provides POSIX shared memory RAII wrappers, lock-free MPSC ring buffer
- * for shared memory, and named channel abstraction with eventfd notification.
+ * Provides POSIX shared memory RAII wrappers, lock-free MPSC slot-based ring
+ * buffer, SPSC byte-stream ring buffer for large payloads (LiDAR, video),
+ * and named channel abstractions with futex-based notification.
  * Linux-only, header-only, compatible with -fno-exceptions -fno-rtti.
  */
 
@@ -48,8 +49,10 @@
 #if defined(OSP_PLATFORM_LINUX)
 #include <chrono>
 #include <fcntl.h>
+#include <linux/futex.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
 #endif
@@ -70,6 +73,10 @@ namespace osp {
 
 #ifndef OSP_SHM_CHANNEL_NAME_MAX
 #define OSP_SHM_CHANNEL_NAME_MAX 64
+#endif
+
+#ifndef OSP_SHM_BYTE_RING_CAPACITY
+#define OSP_SHM_BYTE_RING_CAPACITY (1024 * 1024)  // 1 MB default
 #endif
 
 // ============================================================================
@@ -155,57 +162,33 @@ class SharedMemorySegment final {
   /**
    * @brief Create a new shared memory segment.
    * @param name Segment name (will be prefixed with /osp_shm_).
-   * @param size Size in bytes.
+   * @param size Size in bytes (will be page-aligned).
    * @return expected with SharedMemorySegment on success.
    */
   static expected<SharedMemorySegment, ShmError> Create(const char* name, uint32_t size) noexcept {
     SharedMemorySegment seg;
-    seg.name_.assign(TruncateToCapacity, "/osp_shm_");
-
-    // Append user name
-    uint32_t prefix_len = seg.name_.size();
-    uint32_t name_len = 0;
-    while (name[name_len] != '\0' && (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
-      ++name_len;
-    }
-
-    for (uint32_t i = 0; i < name_len; ++i) {
-      char buf[2] = {name[i], '\0'};
-      uint32_t current_len = seg.name_.size();
-      if (current_len < OSP_SHM_CHANNEL_NAME_MAX) {
-        char temp[OSP_SHM_CHANNEL_NAME_MAX + 1];
-        std::memcpy(temp, seg.name_.c_str(), current_len);
-        temp[current_len] = name[i];
-        temp[current_len + 1] = '\0';
-        seg.name_.assign(TruncateToCapacity, temp);
-      }
-    }
+    BuildName(seg.name_, name);
 
     seg.fd_ = ::shm_open(seg.name_.c_str(), O_CREAT | O_RDWR | O_EXCL, kShmPermissions);
     if (seg.fd_ < 0) {
       return expected<SharedMemorySegment, ShmError>::error(ShmError::kCreateFailed);
     }
 
-    if (::ftruncate(seg.fd_, size) != 0) {
+    uint32_t aligned_size = PageAlign(size);
+    if (::ftruncate(seg.fd_, aligned_size) != 0) {
       ::close(seg.fd_);
       ::shm_unlink(seg.name_.c_str());
       return expected<SharedMemorySegment, ShmError>::error(ShmError::kCreateFailed);
     }
 
-    seg.addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, kShmMmapFlags, seg.fd_, 0);
-#ifdef OSP_SHM_HUGE_PAGES
-    if (seg.addr_ == MAP_FAILED) {
-      // Huge page allocation failed -- fall back to normal pages.
-      seg.addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, seg.fd_, 0);
-    }
-#endif
+    seg.addr_ = MmapWithFallback(seg.fd_, aligned_size);
     if (seg.addr_ == MAP_FAILED) {
       ::close(seg.fd_);
       ::shm_unlink(seg.name_.c_str());
       return expected<SharedMemorySegment, ShmError>::error(ShmError::kMapFailed);
     }
 
-    seg.size_ = size;
+    seg.size_ = aligned_size;
     return expected<SharedMemorySegment, ShmError>::success(static_cast<SharedMemorySegment&&>(seg));
   }
 
@@ -216,32 +199,13 @@ class SharedMemorySegment final {
    * Equivalent to shm_unlink + Create.
    *
    * @param name Segment name (will be prefixed with /osp_shm_).
-   * @param size Size in bytes.
+   * @param size Size in bytes (will be page-aligned).
    * @return expected with SharedMemorySegment on success.
    */
   static expected<SharedMemorySegment, ShmError> CreateOrReplace(const char* name, uint32_t size) noexcept {
-    // Build the full name to unlink any stale segment
     FixedString<OSP_SHM_CHANNEL_NAME_MAX> full_name;
-    full_name.assign(TruncateToCapacity, "/osp_shm_");
-    uint32_t prefix_len = full_name.size();
-    uint32_t name_len = 0;
-    while (name[name_len] != '\0' && (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
-      ++name_len;
-    }
-    for (uint32_t i = 0; i < name_len; ++i) {
-      uint32_t current_len = full_name.size();
-      if (current_len < OSP_SHM_CHANNEL_NAME_MAX) {
-        char temp[OSP_SHM_CHANNEL_NAME_MAX + 1];
-        std::memcpy(temp, full_name.c_str(), current_len);
-        temp[current_len] = name[i];
-        temp[current_len + 1] = '\0';
-        full_name.assign(TruncateToCapacity, temp);
-      }
-    }
-
-    // Remove stale segment (ignore errors -- may not exist)
+    BuildName(full_name, name);
     ::shm_unlink(full_name.c_str());
-
     return Create(name, size);
   }
 
@@ -252,25 +216,7 @@ class SharedMemorySegment final {
    */
   static expected<SharedMemorySegment, ShmError> Open(const char* name) noexcept {
     SharedMemorySegment seg;
-    seg.name_.assign(TruncateToCapacity, "/osp_shm_");
-
-    // Append user name
-    uint32_t prefix_len = seg.name_.size();
-    uint32_t name_len = 0;
-    while (name[name_len] != '\0' && (prefix_len + name_len) < OSP_SHM_CHANNEL_NAME_MAX) {
-      ++name_len;
-    }
-
-    for (uint32_t i = 0; i < name_len; ++i) {
-      uint32_t current_len = seg.name_.size();
-      if (current_len < OSP_SHM_CHANNEL_NAME_MAX) {
-        char temp[OSP_SHM_CHANNEL_NAME_MAX + 1];
-        std::memcpy(temp, seg.name_.c_str(), current_len);
-        temp[current_len] = name[i];
-        temp[current_len + 1] = '\0';
-        seg.name_.assign(TruncateToCapacity, temp);
-      }
-    }
+    BuildName(seg.name_, name);
 
     seg.fd_ = ::shm_open(seg.name_.c_str(), O_RDWR, kShmPermissions);
     if (seg.fd_ < 0) {
@@ -284,13 +230,7 @@ class SharedMemorySegment final {
     }
 
     seg.size_ = static_cast<uint32_t>(st.st_size);
-    seg.addr_ = ::mmap(nullptr, seg.size_, PROT_READ | PROT_WRITE, kShmMmapFlags, seg.fd_, 0);
-#ifdef OSP_SHM_HUGE_PAGES
-    if (seg.addr_ == MAP_FAILED) {
-      // Fallback: retry without MAP_HUGETLB.
-      seg.addr_ = ::mmap(nullptr, seg.size_, PROT_READ | PROT_WRITE, MAP_SHARED, seg.fd_, 0);
-    }
-#endif
+    seg.addr_ = MmapWithFallback(seg.fd_, seg.size_);
     if (seg.addr_ == MAP_FAILED) {
       ::close(seg.fd_);
       return expected<SharedMemorySegment, ShmError>::error(ShmError::kMapFailed);
@@ -315,6 +255,35 @@ class SharedMemorySegment final {
   const char* Name() const noexcept { return name_.c_str(); }
 
  private:
+  /// @brief Build full shm name: "/osp_shm_" + user name.
+  static void BuildName(FixedString<OSP_SHM_CHANNEL_NAME_MAX>& out, const char* name) noexcept {
+    char temp[OSP_SHM_CHANNEL_NAME_MAX + 1];
+    constexpr uint32_t kPrefixLen = 9;  // strlen("/osp_shm_")
+    std::memcpy(temp, "/osp_shm_", kPrefixLen);
+    uint32_t pos = kPrefixLen;
+    for (uint32_t i = 0; name[i] != '\0' && pos < OSP_SHM_CHANNEL_NAME_MAX; ++i) {
+      temp[pos++] = name[i];
+    }
+    temp[pos] = '\0';
+    out.assign(TruncateToCapacity, temp);
+  }
+
+  /// @brief mmap with huge page fallback.
+  static void* MmapWithFallback(int fd, uint32_t size) noexcept {
+    void* addr = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, kShmMmapFlags, fd, 0);
+#ifdef OSP_SHM_HUGE_PAGES
+    if (addr == MAP_FAILED) {
+      addr = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    }
+#endif
+    return addr;
+  }
+
+  /// @brief Round up to page boundary (4 KB).
+  static uint32_t PageAlign(uint32_t size) noexcept {
+    return (size + 4095u) & ~4095u;
+  }
+
   int32_t fd_;
   void* addr_;
   uint32_t size_;
@@ -692,6 +661,389 @@ class ShmChannel final {
  private:
   SharedMemorySegment shm_segment_;
   RingBuffer* ring_buffer_;
+  bool is_writer_;
+};
+
+// ============================================================================
+// ShmSpscByteRing - SPSC byte-stream ring buffer for large payloads
+// ============================================================================
+
+/// @brief POD header for SPSC byte ring buffer (16 bytes).
+/// Stored at the start of the shared memory region.
+struct ShmByteRingHeader {
+  uint32_t head;      ///< Producer write position (monotonically increasing)
+  uint32_t tail;      ///< Consumer read position (monotonically increasing)
+  uint32_t capacity;  ///< Data area size (must be power of 2)
+  uint32_t reserved;  ///< Alignment padding
+};
+
+static_assert(sizeof(ShmByteRingHeader) == 16, "ShmByteRingHeader must be 16 bytes");
+
+/**
+ * @brief SPSC byte-level ring buffer for shared memory IPC.
+ *
+ * Designed for large variable-length payloads (e.g. LiDAR point clouds,
+ * video frames) where fixed-slot MPSC wastes memory. Uses monotonically
+ * increasing head/tail indices with power-of-2 bitmask wrap-around.
+ *
+ * Memory layout:
+ *   [0..15]  : ShmByteRingHeader (head, tail, capacity, reserved)
+ *   [16..N]  : Data area (circular buffer)
+ *
+ * Message format: [4-byte LE length][payload]
+ *
+ * Memory ordering: acquire/release fences (not seq_cst).
+ * Thread/process safety: SPSC only (one producer, one consumer).
+ */
+class ShmSpscByteRing final {
+  static constexpr uint32_t kHeaderSize = 16;
+
+ public:
+  ShmSpscByteRing() noexcept : header_(nullptr), data_(nullptr), mask_(0) {}
+
+  /**
+   * @brief Bind to shared memory as producer (initializes header).
+   * @param shm_base Pointer to the start of shared memory.
+   * @param total_size Total shared memory size (header + data).
+   */
+  static ShmSpscByteRing InitAt(void* shm_base, uint32_t total_size) noexcept {
+    OSP_ASSERT(shm_base != nullptr);
+    OSP_ASSERT(total_size > kHeaderSize);
+    ShmSpscByteRing ring;
+    ring.header_ = static_cast<ShmByteRingHeader*>(shm_base);
+    ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
+    uint32_t cap = RoundDownPow2(total_size - kHeaderSize);
+    ring.header_->head = 0;
+    ring.header_->tail = 0;
+    ring.header_->capacity = cap;
+    ring.header_->reserved = 0;
+    std::atomic_thread_fence(std::memory_order_release);
+    ring.mask_ = cap - 1;
+    return ring;
+  }
+
+  /**
+   * @brief Bind to shared memory as consumer (reads existing header).
+   * @param shm_base Pointer to the start of shared memory.
+   */
+  static ShmSpscByteRing AttachAt(void* shm_base) noexcept {
+    OSP_ASSERT(shm_base != nullptr);
+    ShmSpscByteRing ring;
+    ring.header_ = static_cast<ShmByteRingHeader*>(shm_base);
+    ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
+    std::atomic_thread_fence(std::memory_order_acquire);
+    ring.mask_ = ring.header_->capacity - 1;
+    return ring;
+  }
+
+  /**
+   * @brief Calculate minimum shared memory size for given data capacity.
+   * @param data_capacity Desired data area size (will be rounded down to power of 2).
+   */
+  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept {
+    return kHeaderSize + data_capacity;
+  }
+
+  // ---- Producer API ----
+
+  /**
+   * @brief Write a length-prefixed message: [4B len][payload].
+   * @param data Pointer to payload data.
+   * @param len Payload length in bytes.
+   * @return true if successful, false if not enough space.
+   */
+  bool Write(const void* data, uint32_t len) noexcept {
+    const uint32_t total = len + 4;
+    if (WriteableBytes() < total) {
+      return false;
+    }
+    const uint32_t head = header_->head;
+    WriteRaw(head, &len, 4);
+    WriteRaw(head + 4, data, len);
+    std::atomic_thread_fence(std::memory_order_release);
+    header_->head = head + total;
+    return true;
+  }
+
+  /// @brief Available bytes for writing.
+  uint32_t WriteableBytes() const noexcept {
+    const uint32_t head = header_->head;
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const uint32_t tail = header_->tail;
+    return header_->capacity - (head - tail);
+  }
+
+  // ---- Consumer API ----
+
+  /**
+   * @brief Read one length-prefixed message.
+   * @param[out] out Buffer to receive payload.
+   * @param max_len Maximum payload size.
+   * @return Payload length, or 0 if no data available.
+   */
+  uint32_t Read(void* out, uint32_t max_len) noexcept {
+    const uint32_t tail = header_->tail;
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const uint32_t head = header_->head;
+    const uint32_t available = head - tail;
+    if (available < 4) {
+      return 0;
+    }
+    uint32_t msg_len = 0;
+    ReadRaw(tail, &msg_len, 4);
+    if (msg_len == 0 || available < msg_len + 4) {
+      return 0;
+    }
+    if (msg_len > max_len) {
+      // Message too large for output buffer; skip it
+      std::atomic_thread_fence(std::memory_order_release);
+      header_->tail = tail + msg_len + 4;
+      return 0;
+    }
+    ReadRaw(tail + 4, out, msg_len);
+    std::atomic_thread_fence(std::memory_order_release);
+    header_->tail = tail + msg_len + 4;
+    return msg_len;
+  }
+
+  /// @brief Available bytes for reading.
+  uint32_t ReadableBytes() const noexcept {
+    const uint32_t tail = header_->tail;
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const uint32_t head = header_->head;
+    return head - tail;
+  }
+
+  /// @brief Check if at least one complete message header is available.
+  bool HasData() const noexcept { return ReadableBytes() >= 4; }
+
+  /// @brief Data area capacity in bytes.
+  uint32_t Capacity() const noexcept { return header_ ? header_->capacity : 0; }
+
+  /// @brief Pointer to the head field (for futex wait/wake).
+  uint32_t* HeadPtr() noexcept { return &header_->head; }
+
+ private:
+  void WriteRaw(uint32_t pos, const void* src, uint32_t len) noexcept {
+    const uint32_t offset = pos & mask_;
+    const uint32_t first = header_->capacity - offset;
+    if (first >= len) {
+      std::memcpy(data_ + offset, src, len);
+    } else {
+      std::memcpy(data_ + offset, src, first);
+      std::memcpy(data_, static_cast<const uint8_t*>(src) + first, len - first);
+    }
+  }
+
+  void ReadRaw(uint32_t pos, void* dst, uint32_t len) const noexcept {
+    const uint32_t offset = pos & mask_;
+    const uint32_t first = header_->capacity - offset;
+    if (first >= len) {
+      std::memcpy(dst, data_ + offset, len);
+    } else {
+      std::memcpy(dst, data_ + offset, first);
+      std::memcpy(static_cast<uint8_t*>(dst) + first, data_, len - first);
+    }
+  }
+
+  /// @brief Round down to the nearest power of 2.
+  static uint32_t RoundDownPow2(uint32_t v) noexcept {
+    if (v == 0) return 0;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    return (v >> 1) + 1;
+  }
+
+  ShmByteRingHeader* header_;
+  uint8_t* data_;
+  uint32_t mask_;
+};
+
+// ============================================================================
+// Futex helpers - low-latency wait/wake for shared memory
+// ============================================================================
+
+namespace detail {
+
+/// @brief Wait on a futex word until it changes from expected_val or timeout.
+/// @return 0 on wake, -1 on timeout/error.
+inline int FutexWait(uint32_t* addr, uint32_t expected_val, uint32_t timeout_ms) noexcept {
+  struct timespec ts;
+  ts.tv_sec = static_cast<time_t>(timeout_ms / 1000);
+  ts.tv_nsec = static_cast<long>((timeout_ms % 1000) * 1000000L);  // NOLINT
+  return static_cast<int>(
+      ::syscall(SYS_futex, addr, FUTEX_WAIT, expected_val, &ts, nullptr, 0));
+}
+
+/// @brief Wake one waiter on a futex word.
+inline void FutexWake(uint32_t* addr) noexcept {
+  (void)::syscall(SYS_futex, addr, FUTEX_WAKE, 1, nullptr, nullptr, 0);
+}
+
+}  // namespace detail
+
+// ============================================================================
+// ShmByteChannel - SPSC byte-stream channel with futex notification
+// ============================================================================
+
+/**
+ * @brief Named SPSC byte-stream channel for large variable-length payloads.
+ *
+ * Combines SharedMemorySegment + ShmSpscByteRing + futex notification.
+ * Ideal for LiDAR point clouds, video frames, and other large sensor data
+ * where fixed-slot MPSC wastes memory.
+ *
+ * Writer calls Write() (auto-notifies via futex). Reader calls WaitReadable() + Read().
+ */
+class ShmByteChannel final {
+ public:
+  ShmByteChannel() noexcept : is_writer_(false) {}
+  ~ShmByteChannel() = default;
+
+  // Non-copyable, movable
+  ShmByteChannel(const ShmByteChannel&) = delete;
+  ShmByteChannel& operator=(const ShmByteChannel&) = delete;
+
+  ShmByteChannel(ShmByteChannel&& other) noexcept
+      : shm_segment_(static_cast<SharedMemorySegment&&>(other.shm_segment_)),
+        ring_(other.ring_),
+        is_writer_(other.is_writer_) {
+    other.ring_ = ShmSpscByteRing();
+  }
+
+  ShmByteChannel& operator=(ShmByteChannel&& other) noexcept {
+    if (this != &other) {
+      shm_segment_ = static_cast<SharedMemorySegment&&>(other.shm_segment_);
+      ring_ = other.ring_;
+      is_writer_ = other.is_writer_;
+      other.ring_ = ShmSpscByteRing();
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Create a writer endpoint.
+   * @param name Channel name.
+   * @param capacity Data area capacity in bytes (rounded down to power of 2).
+   */
+  static expected<ShmByteChannel, ShmError> CreateWriter(
+      const char* name, uint32_t capacity = OSP_SHM_BYTE_RING_CAPACITY) noexcept {
+    ShmByteChannel ch;
+    ch.is_writer_ = true;
+    uint32_t shm_size = ShmSpscByteRing::RequiredSize(capacity);
+    auto result = SharedMemorySegment::Create(name, shm_size);
+    if (!result.has_value()) {
+      return expected<ShmByteChannel, ShmError>::error(result.get_error());
+    }
+    ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    ch.ring_ = ShmSpscByteRing::InitAt(ch.shm_segment_.Data(), ch.shm_segment_.Size());
+    return expected<ShmByteChannel, ShmError>::success(static_cast<ShmByteChannel&&>(ch));
+  }
+
+  /**
+   * @brief Create a writer endpoint, removing any stale channel first.
+   * @param name Channel name.
+   * @param capacity Data area capacity in bytes (rounded down to power of 2).
+   */
+  static expected<ShmByteChannel, ShmError> CreateOrReplaceWriter(
+      const char* name, uint32_t capacity = OSP_SHM_BYTE_RING_CAPACITY) noexcept {
+    ShmByteChannel ch;
+    ch.is_writer_ = true;
+    uint32_t shm_size = ShmSpscByteRing::RequiredSize(capacity);
+    auto result = SharedMemorySegment::CreateOrReplace(name, shm_size);
+    if (!result.has_value()) {
+      return expected<ShmByteChannel, ShmError>::error(result.get_error());
+    }
+    ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    ch.ring_ = ShmSpscByteRing::InitAt(ch.shm_segment_.Data(), ch.shm_segment_.Size());
+    return expected<ShmByteChannel, ShmError>::success(static_cast<ShmByteChannel&&>(ch));
+  }
+
+  /**
+   * @brief Open a reader endpoint for an existing channel.
+   * @param name Channel name.
+   */
+  static expected<ShmByteChannel, ShmError> OpenReader(const char* name) noexcept {
+    ShmByteChannel ch;
+    ch.is_writer_ = false;
+    auto result = SharedMemorySegment::Open(name);
+    if (!result.has_value()) {
+      return expected<ShmByteChannel, ShmError>::error(result.get_error());
+    }
+    ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    ch.ring_ = ShmSpscByteRing::AttachAt(ch.shm_segment_.Data());
+    return expected<ShmByteChannel, ShmError>::success(static_cast<ShmByteChannel&&>(ch));
+  }
+
+  /**
+   * @brief Write data and notify waiting reader via futex.
+   * @param data Pointer to payload data.
+   * @param size Payload size in bytes.
+   */
+  expected<void, ShmError> Write(const void* data, uint32_t size) noexcept {
+    if (!ring_.Write(data, size)) {
+      return expected<void, ShmError>::error(ShmError::kFull);
+    }
+    detail::FutexWake(ring_.HeadPtr());
+    return expected<void, ShmError>::success();
+  }
+
+  /**
+   * @brief Read one message from the channel.
+   * @param data Buffer to receive payload.
+   * @param max_len Maximum payload size.
+   * @return Payload length, or 0 if no data.
+   */
+  uint32_t Read(void* data, uint32_t max_len) noexcept {
+    return ring_.Read(data, max_len);
+  }
+
+  /**
+   * @brief Wait for data using futex (microsecond-level latency).
+   * @param timeout_ms Timeout in milliseconds.
+   */
+  expected<void, ShmError> WaitReadable(uint32_t timeout_ms) noexcept {
+    // Fast path: data already available
+    if (ring_.HasData()) {
+      return expected<void, ShmError>::success();
+    }
+    // Futex wait: sleep until head changes
+    uint32_t cur_head = *ring_.HeadPtr();
+    detail::FutexWait(ring_.HeadPtr(), cur_head, timeout_ms);
+    // Re-check after wake
+    if (ring_.HasData()) {
+      return expected<void, ShmError>::success();
+    }
+    return expected<void, ShmError>::error(ShmError::kTimeout);
+  }
+
+  /// @brief Notify waiting reader (explicit, for batch writes without per-write wake).
+  void Notify() noexcept {
+    detail::FutexWake(ring_.HeadPtr());
+  }
+
+  /// @brief Unlink the shared memory segment (writer only).
+  void Unlink() noexcept {
+    if (is_writer_) {
+      shm_segment_.Unlink();
+    }
+  }
+
+  /// @brief Available bytes for reading.
+  uint32_t ReadableBytes() const noexcept { return ring_.ReadableBytes(); }
+
+  /// @brief Available bytes for writing.
+  uint32_t WriteableBytes() const noexcept { return ring_.WriteableBytes(); }
+
+  /// @brief Data area capacity.
+  uint32_t Capacity() const noexcept { return ring_.Capacity(); }
+
+ private:
+  SharedMemorySegment shm_segment_;
+  ShmSpscByteRing ring_;
   bool is_writer_;
 };
 

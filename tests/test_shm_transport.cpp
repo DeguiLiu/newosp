@@ -79,7 +79,7 @@ TEST_CASE("shm_transport - SharedMemorySegment move semantics",
   // Move construct
   osp::SharedMemorySegment seg2(static_cast<osp::SharedMemorySegment&&>(seg1));
   REQUIRE(seg2.Data() != nullptr);
-  REQUIRE(seg2.Size() == 2048);
+  REQUIRE(seg2.Size() == 4096);  // page-aligned from 2048
 
   seg2.Unlink();
 }
@@ -939,6 +939,607 @@ TEST_CASE("shm_transport - Cross-process ShmChannel WaitReadable polling",
   // Parent: write after delay
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
   uint32_t val = 0xDEAD;
+  auto w = writer.Write(&val, sizeof(val));
+  REQUIRE(w.has_value());
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+
+  writer.Unlink();
+}
+
+// ============================================================================
+// ShmSpscByteRing tests
+// ============================================================================
+
+TEST_CASE("shm_transport - ShmSpscByteRing basic write and read",
+          "[shm_transport]") {
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_basic",
+                                                          4096);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+  REQUIRE(ring.Capacity() > 0);
+  REQUIRE(ring.ReadableBytes() == 0);
+  REQUIRE(!ring.HasData());
+
+  // Write a message
+  const char msg[] = "Hello ByteRing";
+  REQUIRE(ring.Write(msg, sizeof(msg)));
+  REQUIRE(ring.HasData());
+  REQUIRE(ring.ReadableBytes() == sizeof(msg) + 4);  // 4B length prefix
+
+  // Read it back
+  char buf[256];
+  uint32_t len = ring.Read(buf, sizeof(buf));
+  REQUIRE(len == sizeof(msg));
+  REQUIRE(std::memcmp(buf, msg, sizeof(msg)) == 0);
+  REQUIRE(!ring.HasData());
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmSpscByteRing multiple messages",
+          "[shm_transport]") {
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_multi",
+                                                          8192);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+
+  // Write 10 messages
+  for (uint32_t i = 0; i < 10; ++i) {
+    char msg[64];
+    std::snprintf(msg, sizeof(msg), "Message-%u", i);
+    uint32_t msg_len = static_cast<uint32_t>(std::strlen(msg)) + 1;
+    REQUIRE(ring.Write(msg, msg_len));
+  }
+
+  // Read them back in order
+  for (uint32_t i = 0; i < 10; ++i) {
+    char expected[64];
+    std::snprintf(expected, sizeof(expected), "Message-%u", i);
+    char buf[256];
+    uint32_t len = ring.Read(buf, sizeof(buf));
+    REQUIRE(len > 0);
+    REQUIRE(std::strcmp(buf, expected) == 0);
+  }
+
+  // Should be empty now
+  char buf[256];
+  REQUIRE(ring.Read(buf, sizeof(buf)) == 0);
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmSpscByteRing full buffer rejection",
+          "[shm_transport]") {
+  // Small buffer: 4096 total, ~4080 data after header, rounded to 2048
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_full",
+                                                          4096);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+  uint32_t cap = ring.Capacity();
+
+  // Fill with a message that uses most of the capacity
+  // Each message costs len + 4 bytes
+  std::vector<uint8_t> big_msg(cap - 8);  // leave room for length prefix
+  std::memset(big_msg.data(), 0xAB, big_msg.size());
+  REQUIRE(ring.Write(big_msg.data(), static_cast<uint32_t>(big_msg.size())));
+
+  // Next write should fail (not enough space)
+  char small[] = "x";
+  REQUIRE_FALSE(ring.Write(small, 2));
+
+  // Read the big message, then write should succeed again
+  std::vector<uint8_t> recv(cap);
+  uint32_t len = ring.Read(recv.data(), static_cast<uint32_t>(recv.size()));
+  REQUIRE(len == big_msg.size());
+  REQUIRE(ring.Write(small, 2));
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmSpscByteRing wrap-around",
+          "[shm_transport]") {
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_wrap",
+                                                          4096);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+  uint32_t cap = ring.Capacity();
+
+  // Fill and drain multiple rounds to force wrap-around
+  for (uint32_t round = 0; round < 5; ++round) {
+    // Write messages until near full
+    uint32_t written = 0;
+    while (ring.WriteableBytes() >= 68) {  // 64 payload + 4 prefix
+      char msg[64];
+      std::snprintf(msg, sizeof(msg), "R%u-M%u", round, written);
+      uint32_t msg_len = static_cast<uint32_t>(std::strlen(msg)) + 1;
+      REQUIRE(ring.Write(msg, msg_len));
+      ++written;
+    }
+    REQUIRE(written > 0);
+
+    // Drain all
+    uint32_t read_count = 0;
+    char buf[256];
+    while (ring.Read(buf, sizeof(buf)) > 0) {
+      ++read_count;
+    }
+    REQUIRE(read_count == written);
+  }
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmSpscByteRing producer/consumer attach",
+          "[shm_transport]") {
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_attach",
+                                                          8192);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+
+  // Producer initializes
+  auto producer = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+
+  // Consumer attaches
+  auto consumer = osp::ShmSpscByteRing::AttachAt(seg.Data());
+  REQUIRE(consumer.Capacity() == producer.Capacity());
+
+  // Producer writes
+  const char msg[] = "cross-view test";
+  REQUIRE(producer.Write(msg, sizeof(msg)));
+
+  // Consumer reads
+  char buf[256];
+  uint32_t len = consumer.Read(buf, sizeof(buf));
+  REQUIRE(len == sizeof(msg));
+  REQUIRE(std::memcmp(buf, msg, sizeof(msg)) == 0);
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmSpscByteRing large payload (simulated LiDAR)",
+          "[shm_transport]") {
+  // 2 MB buffer for large payloads
+  constexpr uint32_t kBufSize = 2 * 1024 * 1024;
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_lidar",
+                                                          kBufSize);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+
+  // Simulate a 100KB LiDAR point cloud
+  constexpr uint32_t kFrameSize = 100 * 1024;
+  std::vector<uint8_t> frame(kFrameSize);
+  for (uint32_t i = 0; i < kFrameSize; ++i) {
+    frame[i] = static_cast<uint8_t>((i * 7 + 13) & 0xFF);
+  }
+
+  REQUIRE(ring.Write(frame.data(), kFrameSize));
+
+  std::vector<uint8_t> recv(kFrameSize);
+  uint32_t len = ring.Read(recv.data(), kFrameSize);
+  REQUIRE(len == kFrameSize);
+
+  // Verify data integrity
+  for (uint32_t i = 0; i < kFrameSize; ++i) {
+    if (recv[i] != frame[i]) {
+      FAIL("Data mismatch at offset " << i);
+      break;
+    }
+  }
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmSpscByteRing concurrent SPSC",
+          "[shm_transport]") {
+  constexpr uint32_t kBufSize = 256 * 1024;
+  constexpr uint32_t kMsgCount = 1000;
+
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_spsc",
+                                                          kBufSize);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+
+  auto producer = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+  auto consumer = osp::ShmSpscByteRing::AttachAt(seg.Data());
+
+  std::atomic<bool> error_flag{false};
+
+  std::thread prod_thread([&producer]() {
+    for (uint32_t i = 0; i < kMsgCount; ++i) {
+      while (!producer.Write(&i, sizeof(i))) {
+        std::this_thread::yield();
+      }
+    }
+  });
+
+  std::thread cons_thread([&consumer, &error_flag]() {
+    uint32_t expected = 0;
+    while (expected < kMsgCount) {
+      uint32_t val = 0;
+      uint32_t len = consumer.Read(&val, sizeof(val));
+      if (len > 0) {
+        if (val != expected) {
+          error_flag.store(true, std::memory_order_relaxed);
+          break;
+        }
+        ++expected;
+      } else {
+        std::this_thread::yield();
+      }
+    }
+  });
+
+  prod_thread.join();
+  cons_thread.join();
+
+  REQUIRE_FALSE(error_flag.load());
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmSpscByteRing RoundDownPow2 via capacity",
+          "[shm_transport]") {
+  // 5000 total - 16 header = 4984 data, rounded down to 4096
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_pow2",
+                                                          5000);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+
+  // Page-aligned size will be 8192, so data = 8192 - 16 = 8176, pow2 = 4096
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+  // Capacity must be power of 2
+  uint32_t cap = ring.Capacity();
+  REQUIRE(cap > 0);
+  REQUIRE((cap & (cap - 1)) == 0);
+
+  seg.Unlink();
+}
+
+// ============================================================================
+// ShmByteChannel tests
+// ============================================================================
+
+TEST_CASE("shm_transport - ShmByteChannel create writer and open reader",
+          "[shm_transport]") {
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_1", 4096);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
+
+  auto rd = osp::ShmByteChannel::OpenReader("test_byte_ch_1");
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
+
+  REQUIRE(writer.Capacity() > 0);
+  REQUIRE(reader.Capacity() == writer.Capacity());
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmByteChannel write and read",
+          "[shm_transport]") {
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_rw", 8192);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
+
+  auto rd = osp::ShmByteChannel::OpenReader("test_byte_ch_rw");
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
+
+  // Write
+  const char msg[] = "Hello from ShmByteChannel";
+  auto w = writer.Write(msg, sizeof(msg));
+  REQUIRE(w.has_value());
+
+  // Read
+  char buf[256];
+  uint32_t len = reader.Read(buf, sizeof(buf));
+  REQUIRE(len == sizeof(msg));
+  REQUIRE(std::strcmp(buf, msg) == 0);
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmByteChannel write full returns kFull",
+          "[shm_transport]") {
+  // Small capacity
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_full", 4096);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
+
+  uint32_t cap = writer.Capacity();
+  // Fill the buffer
+  std::vector<uint8_t> big(cap - 8);
+  auto w1 = writer.Write(big.data(), static_cast<uint32_t>(big.size()));
+  REQUIRE(w1.has_value());
+
+  // Next write should fail
+  char small[] = "x";
+  auto w2 = writer.Write(small, 2);
+  REQUIRE_FALSE(w2.has_value());
+  REQUIRE(w2.get_error() == osp::ShmError::kFull);
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmByteChannel futex WaitReadable",
+          "[shm_transport]") {
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_futex",
+                                                         8192);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
+
+  auto rd = osp::ShmByteChannel::OpenReader("test_byte_ch_futex");
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
+
+  std::atomic<bool> writer_done{false};
+
+  // Writer thread: write after 50ms delay
+  std::thread writer_thread([&writer, &writer_done]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const char msg[] = "futex wakeup";
+    writer.Write(msg, sizeof(msg));
+    writer_done.store(true, std::memory_order_release);
+  });
+
+  // Reader: wait for data via futex
+  auto wait_result = reader.WaitReadable(2000);
+  REQUIRE(wait_result.has_value());
+
+  char buf[256];
+  uint32_t len = reader.Read(buf, sizeof(buf));
+  REQUIRE(len > 0);
+  REQUIRE(std::strcmp(buf, "futex wakeup") == 0);
+
+  writer_thread.join();
+  REQUIRE(writer_done.load());
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmByteChannel WaitReadable timeout",
+          "[shm_transport]") {
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_timeout",
+                                                         4096);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
+
+  auto rd = osp::ShmByteChannel::OpenReader("test_byte_ch_timeout");
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
+
+  auto start = std::chrono::steady_clock::now();
+  auto wait_result = reader.WaitReadable(50);
+  auto elapsed = std::chrono::steady_clock::now() - start;
+
+  REQUIRE_FALSE(wait_result.has_value());
+  REQUIRE(wait_result.get_error() == osp::ShmError::kTimeout);
+
+  auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  REQUIRE(elapsed_ms >= 40);  // Allow some slack
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmByteChannel concurrent SPSC throughput",
+          "[shm_transport]") {
+  constexpr uint32_t kCapacity = 256 * 1024;
+  constexpr uint32_t kMsgCount = 500;
+
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_spsc",
+                                                         kCapacity);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
+
+  auto rd = osp::ShmByteChannel::OpenReader("test_byte_ch_spsc");
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
+
+  std::atomic<uint32_t> total_read{0};
+
+  std::thread prod([&writer]() {
+    for (uint32_t i = 0; i < kMsgCount; ++i) {
+      char msg[128];
+      std::snprintf(msg, sizeof(msg), "Msg-%u", i);
+      uint32_t len = static_cast<uint32_t>(std::strlen(msg)) + 1;
+      while (!writer.Write(msg, len).has_value()) {
+        std::this_thread::yield();
+      }
+    }
+  });
+
+  std::thread cons([&reader, &total_read]() {
+    char buf[256];
+    while (total_read.load(std::memory_order_relaxed) < kMsgCount) {
+      uint32_t len = reader.Read(buf, sizeof(buf));
+      if (len > 0) {
+        total_read.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        reader.WaitReadable(10);
+      }
+    }
+  });
+
+  prod.join();
+  cons.join();
+
+  REQUIRE(total_read.load() == kMsgCount);
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - ShmByteChannel move semantics",
+          "[shm_transport]") {
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_move",
+                                                         4096);
+  REQUIRE(wr.has_value());
+  auto ch1 = static_cast<osp::ShmByteChannel&&>(wr.value());
+  REQUIRE(ch1.Capacity() > 0);
+
+  // Move construct
+  osp::ShmByteChannel ch2(static_cast<osp::ShmByteChannel&&>(ch1));
+  REQUIRE(ch2.Capacity() > 0);
+
+  // Move assign
+  osp::ShmByteChannel ch3;
+  ch3 = static_cast<osp::ShmByteChannel&&>(ch2);
+  REQUIRE(ch3.Capacity() > 0);
+
+  // Write through moved channel
+  const char msg[] = "moved";
+  auto w = ch3.Write(msg, sizeof(msg));
+  REQUIRE(w.has_value());
+
+  ch3.Unlink();
+}
+
+// ============================================================================
+// Cross-process ShmByteChannel tests
+// ============================================================================
+
+TEST_CASE("shm_transport - Cross-process ShmByteChannel write then read",
+          "[shm_transport][fork]") {
+  const char* name = "xproc_byte_ch";
+  constexpr uint32_t kCapacity = 64 * 1024;
+
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter(name, kCapacity);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
+
+  // Write messages
+  constexpr uint32_t kCount = 10;
+  for (uint32_t i = 0; i < kCount; ++i) {
+    uint32_t payload = i * 100 + 42;
+    auto w = writer.Write(&payload, sizeof(payload));
+    REQUIRE(w.has_value());
+  }
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    auto rd = osp::ShmByteChannel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
+
+    for (uint32_t i = 0; i < kCount; ++i) {
+      uint32_t val = 0;
+      uint32_t len = reader.Read(&val, sizeof(val));
+      if (len != sizeof(uint32_t)) _exit(10 + i);
+      if (val != i * 100 + 42) _exit(20 + i);
+    }
+    _exit(0);
+  }
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - Cross-process ShmByteChannel large frame",
+          "[shm_transport][fork]") {
+  const char* name = "xproc_byte_large";
+  constexpr uint32_t kCapacity = 512 * 1024;
+  constexpr uint32_t kFrameSize = 200 * 1024;  // 200 KB simulated frame
+
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter(name, kCapacity);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
+
+  // Write a large frame
+  std::vector<uint8_t> frame(kFrameSize);
+  for (uint32_t i = 0; i < kFrameSize; ++i) {
+    frame[i] = static_cast<uint8_t>((i * 11 + 7) & 0xFF);
+  }
+  auto w = writer.Write(frame.data(), kFrameSize);
+  REQUIRE(w.has_value());
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    auto rd = osp::ShmByteChannel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
+
+    std::vector<uint8_t> buf(kFrameSize);
+    uint32_t len = reader.Read(buf.data(), kFrameSize);
+    if (len != kFrameSize) _exit(2);
+
+    for (uint32_t i = 0; i < kFrameSize; ++i) {
+      if (buf[i] != static_cast<uint8_t>((i * 11 + 7) & 0xFF)) _exit(3);
+    }
+    _exit(0);
+  }
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+
+  writer.Unlink();
+}
+
+TEST_CASE("shm_transport - Cross-process ShmByteChannel futex notification",
+          "[shm_transport][fork]") {
+#if defined(__SANITIZE_THREAD__)
+  SKIP("Skipped under ThreadSanitizer (fork + shm timing unreliable)");
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+  SKIP("Skipped under ThreadSanitizer (fork + shm timing unreliable)");
+#endif
+#endif
+  const char* name = "xproc_byte_futex";
+  constexpr uint32_t kCapacity = 8192;
+
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter(name, kCapacity);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    auto rd = osp::ShmByteChannel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
+
+    // Should timeout initially (no data)
+    auto w1 = reader.WaitReadable(100);
+    if (w1.has_value()) _exit(2);
+
+    // Wait longer -- parent writes after 300ms
+    auto w2 = reader.WaitReadable(2000);
+    if (!w2.has_value()) _exit(3);
+
+    uint32_t val = 0;
+    uint32_t len = reader.Read(&val, sizeof(val));
+    if (len != sizeof(uint32_t) || val != 0xBEEF) _exit(4);
+
+    _exit(0);
+  }
+
+  // Parent: write after delay
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  uint32_t val = 0xBEEF;
   auto w = writer.Write(&val, sizeof(val));
   REQUIRE(w.has_value());
 
