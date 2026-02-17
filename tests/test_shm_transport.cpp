@@ -1551,4 +1551,516 @@ TEST_CASE("shm_transport - Cross-process ShmByteChannel futex notification",
   writer.Unlink();
 }
 
+// ============================================================================
+// ShmSpmcByteRing tests
+// ============================================================================
+
+TEST_CASE("ShmSpmcByteRing: InitAt and basic properties", "[shm][spmc]") {
+  alignas(64) uint8_t buf[8192];
+  constexpr uint32_t kMaxConsumers = 4;
+
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), kMaxConsumers);
+  REQUIRE(ring.Capacity() > 0);
+  REQUIRE(ring.MaxConsumers() == kMaxConsumers);
+  REQUIRE(ring.ConsumerCount() == 0);
+  REQUIRE(ring.WriteableBytes() == ring.Capacity());
+}
+
+TEST_CASE("ShmSpmcByteRing: RegisterConsumer and UnregisterConsumer",
+          "[shm][spmc]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 8);
+
+  // Register 3 consumers
+  int32_t c0 = ring.RegisterConsumer();
+  int32_t c1 = ring.RegisterConsumer();
+  int32_t c2 = ring.RegisterConsumer();
+  REQUIRE(c0 >= 0);
+  REQUIRE(c1 >= 0);
+  REQUIRE(c2 >= 0);
+  REQUIRE(ring.ConsumerCount() == 3);
+
+  // Unregister one
+  ring.UnregisterConsumer(c1);
+  REQUIRE(ring.ConsumerCount() == 2);
+
+  // Unregister remaining
+  ring.UnregisterConsumer(c0);
+  ring.UnregisterConsumer(c2);
+  REQUIRE(ring.ConsumerCount() == 0);
+}
+
+TEST_CASE("ShmSpmcByteRing: RegisterConsumer full returns -1", "[shm][spmc]") {
+  alignas(64) uint8_t buf[8192];
+  constexpr uint32_t kMaxConsumers = 3;
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), kMaxConsumers);
+
+  // Register max consumers
+  std::vector<int32_t> ids;
+  for (uint32_t i = 0; i < kMaxConsumers; ++i) {
+    int32_t id = ring.RegisterConsumer();
+    REQUIRE(id >= 0);
+    ids.push_back(id);
+  }
+  REQUIRE(ring.ConsumerCount() == kMaxConsumers);
+
+  // Next registration should fail
+  int32_t overflow = ring.RegisterConsumer();
+  REQUIRE(overflow == -1);
+  REQUIRE(ring.ConsumerCount() == kMaxConsumers);
+
+  // Cleanup
+  for (auto id : ids) {
+    ring.UnregisterConsumer(id);
+  }
+}
+
+TEST_CASE("ShmSpmcByteRing: single producer single consumer", "[shm][spmc]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
+
+  int32_t c0 = ring.RegisterConsumer();
+  REQUIRE(c0 >= 0);
+
+  // Write 3 messages
+  const char* msgs[] = {"msg1", "msg2", "msg3"};
+  for (const char* msg : msgs) {
+    uint32_t len = static_cast<uint32_t>(std::strlen(msg)) + 1;
+    REQUIRE(ring.Write(msg, len));
+  }
+
+  // Read all from consumer 0
+  for (const char* expected : msgs) {
+    char recv[64];
+    uint32_t len = ring.Read(c0, recv, sizeof(recv));
+    REQUIRE(len == std::strlen(expected) + 1);
+    REQUIRE(std::strcmp(recv, expected) == 0);
+  }
+
+  REQUIRE_FALSE(ring.HasData(c0));
+  ring.UnregisterConsumer(c0);
+}
+
+TEST_CASE("ShmSpmcByteRing: multiple consumers read same data", "[shm][spmc]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 8);
+
+  // Register 3 consumers
+  int32_t c0 = ring.RegisterConsumer();
+  int32_t c1 = ring.RegisterConsumer();
+  int32_t c2 = ring.RegisterConsumer();
+  REQUIRE(c0 >= 0);
+  REQUIRE(c1 >= 0);
+  REQUIRE(c2 >= 0);
+
+  // Write a message
+  const char msg[] = "broadcast message";
+  REQUIRE(ring.Write(msg, sizeof(msg)));
+
+  // All 3 consumers should read the same data
+  for (int32_t cid : {c0, c1, c2}) {
+    REQUIRE(ring.HasData(cid));
+    char recv[64];
+    uint32_t len = ring.Read(cid, recv, sizeof(recv));
+    REQUIRE(len == sizeof(msg));
+    REQUIRE(std::strcmp(recv, msg) == 0);
+    REQUIRE_FALSE(ring.HasData(cid));
+  }
+
+  // Cleanup
+  ring.UnregisterConsumer(c0);
+  ring.UnregisterConsumer(c1);
+  ring.UnregisterConsumer(c2);
+}
+
+TEST_CASE("ShmSpmcByteRing: slowest consumer limits writeable", "[shm][spmc]") {
+  alignas(64) uint8_t buf[4096];  // Small buffer
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
+
+  int32_t c0 = ring.RegisterConsumer();
+  int32_t c1 = ring.RegisterConsumer();
+  REQUIRE(c0 >= 0);
+  REQUIRE(c1 >= 0);
+
+  // Fill buffer with messages
+  uint32_t written = 0;
+  while (ring.WriteableBytes() >= 68) {  // 64 payload + 4 prefix
+    char msg[64];
+    std::snprintf(msg, sizeof(msg), "msg-%u", written);
+    if (!ring.Write(msg, static_cast<uint32_t>(std::strlen(msg)) + 1)) {
+      break;
+    }
+    ++written;
+  }
+  REQUIRE(written > 0);
+
+  // Consumer 0 reads all
+  uint32_t c0_read = 0;
+  while (ring.HasData(c0)) {
+    char recv[64];
+    if (ring.Read(c0, recv, sizeof(recv)) > 0) {
+      ++c0_read;
+    }
+  }
+  REQUIRE(c0_read == written);
+
+  // Consumer 1 hasn't read anything, so WriteableBytes should still be limited
+  uint32_t writeable_before = ring.WriteableBytes();
+
+  // Consumer 1 reads one message
+  char recv[64];
+  REQUIRE(ring.Read(c1, recv, sizeof(recv)) > 0);
+
+  // WriteableBytes should increase
+  REQUIRE(ring.WriteableBytes() > writeable_before);
+
+  // Cleanup
+  ring.UnregisterConsumer(c0);
+  ring.UnregisterConsumer(c1);
+}
+
+TEST_CASE("ShmSpmcByteRing: consumer re-registration gets current head",
+          "[shm][spmc]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
+
+  // Write some messages
+  for (uint32_t i = 0; i < 5; ++i) {
+    char msg[32];
+    std::snprintf(msg, sizeof(msg), "early-%u", i);
+    REQUIRE(ring.Write(msg, static_cast<uint32_t>(std::strlen(msg)) + 1));
+  }
+
+  // Register consumer after writes
+  int32_t c0 = ring.RegisterConsumer();
+  REQUIRE(c0 >= 0);
+
+  // Consumer should NOT see old messages (starts from current head)
+  REQUIRE_FALSE(ring.HasData(c0));
+
+  // Write new message
+  const char new_msg[] = "new message";
+  REQUIRE(ring.Write(new_msg, sizeof(new_msg)));
+
+  // Consumer should see new message
+  REQUIRE(ring.HasData(c0));
+  char recv[64];
+  uint32_t len = ring.Read(c0, recv, sizeof(recv));
+  REQUIRE(len == sizeof(new_msg));
+  REQUIRE(std::strcmp(recv, new_msg) == 0);
+
+  ring.UnregisterConsumer(c0);
+}
+
+TEST_CASE("ShmSpmcByteRing: wrap-around with multiple consumers",
+          "[shm][spmc]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
+
+  int32_t c0 = ring.RegisterConsumer();
+  int32_t c1 = ring.RegisterConsumer();
+  REQUIRE(c0 >= 0);
+  REQUIRE(c1 >= 0);
+
+  // Fill and drain multiple rounds
+  for (uint32_t round = 0; round < 3; ++round) {
+    // Fill buffer
+    uint32_t written = 0;
+    while (ring.WriteableBytes() >= 68) {
+      char msg[64];
+      std::snprintf(msg, sizeof(msg), "R%u-M%u", round, written);
+      if (!ring.Write(msg, static_cast<uint32_t>(std::strlen(msg)) + 1)) {
+        break;
+      }
+      ++written;
+    }
+    REQUIRE(written > 0);
+
+    // Both consumers drain
+    for (int32_t cid : {c0, c1}) {
+      uint32_t read_count = 0;
+      while (ring.HasData(cid)) {
+        char recv[64];
+        if (ring.Read(cid, recv, sizeof(recv)) > 0) {
+          ++read_count;
+        }
+      }
+      REQUIRE(read_count == written);
+    }
+  }
+
+  ring.UnregisterConsumer(c0);
+  ring.UnregisterConsumer(c1);
+}
+
+// ============================================================================
+// ShmSpmcByteChannel tests
+// ============================================================================
+
+TEST_CASE("ShmSpmcByteChannel: create writer and open readers", "[shm][spmc]") {
+  const char* name = "osp_test_spmc_ch1";
+
+  auto wr = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, 8192, 4);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+
+  // Open 3 readers
+  auto rd0 = osp::ShmSpmcByteChannel::OpenReader(name);
+  auto rd1 = osp::ShmSpmcByteChannel::OpenReader(name);
+  auto rd2 = osp::ShmSpmcByteChannel::OpenReader(name);
+  REQUIRE(rd0.has_value());
+  REQUIRE(rd1.has_value());
+  REQUIRE(rd2.has_value());
+
+  auto reader0 = static_cast<osp::ShmSpmcByteChannel&&>(rd0.value());
+  auto reader1 = static_cast<osp::ShmSpmcByteChannel&&>(rd1.value());
+  auto reader2 = static_cast<osp::ShmSpmcByteChannel&&>(rd2.value());
+
+  REQUIRE(writer.ConsumerCount() == 3);
+  REQUIRE(reader0.ConsumerId() >= 0);
+  REQUIRE(reader1.ConsumerId() >= 0);
+  REQUIRE(reader2.ConsumerId() >= 0);
+
+  writer.Unlink();
+}
+
+TEST_CASE("ShmSpmcByteChannel: all readers receive same data", "[shm][spmc]") {
+  const char* name = "osp_test_spmc_ch2";
+
+  auto wr = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, 8192, 4);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+
+  auto rd0 = osp::ShmSpmcByteChannel::OpenReader(name);
+  auto rd1 = osp::ShmSpmcByteChannel::OpenReader(name);
+  auto rd2 = osp::ShmSpmcByteChannel::OpenReader(name);
+  REQUIRE(rd0.has_value());
+  REQUIRE(rd1.has_value());
+  REQUIRE(rd2.has_value());
+
+  auto reader0 = static_cast<osp::ShmSpmcByteChannel&&>(rd0.value());
+  auto reader1 = static_cast<osp::ShmSpmcByteChannel&&>(rd1.value());
+  auto reader2 = static_cast<osp::ShmSpmcByteChannel&&>(rd2.value());
+
+  // Write a message
+  const char msg[] = "broadcast to all";
+  auto w = writer.Write(msg, sizeof(msg));
+  REQUIRE(w.has_value());
+
+  // All 3 readers should receive identical data
+  for (auto* reader : {&reader0, &reader1, &reader2}) {
+    char recv[64];
+    uint32_t len = reader->Read(recv, sizeof(recv));
+    REQUIRE(len == sizeof(msg));
+    REQUIRE(std::strcmp(recv, msg) == 0);
+  }
+
+  writer.Unlink();
+}
+
+TEST_CASE("ShmSpmcByteChannel: WaitReadable timeout", "[shm][spmc]") {
+  const char* name = "osp_test_spmc_timeout";
+
+  auto wr = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, 4096, 2);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+
+  auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
+
+  // No data written, should timeout
+  auto start = std::chrono::steady_clock::now();
+  auto wait_result = reader.WaitReadable(50);
+  auto elapsed = std::chrono::steady_clock::now() - start;
+
+  REQUIRE_FALSE(wait_result.has_value());
+  REQUIRE(wait_result.get_error() == osp::ShmError::kTimeout);
+
+  auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  REQUIRE(elapsed_ms >= 40);
+
+  writer.Unlink();
+}
+
+TEST_CASE("ShmSpmcByteChannel: reader auto-unregisters on destroy",
+          "[shm][spmc]") {
+  const char* name = "osp_test_spmc_unreg";
+
+  auto wr = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, 4096, 4);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+
+  {
+    auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
+    REQUIRE(rd.has_value());
+    auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
+    REQUIRE(writer.ConsumerCount() == 1);
+    // reader destroyed here
+  }
+
+  // Consumer should be unregistered
+  REQUIRE(writer.ConsumerCount() == 0);
+
+  writer.Unlink();
+}
+
+TEST_CASE("ShmSpmcByteChannel: max consumers returns kFull", "[shm][spmc]") {
+  const char* name = "osp_test_spmc_maxcons";
+  constexpr uint32_t kMaxConsumers = 3;
+
+  auto wr =
+      osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, 4096, kMaxConsumers);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+
+  // Open max consumers
+  std::vector<osp::ShmSpmcByteChannel> readers;
+  for (uint32_t i = 0; i < kMaxConsumers; ++i) {
+    auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
+    REQUIRE(rd.has_value());
+    readers.push_back(static_cast<osp::ShmSpmcByteChannel&&>(rd.value()));
+  }
+  REQUIRE(writer.ConsumerCount() == kMaxConsumers);
+
+  // Next open should fail
+  auto overflow = osp::ShmSpmcByteChannel::OpenReader(name);
+  REQUIRE_FALSE(overflow.has_value());
+  REQUIRE(overflow.get_error() == osp::ShmError::kFull);
+
+  writer.Unlink();
+}
+
+// ============================================================================
+// Cross-process SPMC tests
+// ============================================================================
+
+TEST_CASE("ShmSpmcByteChannel: cross-process multi-consumer",
+          "[shm][spmc][fork]") {
+  const char* name = "osp_test_spmc_xproc";
+  constexpr uint32_t kCapacity = 64 * 1024;
+
+  auto wr =
+      osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, kCapacity, 4);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+
+  // Fork 2 children
+  pid_t pid1 = fork();
+  REQUIRE(pid1 >= 0);
+
+  if (pid1 == 0) {
+    // Child 1: open reader and wait for data
+    auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
+
+    auto w = reader.WaitReadable(5000);
+    if (!w.has_value()) _exit(2);
+
+    char recv[64];
+    uint32_t len = reader.Read(recv, sizeof(recv));
+    if (len == 0) _exit(3);
+    if (std::strcmp(recv, "multi-consumer test") != 0) _exit(4);
+
+    _exit(0);
+  }
+
+  pid_t pid2 = fork();
+  REQUIRE(pid2 >= 0);
+
+  if (pid2 == 0) {
+    // Child 2: open reader and wait for data
+    auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
+
+    auto w = reader.WaitReadable(5000);
+    if (!w.has_value()) _exit(2);
+
+    char recv[64];
+    uint32_t len = reader.Read(recv, sizeof(recv));
+    if (len == 0) _exit(3);
+    if (std::strcmp(recv, "multi-consumer test") != 0) _exit(4);
+
+    _exit(0);
+  }
+
+  // Parent: wait for children to register, then write
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  const char msg[] = "multi-consumer test";
+  auto w = writer.Write(msg, sizeof(msg));
+  REQUIRE(w.has_value());
+
+  // Wait for both children
+  int status1 = 0, status2 = 0;
+  waitpid(pid1, &status1, 0);
+  waitpid(pid2, &status2, 0);
+
+  REQUIRE(WIFEXITED(status1));
+  REQUIRE(WEXITSTATUS(status1) == 0);
+  REQUIRE(WIFEXITED(status2));
+  REQUIRE(WEXITSTATUS(status2) == 0);
+
+  writer.Unlink();
+}
+
+TEST_CASE("ShmSpmcByteChannel: cross-process futex wakeall",
+          "[shm][spmc][fork]") {
+#if defined(__SANITIZE_THREAD__)
+  SKIP("Skipped under ThreadSanitizer (fork + shm timing unreliable)");
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+  SKIP("Skipped under ThreadSanitizer (fork + shm timing unreliable)");
+#endif
+#endif
+
+  const char* name = "osp_test_spmc_futex";
+  constexpr uint32_t kCapacity = 8192;
+
+  auto wr =
+      osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, kCapacity, 4);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+
+  pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    // Child: open reader and wait for futex wakeup
+    auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
+    if (!rd.has_value()) _exit(1);
+    auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
+
+    // Should timeout initially
+    auto w1 = reader.WaitReadable(100);
+    if (w1.has_value()) _exit(2);
+
+    // Wait longer -- parent writes after 300ms
+    auto w2 = reader.WaitReadable(2000);
+    if (!w2.has_value()) _exit(3);
+
+    uint32_t val = 0;
+    uint32_t len = reader.Read(&val, sizeof(val));
+    if (len != sizeof(uint32_t) || val != 0xCAFE) _exit(4);
+
+    _exit(0);
+  }
+
+  // Parent: write after delay
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  uint32_t val = 0xCAFE;
+  auto w = writer.Write(&val, sizeof(val));
+  REQUIRE(w.has_value());
+
+  int status = 0;
+  waitpid(pid, &status, 0);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+
+  writer.Unlink();
+}
+
 #endif  // OSP_PLATFORM_LINUX

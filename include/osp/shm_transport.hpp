@@ -39,6 +39,7 @@
 #include "osp/vocabulary.hpp"
 
 #include <cstdint>
+#include <climits>
 #include <cstring>
 
 #include <atomic>
@@ -77,6 +78,10 @@ namespace osp {
 
 #ifndef OSP_SHM_BYTE_RING_CAPACITY
 #define OSP_SHM_BYTE_RING_CAPACITY (1024 * 1024)  // 1 MB default
+#endif
+
+#ifndef OSP_SHM_SPMC_MAX_CONSUMERS
+#define OSP_SHM_SPMC_MAX_CONSUMERS 8
 #endif
 
 // ============================================================================
@@ -883,6 +888,11 @@ inline void FutexWake(uint32_t* addr) noexcept {
   (void)::syscall(SYS_futex, addr, FUTEX_WAKE, 1, nullptr, nullptr, 0);
 }
 
+/// @brief Wake all waiters on a futex word (for SPMC broadcast).
+inline void FutexWakeAll(uint32_t* addr) noexcept {
+  (void)::syscall(SYS_futex, addr, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+}
+
 }  // namespace detail
 
 // ============================================================================
@@ -1045,6 +1055,479 @@ class ShmByteChannel final {
   SharedMemorySegment shm_segment_;
   ShmSpscByteRing ring_;
   bool is_writer_;
+};
+
+// ============================================================================
+// ShmSpmcByteRing - Single-Producer Multi-Consumer byte-stream ring buffer
+// ============================================================================
+
+/// @brief POD header for SPMC byte ring buffer.
+/// Stored at the start of the shared memory region.
+/// Each consumer has an independent tail pointer for independent reading.
+struct ShmSpmcByteRingHeader {
+  uint32_t head;              ///< Producer write position (monotonically increasing)
+  uint32_t capacity;          ///< Data area size (must be power of 2)
+  uint32_t max_consumers;     ///< Maximum number of consumers
+  uint32_t consumer_count;    ///< Active consumer count (atomic CAS registration)
+  uint32_t tails[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< Per-consumer read positions
+  uint32_t active[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< 1 = active, 0 = inactive
+};
+
+/**
+ * @brief SPMC byte-level ring buffer for shared memory IPC.
+ *
+ * Designed for data distribution: one producer writes, multiple consumers
+ * each independently read the same data stream (e.g. LiDAR point clouds
+ * distributed to logging, fusion, and visualization subscribers).
+ *
+ * Memory layout:
+ *   [0..H-1]  : ShmSpmcByteRingHeader (head, capacity, tails[], active[])
+ *   [H..N]    : Data area (circular buffer)
+ *
+ * Message format: [4-byte LE length][payload]
+ *
+ * Memory ordering: acquire/release fences (not seq_cst).
+ * Thread/process safety: single producer, multiple consumers.
+ * Each consumer must call RegisterConsumer() to get a unique consumer_id.
+ * Producer checks the slowest consumer tail to prevent data overwrite.
+ */
+class ShmSpmcByteRing final {
+ public:
+  static constexpr uint32_t kHeaderSize =
+      static_cast<uint32_t>(sizeof(ShmSpmcByteRingHeader));
+
+  ShmSpmcByteRing() noexcept : header_(nullptr), data_(nullptr), mask_(0) {}
+
+  /**
+   * @brief Initialize as producer (creates header).
+   * @param shm_base Pointer to the start of shared memory.
+   * @param total_size Total shared memory size (header + data).
+   * @param max_consumers Maximum number of consumers (clamped to OSP_SHM_SPMC_MAX_CONSUMERS).
+   */
+  static ShmSpmcByteRing InitAt(void* shm_base, uint32_t total_size,
+                                 uint32_t max_consumers = OSP_SHM_SPMC_MAX_CONSUMERS) noexcept {
+    OSP_ASSERT(shm_base != nullptr);
+    OSP_ASSERT(total_size > kHeaderSize);
+    if (max_consumers > OSP_SHM_SPMC_MAX_CONSUMERS) {
+      max_consumers = OSP_SHM_SPMC_MAX_CONSUMERS;
+    }
+    ShmSpmcByteRing ring;
+    ring.header_ = static_cast<ShmSpmcByteRingHeader*>(shm_base);
+    ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
+    uint32_t cap = RoundDownPow2(total_size - kHeaderSize);
+    ring.header_->head = 0;
+    ring.header_->capacity = cap;
+    ring.header_->max_consumers = max_consumers;
+    ring.header_->consumer_count = 0;
+    for (uint32_t i = 0; i < OSP_SHM_SPMC_MAX_CONSUMERS; ++i) {
+      ring.header_->tails[i] = 0;
+      ring.header_->active[i] = 0;
+    }
+    std::atomic_thread_fence(std::memory_order_release);
+    ring.mask_ = cap - 1;
+    return ring;
+  }
+
+  /**
+   * @brief Attach to existing shared memory (consumer or observer).
+   * @param shm_base Pointer to the start of shared memory.
+   */
+  static ShmSpmcByteRing AttachAt(void* shm_base) noexcept {
+    OSP_ASSERT(shm_base != nullptr);
+    ShmSpmcByteRing ring;
+    ring.header_ = static_cast<ShmSpmcByteRingHeader*>(shm_base);
+    ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
+    std::atomic_thread_fence(std::memory_order_acquire);
+    ring.mask_ = ring.header_->capacity - 1;
+    return ring;
+  }
+
+  /// @brief Calculate minimum shared memory size for given data capacity.
+  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept {
+    return kHeaderSize + data_capacity;
+  }
+
+  // ---- Consumer registration ----
+
+  /**
+   * @brief Register a new consumer. Returns consumer_id (0..max-1) or -1 if full.
+   * Consumer's tail is set to current head (starts reading from now).
+   */
+  int32_t RegisterConsumer() noexcept {
+    // Atomic CAS loop to claim a slot
+    for (uint32_t i = 0; i < header_->max_consumers; ++i) {
+      auto* slot = reinterpret_cast<std::atomic<uint32_t>*>(&header_->active[i]);
+      uint32_t expected = 0;
+      if (slot->compare_exchange_strong(expected, 1,
+              std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        // Set tail to current head (consumer starts from "now")
+        std::atomic_thread_fence(std::memory_order_acquire);
+        header_->tails[i] = header_->head;
+        auto* cnt = reinterpret_cast<std::atomic<uint32_t>*>(&header_->consumer_count);
+        cnt->fetch_add(1, std::memory_order_relaxed);
+        return static_cast<int32_t>(i);
+      }
+    }
+    return -1;  // No slots available
+  }
+
+  /// @brief Unregister a consumer, freeing its slot.
+  void UnregisterConsumer(int32_t consumer_id) noexcept {
+    if (consumer_id < 0 ||
+        static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
+      return;
+    }
+    auto* slot = reinterpret_cast<std::atomic<uint32_t>*>(
+        &header_->active[static_cast<uint32_t>(consumer_id)]);
+    if (slot->exchange(0, std::memory_order_acq_rel) == 1) {
+      auto* cnt = reinterpret_cast<std::atomic<uint32_t>*>(&header_->consumer_count);
+      cnt->fetch_sub(1, std::memory_order_relaxed);
+    }
+  }
+
+  /// @brief Number of active consumers.
+  uint32_t ConsumerCount() const noexcept {
+    auto* cnt = reinterpret_cast<const std::atomic<uint32_t>*>(&header_->consumer_count);
+    return cnt->load(std::memory_order_relaxed);
+  }
+
+  // ---- Producer API ----
+
+  /**
+   * @brief Write a length-prefixed message: [4B len][payload].
+   * Checks the slowest active consumer to prevent overwrite.
+   * @return true if successful, false if not enough space.
+   */
+  bool Write(const void* data, uint32_t len) noexcept {
+    const uint32_t total = len + 4;
+    if (WriteableBytes() < total) {
+      return false;
+    }
+    const uint32_t head = header_->head;
+    WriteRaw(head, &len, 4);
+    WriteRaw(head + 4, data, len);
+    std::atomic_thread_fence(std::memory_order_release);
+    header_->head = head + total;
+    return true;
+  }
+
+  /// @brief Available bytes for writing (limited by slowest consumer).
+  uint32_t WriteableBytes() const noexcept {
+    const uint32_t head = header_->head;
+    const uint32_t slowest = SlowestTail();
+    return header_->capacity - (head - slowest);
+  }
+
+  // ---- Consumer API ----
+
+  /**
+   * @brief Read one length-prefixed message for a specific consumer.
+   * @param consumer_id Consumer slot index from RegisterConsumer().
+   * @param[out] out Buffer to receive payload.
+   * @param max_len Maximum payload size.
+   * @return Payload length, or 0 if no data available.
+   */
+  uint32_t Read(int32_t consumer_id, void* out, uint32_t max_len) noexcept {
+    if (consumer_id < 0 ||
+        static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
+      return 0;
+    }
+    const uint32_t idx = static_cast<uint32_t>(consumer_id);
+    const uint32_t tail = header_->tails[idx];
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const uint32_t head = header_->head;
+    const uint32_t available = head - tail;
+    if (available < 4) {
+      return 0;
+    }
+    uint32_t msg_len = 0;
+    ReadRaw(tail, &msg_len, 4);
+    if (msg_len == 0 || available < msg_len + 4) {
+      return 0;
+    }
+    if (msg_len > max_len) {
+      // Message too large for output buffer; skip it
+      std::atomic_thread_fence(std::memory_order_release);
+      header_->tails[idx] = tail + msg_len + 4;
+      return 0;
+    }
+    ReadRaw(tail + 4, out, msg_len);
+    std::atomic_thread_fence(std::memory_order_release);
+    header_->tails[idx] = tail + msg_len + 4;
+    return msg_len;
+  }
+
+  /// @brief Available bytes for reading for a specific consumer.
+  uint32_t ReadableBytes(int32_t consumer_id) const noexcept {
+    if (consumer_id < 0 ||
+        static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
+      return 0;
+    }
+    const uint32_t idx = static_cast<uint32_t>(consumer_id);
+    const uint32_t tail = header_->tails[idx];
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const uint32_t head = header_->head;
+    return head - tail;
+  }
+
+  /// @brief Check if consumer has at least one complete message header.
+  bool HasData(int32_t consumer_id) const noexcept {
+    return ReadableBytes(consumer_id) >= 4;
+  }
+
+  /// @brief Data area capacity in bytes.
+  uint32_t Capacity() const noexcept { return header_ ? header_->capacity : 0; }
+
+  /// @brief Pointer to the head field (for futex wait/wake).
+  uint32_t* HeadPtr() noexcept { return &header_->head; }
+
+  /// @brief Maximum consumers supported.
+  uint32_t MaxConsumers() const noexcept {
+    return header_ ? header_->max_consumers : 0;
+  }
+
+ private:
+  /// @brief Find the slowest (minimum) tail among active consumers.
+  uint32_t SlowestTail() const noexcept {
+    uint32_t slowest = header_->head;  // If no consumers, full capacity
+    for (uint32_t i = 0; i < header_->max_consumers; ++i) {
+      auto* slot = reinterpret_cast<const std::atomic<uint32_t>*>(&header_->active[i]);
+      if (slot->load(std::memory_order_relaxed) != 0) {
+        const uint32_t t = header_->tails[i];
+        // Use signed comparison for monotonic wrap-around
+        if (static_cast<int32_t>(slowest - t) > 0) {
+          slowest = t;
+        }
+      }
+    }
+    return slowest;
+  }
+
+  void WriteRaw(uint32_t pos, const void* src, uint32_t len) noexcept {
+    const uint32_t offset = pos & mask_;
+    const uint32_t first = header_->capacity - offset;
+    if (first >= len) {
+      std::memcpy(data_ + offset, src, len);
+    } else {
+      std::memcpy(data_ + offset, src, first);
+      std::memcpy(data_, static_cast<const uint8_t*>(src) + first, len - first);
+    }
+  }
+
+  void ReadRaw(uint32_t pos, void* dst, uint32_t len) const noexcept {
+    const uint32_t offset = pos & mask_;
+    const uint32_t first = header_->capacity - offset;
+    if (first >= len) {
+      std::memcpy(dst, data_ + offset, len);
+    } else {
+      std::memcpy(dst, data_ + offset, first);
+      std::memcpy(static_cast<uint8_t*>(dst) + first, data_, len - first);
+    }
+  }
+
+  static uint32_t RoundDownPow2(uint32_t v) noexcept {
+    if (v == 0) return 0;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    return (v >> 1) + 1;
+  }
+
+  ShmSpmcByteRingHeader* header_;
+  uint8_t* data_;
+  uint32_t mask_;
+};
+
+// ============================================================================
+// ShmSpmcByteChannel - SPMC byte-stream channel with futex notification
+// ============================================================================
+
+/**
+ * @brief Named SPMC byte-stream channel for data distribution.
+ *
+ * One producer writes data, multiple consumers each independently read
+ * the full data stream. Ideal for sensor data distribution (e.g. LiDAR
+ * point clouds to logging, fusion, and visualization subscribers).
+ *
+ * Writer calls Write() (auto-notifies all waiters via futex).
+ * Each reader calls OpenReader() which auto-registers a consumer slot.
+ * Reader calls WaitReadable() + Read().
+ */
+class ShmSpmcByteChannel final {
+ public:
+  ShmSpmcByteChannel() noexcept : is_writer_(false), consumer_id_(-1) {}
+
+  ~ShmSpmcByteChannel() {
+    if (!is_writer_ && consumer_id_ >= 0 && ring_.Capacity() > 0) {
+      ring_.UnregisterConsumer(consumer_id_);
+    }
+  }
+
+  // Non-copyable, movable
+  ShmSpmcByteChannel(const ShmSpmcByteChannel&) = delete;
+  ShmSpmcByteChannel& operator=(const ShmSpmcByteChannel&) = delete;
+
+  ShmSpmcByteChannel(ShmSpmcByteChannel&& other) noexcept
+      : shm_segment_(static_cast<SharedMemorySegment&&>(other.shm_segment_)),
+        ring_(other.ring_),
+        is_writer_(other.is_writer_),
+        consumer_id_(other.consumer_id_) {
+    other.ring_ = ShmSpmcByteRing();
+    other.consumer_id_ = -1;
+  }
+
+  ShmSpmcByteChannel& operator=(ShmSpmcByteChannel&& other) noexcept {
+    if (this != &other) {
+      // Unregister current consumer if active
+      if (!is_writer_ && consumer_id_ >= 0 && ring_.Capacity() > 0) {
+        ring_.UnregisterConsumer(consumer_id_);
+      }
+      shm_segment_ = static_cast<SharedMemorySegment&&>(other.shm_segment_);
+      ring_ = other.ring_;
+      is_writer_ = other.is_writer_;
+      consumer_id_ = other.consumer_id_;
+      other.ring_ = ShmSpmcByteRing();
+      other.consumer_id_ = -1;
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Create a writer endpoint.
+   * @param name Channel name.
+   * @param capacity Data area capacity in bytes.
+   * @param max_consumers Maximum number of consumers.
+   */
+  static expected<ShmSpmcByteChannel, ShmError> CreateWriter(
+      const char* name, uint32_t capacity = OSP_SHM_BYTE_RING_CAPACITY,
+      uint32_t max_consumers = OSP_SHM_SPMC_MAX_CONSUMERS) noexcept {
+    ShmSpmcByteChannel ch;
+    ch.is_writer_ = true;
+    uint32_t shm_size = ShmSpmcByteRing::RequiredSize(capacity);
+    auto result = SharedMemorySegment::Create(name, shm_size);
+    if (!result.has_value()) {
+      return expected<ShmSpmcByteChannel, ShmError>::error(result.get_error());
+    }
+    ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    ch.ring_ = ShmSpmcByteRing::InitAt(
+        ch.shm_segment_.Data(), ch.shm_segment_.Size(), max_consumers);
+    return expected<ShmSpmcByteChannel, ShmError>::success(
+        static_cast<ShmSpmcByteChannel&&>(ch));
+  }
+
+  /**
+   * @brief Create a writer endpoint, removing any stale channel first.
+   */
+  static expected<ShmSpmcByteChannel, ShmError> CreateOrReplaceWriter(
+      const char* name, uint32_t capacity = OSP_SHM_BYTE_RING_CAPACITY,
+      uint32_t max_consumers = OSP_SHM_SPMC_MAX_CONSUMERS) noexcept {
+    ShmSpmcByteChannel ch;
+    ch.is_writer_ = true;
+    uint32_t shm_size = ShmSpmcByteRing::RequiredSize(capacity);
+    auto result = SharedMemorySegment::CreateOrReplace(name, shm_size);
+    if (!result.has_value()) {
+      return expected<ShmSpmcByteChannel, ShmError>::error(result.get_error());
+    }
+    ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    ch.ring_ = ShmSpmcByteRing::InitAt(
+        ch.shm_segment_.Data(), ch.shm_segment_.Size(), max_consumers);
+    return expected<ShmSpmcByteChannel, ShmError>::success(
+        static_cast<ShmSpmcByteChannel&&>(ch));
+  }
+
+  /**
+   * @brief Open a reader endpoint. Auto-registers a consumer slot.
+   * @param name Channel name.
+   * @return Channel on success, kFull if max consumers reached.
+   */
+  static expected<ShmSpmcByteChannel, ShmError> OpenReader(const char* name) noexcept {
+    ShmSpmcByteChannel ch;
+    ch.is_writer_ = false;
+    auto result = SharedMemorySegment::Open(name);
+    if (!result.has_value()) {
+      return expected<ShmSpmcByteChannel, ShmError>::error(result.get_error());
+    }
+    ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    ch.ring_ = ShmSpmcByteRing::AttachAt(ch.shm_segment_.Data());
+    ch.consumer_id_ = ch.ring_.RegisterConsumer();
+    if (ch.consumer_id_ < 0) {
+      return expected<ShmSpmcByteChannel, ShmError>::error(ShmError::kFull);
+    }
+    return expected<ShmSpmcByteChannel, ShmError>::success(
+        static_cast<ShmSpmcByteChannel&&>(ch));
+  }
+
+  /**
+   * @brief Write data and notify all waiting readers via futex.
+   */
+  expected<void, ShmError> Write(const void* data, uint32_t size) noexcept {
+    if (!ring_.Write(data, size)) {
+      return expected<void, ShmError>::error(ShmError::kFull);
+    }
+    detail::FutexWakeAll(ring_.HeadPtr());
+    return expected<void, ShmError>::success();
+  }
+
+  /**
+   * @brief Read one message (consumer only).
+   * @param data Buffer to receive payload.
+   * @param max_len Maximum payload size.
+   * @return Payload length, or 0 if no data.
+   */
+  uint32_t Read(void* data, uint32_t max_len) noexcept {
+    return ring_.Read(consumer_id_, data, max_len);
+  }
+
+  /**
+   * @brief Wait for data using futex (microsecond-level latency).
+   * @param timeout_ms Timeout in milliseconds.
+   */
+  expected<void, ShmError> WaitReadable(uint32_t timeout_ms) noexcept {
+    if (ring_.HasData(consumer_id_)) {
+      return expected<void, ShmError>::success();
+    }
+    uint32_t cur_head = *ring_.HeadPtr();
+    detail::FutexWait(ring_.HeadPtr(), cur_head, timeout_ms);
+    if (ring_.HasData(consumer_id_)) {
+      return expected<void, ShmError>::success();
+    }
+    return expected<void, ShmError>::error(ShmError::kTimeout);
+  }
+
+  /// @brief Notify all waiting readers (explicit, for batch writes).
+  void Notify() noexcept {
+    detail::FutexWakeAll(ring_.HeadPtr());
+  }
+
+  /// @brief Unlink the shared memory segment (writer only).
+  void Unlink() noexcept {
+    if (is_writer_) {
+      shm_segment_.Unlink();
+    }
+  }
+
+  /// @brief Available bytes for reading (this consumer).
+  uint32_t ReadableBytes() const noexcept { return ring_.ReadableBytes(consumer_id_); }
+
+  /// @brief Available bytes for writing (producer only).
+  uint32_t WriteableBytes() const noexcept { return ring_.WriteableBytes(); }
+
+  /// @brief Data area capacity.
+  uint32_t Capacity() const noexcept { return ring_.Capacity(); }
+
+  /// @brief Number of active consumers.
+  uint32_t ConsumerCount() const noexcept { return ring_.ConsumerCount(); }
+
+  /// @brief This reader's consumer ID (-1 if writer).
+  int32_t ConsumerId() const noexcept { return consumer_id_; }
+
+ private:
+  SharedMemorySegment shm_segment_;
+  ShmSpmcByteRing ring_;
+  bool is_writer_;
+  int32_t consumer_id_;
 };
 
 #endif  // OSP_PLATFORM_LINUX
