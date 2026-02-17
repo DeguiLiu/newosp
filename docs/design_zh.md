@@ -1921,7 +1921,7 @@ osp::RunCommand(argv, out, code);
 
 ---
 
-### 10.7 JobPool -- 共享数据块流水线 (`job_pool.hpp`)
+### 10.7 DataDispatcher -- 统一数据分发框架 (`data_dispatcher.hpp`)
 
 为 newosp 提供统一的数据分发与流水线执行框架，满足工业嵌入式场景需求:
 
@@ -1930,15 +1930,19 @@ osp::RunCommand(argv, out, code);
 - 支持并行扇出 (fan-out) 和串行流水线 (pipeline) 两种 DAG 拓扑
 - 背压机制 + FaultCollector 异常上报
 - 超时检测 + Watchdog 集成
+- StorePolicy + NotifyPolicy 双策略模板，进程内/跨进程共用一套 CAS 逻辑
 
 **核心组件**:
 
 | 组件 | 说明 |
 |------|------|
 | `DataBlock` | 共享数据块头 (atomic refcount + state + deadline) |
-| `JobPool<BlockSize, MaxBlocks>` | Lock-free 数据块池 (CAS alloc/release, 嵌入式 free list) |
+| `detail::InProcStore<BS, MB>` | 进程内嵌入式存储 (CAS alloc/release, 嵌入式 free list) |
+| `detail::ShmStore<BS, MB>` | 共享内存存储 (Creator Init / Opener Attach 双路径) |
+| `DirectNotify` / `ShmNotify` | 通知策略 (进程内无操作 / 跨进程回调通知) |
 | `Pipeline<MaxStages, MaxEdges>` | 静态 DAG 拓扑 (stage + edge + 同步执行) |
-| `DataDispatcher<...>` | 胶水层: 组合 JobPool + Pipeline + 背压 + Fault |
+| `DataDispatcher<Store, Notify>` | 核心模板: 组合 Store + Notify + Pipeline + 背压 + Fault |
+| `InProcDispatcher<BS, MB>` | 便捷别名: `DataDispatcher<InProcStore<BS,MB>, DirectNotify>` |
 
 **数据块生命周期**:
 
@@ -1976,7 +1980,7 @@ kFree --> kAllocated --> kReady --> kProcessing --> kDone --> kFree
 | Pipeline | ~512B |
 | 总计 | ~503KB |
 
-**与 SPMC 的关系**: 两者定位不同，共存互补。简单 1:N 分发用 SPMC，复杂流水线 + 生命周期管理用 JobPool。详见 `docs/design_job_pool_zh.md`。
+**与 SPMC 的关系**: 两者定位不同，共存互补。简单 1:N 分发用 SPMC，复杂流水线 + 生命周期管理用 DataDispatcher。详见 `docs/design_job_pool_zh.md`。
 
 ---
 

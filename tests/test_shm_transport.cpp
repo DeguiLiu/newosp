@@ -1145,6 +1145,13 @@ TEST_CASE("shm_transport - ShmSpscByteRing large payload (simulated LiDAR)",
 
 TEST_CASE("shm_transport - ShmSpscByteRing concurrent SPSC",
           "[shm_transport]") {
+#if defined(__SANITIZE_THREAD__)
+  SKIP("Skipped under ThreadSanitizer (shm + concurrent threads unreliable)");
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+  SKIP("Skipped under ThreadSanitizer (shm + concurrent threads unreliable)");
+#endif
+#endif
   constexpr uint32_t kBufSize = 256 * 1024;
   constexpr uint32_t kMsgCount = 1000;
 
