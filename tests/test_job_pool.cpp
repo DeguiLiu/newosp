@@ -261,6 +261,55 @@ TEST_CASE("JobPool: concurrent alloc and release", "[job_pool]") {
   REQUIRE(success_count.load() > 0U);
 }
 
+TEST_CASE("JobPool: ScanTimeout vs Release concurrent safety", "[job_pool]") {
+  constexpr uint32_t kPoolSize = 16U;
+  JobPool<64, kPoolSize> pool;
+  constexpr uint32_t kIterations = 200U;
+
+  std::atomic<uint32_t> release_count{0U};
+  std::atomic<uint32_t> timeout_count{0U};
+
+  for (uint32_t iter = 0U; iter < kIterations; ++iter) {
+    auto r = pool.Alloc();
+    REQUIRE(r.has_value());
+    uint32_t bid = r.value();
+    pool.Submit(bid, 8U, 1U, 1U);  // 1ms timeout
+
+    // Wait for timeout to expire
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+
+    // Race: one thread calls Release, another calls ScanTimeout
+    std::atomic<bool> go{false};
+    bool release_last = false;
+    uint32_t scan_found = 0U;
+
+    std::thread t_release([&]() {
+      while (!go.load(std::memory_order_acquire)) {}
+      release_last = pool.Release(bid);
+    });
+
+    std::thread t_scan([&]() {
+      while (!go.load(std::memory_order_acquire)) {}
+      scan_found = pool.ScanTimeout(nullptr, nullptr);
+    });
+
+    go.store(true, std::memory_order_release);
+    t_release.join();
+    t_scan.join();
+
+    if (release_last) release_count.fetch_add(1U, std::memory_order_relaxed);
+    if (scan_found > 0U) timeout_count.fetch_add(1U, std::memory_order_relaxed);
+
+    // Block must be recycled exactly once (no double-free)
+    // After both threads complete, the block must be free
+    REQUIRE(pool.GetBlockState(bid) == BlockState::kFree);
+  }
+
+  // All blocks must be returned to the pool
+  REQUIRE(pool.FreeCount() == kPoolSize);
+  REQUIRE(pool.AllocCount() == 0U);
+}
+
 // ============================================================================
 // Pipeline -- basic topology
 // ============================================================================

@@ -260,16 +260,28 @@ class JobPool {
 
   /// @brief Decrement refcount. Returns true if caller is the last consumer.
   /// When true, the block is automatically recycled to the free list.
+  ///
+  /// Thread-safety: uses CAS to prevent underflow when ScanTimeout or
+  /// ForceCleanup concurrently sets refcount to 0. If the refcount is
+  /// already 0 (block reclaimed by timeout), Release() returns false.
   bool Release(uint32_t block_id) noexcept {
     OSP_ASSERT(block_id < MaxBlocks);
     DataBlock* blk = GetBlock(block_id);
-    uint32_t prev = blk->refcount.fetch_sub(1U, std::memory_order_acq_rel);
-    OSP_ASSERT(prev > 0U);
-    if (prev == 1U) {
-      // Last consumer -- recycle
-      Recycle(block_id);
-      return true;
+    uint32_t cur = blk->refcount.load(std::memory_order_acquire);
+    while (cur > 0U) {
+      if (blk->refcount.compare_exchange_weak(
+              cur, cur - 1U,
+              std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        if (cur == 1U) {
+          // Last consumer -- recycle
+          Recycle(block_id);
+          return true;
+        }
+        return false;
+      }
     }
+    // refcount was already 0 (block reclaimed by ScanTimeout/ForceCleanup)
     return false;
   }
 
@@ -307,6 +319,9 @@ class JobPool {
   /// @param on_timeout Callback for each timed-out block.
   /// @param ctx User context.
   /// @return Number of timed-out blocks found.
+  ///
+  /// Thread-safety: uses CAS to atomically claim the refcount before
+  /// recycling, preventing double-recycle if Release() runs concurrently.
   uint32_t ScanTimeout(void (*on_timeout)(uint32_t block_id, void* ctx),
                         void* ctx) noexcept {
     uint32_t count = 0U;
@@ -320,9 +335,19 @@ class JobPool {
           if (on_timeout != nullptr) {
             on_timeout(i, ctx);
           }
-          // Force recycle
-          blk->refcount.store(0U, std::memory_order_relaxed);
-          Recycle(i);
+          // CAS loop: atomically set refcount to 0.
+          // Only the thread that succeeds the CAS performs recycle,
+          // preventing double-recycle with concurrent Release().
+          uint32_t cur = blk->refcount.load(std::memory_order_acquire);
+          while (cur > 0U) {
+            if (blk->refcount.compare_exchange_weak(
+                    cur, 0U,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+              Recycle(i);
+              break;
+            }
+          }
           ++count;
         }
       }
@@ -333,6 +358,9 @@ class JobPool {
   /// @brief Force-release all blocks held by a crashed consumer.
   /// @param predicate Returns true for blocks that should be force-released.
   /// @return Number of blocks cleaned up.
+  ///
+  /// Thread-safety: uses CAS to atomically set refcount to 0 before
+  /// recycling, preventing underflow and double-recycle.
   uint32_t ForceCleanup(bool (*predicate)(uint32_t block_id, void* ctx),
                          void* ctx) noexcept {
     uint32_t count = 0U;
@@ -342,9 +370,16 @@ class JobPool {
       if (st == BlockState::kProcessing || st == BlockState::kReady) {
         if (predicate != nullptr && predicate(i, ctx)) {
           blk->SetState(BlockState::kError);
-          uint32_t prev = blk->refcount.fetch_sub(1U, std::memory_order_acq_rel);
-          if (prev <= 1U) {
-            Recycle(i);
+          // CAS loop: atomically claim refcount (set to 0).
+          uint32_t cur = blk->refcount.load(std::memory_order_acquire);
+          while (cur > 0U) {
+            if (blk->refcount.compare_exchange_weak(
+                    cur, 0U,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+              Recycle(i);
+              break;
+            }
           }
           ++count;
         }
@@ -429,6 +464,11 @@ struct StageConfig {
 //
 // Configured at initialization, immutable at runtime.
 // Supports fan-out (A -> B, A -> C) and serial (A -> B -> C) topologies.
+//
+// NOTE: Synchronous execution uses recursive ExecuteStage() calls.
+// Maximum recursion depth equals the longest chain in the DAG (bounded
+// by MaxStages). Ensure the stack can accommodate MaxStages levels of
+// recursion. Default MaxStages=8 is safe for typical embedded stacks.
 // ============================================================================
 
 template <uint32_t MaxStages = OSP_JOB_MAX_STAGES,
@@ -603,6 +643,11 @@ using BackpressureFn = void (*)(uint32_t free_count, void* ctx);
 //
 // Combines JobPool + Pipeline + backpressure + fault integration.
 // This is the primary user-facing class.
+//
+// WARNING: DataDispatcher contains a JobPool with an embedded storage array
+// of size (BlockStride * MaxBlocks). For large payloads (e.g. LiDAR:
+// BlockSize=16016, MaxBlocks=32 -> ~512KB), this object MUST NOT be
+// placed on the stack. Use static/global storage or heap allocation.
 //
 // @tparam BlockSize  Payload size per block (bytes).
 // @tparam MaxBlocks  Total number of blocks in the pool.
