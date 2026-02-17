@@ -1,5 +1,7 @@
 # --------------------------------------------------------------------------
-# Data Visitor Dispatcher demo (SPMC shared memory)
+# Data Visitor Dispatcher demo
+#   - SPMC shared memory (cross-process)
+#   - JobPool pipeline (intra-process)
 # --------------------------------------------------------------------------
 
 find_package(Threads REQUIRED)
@@ -12,8 +14,12 @@ function(add_dvd_example target source)
     target_link_libraries(${target} PRIVATE rt)
 endfunction()
 
+# Cross-process SPMC demos
 add_dvd_example(osp_dvd_producer         producer.cpp)
 add_dvd_example(osp_dvd_visitor_logging  visitor_logging.cpp)
 add_dvd_example(osp_dvd_visitor_fusion   visitor_fusion.cpp)
 add_dvd_example(osp_dvd_monitor          monitor.cpp)
 add_dvd_example(osp_dvd_launcher         launcher.cpp)
+
+# Intra-process JobPool pipeline demo
+add_dvd_example(osp_dvd_pipeline         pipeline_demo.cpp)

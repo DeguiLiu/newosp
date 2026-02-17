@@ -1921,6 +1921,65 @@ osp::RunCommand(argv, out, code);
 
 ---
 
+### 10.7 JobPool -- 共享数据块流水线 (`job_pool.hpp`)
+
+为 newosp 提供统一的数据分发与流水线执行框架，满足工业嵌入式场景需求:
+
+- 固定大小内存池，预分配，零运行时堆分配
+- 数据块引用计数，最后一个消费者完成后才释放
+- 支持并行扇出 (fan-out) 和串行流水线 (pipeline) 两种 DAG 拓扑
+- 背压机制 + FaultCollector 异常上报
+- 超时检测 + Watchdog 集成
+
+**核心组件**:
+
+| 组件 | 说明 |
+|------|------|
+| `DataBlock` | 共享数据块头 (atomic refcount + state + deadline) |
+| `JobPool<BlockSize, MaxBlocks>` | Lock-free 数据块池 (CAS alloc/release, 嵌入式 free list) |
+| `Pipeline<MaxStages, MaxEdges>` | 静态 DAG 拓扑 (stage + edge + 同步执行) |
+| `DataDispatcher<...>` | 胶水层: 组合 JobPool + Pipeline + 背压 + Fault |
+
+**数据块生命周期**:
+
+```
+Alloc()          Submit()         Stage完成          最后一个Release()
+  |                |                |                    |
+  v                v                v                    v
+kFree --> kAllocated --> kReady --> kProcessing --> kDone --> kFree
+                                       |                       ^
+                                       +-- 超时 --> kTimeout --+
+                                       +-- 异常 --> kError ----+
+```
+
+**引用计数规则**:
+
+- `Submit()`: refcount = EntryFanOut() (入口 stage 消费者数)
+- Stage 完成: `AddRef(successor_count)` + `Release()` (自己减 1)
+- 最后一个 `Release()` 使 refcount 降为 0，自动回收到 free list
+
+**编译期配置**:
+
+| 宏 | 默认值 | 说明 |
+|----|--------|------|
+| `OSP_JOB_POOL_MAGIC` | `0x4A4F4250` | 共享内存 magic number |
+| `OSP_JOB_BLOCK_ALIGN` | 64 | DataBlock 对齐 (cache line) |
+| `OSP_JOB_MAX_STAGES` | 8 | Pipeline 最大 stage 数 |
+| `OSP_JOB_MAX_EDGES` | 16 | Pipeline 最大边数/stage |
+
+**资源预算** (LiDAR 场景, BlockSize=16016, MaxBlocks=32):
+
+| 资源 | 用量 |
+|------|------|
+| DataBlock header | 64B x 32 = 2KB |
+| DataBlock payload | 16016B x 32 = 500KB |
+| Pipeline | ~512B |
+| 总计 | ~503KB |
+
+**与 SPMC 的关系**: 两者定位不同，共存互补。简单 1:N 分发用 SPMC，复杂流水线 + 生命周期管理用 JobPool。详见 `docs/design_job_pool_zh.md`。
+
+---
+
 ## 11. 跨模块交互
 
 ### 11.1 典型启动序列
