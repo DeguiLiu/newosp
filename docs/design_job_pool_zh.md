@@ -613,7 +613,7 @@ Sequence (系统启动)
 
 Pipeline 的 DAG 拓扑在 `InitPipeline` 阶段静态配置，运行时不变。BT 负责确保依赖顺序正确。
 
-## 9. 资源预算
+## 10. 资源预算
 
 以 LiDAR 场景为例 (BlockSize=16016, MaxBlocks=32):
 
@@ -627,7 +627,7 @@ Pipeline 的 DAG 拓扑在 `InitPipeline` 阶段静态配置，运行时不变�
 
 对比当前 SPMC 方案 (256KB ring buffer): JobPool 多用约 250KB，但提供了引用计数、超时检测、DAG 编排能力。
 
-## 10. 编译期配置
+## 11. 编译期配置
 
 | 宏 | 默认值 | 说明 |
 |----|--------|------|
@@ -636,7 +636,7 @@ Pipeline 的 DAG 拓扑在 `InitPipeline` 阶段静态配置，运行时不变�
 | `OSP_JOB_MAX_STAGES` | 8 | Pipeline 最大 stage 数 |
 | `OSP_JOB_MAX_EDGES` | 16 | Pipeline 最大边数 |
 
-## 11. 错误码
+## 12. 错误码
 
 ```cpp
 enum class JobPoolError : uint8_t {
@@ -652,7 +652,7 @@ enum class JobPoolError : uint8_t {
 };
 ```
 
-## 12. 文件清单
+## 13. 文件清单
 
 | 文件 | 说明 | 预估行数 |
 |------|------|----------|
@@ -661,7 +661,7 @@ enum class JobPoolError : uint8_t {
 | `examples/data_visitor_dispatcher/` | 改造 demo 支持进程内/跨进程 | 修改现有文件 |
 | `docs/design_zh.md` | 更新 JobPool 模块文档 | 追加 |
 
-## 13. 与 SPMC 的关系
+## 14. 与 SPMC 的关系
 
 两者定位不同，共存互补:
 

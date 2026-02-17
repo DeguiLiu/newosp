@@ -43,8 +43,8 @@ endif()
 # --- SHM IPC demo (subdirectory) -------------------------------------------
 add_subdirectory(shm_ipc)
 
-# --- Data Visitor Dispatcher demo (SPMC shared memory) ---------------------
-add_subdirectory(data_visitor_dispatcher)
+# --- Data Dispatcher demo (DataDispatcher unified API) ---------------------
+add_subdirectory(data_dispatcher)
 
 # --- Net stress demo (subdirectory) ----------------------------------------
 add_subdirectory(net_stress)

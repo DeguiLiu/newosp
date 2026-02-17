@@ -1061,17 +1061,25 @@ class ShmByteChannel final {
 // ShmSpmcByteRing - Single-Producer Multi-Consumer byte-stream ring buffer
 // ============================================================================
 
-/// @brief POD header for SPMC byte ring buffer.
+/// @brief Header for SPMC byte ring buffer (shared memory safe).
 /// Stored at the start of the shared memory region.
 /// Each consumer has an independent tail pointer for independent reading.
+///
+/// Fields that require atomic CAS operations (consumer_count, active[])
+/// are declared as std::atomic<uint32_t>. On platforms where
+/// std::atomic<uint32_t>::is_always_lock_free is true (all ARM/x86),
+/// these are safe to use across processes via shared memory.
 struct ShmSpmcByteRingHeader {
   uint32_t head;              ///< Producer write position (monotonically increasing)
   uint32_t capacity;          ///< Data area size (must be power of 2)
   uint32_t max_consumers;     ///< Maximum number of consumers
-  uint32_t consumer_count;    ///< Active consumer count (atomic CAS registration)
+  std::atomic<uint32_t> consumer_count;    ///< Active consumer count (atomic CAS)
   uint32_t tails[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< Per-consumer read positions
-  uint32_t active[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< 1 = active, 0 = inactive
+  std::atomic<uint32_t> active[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< 1=active, 0=inactive
 };
+
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "std::atomic<uint32_t> must be lock-free for shared memory use");
 
 /**
  * @brief SPMC byte-level ring buffer for shared memory IPC.
@@ -1118,10 +1126,10 @@ class ShmSpmcByteRing final {
     ring.header_->head = 0;
     ring.header_->capacity = cap;
     ring.header_->max_consumers = max_consumers;
-    ring.header_->consumer_count = 0;
+    ring.header_->consumer_count.store(0, std::memory_order_relaxed);
     for (uint32_t i = 0; i < OSP_SHM_SPMC_MAX_CONSUMERS; ++i) {
       ring.header_->tails[i] = 0;
-      ring.header_->active[i] = 0;
+      ring.header_->active[i].store(0, std::memory_order_relaxed);
     }
     std::atomic_thread_fence(std::memory_order_release);
     ring.mask_ = cap - 1;
@@ -1156,15 +1164,13 @@ class ShmSpmcByteRing final {
   int32_t RegisterConsumer() noexcept {
     // Atomic CAS loop to claim a slot
     for (uint32_t i = 0; i < header_->max_consumers; ++i) {
-      auto* slot = reinterpret_cast<std::atomic<uint32_t>*>(&header_->active[i]);
       uint32_t expected = 0;
-      if (slot->compare_exchange_strong(expected, 1,
+      if (header_->active[i].compare_exchange_strong(expected, 1,
               std::memory_order_acq_rel, std::memory_order_relaxed)) {
         // Set tail to current head (consumer starts from "now")
         std::atomic_thread_fence(std::memory_order_acquire);
         header_->tails[i] = header_->head;
-        auto* cnt = reinterpret_cast<std::atomic<uint32_t>*>(&header_->consumer_count);
-        cnt->fetch_add(1, std::memory_order_relaxed);
+        header_->consumer_count.fetch_add(1, std::memory_order_relaxed);
         return static_cast<int32_t>(i);
       }
     }
@@ -1177,18 +1183,15 @@ class ShmSpmcByteRing final {
         static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
       return;
     }
-    auto* slot = reinterpret_cast<std::atomic<uint32_t>*>(
-        &header_->active[static_cast<uint32_t>(consumer_id)]);
-    if (slot->exchange(0, std::memory_order_acq_rel) == 1) {
-      auto* cnt = reinterpret_cast<std::atomic<uint32_t>*>(&header_->consumer_count);
-      cnt->fetch_sub(1, std::memory_order_relaxed);
+    if (header_->active[static_cast<uint32_t>(consumer_id)].exchange(
+            0, std::memory_order_acq_rel) == 1) {
+      header_->consumer_count.fetch_sub(1, std::memory_order_relaxed);
     }
   }
 
   /// @brief Number of active consumers.
   uint32_t ConsumerCount() const noexcept {
-    auto* cnt = reinterpret_cast<const std::atomic<uint32_t>*>(&header_->consumer_count);
-    return cnt->load(std::memory_order_relaxed);
+    return header_->consumer_count.load(std::memory_order_relaxed);
   }
 
   // ---- Producer API ----
@@ -1291,8 +1294,7 @@ class ShmSpmcByteRing final {
   uint32_t SlowestTail() const noexcept {
     uint32_t slowest = header_->head;  // If no consumers, full capacity
     for (uint32_t i = 0; i < header_->max_consumers; ++i) {
-      auto* slot = reinterpret_cast<const std::atomic<uint32_t>*>(&header_->active[i]);
-      if (slot->load(std::memory_order_relaxed) != 0) {
+      if (header_->active[i].load(std::memory_order_relaxed) != 0) {
         const uint32_t t = header_->tails[i];
         // Use signed comparison for monotonic wrap-around
         if (static_cast<int32_t>(slowest - t) > 0) {
