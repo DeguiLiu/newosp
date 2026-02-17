@@ -51,6 +51,7 @@ DataDispatcher      DataDispatcher     DataDispatcher
     |   (8B NotifyMsg: block_id + payload_size)
     |
 Monitor (DataDispatcher<ShmStore> + DebugShell)
+    +-- ConsumerSlot[8] (per-consumer holding_mask for crash recovery)
     |
 Launcher (process manager)
 ```
@@ -74,6 +75,11 @@ Both modes use the same DataDispatcher methods:
 | `Release(id)` | Decrement refcount, recycle when 0 |
 | `ScanTimeout()` | Reclaim timed-out blocks |
 | `ForceCleanup(pred, ctx)` | Force-release blocks matching predicate |
+| `RegisterConsumer(pid)` | Register consumer process, returns slot index (ShmStore only) |
+| `UnregisterConsumer(id)` | Unregister consumer (ShmStore only) |
+| `TrackBlockHold(cid, bid)` | Mark block as held by consumer (bitmap) (ShmStore only) |
+| `TrackBlockRelease(cid, bid)` | Clear block hold (bitmap) (ShmStore only) |
+| `CleanupDeadConsumers()` | Reclaim blocks from crashed consumers (ShmStore only) |
 | `FreeBlocks()` / `AllocBlocks()` | Pool occupancy queries |
 
 ## Component Dependencies
@@ -175,3 +181,4 @@ Connect via `telnet localhost 9600` to the monitor process:
 | Fault isolation | None (same process) | Process-level isolation |
 | Notification | Pipeline auto-dispatch | ShmSpmcByteChannel (8B NotifyMsg) |
 | Use case | Complex multi-stage processing | Distributed sensor data distribution |
+| Crash recovery | N/A (same process) | ConsumerSlot holding_mask + CleanupDeadConsumers |
