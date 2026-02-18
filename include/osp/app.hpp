@@ -103,11 +103,11 @@ constexpr uint16_t kInsEach = 0xFFFF;
 struct ResponseChannel {
   std::mutex mtx;
   std::condition_variable cv;
-  uint8_t data[OSP_RESPONSE_DATA_SIZE];
-  uint32_t data_len;
-  bool replied;
+  uint8_t data[OSP_RESPONSE_DATA_SIZE] = {};
+  uint32_t data_len = 0;
+  bool replied = false;
 
-  ResponseChannel() noexcept : data{}, data_len(0), replied(false) {}
+  ResponseChannel() noexcept = default;
 
   void Reply(const void* buf, uint32_t len) noexcept {
     std::lock_guard<std::mutex> lock(mtx);
@@ -124,7 +124,7 @@ struct ResponseChannel {
 // Instance Coarse State (backward-compatible with uint16_t CurState())
 // ============================================================================
 
-enum class InstanceState : uint16_t { kCreated = 0, kInitializing = 1, kReady = 2, kError = 3, kDestroying = 4 };
+enum class InstanceState : uint8_t { kCreated = 0, kInitializing = 1, kReady = 2, kError = 3, kDestroying = 4 };
 
 // ============================================================================
 // Instance Detailed State (maps 1:1 to HSM leaf states)
@@ -145,7 +145,7 @@ enum class InstanceDetailedState : uint8_t {
 // Instance HSM Events (MISRA 7-2-1: scoped enum)
 // ============================================================================
 
-enum class InstanceHsmEvent : uint32_t {
+enum class InstanceHsmEvent : uint16_t {
   kInsEvtInitialize = 0x1001,
   kInsEvtInitDone = 0x1002,
   kInsEvtInitFail = 0x1003,
@@ -168,39 +168,25 @@ class Instance;
 inline constexpr uint32_t kInstanceHsmMaxStates = 12;
 
 struct InstanceHsmContext {
-  StateMachine<InstanceHsmContext, kInstanceHsmMaxStates>* sm;
-  Instance* instance;
+  StateMachine<InstanceHsmContext, kInstanceHsmMaxStates>* sm = nullptr;
+  Instance* instance = nullptr;
 
   // State indices
-  int32_t idx_root;
-  int32_t idx_created;
-  int32_t idx_initializing;
-  int32_t idx_ready;
-  int32_t idx_idle;
-  int32_t idx_processing;
-  int32_t idx_suspended;
-  int32_t idx_error;
-  int32_t idx_recoverable;
-  int32_t idx_fatal;
-  int32_t idx_destroying;
+  int32_t idx_root = -1;
+  int32_t idx_created = -1;
+  int32_t idx_initializing = -1;
+  int32_t idx_ready = -1;
+  int32_t idx_idle = -1;
+  int32_t idx_processing = -1;
+  int32_t idx_suspended = -1;
+  int32_t idx_error = -1;
+  int32_t idx_recoverable = -1;
+  int32_t idx_fatal = -1;
+  int32_t idx_destroying = -1;
 
-  bool error_is_fatal;
+  bool error_is_fatal = false;
 
-  InstanceHsmContext() noexcept
-      : sm(nullptr),
-        instance(nullptr),
-        idx_root(-1),
-        idx_created(-1),
-        idx_initializing(-1),
-        idx_ready(-1),
-        idx_idle(-1),
-        idx_processing(-1),
-        idx_suspended(-1),
-        idx_error(-1),
-        idx_recoverable(-1),
-        idx_fatal(-1),
-        idx_destroying(-1),
-        error_is_fatal(false) {}
+  InstanceHsmContext() noexcept = default;
 };
 
 // ============================================================================
@@ -306,10 +292,7 @@ using InstanceSmType = StateMachine<InstanceHsmContext, kInstanceHsmMaxStates>;
 /// OnMessage() is called via static_cast<Impl*>(this)->OnMessage().
 class Instance {
  public:
-  Instance() noexcept
-      : ins_id_(0), response_channel_(nullptr), legacy_state_(0), legacy_state_set_(false), hsm_initialized_(false) {
-    InitHsm();
-  }
+  Instance() noexcept { InitHsm(); }
 
   /// Non-virtual destructor. Safe because Application<Impl> destroys via
   /// ObjectPool<Impl>::Destroy() which calls the derived destructor directly.
@@ -345,7 +328,7 @@ class Instance {
 
   // ======================== State Query ========================
 
-  uint16_t CurState() const noexcept {
+  [[nodiscard]] uint16_t CurState() const noexcept {
     if (legacy_state_set_) {
       return legacy_state_;
     }
@@ -357,7 +340,7 @@ class Instance {
     legacy_state_set_ = true;
   }
 
-  InstanceState CoarseState() const noexcept {
+  [[nodiscard]] InstanceState CoarseState() const noexcept {
     if (!hsm_initialized_) {
       return static_cast<InstanceState>(legacy_state_);
     }
@@ -377,7 +360,7 @@ class Instance {
     return InstanceState::kCreated;
   }
 
-  InstanceDetailedState DetailedState() const noexcept {
+  [[nodiscard]] InstanceDetailedState DetailedState() const noexcept {
     if (!hsm_initialized_) {
       return InstanceDetailedState::kCreated;
     }
@@ -402,13 +385,13 @@ class Instance {
     return InstanceDetailedState::kCreated;
   }
 
-  const char* DetailedStateName() const noexcept {
+  [[nodiscard]] const char* DetailedStateName() const noexcept {
     if (!hsm_initialized_)
       return "Created";
     return GetHsm()->CurrentStateName();
   }
 
-  bool IsInState(int32_t state_index) const noexcept {
+  [[nodiscard]] bool IsInState(int32_t state_index) const noexcept {
     if (!hsm_initialized_)
       return false;
     return GetHsm()->IsInState(state_index);
@@ -416,7 +399,7 @@ class Instance {
 
   // ======================== ID and Response ========================
 
-  uint16_t InsId() const noexcept { return ins_id_; }
+  [[nodiscard]] uint16_t InsId() const noexcept { return ins_id_; }
   void SetInsId(uint16_t id) noexcept { ins_id_ = id; }
 
   bool Reply(const void* data, uint32_t len) noexcept {
@@ -426,11 +409,11 @@ class Instance {
     return true;
   }
 
-  bool HasPendingReply() const noexcept { return response_channel_ != nullptr; }
+  [[nodiscard]] bool HasPendingReply() const noexcept { return response_channel_ != nullptr; }
 
   void SetResponseChannel(ResponseChannel* ch) noexcept { response_channel_ = ch; }
 
-  const InstanceHsmContext& HsmContext() const noexcept { return hsm_ctx_; }
+  [[nodiscard]] const InstanceHsmContext& HsmContext() const noexcept { return hsm_ctx_; }
 
   // ======================== HSM Message Dispatch ========================
 
@@ -483,20 +466,20 @@ class Instance {
   }
 
   // MISRA C++ Rule 5-2-4 deviation: reinterpret_cast for placement-new storage
-  InstanceSmType* GetHsm() noexcept {
+  [[nodiscard]] InstanceSmType* GetHsm() noexcept {
     return reinterpret_cast<InstanceSmType*>(hsm_storage_);  // NOLINT
   }
-  const InstanceSmType* GetHsm() const noexcept {
+  [[nodiscard]] const InstanceSmType* GetHsm() const noexcept {
     return reinterpret_cast<const InstanceSmType*>(hsm_storage_);  // NOLINT
   }
 
   InstanceHsmContext hsm_ctx_;
-  uint16_t ins_id_;
-  uint16_t legacy_state_;
-  bool legacy_state_set_;
-  bool hsm_initialized_;
-  ResponseChannel* response_channel_;
-  alignas(InstanceSmType) uint8_t hsm_storage_[sizeof(InstanceSmType)];
+  uint16_t ins_id_ = 0;
+  uint16_t legacy_state_ = 0;
+  bool legacy_state_set_ = false;
+  bool hsm_initialized_ = false;
+  ResponseChannel* response_channel_ = nullptr;
+  alignas(InstanceSmType) uint8_t hsm_storage_[sizeof(InstanceSmType)] = {};
 };
 
 // ============================================================================
@@ -524,11 +507,11 @@ struct alignas(8) AppMessage {
     const void* ext_ptr;
   } payload;
 
-  bool IsExternal() const noexcept { return (flags_and_len & kExternalFlag) != 0; }
+  [[nodiscard]] bool IsExternal() const noexcept { return (flags_and_len & kExternalFlag) != 0; }
 
-  uint32_t DataLen() const noexcept { return flags_and_len >> kLenShift; }
+  [[nodiscard]] uint32_t DataLen() const noexcept { return flags_and_len >> kLenShift; }
 
-  const void* Data() const noexcept { return IsExternal() ? payload.ext_ptr : payload.inline_data; }
+  [[nodiscard]] const void* Data() const noexcept { return IsExternal() ? payload.ext_ptr : payload.inline_data; }
 
   void Store(const void* data, uint32_t len) noexcept {
     if (data == nullptr || len == 0) {
@@ -585,11 +568,7 @@ class Application {
 
  public:
   Application(uint16_t app_id, const char* name) noexcept
-      : app_id_(app_id), name_(TruncateToCapacity, name), instance_count_(0), queue_head_(0), queue_tail_(0) {
-    for (uint16_t i = 0; i < MaxInstances; ++i) {
-      instances_[i] = nullptr;
-    }
-  }
+      : app_id_(app_id), name_(TruncateToCapacity, name), queue_head_(0), queue_tail_(0) {}
 
   ~Application() noexcept {
     for (uint16_t i = 0; i < MaxInstances; ++i) {
@@ -721,9 +700,9 @@ class Application {
   uint16_t app_id_;
   FixedString<kAppNameMaxLen> name_;
   ObjectPool<InstanceImpl, MaxInstances> pool_;
-  InstanceImpl* instances_[MaxInstances];
-  uint32_t instance_count_;
-  AppMessage queue_[OSP_APP_QUEUE_DEPTH];
+  InstanceImpl* instances_[MaxInstances] = {};
+  uint32_t instance_count_ = 0;
+  AppMessage queue_[OSP_APP_QUEUE_DEPTH] = {};
   std::atomic<uint32_t> queue_head_;
   std::atomic<uint32_t> queue_tail_;
   mutable std::mutex post_mutex_;

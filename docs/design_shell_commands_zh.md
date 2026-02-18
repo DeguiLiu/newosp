@@ -1,9 +1,9 @@
 # newosp Shell 多后端架构与内置诊断命令设计
 
 > 从属于 [design_zh.md](design_zh.md) S4.6 shell.hpp 扩展
-> 版本: 2.0
-> 日期: 2026-02-16
-> 状态: 已完成
+> 版本: 2.1
+> 日期: 2026-02-18
+> 状态: 已完成 (IAC/ESC/History/Auth/Console/UART 全部实现)
 
 ---
 
@@ -683,8 +683,54 @@ echo "osp_bus" | ./my_app --console 2>/dev/null
 
 ---
 
+## 11. 新特性实现状态 (v2.1)
+
+### 11.1 IAC 协议与 ESC 序列
+
+| 特性 | 状态 | 说明 |
+|------|------|------|
+| IAC 协议过滤 | ✅ 完成 | telnet 客户端协议字节自动过滤，支持 WILL/WONT/DO/DONT/SB/SE |
+| ESC 序列解析 | ✅ 完成 | 方向键 (↑↓) 支持历史导航，预留 (←→) 用于光标移动 |
+| 历史记录 | ✅ 完成 | 环形缓冲 16 条命令，跳过连续重复，支持 ↑↓ 导航 |
+| 认证 | ✅ 完成 | DebugShell 可选 username/password，3 次失败断开，星号掩码 |
+| ConsoleShell | ✅ 完成 | stdin/stdout raw mode，支持 termios 配置 |
+| UartShell | ✅ 完成 | 串口后端，支持 5 种波特率 (9600-115200)，PTY 测试 |
+
+### 11.2 测试覆盖
+
+| 类别 | 测试数 | 覆盖范围 |
+|------|--------|----------|
+| IAC 过滤 | 5 cases | 正常字节、协议字节、子协商、IAC IAC、无 telnet 模式 |
+| ESC 序列 | 4 cases | HistoryUp/Down、未知序列、裸 ESC |
+| 历史记录 | 6 cases | 存储、去重、空行、导航、环形缓冲、边界 |
+| 字节处理 | 8 cases | 可打印字符、退格、Enter、CRLF、Ctrl+C/D、Tab |
+| 命令执行 | 14 cases | 注册、查找、重复、溢出、参数、帮助、输出 |
+| 后端集成 | 9 cases | TCP 认证、Console 管道、UART PTY、启停 |
+| **总计** | **46+ cases** | **全覆盖** |
+
+### 11.3 编译期配置
+
+```cpp
+// 在 #include "osp/shell.hpp" 之前定义，覆盖默认值
+#define OSP_SHELL_LINE_BUF_SIZE 512    // 默认 256
+#define OSP_SHELL_HISTORY_SIZE 32      // 默认 16
+#define OSP_SHELL_MAX_ARGS 32          // 默认 16
+```
+
+### 11.4 资源预算
+
+| 资源 | 大小 | 说明 |
+|------|------|------|
+| ShellSession (per session) | ~4.3 KB | line_buf(256) + history(16×256) + 控制字段 |
+| DebugShell (2 conn) | ~9 KB | 2 × ShellSession + listen socket |
+| ConsoleShell (1 session) | ~4.3 KB | 1 × ShellSession + termios 配置 |
+| UartShell (1 session) | ~4.3 KB | 1 × ShellSession + uart_fd |
+| GlobalCmdRegistry | ~2 KB | 64 槽命令表 + mutex |
+
+---
+
 ## 11. 未来扩展 (不在本次范围)
 
 - **SHM IPC 后端**: 基于 `shm_transport` 的跨进程 shell, 有实际需求时再实现
 - **多后端并存**: 同时启用 TCP + UART, 两个入口共享同一命令表 (架构天然支持, GlobalCmdRegistry 是全局单例)
-- **命令历史**: 支持上/下箭头键浏览历史命令 (需 VT100 转义序列解析)
+- **命令历史持久化**: 支持保存历史到文件 (需 filesystem 支持)

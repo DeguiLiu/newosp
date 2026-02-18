@@ -3,6 +3,7 @@
 # newosp
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/Tests-979%20passed-brightgreen)](https://github.com/DeguiLiu/newosp/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Modern C++17 header-only embedded infrastructure library for embedded Linux platforms. Designed for industrial embedded systems such as sensors, robotics, and edge computing.

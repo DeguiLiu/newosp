@@ -120,7 +120,7 @@ jobs:
     - name: Check clang-format (include/)
       run: |
         find include -name '*.hpp' -o -name '*.h' | \
-          xargs clang-format --style="file:.ai/.clang-format" --dry-run --Werror
+          xargs -d '\n' clang-format --style="file:.ai/.clang-format" --dry-run --Werror
 
     - name: Run cpplint (include/)
       run: |
@@ -132,6 +132,5 @@ jobs:
           -DOSP_BUILD_TESTS=ON \
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
         # Analyze test files, report only include/osp/ warnings via HeaderFilterRegex
-        TIDY_FILES=$(find tests -name '*.cpp' | head -10)
-        clang-tidy --config-file=.ai/.clang-tidy -p build $TIDY_FILES 2>&1 | \
+        find tests -name '*.cpp' -print0 | xargs -0 clang-tidy --config-file=.ai/.clang-tidy -p build 2>&1 | \
           grep -E 'include/osp/' | sort -u || true

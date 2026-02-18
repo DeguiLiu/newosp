@@ -2,7 +2,12 @@
 
 本文档列出 newosp 调试 Shell 支持的所有命令、参数格式和使用示例。
 
-Shell 通过 telnet 连接访问（默认端口 2323），支持 TAB 补全、历史记录（上下箭头）和 IAC 协议。
+**访问方式** (v2.1+):
+- **TCP telnet** (DebugShell): 默认端口 5090，支持多连接、可选认证
+- **本地 Console** (ConsoleShell): stdin/stdout，支持 raw mode 行编辑
+- **UART 串口** (UartShell): /dev/ttyS* 等设备，支持 5 种波特率
+
+**共享特性**: TAB 补全、历史记录（↑↓ 方向键）、IAC 协议过滤、ESC 序列解析
 
 ---
 
@@ -719,3 +724,169 @@ osp> my_cmd bogus        # "Unknown subcommand: bogus (try 'my_cmd help')"
 | `osp_mempool` | 诊断 | -- | 内存池 |
 | `osp_app` | 诊断 | -- | 应用实例池 |
 | `osp_sysmon` | 诊断 | -- | 系统健康监控 |
+
+---
+
+## 后端选择与配置 (v2.1+)
+
+### TCP telnet (DebugShell)
+
+**适用场景**: 网络可用，需要多用户并发访问
+
+```cpp
+osp::DebugShell::Config cfg;
+cfg.port = 5090;
+cfg.max_connections = 4;
+cfg.prompt = "osp> ";
+cfg.username = "admin";      // nullptr = 无认证
+cfg.password = "secret";
+cfg.banner = "Welcome to newosp shell\r\n";
+
+osp::DebugShell shell(cfg);
+shell.Start();  // 异步启动，接受 telnet 连接
+```
+
+**连接方式**:
+```bash
+telnet localhost 5090
+# 输入用户名和密码（如果配置了认证）
+osp> help
+```
+
+**特性**:
+- IAC 协议自动过滤，telnet 客户端兼容
+- 支持多个并发连接
+- 可选认证 (username/password)
+- 3 次认证失败自动断开
+
+### 本地 Console (ConsoleShell)
+
+**适用场景**: SSH 进入设备，无 telnet 客户端；开发调试
+
+```cpp
+osp::ConsoleShell console;
+console.Start();  // 异步启动，读取 stdin
+// 或
+console.Run();    // 同步阻塞，直到 Ctrl+D 退出
+```
+
+**特性**:
+- stdin/stdout 直接交互
+- termios raw mode，支持行编辑
+- 方向键历史导航
+- TAB 补全
+
+### UART 串口 (UartShell)
+
+**适用场景**: 开发板串口调试，无网络连接
+
+```cpp
+osp::UartShell::Config cfg;
+cfg.device = "/dev/ttyS0";
+cfg.baudrate = 115200;
+cfg.prompt = "osp> ";
+
+osp::UartShell uart(cfg);
+uart.Start();  // 异步启动，读取串口
+```
+
+**支持的波特率**: 9600, 19200, 38400, 57600, 115200
+
+**连接方式**:
+```bash
+minicom -D /dev/ttyUSB0 -b 115200
+# 或
+screen /dev/ttyUSB0 115200
+```
+
+**特性**:
+- 串口设备自动打开/关闭
+- 支持 PTY 测试 (override_fd 参数)
+- 方向键历史导航
+- TAB 补全
+
+### 编译期配置
+
+```cpp
+// 在 #include "osp/shell.hpp" 之前定义
+#define OSP_SHELL_LINE_BUF_SIZE 512    // 行缓冲大小，默认 256
+#define OSP_SHELL_HISTORY_SIZE 32      // 历史记录条数，默认 16
+#define OSP_SHELL_MAX_ARGS 32          // 最大参数数，默认 16
+```
+
+---
+
+## 典型使用场景
+
+### 场景 1: 开发板初期调试 (无网络)
+
+```cpp
+// 使用 UART 后端
+osp::UartShell uart({.device = "/dev/ttyS0", .baudrate = 115200});
+uart.Start();
+
+// 在 PC 上
+$ minicom -D /dev/ttyUSB0 -b 115200
+osp> help
+osp> osp_watchdog
+osp> osp_faults
+```
+
+### 场景 2: SSH 远程调试
+
+```cpp
+// 使用 Console 后端
+osp::ConsoleShell console;
+console.Start();
+
+// 在 SSH 会话中
+$ ssh root@device
+$ ./my_app
+osp> osp_bus
+osp> osp_lifecycle status
+```
+
+### 场景 3: 多用户并发监控
+
+```cpp
+// 使用 TCP telnet 后端
+osp::DebugShell shell({.port = 5090, .max_connections = 8});
+shell.Start();
+
+// 多个用户同时连接
+$ telnet device 5090
+osp> osp_sysmon
+```
+
+### 场景 4: CI 自动化测试
+
+```bash
+# 通过管道自动化命令
+echo -e "osp_bus\nosp_watchdog\nexit" | ./my_app --console 2>/dev/null
+```
+
+---
+
+## 常见问题
+
+**Q: 如何同时启用 TCP 和 UART?**
+
+A: 创建两个 Shell 实例即可，它们共享全局命令表:
+```cpp
+osp::DebugShell tcp_shell({.port = 5090});
+osp::UartShell uart_shell({.device = "/dev/ttyS0"});
+tcp_shell.Start();
+uart_shell.Start();
+```
+
+**Q: 历史记录支持多少条?**
+
+A: 默认 16 条，可通过 `OSP_SHELL_HISTORY_SIZE` 宏配置。每条最长 256 字符 (可通过 `OSP_SHELL_LINE_BUF_SIZE` 配置)。
+
+**Q: 如何禁用认证?**
+
+A: 设置 `cfg.username = nullptr` 即可跳过认证。
+
+**Q: 支持脚本/管道吗?**
+
+A: 不支持。Shell 设计为交互式调试工具，不支持脚本执行。如需自动化，建议通过管道传入命令。

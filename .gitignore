@@ -25,3 +25,7 @@ build_ex/
 build_test/
 *.bak
 scripts/
+
+# Executable binaries in root (benchmark/test executables)
+bench_*
+test_*

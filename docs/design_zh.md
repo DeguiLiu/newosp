@@ -48,7 +48,7 @@ newosp 是一个面向 ARM-Linux 工业级嵌入式平台的现代 C++17 纯头�
 
 - **语言**: C++17 (兼容 `-fno-exceptions -fno-rtti`)
 - **构建**: CMake >= 3.14, FetchContent 自动管理依赖
-- **测试**: Catch2 v3.5.2, 1153 test cases, ASan/TSan/UBSan clean
+- **测试**: Catch2 v3.5.2, 1226 test cases, ASan/TSan/UBSan clean
 - **代码规范**: Google C++ Style (clang-format v21), cpplint, clang-tidy, MISRA C++
 - **CI**: GitHub Actions (Ubuntu, GCC x Debug/Release, Sanitizers)
 
@@ -552,6 +552,14 @@ uart.Start();
 - AcceptLoop: `poll()` + 200ms 超时，Stop() 时 close(listen_fd_) 即可退出
 - `[[nodiscard]]` 标注所有有返回值意义的公有函数
 - `ScopeGuard` / `OSP_SCOPE_EXIT` 管理 fd 生命周期
+
+**测试覆盖**: 46+ test cases
+- IAC 协议过滤 (5 cases): 正常字节、WILL/WONT/DO/DONT、子协商、IAC IAC、无 telnet 模式
+- ESC 序列解析 (4 cases): HistoryUp/Down、未知序列、裸 ESC
+- 历史记录 (6 cases): 存储、去重、空行、导航、环形缓冲
+- 字节处理 (8 cases): 可打印字符、退格、Enter、CRLF 去重、Ctrl+C、Ctrl+D、Tab 补全
+- 命令执行 (14 cases): 注册、查找、重复、溢出、参数解析、帮助、输出
+- 后端集成 (9 cases): TCP 认证、Console 管道、UART PTY、同步/异步启停
 
 ---
 
@@ -2071,6 +2079,8 @@ expected<V, E> 返回
 | Config (128 entries) | ~48 KB | 0 | 0 |
 | TimerScheduler(16) | ~1 KB | ~1 KB | 1 |
 | DebugShell(2 conn) | ~9 KB | ~4 KB | 3 |
+| ConsoleShell (1 session) | ~4.3 KB | 0 | 1 |
+| UartShell (1 session) | ~4.3 KB | 0 | 1 |
 | FixedPool<256,64> | 16 KB | 0 | 0 |
 | ShutdownManager | <256 B | 0 | 0 |
 | AsyncBus(4096) | ~320 KB | 0 | 0 |
@@ -2142,7 +2152,7 @@ expected<V, E> 返回
 - 每模块独立测试文件: `test_<module>.cpp`
 - 覆盖目标: 基础 API + 边界条件 + 多线程场景
 - Sanitizer 验证: 所有测试在 ASan/TSan/UBSan 下通过
-- 当前: 1153 test cases (全模块), 798 test cases (无异常模式)
+- 当前: 1226 test cases (全模块), 393 test cases (无异常模式)
 - 构建模式: 正常模式 (全模块) / 无网络模式 (`-DOSP_WITH_NETWORK=OFF`) / 无异常模式 (`-DOSP_NO_EXCEPTIONS=ON`)
 
 ---

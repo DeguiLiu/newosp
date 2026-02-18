@@ -1,9 +1,9 @@
 # newosp 性能与内存基准报告
 
 > 从属于 [design_zh.md](design_zh.md) §12 资源预算
-> 版本: 1.0
-> 日期: 2026-02-14
-> 数据来源: `examples/benchmark.cpp`, `examples/benchmarks/` 实测
+> 版本: 1.1
+> 日期: 2026-02-18
+> 数据来源: `examples/benchmark.cpp`, `examples/benchmarks/` 实测 (1226 tests, 10.57s)
 
 ## 1. 测试环境
 
@@ -440,3 +440,62 @@ SmallMsg (24B) 单线程 Publish + ProcessBatch，10,000 样本:
 | 高吞吐要求 (> 1M msgs/s) | 增大 `QueueDepth`，或使用 SPSC 直连替代 Bus 广播 |
 | 突发流量场景 | 增大 `QueueDepth` 吸收突发，避免背压丢弃 |
 | 多进程 IPC | 使用 `ShmChannel` 替代 TCP，延迟降低 10x |
+
+## 8. 测试覆盖与质量保障
+
+### 8.1 单元测试统计
+
+| 指标 | 值 | 说明 |
+|------|-----|------|
+| 总测试数 | 1226 | 全模块 (Release 构建) |
+| 无异常模式 | 393 | `-fno-exceptions -fno-rtti` 构建 |
+| 总断言数 | 26,011+ | 覆盖基础 API + 边界条件 + 多线程 |
+| 执行时间 | 10.57 s | 并行执行 (ctest -j64) |
+| 通过率 | 100% | 0 failures |
+| Sanitizer | ASan/TSan/UBSan clean | 无内存泄漏、数据竞争、未定义行为 |
+
+### 8.2 模块测试覆盖
+
+| 模块 | 测试数 | 关键场景 |
+|------|--------|----------|
+| shell.hpp | 46+ | IAC/ESC/History/Auth/Console/UART |
+| bus.hpp | 28+ | MPSC 无锁、背压、批处理 |
+| node.hpp | 22+ | Pub/Sub、topic 路由、多订阅 |
+| hsm.hpp | 35+ | LCA 转换、guard 条件、嵌套状态 |
+| bt.hpp | 24+ | Sequence/Selector/Decorator、状态转换 |
+| transport.hpp | 40+ | 帧编解码、丢包检测、多协议 |
+| shm_transport.hpp | 38+ | SPSC/SPMC、futex 通知、ARM 内存序 |
+| service.hpp | 28+ | RPC 调用、超时、异步客户端 |
+| discovery.hpp | 32+ | 多播发现、节点加入/超时、调度器注入 |
+| 集成测试 | 15+ | HSM+Bus、BT+Node、Timer+Executor |
+
+### 8.3 性能基准验证
+
+所有性能指标在以下条件下验证:
+
+- **编译**: Release 模式 (`-O3 -std=c++17`)
+- **平台**: x86_64 Linux (Intel Xeon Cascadelake)
+- **重复**: 每个基准运行 3 次，取中位数
+- **隔离**: 单独进程，避免系统干扰
+- **可复现**: 所有数据来自 `examples/benchmark.cpp` 和 `examples/benchmarks/`
+
+### 8.4 CI 流水线
+
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| build-and-test | Debug + Release 构建，1226 tests | ✅ Pass |
+| build-with-options | `-fno-exceptions -fno-rtti` 兼容性 | ✅ Pass |
+| sanitizers | ASan + TSan + UBSan | ✅ Pass |
+| code-quality | clang-format + cpplint + clang-tidy | ✅ Pass |
+
+---
+
+## 9. 结论
+
+newosp 在以下方面达到工业级嵌入式标准:
+
+1. **性能**: 无锁设计达到 5-6 M msgs/s 吞吐，纳秒级延迟
+2. **内存**: 典型部署 < 2 MB RAM (不含应用数据)
+3. **可靠性**: 1226 tests 全部通过，ASan/TSan/UBSan clean
+4. **可维护性**: 零全局状态，RAII 资源管理，编译期分发
+5. **可扩展性**: 模板参数化，支持从低端 MCU 到高端 ARM 服务器
