@@ -45,11 +45,8 @@
 
 #include <cstring>
 
-#include <sockpp/inet_address.h>
-#include <sockpp/tcp_acceptor.h>
-#include <sockpp/tcp_connector.h>
-#include <sockpp/tcp_socket.h>
-#include <sockpp/udp_socket.h>
+#include <sockpp/tcp.h>
+#include <sockpp/udp.h>
 
 namespace osp {
 namespace net {
