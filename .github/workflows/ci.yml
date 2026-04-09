@@ -20,7 +20,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Set up CMake
       uses: lukka/get-cmake@latest
@@ -46,7 +46,7 @@ jobs:
             cmake_flags: "-DOSP_NO_EXCEPTIONS=ON -DOSP_BUILD_EXAMPLES=OFF"
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Set up CMake
       uses: lukka/get-cmake@latest
@@ -73,7 +73,7 @@ jobs:
           - undefined
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Install Dependencies
       run: |
@@ -106,7 +106,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Set up CMake
       uses: lukka/get-cmake@latest
