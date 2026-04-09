@@ -5,10 +5,10 @@
 
 #include "osp/connection.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
-#include <chrono>
 #include <cstring>
+
+#include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <thread>
 
 // Use a small pool for easy capacity testing
@@ -146,9 +146,7 @@ TEST_CASE("connection - foreach iterates all active", "[connection]") {
   pool.Remove(result.value());
 
   visited = 0U;
-  pool.ForEach([&visited](const osp::ConnectionInfo& /*info*/) {
-    ++visited;
-  });
+  pool.ForEach([&visited](const osp::ConnectionInfo& /*info*/) { ++visited; });
   REQUIRE(visited == 3U);
 }
 
@@ -218,11 +216,9 @@ TEST_CASE("connection - remove with invalid id returns error", "[connection]") {
   REQUIRE(rm.get_error() == osp::ConnectionError::kInvalidId);
 }
 
-TEST_CASE("connection - set state on non-existent returns error",
-          "[connection]") {
+TEST_CASE("connection - set state on non-existent returns error", "[connection]") {
   TestPool pool;
-  auto s = pool.SetState(osp::ConnectionId{999U},
-                         osp::ConnectionState::kConnected);
+  auto s = pool.SetState(osp::ConnectionId{999U}, osp::ConnectionState::kConnected);
   REQUIRE(!s.has_value());
   REQUIRE(s.get_error() == osp::ConnectionError::kNotFound);
 }

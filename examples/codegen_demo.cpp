@@ -18,19 +18,19 @@
  *  11. Subscription counts from topology
  */
 
-#include "osp/protocol_messages.hpp"
-#include "osp/sensor_messages.hpp"
-#include "osp/topology.hpp"
-
 #include "osp/app.hpp"
 #include "osp/bus.hpp"
 #include "osp/log.hpp"
 #include "osp/node.hpp"
 #include "osp/post.hpp"
+#include "osp/protocol_messages.hpp"
+#include "osp/sensor_messages.hpp"
+#include "osp/topology.hpp"
 
-#include <chrono>
 #include <cstdio>
 #include <cstring>
+
+#include <chrono>
 
 // ============================================================================
 // Part 1: Protocol messages + Bus/Node pub-sub
@@ -43,28 +43,20 @@ static void RunProtocolDemo() {
   ProtoBus::Instance().Reset();
 
   // Create nodes using generated topology constants
-  osp::Node<protocol::ProtocolPayload> registrar(
-      kNodeName_registrar, kNodeId_registrar);
-  osp::Node<protocol::ProtocolPayload> hb_monitor(
-      kNodeName_heartbeat_monitor, kNodeId_heartbeat_monitor);
-  osp::Node<protocol::ProtocolPayload> stream_ctrl(
-      kNodeName_stream_controller, kNodeId_stream_controller);
-  osp::Node<protocol::ProtocolPayload> client(
-      kNodeName_client, kNodeId_client);
+  osp::Node<protocol::ProtocolPayload> registrar(kNodeName_registrar, kNodeId_registrar);
+  osp::Node<protocol::ProtocolPayload> hb_monitor(kNodeName_heartbeat_monitor, kNodeId_heartbeat_monitor);
+  osp::Node<protocol::ProtocolPayload> stream_ctrl(kNodeName_stream_controller, kNodeId_stream_controller);
+  osp::Node<protocol::ProtocolPayload> client(kNodeName_client, kNodeId_client);
 
   uint32_t reg_count = 0, hb_count = 0, stream_count = 0;
 
   // Registrar handles RegisterRequest, replies with RegisterResponse
   registrar.Subscribe<protocol::RegisterRequest>(
-      [&](const protocol::RegisterRequest& req,
-          const osp::MessageHeader& /*hdr*/) {
-        OSP_LOG_INFO("registrar", "[evt=%u] device %s from %s:%u",
-                     static_cast<unsigned>(protocol::kProtocolRegister),
-                     req.device_id, req.ip,
-                     static_cast<unsigned>(req.port));
+      [&](const protocol::RegisterRequest& req, const osp::MessageHeader& /*hdr*/) {
+        OSP_LOG_INFO("registrar", "[evt=%u] device %s from %s:%u", static_cast<unsigned>(protocol::kProtocolRegister),
+                     req.device_id, req.ip, static_cast<unsigned>(req.port));
         protocol::RegisterResponse resp{};
-        std::strncpy(resp.device_id, req.device_id,
-                     sizeof(resp.device_id) - 1);
+        std::strncpy(resp.device_id, req.device_id, sizeof(resp.device_id) - 1);
         resp.result = 0;
         resp.session_id = 0x1001;
         registrar.Publish(resp);
@@ -73,31 +65,24 @@ static void RunProtocolDemo() {
 
   // Client receives RegisterResponse
   client.Subscribe<protocol::RegisterResponse>(
-      [](const protocol::RegisterResponse& resp,
-         const osp::MessageHeader& /*hdr*/) {
+      [](const protocol::RegisterResponse& resp, const osp::MessageHeader& /*hdr*/) {
         OSP_LOG_INFO("client", "[evt=%u] registered %s session=0x%X",
-                     static_cast<unsigned>(protocol::kProtocolRegisterAck),
-                     resp.device_id, resp.session_id);
+                     static_cast<unsigned>(protocol::kProtocolRegisterAck), resp.device_id, resp.session_id);
       });
 
   // Heartbeat monitor
   hb_monitor.Subscribe<protocol::HeartbeatMsg>(
-      [&](const protocol::HeartbeatMsg& hb,
-          const osp::MessageHeader& /*hdr*/) {
-        OSP_LOG_DEBUG("hb_mon", "[evt=%u] session=0x%X ts=%lu",
-                      static_cast<unsigned>(protocol::kProtocolHeartbeat),
-                      hb.session_id,
-                      static_cast<unsigned long>(hb.timestamp_us));
+      [&](const protocol::HeartbeatMsg& hb, const osp::MessageHeader& /*hdr*/) {
+        OSP_LOG_DEBUG("hb_mon", "[evt=%u] session=0x%X ts=%lu", static_cast<unsigned>(protocol::kProtocolHeartbeat),
+                      hb.session_id, static_cast<unsigned long>(hb.timestamp_us));
         ++hb_count;
       });
 
   // Stream controller
   stream_ctrl.Subscribe<protocol::StreamCommand>(
-      [&](const protocol::StreamCommand& cmd,
-          const osp::MessageHeader& /*hdr*/) {
+      [&](const protocol::StreamCommand& cmd, const osp::MessageHeader& /*hdr*/) {
         const char* action = (cmd.action == 1) ? "START" : "STOP";
-        OSP_LOG_INFO("stream", "[evt=%u] session=0x%X %s",
-                     static_cast<unsigned>(protocol::kProtocolStreamStart),
+        OSP_LOG_INFO("stream", "[evt=%u] session=0x%X %s", static_cast<unsigned>(protocol::kProtocolStreamStart),
                      cmd.session_id, action);
         ++stream_count;
       });
@@ -115,8 +100,7 @@ static void RunProtocolDemo() {
   protocol::HeartbeatMsg hb{};
   hb.session_id = 0x1001;
   auto now = std::chrono::steady_clock::now().time_since_epoch();
-  hb.timestamp_us = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+  hb.timestamp_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
   client.Publish(hb);
 
   // 3. Stream start
@@ -132,8 +116,7 @@ static void RunProtocolDemo() {
   stream_ctrl.SpinOnce();
   client.SpinOnce();
 
-  OSP_LOG_INFO("demo", "protocol: reg=%u hb=%u stream=%u (nodes=%u)",
-               reg_count, hb_count, stream_count, kNodeCount);
+  OSP_LOG_INFO("demo", "protocol: reg=%u hb=%u stream=%u (nodes=%u)", reg_count, hb_count, stream_count, kNodeCount);
 }
 
 // ============================================================================
@@ -151,34 +134,28 @@ static void RunSensorDemo() {
 
   uint32_t data_count = 0, alarm_count = 0;
 
-  sensor_node.Subscribe<sensor::SensorData>(
-      [&](const sensor::SensorData& d, const osp::MessageHeader& /*hdr*/) {
-        OSP_LOG_INFO("sensor", "[evt=%u] temp=%.1f humidity=%.1f",
-                     static_cast<unsigned>(sensor::kSensorTemperatureUpdate),
-                     static_cast<double>(d.temp),
-                     static_cast<double>(d.humidity));
-        ++data_count;
+  sensor_node.Subscribe<sensor::SensorData>([&](const sensor::SensorData& d, const osp::MessageHeader& /*hdr*/) {
+    OSP_LOG_INFO("sensor", "[evt=%u] temp=%.1f humidity=%.1f", static_cast<unsigned>(sensor::kSensorTemperatureUpdate),
+                 static_cast<double>(d.temp), static_cast<double>(d.humidity));
+    ++data_count;
 
-        // Trigger alarm if temp > 40
-        if (d.temp > 40.0f) {
-          sensor::SensorAlarm alarm{};
-          alarm.sensor_id = 1;
-          alarm.code = sensor::kSensorAlarm;
-          alarm.value = d.temp;
-          alarm.threshold = 40.0f;
-          sensor_node.Publish(alarm);
-        }
-      });
+    // Trigger alarm if temp > 40
+    if (d.temp > 40.0f) {
+      sensor::SensorAlarm alarm{};
+      alarm.sensor_id = 1;
+      alarm.code = sensor::kSensorAlarm;
+      alarm.value = d.temp;
+      alarm.threshold = 40.0f;
+      sensor_node.Publish(alarm);
+    }
+  });
 
-  alarm_node.Subscribe<sensor::SensorAlarm>(
-      [&](const sensor::SensorAlarm& a, const osp::MessageHeader& /*hdr*/) {
-        OSP_LOG_WARN("alarm", "[evt=%u] sensor=%u code=%u val=%.1f thresh=%.1f",
-                     static_cast<unsigned>(sensor::kSensorAlarm),
-                     static_cast<unsigned>(a.sensor_id), a.code,
-                     static_cast<double>(a.value),
-                     static_cast<double>(a.threshold));
-        ++alarm_count;
-      });
+  alarm_node.Subscribe<sensor::SensorAlarm>([&](const sensor::SensorAlarm& a, const osp::MessageHeader& /*hdr*/) {
+    OSP_LOG_WARN("alarm", "[evt=%u] sensor=%u code=%u val=%.1f thresh=%.1f",
+                 static_cast<unsigned>(sensor::kSensorAlarm), static_cast<unsigned>(a.sensor_id), a.code,
+                 static_cast<double>(a.value), static_cast<double>(a.threshold));
+    ++alarm_count;
+  });
 
   // Normal reading
   sensor::SensorData sd1{};
@@ -265,37 +242,33 @@ static void RunNewFeaturesDemo() {
   // --- 4a: Standalone enums (enum class, type-safe) ---
   protocol::StreamAction action = protocol::StreamAction::kStart;
   protocol::MediaType media = protocol::MediaType::kAv;
-  OSP_LOG_INFO("demo", "standalone enums: action=%u media=%u",
-               static_cast<unsigned>(action), static_cast<unsigned>(media));
+  OSP_LOG_INFO("demo", "standalone enums: action=%u media=%u", static_cast<unsigned>(action),
+               static_cast<unsigned>(media));
 
   sensor::AlarmSeverity severity = sensor::AlarmSeverity::kCritical;
   sensor::LogLevel level = sensor::LogLevel::kWarning;
-  OSP_LOG_INFO("demo", "sensor enums: severity=%u log_level=%u",
-               static_cast<unsigned>(severity), static_cast<unsigned>(level));
+  OSP_LOG_INFO("demo", "sensor enums: severity=%u log_level=%u", static_cast<unsigned>(severity),
+               static_cast<unsigned>(level));
 
   // --- 4b: Validate() -- field range checking ---
   protocol::RegisterRequest good_req{};
   std::strncpy(good_req.device_id, "SENSOR-01", sizeof(good_req.device_id) - 1);
   std::strncpy(good_req.ip, "10.0.0.1", sizeof(good_req.ip) - 1);
   good_req.port = 8080;
-  OSP_LOG_INFO("demo", "validate(port=8080): %s",
-               good_req.Validate() ? "PASS" : "FAIL");
+  OSP_LOG_INFO("demo", "validate(port=8080): %s", good_req.Validate() ? "PASS" : "FAIL");
 
   protocol::RegisterRequest bad_req{};
   bad_req.port = 0;  // out of range [1, 65535]
-  OSP_LOG_INFO("demo", "validate(port=0): %s",
-               bad_req.Validate() ? "PASS" : "FAIL");
+  OSP_LOG_INFO("demo", "validate(port=0): %s", bad_req.Validate() ? "PASS" : "FAIL");
 
   protocol::StreamCommand bad_cmd{};
   bad_cmd.action = 5;  // out of range [0, 1]
-  OSP_LOG_INFO("demo", "validate(action=5): %s",
-               bad_cmd.Validate() ? "PASS" : "FAIL");
+  OSP_LOG_INFO("demo", "validate(action=5): %s", bad_cmd.Validate() ? "PASS" : "FAIL");
 
   sensor::SensorData bad_sensor{};
   bad_sensor.temp = 200.0f;  // out of range [-40.0, 125.0]
   bad_sensor.humidity = 50.0f;
-  OSP_LOG_INFO("demo", "validate(temp=200): %s",
-               bad_sensor.Validate() ? "PASS" : "FAIL");
+  OSP_LOG_INFO("demo", "validate(temp=200): %s", bad_sensor.Validate() ? "PASS" : "FAIL");
 
   // --- 4c: Dump() -- debug printing ---
   char buf[256];
@@ -317,14 +290,11 @@ static void RunNewFeaturesDemo() {
   OSP_LOG_INFO("demo", "dump: %s", buf);
 
   // --- 4d: EventIdOf<T>() -- compile-time event<->message binding ---
-  static_assert(protocol::EventIdOf<protocol::RegisterRequest>() ==
-                    protocol::kProtocolRegister,
+  static_assert(protocol::EventIdOf<protocol::RegisterRequest>() == protocol::kProtocolRegister,
                 "RegisterRequest must bind to REGISTER event");
-  static_assert(protocol::EventIdOf<protocol::HeartbeatMsg>() ==
-                    protocol::kProtocolHeartbeat,
+  static_assert(protocol::EventIdOf<protocol::HeartbeatMsg>() == protocol::kProtocolHeartbeat,
                 "HeartbeatMsg must bind to HEARTBEAT event");
-  static_assert(protocol::EventIdOf<protocol::StreamData>() ==
-                    protocol::kProtocolStreamData,
+  static_assert(protocol::EventIdOf<protocol::StreamData>() == protocol::kProtocolStreamData,
                 "StreamData must bind to STREAM_DATA event");
 
   // Forward mapping: event -> type
@@ -334,33 +304,28 @@ static void RunNewFeaturesDemo() {
 
   // Reverse mapping at runtime
   uint32_t hb_event = protocol::EventIdOf<protocol::HeartbeatMsg>();
-  OSP_LOG_INFO("demo", "EventIdOf<HeartbeatMsg>()=%u (expected=%u)",
-               hb_event, static_cast<unsigned>(protocol::kProtocolHeartbeat));
+  OSP_LOG_INFO("demo", "EventIdOf<HeartbeatMsg>()=%u (expected=%u)", hb_event,
+               static_cast<unsigned>(protocol::kProtocolHeartbeat));
 
   // --- 4e: Protocol version ---
-  OSP_LOG_INFO("demo", "protocol version=%u, sensor version=%u",
-               protocol::kVersion, sensor::kVersion);
+  OSP_LOG_INFO("demo", "protocol version=%u, sensor version=%u", protocol::kVersion, sensor::kVersion);
 
   // --- 4f: Topology subscription counts ---
-  OSP_LOG_INFO("demo", "subscription counts: %s=%u, %s=%u, %s=%u, %s=%u",
-               kNodeName_registrar, kNodeSubCount_registrar,
-               kNodeName_heartbeat_monitor, kNodeSubCount_heartbeat_monitor,
-               kNodeName_stream_controller, kNodeSubCount_stream_controller,
-               kNodeName_client, kNodeSubCount_client);
+  OSP_LOG_INFO("demo", "subscription counts: %s=%u, %s=%u, %s=%u, %s=%u", kNodeName_registrar, kNodeSubCount_registrar,
+               kNodeName_heartbeat_monitor, kNodeSubCount_heartbeat_monitor, kNodeName_stream_controller,
+               kNodeSubCount_stream_controller, kNodeName_client, kNodeSubCount_client);
 
   // --- 4g: sizeof assertions (compile-time, shown here for documentation) ---
-  OSP_LOG_INFO("demo",
-               "sizeof: RegisterRequest=%u RegisterResponse=%u "
-               "HeartbeatMsg=%u StreamCommand=%u StreamData=%u",
-               static_cast<unsigned>(sizeof(protocol::RegisterRequest)),
-               static_cast<unsigned>(sizeof(protocol::RegisterResponse)),
-               static_cast<unsigned>(sizeof(protocol::HeartbeatMsg)),
-               static_cast<unsigned>(sizeof(protocol::StreamCommand)),
-               static_cast<unsigned>(sizeof(protocol::StreamData)));
+  OSP_LOG_INFO(
+      "demo",
+      "sizeof: RegisterRequest=%u RegisterResponse=%u "
+      "HeartbeatMsg=%u StreamCommand=%u StreamData=%u",
+      static_cast<unsigned>(sizeof(protocol::RegisterRequest)),
+      static_cast<unsigned>(sizeof(protocol::RegisterResponse)), static_cast<unsigned>(sizeof(protocol::HeartbeatMsg)),
+      static_cast<unsigned>(sizeof(protocol::StreamCommand)), static_cast<unsigned>(sizeof(protocol::StreamData)));
 
   OSP_LOG_INFO("demo", "sizeof: SensorData=%u SystemLog=%u SensorAlarm=%u",
-               static_cast<unsigned>(sizeof(sensor::SensorData)),
-               static_cast<unsigned>(sizeof(sensor::SystemLog)),
+               static_cast<unsigned>(sizeof(sensor::SensorData)), static_cast<unsigned>(sizeof(sensor::SystemLog)),
                static_cast<unsigned>(sizeof(sensor::SensorAlarm)));
 }
 

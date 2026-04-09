@@ -6,7 +6,6 @@
 #include "osp/bt.hpp"
 
 #include <catch2/catch_test_macros.hpp>
-
 #include <string>
 #include <vector>
 
@@ -446,13 +445,16 @@ TEST_CASE("bt - sequence with running child preserves state", "[bt]") {
   tree.AddAction("inc", IncrementCounter, seq);
 
   // Custom action that returns running for first 2 ticks, then succeeds
-  tree.AddAction("running", [](BtTestContext& ctx) -> osp::NodeStatus {
-    ++tick_count;
-    if (tick_count <= 2) {
-      return osp::NodeStatus::kRunning;
-    }
-    return osp::NodeStatus::kSuccess;
-  }, seq);
+  tree.AddAction(
+      "running",
+      [](BtTestContext& ctx) -> osp::NodeStatus {
+        ++tick_count;
+        if (tick_count <= 2) {
+          return osp::NodeStatus::kRunning;
+        }
+        return osp::NodeStatus::kSuccess;
+      },
+      seq);
 
   tree.AddAction("inc2", IncrementCounter, seq);
   tree.SetRoot(seq);

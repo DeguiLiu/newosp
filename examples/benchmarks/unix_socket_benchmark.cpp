@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
 #include <thread>
 #include <unistd.h>
 
@@ -34,7 +35,8 @@ static bool SendAll(int32_t fd, const void* data, size_t len) {
   size_t sent = 0;
   while (sent < len) {
     auto n = ::send(fd, p + sent, len - sent, MSG_NOSIGNAL);
-    if (n <= 0) return false;
+    if (n <= 0)
+      return false;
     sent += static_cast<size_t>(n);
   }
   return true;
@@ -46,7 +48,8 @@ static bool RecvAll(int32_t fd, void* buf, size_t len) {
   size_t got = 0;
   while (got < len) {
     auto n = ::recv(fd, p + got, len - got, 0);
-    if (n <= 0) return false;
+    if (n <= 0)
+      return false;
     got += static_cast<size_t>(n);
   }
   return true;
@@ -110,8 +113,7 @@ static BenchResult BenchUnix(uint32_t msg_size, uint32_t iterations) {
 
   double msg_per_sec = static_cast<double>(iterations) / (elapsed_ms / 1000.0);
   // Each iteration = 1 send + 1 recv = 2 * msg_size bytes transferred
-  double total_bytes = static_cast<double>(iterations) * 2.0 *
-                       static_cast<double>(msg_size);
+  double total_bytes = static_cast<double>(iterations) * 2.0 * static_cast<double>(msg_size);
   double mb_per_sec = (total_bytes / (1024.0 * 1024.0)) / (elapsed_ms / 1000.0);
 
   return {elapsed_ms, msg_per_sec, mb_per_sec};
@@ -133,7 +135,7 @@ static BenchResult BenchTcp(uint32_t msg_size, uint32_t iterations) {
   listener.Listen();
 
   // Get the actual port
-  struct sockaddr_in sin {};
+  struct sockaddr_in sin{};
   socklen_t slen = sizeof(sin);
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
   ::getsockname(listener.Fd(), reinterpret_cast<sockaddr*>(&sin), &slen);
@@ -178,8 +180,7 @@ static BenchResult BenchTcp(uint32_t msg_size, uint32_t iterations) {
   std::free(recv_buf);
 
   double msg_per_sec = static_cast<double>(iterations) / (elapsed_ms / 1000.0);
-  double total_bytes = static_cast<double>(iterations) * 2.0 *
-                       static_cast<double>(msg_size);
+  double total_bytes = static_cast<double>(iterations) * 2.0 * static_cast<double>(msg_size);
   double mb_per_sec = (total_bytes / (1024.0 * 1024.0)) / (elapsed_ms / 1000.0);
 
   return {elapsed_ms, msg_per_sec, mb_per_sec};
@@ -193,8 +194,10 @@ int main(int argc, char* argv[]) {
   uint32_t msg_size = kDefaultMsgSize;
   uint32_t iterations = kDefaultIterations;
 
-  if (argc > 1) msg_size = static_cast<uint32_t>(std::atoi(argv[1]));
-  if (argc > 2) iterations = static_cast<uint32_t>(std::atoi(argv[2]));
+  if (argc > 1)
+    msg_size = static_cast<uint32_t>(std::atoi(argv[1]));
+  if (argc > 2)
+    iterations = static_cast<uint32_t>(std::atoi(argv[2]));
 
   std::printf("=== Unix Domain Socket vs TCP Loopback Benchmark ===\n");
   std::printf("  msg_size:   %u bytes\n", msg_size);
@@ -208,36 +211,32 @@ int main(int argc, char* argv[]) {
   // Unix benchmark
   std::printf("Running Unix Domain Socket benchmark...\n");
   auto unix_r = BenchUnix(msg_size, iterations);
-  std::printf("  [Unix]  %.1f ms  |  %.0f msg/s  |  %.1f MB/s\n\n",
-              unix_r.elapsed_ms, unix_r.msg_per_sec, unix_r.mb_per_sec);
+  std::printf("  [Unix]  %.1f ms  |  %.0f msg/s  |  %.1f MB/s\n\n", unix_r.elapsed_ms, unix_r.msg_per_sec,
+              unix_r.mb_per_sec);
 
   // TCP benchmark
   std::printf("Running TCP loopback benchmark...\n");
   auto tcp_r = BenchTcp(msg_size, iterations);
-  std::printf("  [TCP]   %.1f ms  |  %.0f msg/s  |  %.1f MB/s\n\n",
-              tcp_r.elapsed_ms, tcp_r.msg_per_sec, tcp_r.mb_per_sec);
+  std::printf("  [TCP]   %.1f ms  |  %.0f msg/s  |  %.1f MB/s\n\n", tcp_r.elapsed_ms, tcp_r.msg_per_sec,
+              tcp_r.mb_per_sec);
 
   // Summary
   std::printf("--- Summary ---\n");
   double speedup = tcp_r.elapsed_ms / unix_r.elapsed_ms;
-  std::printf("  Unix is %.2fx %s than TCP loopback\n",
-              speedup > 1.0 ? speedup : 1.0 / speedup,
+  std::printf("  Unix is %.2fx %s than TCP loopback\n", speedup > 1.0 ? speedup : 1.0 / speedup,
               speedup > 1.0 ? "faster" : "slower");
 
   // Multi-size sweep
   std::printf("\n=== Message Size Sweep (10000 round-trips each) ===\n");
-  std::printf("  %-12s  %-18s  %-18s  %s\n",
-              "msg_size", "Unix (MB/s)", "TCP (MB/s)", "Speedup");
-  std::printf("  %-12s  %-18s  %-18s  %s\n",
-              "--------", "-----------", "----------", "-------");
+  std::printf("  %-12s  %-18s  %-18s  %s\n", "msg_size", "Unix (MB/s)", "TCP (MB/s)", "Speedup");
+  std::printf("  %-12s  %-18s  %-18s  %s\n", "--------", "-----------", "----------", "-------");
 
   static const uint32_t sizes[] = {64, 256, 1024, 4096, 16384, 65536};
   for (auto sz : sizes) {
     auto u = BenchUnix(sz, 10000);
     auto t = BenchTcp(sz, 10000);
     double sp = t.elapsed_ms / u.elapsed_ms;
-    std::printf("  %-12u  %-18.1f  %-18.1f  %.2fx\n",
-                sz, u.mb_per_sec, t.mb_per_sec, sp);
+    std::printf("  %-12u  %-18.1f  %-18.1f  %.2fx\n", sz, u.mb_per_sec, t.mb_per_sec, sp);
   }
 
   return 0;

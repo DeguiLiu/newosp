@@ -96,7 +96,9 @@ class ManualTickSource {
   /**
    * @brief Get current time in nanoseconds (ticks * tick_period_ns).
    */
-  static uint64_t NowNs() noexcept { return ticks_.load(std::memory_order_acquire) * tick_period_ns_; }
+  static uint64_t NowNs() noexcept {
+    return ticks_.load(std::memory_order_acquire) * tick_period_ns_.load(std::memory_order_relaxed);
+  }
 
   /**
    * @brief Advance tick counter by 1 (called from ISR or test driver).
@@ -107,7 +109,7 @@ class ManualTickSource {
    * @brief Set the duration of each tick in nanoseconds.
    * @param ns  Tick period (default 1ms = 1000000ns).
    */
-  static void SetTickPeriodNs(uint64_t ns) noexcept { tick_period_ns_ = ns; }
+  static void SetTickPeriodNs(uint64_t ns) noexcept { tick_period_ns_.store(ns, std::memory_order_relaxed); }
 
   /**
    * @brief Reset tick counter to zero (for test isolation).
@@ -121,7 +123,7 @@ class ManualTickSource {
 
  private:
   static inline std::atomic<uint64_t> ticks_{0U};
-  static inline uint64_t tick_period_ns_{1000000ULL};  // Default: 1ms/tick
+  static inline std::atomic<uint64_t> tick_period_ns_{1000000ULL};  // Default: 1ms/tick
 };
 
 // ============================================================================
@@ -512,8 +514,7 @@ class TimerScheduler final {
 
           // Compute remaining time for sleep calculation
           if (slots_[i].active) {
-            const uint64_t after = TickSource::NowNs();
-            const uint64_t remaining = (slots_[i].next_fire_ns > after) ? (slots_[i].next_fire_ns - after) : 0U;
+            const uint64_t remaining = (slots_[i].next_fire_ns > now) ? (slots_[i].next_fire_ns - now) : 0U;
             if (remaining < min_remaining) {
               min_remaining = remaining;
             }
@@ -548,8 +549,10 @@ class TimerScheduler final {
 #if defined(OSP_PLATFORM_LINUX)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    ts.tv_nsec += static_cast<long>(ns);
-    while (ts.tv_nsec >= 1000000000L) {
+    // Split ns into seconds and nanoseconds before adding to avoid tv_nsec overflow
+    ts.tv_sec += static_cast<time_t>(ns / 1000000000ULL);
+    ts.tv_nsec += static_cast<long>(ns % 1000000000ULL);
+    if (1000000000L <= ts.tv_nsec) {
       ts.tv_sec += 1;
       ts.tv_nsec -= 1000000000L;
     }

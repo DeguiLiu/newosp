@@ -6,12 +6,11 @@
 
 #include "osp/shell.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <cstring>
-#include <string>
 
+#include <catch2/catch_test_macros.hpp>
 #include <fcntl.h>
+#include <string>
 #include <unistd.h>
 
 // ============================================================================
@@ -48,8 +47,10 @@ struct MockSession {
   }
 
   ~MockSession() {
-    if (capture_read_fd >= 0) ::close(capture_read_fd);
-    if (capture_write_fd >= 0) ::close(capture_write_fd);
+    if (capture_read_fd >= 0)
+      ::close(capture_read_fd);
+    if (capture_write_fd >= 0)
+      ::close(capture_write_fd);
   }
 
   std::string DrainOutput() {
@@ -57,7 +58,8 @@ struct MockSession {
     char buf[512];
     for (;;) {
       ssize_t n = ::read(capture_read_fd, buf, sizeof(buf));
-      if (n <= 0) break;
+      if (n <= 0)
+        break;
       result.append(buf, static_cast<size_t>(n));
     }
     return result;
@@ -69,9 +71,7 @@ struct MockSession {
 
 /// RAII guard that sets/clears CurrentSession for the scope.
 struct SessionGuard {
-  explicit SessionGuard(MockSession& m) {
-    osp::detail::CurrentSession() = &m.session;
-  }
+  explicit SessionGuard(MockSession& m) { osp::detail::CurrentSession() = &m.session; }
   ~SessionGuard() { osp::detail::CurrentSession() = nullptr; }
 };
 

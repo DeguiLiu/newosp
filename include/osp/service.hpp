@@ -136,6 +136,7 @@ class Service {
    * @param ctx User context pointer passed to handler.
    */
   void SetHandler(Handler handler, void* ctx = nullptr) noexcept {
+    OSP_ASSERT(false == running_.load(std::memory_order_acquire));
     handler_ = handler;
     handler_ctx_ = ctx;
   }
@@ -220,12 +221,19 @@ class Service {
 
   /** @brief Get the bound port (useful when using port 0 for OS-assigned). */
   uint16_t GetPort() const noexcept {
-    int32_t fd = sockfd_.load(std::memory_order_acquire);
-    if (fd < 0)
+    if (false == running_.load(std::memory_order_acquire)) {
       return 0;
+    }
+    std::lock_guard<std::mutex> lock(threads_mutex_);
+    int32_t fd = sockfd_.load(std::memory_order_acquire);
+    if (fd < 0) {
+      return 0;
+    }
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
+    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+      return 0;
+    }
     return ntohs(addr.sin_port);
   }
 
@@ -395,7 +403,7 @@ class Service {
   std::atomic<bool> running_;
   std::thread accept_thread_;
   std::vector<WorkerEntry> worker_entries_;
-  std::mutex threads_mutex_;
+  mutable std::mutex threads_mutex_;
   std::atomic<uint32_t> active_workers_{0};
   ThreadHeartbeat* heartbeat_{nullptr};
 
@@ -791,31 +799,24 @@ class AsyncClient {
   AsyncClient(const AsyncClient&) = delete;
   AsyncClient& operator=(const AsyncClient&) = delete;
 
+  /**
+   * @brief Move constructor. Only safe before the client is used concurrently.
+   *
+   * Precondition: no async call is in progress on the source object.
+   */
   AsyncClient(AsyncClient&& other) noexcept
       : client_(std::move(other.client_)),
         connected_(other.connected_),
-        call_in_progress_(other.call_in_progress_.load()),
-        result_ready_(other.result_ready_.load()),
+        call_in_progress_(other.call_in_progress_.load(std::memory_order_relaxed)),
+        result_ready_(other.result_ready_.load(std::memory_order_relaxed)),
         result_(other.result_) {
+    OSP_ASSERT(false == other.call_in_progress_.load(std::memory_order_relaxed));
     other.connected_ = false;
-    other.call_in_progress_.store(false);
-    other.result_ready_.store(false);
+    other.call_in_progress_.store(false, std::memory_order_relaxed);
+    other.result_ready_.store(false, std::memory_order_relaxed);
   }
 
-  AsyncClient& operator=(AsyncClient&& other) noexcept {
-    if (this != &other) {
-      Close();
-      client_ = std::move(other.client_);
-      connected_ = other.connected_;
-      call_in_progress_.store(other.call_in_progress_.load());
-      result_ready_.store(other.result_ready_.load());
-      result_ = other.result_;
-      other.connected_ = false;
-      other.call_in_progress_.store(false);
-      other.result_ready_.store(false);
-    }
-    return *this;
-  }
+  AsyncClient& operator=(AsyncClient&&) = delete;
 
   /**
    * @brief Connect to a service endpoint.

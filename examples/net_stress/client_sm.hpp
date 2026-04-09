@@ -21,14 +21,16 @@
 #ifndef NET_STRESS_CLIENT_SM_HPP_
 #define NET_STRESS_CLIENT_SM_HPP_
 
+#include "protocol.hpp"
+
 #include "osp/hsm.hpp"
 #include "osp/log.hpp"
 #include "osp/service.hpp"
 #include "osp/vocabulary.hpp"
-#include "protocol.hpp"
+
+#include <cstring>
 
 #include <atomic>
-#include <cstring>
 
 namespace net_stress {
 
@@ -68,11 +70,11 @@ struct ClientCtx {
   // Handshake result
   uint32_t slot;
   uint32_t server_id;
-  bool     connected;
+  bool connected;
 
-  // RPC client handles (non-owning pointers, lifetime managed externally)
-  osp::Client<HandshakeReq, HandshakeResp>* hs_cli;
-  osp::Client<EchoReq, EchoResp>*           echo_cli;
+  // RPC client handles (owned in-place by context, no heap allocation)
+  osp::Client<HandshakeReq, HandshakeResp> hs_cli;
+  osp::Client<EchoReq, EchoResp> echo_cli;
 
   // Test config
   uint32_t interval_ms;
@@ -107,8 +109,6 @@ inline void InitClientCtx(ClientCtx& c) noexcept {
   c.slot = 0;
   c.server_id = 0;
   c.connected = false;
-  c.hs_cli = nullptr;
-  c.echo_cli = nullptr;
   c.interval_ms = kDefaultIntervalMs;
   c.payload_len = kDefaultPayloadLen;
   c.seq = 0;
@@ -128,6 +128,8 @@ inline void InitClientCtx(ClientCtx& c) noexcept {
 // ============================================================================
 // Free-Function State Handlers
 // ============================================================================
+
+inline void CleanupClient(ClientCtx& ctx) noexcept;
 
 namespace hsm_handler {
 
@@ -157,7 +159,7 @@ inline TR Connecting(ClientCtx& ctx, const Ev& evt) {
 
 inline TR Connected(ClientCtx& ctx, const Ev& evt) {
   if (evt.id == kEvtDisconnect) {
-    ctx.connected = false;
+    CleanupClient(ctx);
     return ctx.sm->RequestTransition(ctx.si_disc);
   }
   return TR::kUnhandled;
@@ -172,7 +174,7 @@ inline TR Idle(ClientCtx& ctx, const Ev& evt) {
 
 inline TR Running(ClientCtx& ctx, const Ev& evt) {
   if (evt.id == kEvtTick) {
-    if (ctx.echo_cli == nullptr) {
+    if (!ctx.echo_cli.IsConnected()) {
       ctx.n_err.fetch_add(1, std::memory_order_relaxed);
       return TR::kHandled;
     }
@@ -181,14 +183,13 @@ inline TR Running(ClientCtx& ctx, const Ev& evt) {
     EchoReq req{};
     req.client_id = ctx.id;
     req.seq = ctx.seq++;
-    req.payload_len = (ctx.payload_len > kMaxPayloadBytes)
-                          ? kMaxPayloadBytes : ctx.payload_len;
+    req.payload_len = (ctx.payload_len > kMaxPayloadBytes) ? kMaxPayloadBytes : ctx.payload_len;
     req.send_ts_ns = NowNs();
     FillPattern(req.payload, req.payload_len, req.seq);
 
     ctx.n_sent.fetch_add(1, std::memory_order_relaxed);
 
-    auto resp = ctx.echo_cli->Call(req, 2000);
+    auto resp = ctx.echo_cli.Call(req, 2000);
     if (resp.has_value() && resp.value().seq == req.seq) {
       ctx.n_recv.fetch_add(1, std::memory_order_relaxed);
       uint64_t rtt = (NowNs() - resp.value().client_ts_ns) / 1000ULL;
@@ -206,7 +207,7 @@ inline TR Running(ClientCtx& ctx, const Ev& evt) {
 
 inline TR Error(ClientCtx& ctx, const Ev& evt) {
   if (evt.id == kEvtRetry) {
-    ctx.connected = false;
+    CleanupClient(ctx);
     return ctx.sm->RequestTransition(ctx.si_disc);
   }
   return TR::kUnhandled;
@@ -223,24 +224,13 @@ inline void BuildClientSm(ClientSm& sm, ClientCtx& ctx) noexcept {
 
   using Cfg = osp::StateConfig<ClientCtx>;
 
-  ctx.si_root = sm.AddState(
-      Cfg{"Root", -1, hsm_handler::Root, nullptr, nullptr});
-  ctx.si_disc = sm.AddState(
-      Cfg{"Disconnected", ctx.si_root, hsm_handler::Disconnected,
-          nullptr, nullptr});
-  ctx.si_conn_ing = sm.AddState(
-      Cfg{"Connecting", ctx.si_root, hsm_handler::Connecting,
-          nullptr, nullptr});
-  ctx.si_conn_ed = sm.AddState(
-      Cfg{"Connected", ctx.si_root, hsm_handler::Connected,
-          nullptr, nullptr});
-  ctx.si_idle = sm.AddState(
-      Cfg{"Idle", ctx.si_conn_ed, hsm_handler::Idle, nullptr, nullptr});
-  ctx.si_run = sm.AddState(
-      Cfg{"Running", ctx.si_conn_ed, hsm_handler::Running,
-          nullptr, nullptr});
-  ctx.si_err = sm.AddState(
-      Cfg{"Error", ctx.si_root, hsm_handler::Error, nullptr, nullptr});
+  ctx.si_root = sm.AddState(Cfg{"Root", -1, hsm_handler::Root, nullptr, nullptr});
+  ctx.si_disc = sm.AddState(Cfg{"Disconnected", ctx.si_root, hsm_handler::Disconnected, nullptr, nullptr});
+  ctx.si_conn_ing = sm.AddState(Cfg{"Connecting", ctx.si_root, hsm_handler::Connecting, nullptr, nullptr});
+  ctx.si_conn_ed = sm.AddState(Cfg{"Connected", ctx.si_root, hsm_handler::Connected, nullptr, nullptr});
+  ctx.si_idle = sm.AddState(Cfg{"Idle", ctx.si_conn_ed, hsm_handler::Idle, nullptr, nullptr});
+  ctx.si_run = sm.AddState(Cfg{"Running", ctx.si_conn_ed, hsm_handler::Running, nullptr, nullptr});
+  ctx.si_err = sm.AddState(Cfg{"Error", ctx.si_root, hsm_handler::Error, nullptr, nullptr});
 
   sm.SetInitialState(ctx.si_disc);
   sm.Start();
@@ -260,18 +250,17 @@ inline void Dispatch(ClientCtx& ctx, uint32_t evt_id) noexcept {
 // ============================================================================
 
 inline bool DoHandshake(ClientCtx& ctx) noexcept {
+  CleanupClient(ctx);
+
   // Connect handshake RPC
-  auto hs_r = osp::Client<HandshakeReq, HandshakeResp>::Connect(
-      ctx.server_host.c_str(), ctx.hs_port,
-      static_cast<int32_t>(kConnectTimeoutMs));
+  auto hs_r = osp::Client<HandshakeReq, HandshakeResp>::Connect(ctx.server_host.c_str(), ctx.hs_port,
+                                                                static_cast<int32_t>(kConnectTimeoutMs));
   if (!hs_r.has_value()) {
     OSP_LOG_ERROR("CLIENT", "[%u] Handshake connect failed", ctx.id);
     return false;
   }
 
-  auto* hs = new osp::Client<HandshakeReq, HandshakeResp>(
-      std::move(hs_r.value()));
-  ctx.hs_cli = hs;
+  ctx.hs_cli = std::move(hs_r.value());
 
   HandshakeReq req{};
   req.client_id = ctx.id;
@@ -279,44 +268,37 @@ inline bool DoHandshake(ClientCtx& ctx) noexcept {
   std::strncpy(req.name, ctx.name.c_str(), sizeof(req.name) - 1);
   req.name[sizeof(req.name) - 1] = '\0';
 
-  auto resp = hs->Call(req, static_cast<int32_t>(kConnectTimeoutMs));
+  auto resp = ctx.hs_cli.Call(req, static_cast<int32_t>(kConnectTimeoutMs));
   if (!resp.has_value() || resp.value().accepted == 0) {
     OSP_LOG_ERROR("CLIENT", "[%u] Handshake rejected", ctx.id);
-    delete hs;
-    ctx.hs_cli = nullptr;
+    CleanupClient(ctx);
     return false;
   }
 
   ctx.slot = resp.value().slot;
   ctx.server_id = resp.value().server_id;
   ctx.echo_port = resp.value().echo_port;
-  ctx.connected = true;
 
   // Connect echo RPC
-  auto echo_r = osp::Client<EchoReq, EchoResp>::Connect(
-      ctx.server_host.c_str(), ctx.echo_port,
-      static_cast<int32_t>(kConnectTimeoutMs));
+  auto echo_r = osp::Client<EchoReq, EchoResp>::Connect(ctx.server_host.c_str(), ctx.echo_port,
+                                                        static_cast<int32_t>(kConnectTimeoutMs));
   if (!echo_r.has_value()) {
     OSP_LOG_ERROR("CLIENT", "[%u] Echo connect failed", ctx.id);
-    delete hs;
-    ctx.hs_cli = nullptr;
+    CleanupClient(ctx);
     return false;
   }
 
-  ctx.echo_cli = new osp::Client<EchoReq, EchoResp>(
-      std::move(echo_r.value()));
+  ctx.echo_cli = std::move(echo_r.value());
+  ctx.connected = true;
 
-  OSP_LOG_INFO("CLIENT", "[%u] Connected: slot=%u echo_port=%u",
-               ctx.id, ctx.slot, ctx.echo_port);
+  OSP_LOG_INFO("CLIENT", "[%u] Connected: slot=%u echo_port=%u", ctx.id, ctx.slot, ctx.echo_port);
   return true;
 }
 
 /// Cleanup RPC clients.
 inline void CleanupClient(ClientCtx& ctx) noexcept {
-  delete ctx.echo_cli;
-  ctx.echo_cli = nullptr;
-  delete ctx.hs_cli;
-  ctx.hs_cli = nullptr;
+  ctx.echo_cli.Close();
+  ctx.hs_cli.Close();
   ctx.connected = false;
 }
 

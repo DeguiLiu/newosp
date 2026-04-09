@@ -9,10 +9,11 @@
 #include "osp/shutdown.hpp"
 #include "osp/worker_pool.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
+
+#include <atomic>
+#include <chrono>
 #include <thread>
 #include <variant>
 
@@ -48,8 +49,7 @@ struct ProcessResult {
   uint32_t processed_bytes;
 };
 
-using Payload = std::variant<ClientConnect, ClientDisconnect, ClientData,
-                             ClientHeartbeat, ProcessResult>;
+using Payload = std::variant<ClientConnect, ClientDisconnect, ClientData, ClientHeartbeat, ProcessResult>;
 
 // ============================================================================
 // Global Counters
@@ -65,24 +65,28 @@ static std::atomic<uint32_t> g_heartbeats{0};
 // WorkerPool Handlers (free functions, -fno-rtti compatible)
 // ============================================================================
 
-static void HandleClientData(const ClientData& msg,
-                             const osp::MessageHeader& hdr) {
+static void HandleClientData(const ClientData& msg, const osp::MessageHeader& hdr) {
+  /* Simulated work to make parallel processing visible in the demo output. */
   std::this_thread::sleep_for(std::chrono::microseconds(msg.data_len));
   g_data_processed.fetch_add(1, std::memory_order_relaxed);
   g_bytes_processed.fetch_add(msg.data_len, std::memory_order_relaxed);
-  OSP_LOG_DEBUG("proc", "processed %u B from client %u (msg %lu)",
-                msg.data_len, msg.client_id,
+  OSP_LOG_DEBUG("proc", "processed %u B from client %u (msg %lu)", msg.data_len, msg.client_id,
                 static_cast<unsigned long>(hdr.msg_id));
 }
 
-static void HandleProcessResult(const ProcessResult& msg,
-                                const osp::MessageHeader& /*hdr*/) {
-  OSP_LOG_INFO("proc", "result: client %u status=%u bytes=%u",
-               msg.client_id, msg.status, msg.processed_bytes);
+static void HandleProcessResult(const ProcessResult& msg, const osp::MessageHeader& /*hdr*/) {
+  OSP_LOG_INFO("proc", "result: client %u status=%u bytes=%u", msg.client_id, msg.status, msg.processed_bytes);
 }
 
 static constexpr uint32_t kNumClients = 4;
 static constexpr uint32_t kMsgsPerClient = 8;
+
+/*
+ * This demo prioritizes readable lifecycle/log output over minimum latency.
+ * The sleep_for() calls below are used only to separate phases and make the
+ * message flow easier to observe when running the demo interactively.
+ * They are not intended to represent the recommended low-latency usage of OSP.
+ */
 
 // ============================================================================
 // Main
@@ -110,24 +114,21 @@ int main() {
 
   // -- Gateway node: connect/disconnect --
   osp::Node<Payload> gateway("gateway", 1);
-  gateway.Subscribe<ClientConnect>(
-      [](const ClientConnect& m, const osp::MessageHeader&) {
-        g_connected.fetch_add(1, std::memory_order_relaxed);
-        OSP_LOG_INFO("gw", "client %u from %s:%u", m.client_id, m.ip, m.port);
-      });
-  gateway.Subscribe<ClientDisconnect>(
-      [](const ClientDisconnect& m, const osp::MessageHeader&) {
-        g_disconnected.fetch_add(1, std::memory_order_relaxed);
-        OSP_LOG_INFO("gw", "client %u left (reason=%u)", m.client_id, m.reason);
-      });
+  gateway.Subscribe<ClientConnect>([](const ClientConnect& m, const osp::MessageHeader&) {
+    g_connected.fetch_add(1, std::memory_order_relaxed);
+    OSP_LOG_INFO("gw", "client %u from %s:%u", m.client_id, m.ip, m.port);
+  });
+  gateway.Subscribe<ClientDisconnect>([](const ClientDisconnect& m, const osp::MessageHeader&) {
+    g_disconnected.fetch_add(1, std::memory_order_relaxed);
+    OSP_LOG_INFO("gw", "client %u left (reason=%u)", m.client_id, m.reason);
+  });
 
   // -- Monitor node: heartbeat tracking --
   osp::Node<Payload> monitor("monitor", 3);
-  monitor.Subscribe<ClientHeartbeat>(
-      [](const ClientHeartbeat& m, const osp::MessageHeader&) {
-        g_heartbeats.fetch_add(1, std::memory_order_relaxed);
-        OSP_LOG_DEBUG("mon", "hb client %u rtt=%u us", m.client_id, m.rtt_us);
-      });
+  monitor.Subscribe<ClientHeartbeat>([](const ClientHeartbeat& m, const osp::MessageHeader&) {
+    g_heartbeats.fetch_add(1, std::memory_order_relaxed);
+    OSP_LOG_DEBUG("mon", "hb client %u rtt=%u us", m.client_id, m.rtt_us);
+  });
 
   gateway.Start();
   monitor.Start();
@@ -143,6 +144,7 @@ int main() {
     msg.port = static_cast<uint16_t>(9000 + id);
     gateway.Publish(msg);
   }
+  /* Demo-only pacing for readable logs; not a recommended low-latency pattern. */
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Phase 2: Data messages processed by WorkerPool in parallel.
@@ -165,6 +167,7 @@ int main() {
     msg.rtt_us = 500 + id * 100;
     gateway.Publish(msg);
   }
+  /* Demo-only pacing for readable logs; not a recommended low-latency pattern. */
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Phase 4: FlushAndPause -- drain all in-flight work before disconnect.
@@ -176,8 +179,7 @@ int main() {
     ProcessResult msg{};
     msg.client_id = id;
     msg.status = 0;
-    msg.processed_bytes = static_cast<uint32_t>(
-        g_bytes_processed.load(std::memory_order_relaxed) / kNumClients);
+    msg.processed_bytes = static_cast<uint32_t>(g_bytes_processed.load(std::memory_order_relaxed) / kNumClients);
     gateway.Publish(msg);
   }
   pool.Resume();
@@ -191,6 +193,7 @@ int main() {
     msg.reason = 0;
     gateway.Publish(msg);
   }
+  /* Demo-only pacing for readable logs; not a recommended low-latency pattern. */
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Shutdown.
@@ -203,19 +206,13 @@ int main() {
   auto ps = pool.GetStats();
   auto bs = osp::AsyncBus<Payload>::Instance().GetStatistics();
   OSP_LOG_INFO("main", "=== Statistics ===");
-  OSP_LOG_INFO("main", "  connected=%u disconnected=%u",
-               g_connected.load(), g_disconnected.load());
-  OSP_LOG_INFO("main", "  data_processed=%u bytes=%lu heartbeats=%u",
-               g_data_processed.load(),
-               static_cast<unsigned long>(g_bytes_processed.load()),
-               g_heartbeats.load());
-  OSP_LOG_INFO("main", "  bus: published=%lu dropped=%lu",
-               static_cast<unsigned long>(bs.messages_published),
+  OSP_LOG_INFO("main", "  connected=%u disconnected=%u", g_connected.load(), g_disconnected.load());
+  OSP_LOG_INFO("main", "  data_processed=%u bytes=%lu heartbeats=%u", g_data_processed.load(),
+               static_cast<unsigned long>(g_bytes_processed.load()), g_heartbeats.load());
+  OSP_LOG_INFO("main", "  bus: published=%lu dropped=%lu", static_cast<unsigned long>(bs.messages_published),
                static_cast<unsigned long>(bs.messages_dropped));
-  OSP_LOG_INFO("main", "  pool: dispatched=%lu processed=%lu qfull=%lu",
-               static_cast<unsigned long>(ps.dispatched),
-               static_cast<unsigned long>(ps.processed),
-               static_cast<unsigned long>(ps.worker_queue_full));
+  OSP_LOG_INFO("main", "  pool: dispatched=%lu processed=%lu qfull=%lu", static_cast<unsigned long>(ps.dispatched),
+               static_cast<unsigned long>(ps.processed), static_cast<unsigned long>(ps.worker_queue_full));
   OSP_LOG_INFO("main", "=== Demo Complete ===");
 
   osp::log::Shutdown();

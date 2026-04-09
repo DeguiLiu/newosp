@@ -294,8 +294,8 @@ class ShutdownManager final {
    */
   static void SignalHandler(int signo) {
     ShutdownManager* self = detail::GetShutdownInstance();
-    if (self != nullptr) {
-      self->shutdown_flag_.store(true);
+    if (nullptr != self) {
+      self->shutdown_flag_.store(true, std::memory_order_relaxed);
       self->signo_.store(signo, std::memory_order_relaxed);
       if (self->pipe_fd_[1] >= 0) {
         const uint8_t byte = 1;

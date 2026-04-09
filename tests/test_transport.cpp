@@ -4,12 +4,13 @@
  *        TcpTransport, NetworkNode.
  */
 
-#include <catch2/catch_test_macros.hpp>
 #include "osp/transport.hpp"
 
 #include <cstring>
-#include <thread>
+
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <thread>
 #include <variant>
 
 // ============================================================================
@@ -38,8 +39,7 @@ static uint16_t SetupListener(osp::TcpListener& listener) {
   listener = static_cast<osp::TcpListener&&>(listener_r.value());
 
   int opt = 1;
-  ::setsockopt(listener.Fd(), SOL_SOCKET, SO_REUSEADDR, &opt,
-               static_cast<socklen_t>(sizeof(opt)));
+  ::setsockopt(listener.Fd(), SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
 
   auto addr_r = osp::SocketAddress::FromIpv4("127.0.0.1", 0);
   REQUIRE(addr_r.has_value());
@@ -48,8 +48,7 @@ static uint16_t SetupListener(osp::TcpListener& listener) {
 
   sockaddr_in bound_addr{};
   socklen_t addr_len = sizeof(bound_addr);
-  ::getsockname(listener.Fd(), reinterpret_cast<sockaddr*>(&bound_addr),
-                &addr_len);
+  ::getsockname(listener.Fd(), reinterpret_cast<sockaddr*>(&bound_addr), &addr_len);
   uint16_t port = ntohs(bound_addr.sin_port);
   REQUIRE(port > 0);
 
@@ -69,8 +68,7 @@ TEST_CASE("transport - Endpoint::FromString", "[transport][endpoint]") {
   REQUIRE(ep.port == 5555);
 }
 
-TEST_CASE("transport - Endpoint::FromString truncates long host",
-          "[transport][endpoint]") {
+TEST_CASE("transport - Endpoint::FromString truncates long host", "[transport][endpoint]") {
   // Create a 70-char string (exceeds 63-char host buffer)
   char long_host[70];
   std::memset(long_host, 'a', sizeof(long_host));
@@ -81,8 +79,7 @@ TEST_CASE("transport - Endpoint::FromString truncates long host",
   REQUIRE(ep.port == 80);
 }
 
-TEST_CASE("transport - Endpoint::FromString nullptr host",
-          "[transport][endpoint]") {
+TEST_CASE("transport - Endpoint::FromString nullptr host", "[transport][endpoint]") {
   auto ep = osp::Endpoint::FromString(nullptr, 1234);
   REQUIRE(ep.host.empty());
   REQUIRE(ep.port == 1234);
@@ -92,8 +89,7 @@ TEST_CASE("transport - Endpoint::FromString nullptr host",
 // 2. FrameCodec encode/decode roundtrip
 // ============================================================================
 
-TEST_CASE("transport - FrameCodec encode decode roundtrip",
-          "[transport][codec]") {
+TEST_CASE("transport - FrameCodec encode decode roundtrip", "[transport][codec]") {
   osp::FrameHeader original;
   original.magic = osp::kFrameMagic;
   original.length = 128;
@@ -113,8 +109,7 @@ TEST_CASE("transport - FrameCodec encode decode roundtrip",
   REQUIRE(decoded.sender_id == original.sender_id);
 }
 
-TEST_CASE("transport - FrameCodec encode fails on small buffer",
-          "[transport][codec]") {
+TEST_CASE("transport - FrameCodec encode fails on small buffer", "[transport][codec]") {
   osp::FrameHeader hdr;
   hdr.magic = osp::kFrameMagic;
   hdr.length = 0;
@@ -122,13 +117,11 @@ TEST_CASE("transport - FrameCodec encode fails on small buffer",
   hdr.sender_id = 0;
 
   uint8_t small_buf[4];
-  uint32_t written =
-      osp::FrameCodec::EncodeHeader(hdr, small_buf, sizeof(small_buf));
+  uint32_t written = osp::FrameCodec::EncodeHeader(hdr, small_buf, sizeof(small_buf));
   REQUIRE(written == 0);
 }
 
-TEST_CASE("transport - FrameCodec decode fails on small buffer",
-          "[transport][codec]") {
+TEST_CASE("transport - FrameCodec decode fails on small buffer", "[transport][codec]") {
   uint8_t small_buf[4] = {0};
   osp::FrameHeader hdr;
   bool ok = osp::FrameCodec::DecodeHeader(small_buf, sizeof(small_buf), hdr);
@@ -143,8 +136,7 @@ TEST_CASE("transport - Serializer POD roundtrip", "[transport][serializer]") {
   SensorData original{25.5f, 7};
 
   uint8_t buf[64];
-  uint32_t len =
-      osp::Serializer<SensorData>::Serialize(original, buf, sizeof(buf));
+  uint32_t len = osp::Serializer<SensorData>::Serialize(original, buf, sizeof(buf));
   REQUIRE(len == sizeof(SensorData));
 
   SensorData restored;
@@ -154,14 +146,12 @@ TEST_CASE("transport - Serializer POD roundtrip", "[transport][serializer]") {
   REQUIRE(restored.sensor_id == original.sensor_id);
 }
 
-TEST_CASE("transport - Serializer fails on undersized buffer",
-          "[transport][serializer]") {
+TEST_CASE("transport - Serializer fails on undersized buffer", "[transport][serializer]") {
   SensorData data{1.0f, 1};
 
   // Serialize into too-small buffer
   uint8_t tiny_buf[1];
-  uint32_t len =
-      osp::Serializer<SensorData>::Serialize(data, tiny_buf, sizeof(tiny_buf));
+  uint32_t len = osp::Serializer<SensorData>::Serialize(data, tiny_buf, sizeof(tiny_buf));
   REQUIRE(len == 0);
 
   // Deserialize from too-small buffer
@@ -174,8 +164,7 @@ TEST_CASE("transport - Serializer fails on undersized buffer",
 // 4. TcpTransport Connect/SendFrame/RecvFrame loopback
 // ============================================================================
 
-TEST_CASE("transport - TcpTransport SendFrame RecvFrame loopback",
-          "[transport][tcp][integration]") {
+TEST_CASE("transport - TcpTransport SendFrame RecvFrame loopback", "[transport][tcp][integration]") {
   // Set up a listener on port 0
   osp::TcpListener listener;
   uint16_t port = SetupListener(listener);
@@ -186,12 +175,13 @@ TEST_CASE("transport - TcpTransport SendFrame RecvFrame loopback",
     osp::TcpTransport client;
     auto ep = osp::Endpoint::FromString("127.0.0.1", port);
     auto r = client.Connect(ep);
-    if (!r.has_value()) return;
+    if (!r.has_value())
+      return;
 
     uint8_t payload_buf[64];
-    uint32_t len = osp::Serializer<SensorData>::Serialize(
-        send_data, payload_buf, sizeof(payload_buf));
-    if (len == 0) return;
+    uint32_t len = osp::Serializer<SensorData>::Serialize(send_data, payload_buf, sizeof(payload_buf));
+    if (len == 0)
+      return;
 
     (void)client.SendFrame(0, 42, payload_buf, len);
   });
@@ -216,8 +206,7 @@ TEST_CASE("transport - TcpTransport SendFrame RecvFrame loopback",
 
   // Deserialize and verify
   SensorData received;
-  bool ok = osp::Serializer<SensorData>::Deserialize(
-      recv_buf, recv_r.value(), received);
+  bool ok = osp::Serializer<SensorData>::Deserialize(recv_buf, recv_r.value(), received);
   REQUIRE(ok);
   REQUIRE(received.temperature == send_data.temperature);
   REQUIRE(received.sensor_id == send_data.sensor_id);
@@ -229,8 +218,7 @@ TEST_CASE("transport - TcpTransport SendFrame RecvFrame loopback",
 // 5. TcpTransport not connected returns error
 // ============================================================================
 
-TEST_CASE("transport - TcpTransport not connected returns error",
-          "[transport][tcp]") {
+TEST_CASE("transport - TcpTransport not connected returns error", "[transport][tcp]") {
   osp::TcpTransport transport;
   REQUIRE(!transport.IsConnected());
 
@@ -251,21 +239,23 @@ TEST_CASE("transport - TcpTransport not connected returns error",
 // 6. FrameHeader magic validation
 // ============================================================================
 
-TEST_CASE("transport - FrameHeader magic validation",
-          "[transport][tcp][integration]") {
+TEST_CASE("transport - FrameHeader magic validation", "[transport][tcp][integration]") {
   osp::TcpListener listener;
   uint16_t port = SetupListener(listener);
 
   // Client sends a frame with bad magic
   std::thread client_thread([port]() {
     auto sock_r = osp::TcpSocket::Create();
-    if (!sock_r.has_value()) return;
+    if (!sock_r.has_value())
+      return;
     osp::TcpSocket sock = static_cast<osp::TcpSocket&&>(sock_r.value());
 
     auto addr_r = osp::SocketAddress::FromIpv4("127.0.0.1", port);
-    if (!addr_r.has_value()) return;
+    if (!addr_r.has_value())
+      return;
     auto conn_r = sock.Connect(addr_r.value());
-    if (!conn_r.has_value()) return;
+    if (!conn_r.has_value())
+      return;
 
     // Build a header with wrong magic
     osp::FrameHeader bad_hdr;
@@ -298,8 +288,7 @@ TEST_CASE("transport - FrameHeader magic validation",
 // 7. NetworkNode construction
 // ============================================================================
 
-TEST_CASE("transport - NetworkNode construction",
-          "[transport][network_node]") {
+TEST_CASE("transport - NetworkNode construction", "[transport][network_node]") {
   osp::NetworkNode<TestPayload> node("test_net_node", 10);
   REQUIRE(std::strcmp(node.Name(), "test_net_node") == 0);
   REQUIRE(node.Id() == 10);
@@ -312,8 +301,7 @@ TEST_CASE("transport - NetworkNode construction",
 // 8. NetworkNode AdvertiseTo (connect to local listener)
 // ============================================================================
 
-TEST_CASE("transport - NetworkNode AdvertiseTo connects to listener",
-          "[transport][network_node][integration]") {
+TEST_CASE("transport - NetworkNode AdvertiseTo connects to listener", "[transport][network_node][integration]") {
   // Reset the bus to avoid cross-test interference
   osp::AsyncBus<TestPayload>::Instance().Reset();
 
@@ -347,8 +335,7 @@ TEST_CASE("transport - NetworkNode AdvertiseTo connects to listener",
 // 9. NetworkNode Listen and AcceptOne
 // ============================================================================
 
-TEST_CASE("transport - NetworkNode Listen and AcceptOne",
-          "[transport][network_node][integration]") {
+TEST_CASE("transport - NetworkNode Listen and AcceptOne", "[transport][network_node][integration]") {
   osp::AsyncBus<TestPayload>::Instance().Reset();
 
   osp::NetworkNode<TestPayload> node("listener_node", 2);
@@ -361,18 +348,19 @@ TEST_CASE("transport - NetworkNode Listen and AcceptOne",
   // Get the assigned port via getsockname
   sockaddr_in bound_addr{};
   socklen_t addr_len = sizeof(bound_addr);
-  ::getsockname(node.ListenerFd(),
-                reinterpret_cast<sockaddr*>(&bound_addr), &addr_len);
+  ::getsockname(node.ListenerFd(), reinterpret_cast<sockaddr*>(&bound_addr), &addr_len);
   uint16_t port = ntohs(bound_addr.sin_port);
   REQUIRE(port > 0);
 
   // Connect a client
   std::thread client_thread([port]() {
     auto sock_r = osp::TcpSocket::Create();
-    if (!sock_r.has_value()) return;
+    if (!sock_r.has_value())
+      return;
     osp::TcpSocket sock = static_cast<osp::TcpSocket&&>(sock_r.value());
     auto addr_r = osp::SocketAddress::FromIpv4("127.0.0.1", port);
-    if (!addr_r.has_value()) return;
+    if (!addr_r.has_value())
+      return;
     (void)sock.Connect(addr_r.value());
     // Keep connection alive briefly
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -389,8 +377,7 @@ TEST_CASE("transport - NetworkNode Listen and AcceptOne",
 // 10. Full roundtrip: NetworkNode A -> NetworkNode B via TCP
 // ============================================================================
 
-TEST_CASE("transport - full roundtrip NetworkNode A to B via TCP",
-          "[transport][network_node][integration]") {
+TEST_CASE("transport - full roundtrip NetworkNode A to B via TCP", "[transport][network_node][integration]") {
   osp::AsyncBus<TestPayload>::Instance().Reset();
 
   // Node B: the receiver. Listens and accepts.
@@ -446,8 +433,7 @@ TEST_CASE("transport - full roundtrip NetworkNode A to B via TCP",
   REQUIRE(hdr.sender_id == 10);
 
   SensorData received;
-  bool ok = osp::Serializer<SensorData>::Deserialize(
-      payload_buf, recv_r.value(), received);
+  bool ok = osp::Serializer<SensorData>::Deserialize(payload_buf, recv_r.value(), received);
   REQUIRE(ok);
   REQUIRE(received.temperature == outgoing.temperature);
   REQUIRE(received.sensor_id == outgoing.sensor_id);
@@ -457,8 +443,7 @@ TEST_CASE("transport - full roundtrip NetworkNode A to B via TCP",
 // 11. P0-4 Transport Frame Extension Tests (v1 format)
 // ============================================================================
 
-TEST_CASE("transport - FrameHeaderV1 encode decode roundtrip",
-          "[transport][codec][v1]") {
+TEST_CASE("transport - FrameHeaderV1 encode decode roundtrip", "[transport][codec][v1]") {
   osp::FrameHeaderV1 original;
   original.magic = osp::kFrameMagicV1;
   original.length = 256;
@@ -482,8 +467,7 @@ TEST_CASE("transport - FrameHeaderV1 encode decode roundtrip",
   REQUIRE(decoded.timestamp_ns == original.timestamp_ns);
 }
 
-TEST_CASE("transport - FrameCodec DetectVersion v0",
-          "[transport][codec][v1]") {
+TEST_CASE("transport - FrameCodec DetectVersion v0", "[transport][codec][v1]") {
   uint8_t buf[14];
   uint32_t magic = osp::kFrameMagicV0;
   std::memcpy(buf, &magic, 4);
@@ -492,8 +476,7 @@ TEST_CASE("transport - FrameCodec DetectVersion v0",
   REQUIRE(version == 0);
 }
 
-TEST_CASE("transport - FrameCodec DetectVersion v1",
-          "[transport][codec][v1]") {
+TEST_CASE("transport - FrameCodec DetectVersion v1", "[transport][codec][v1]") {
   uint8_t buf[26];
   uint32_t magic = osp::kFrameMagicV1;
   std::memcpy(buf, &magic, 4);
@@ -502,8 +485,7 @@ TEST_CASE("transport - FrameCodec DetectVersion v1",
   REQUIRE(version == 1);
 }
 
-TEST_CASE("transport - FrameCodec DetectVersion unknown",
-          "[transport][codec][v1]") {
+TEST_CASE("transport - FrameCodec DetectVersion unknown", "[transport][codec][v1]") {
   uint8_t buf[4];
   uint32_t magic = 0xDEADBEEF;
   std::memcpy(buf, &magic, 4);
@@ -512,8 +494,7 @@ TEST_CASE("transport - FrameCodec DetectVersion unknown",
   REQUIRE(version == UINT8_MAX);
 }
 
-TEST_CASE("transport - SequenceTracker in-order",
-          "[transport][sequence][v1]") {
+TEST_CASE("transport - SequenceTracker in-order", "[transport][sequence][v1]") {
   osp::SequenceTracker tracker;
 
   REQUIRE(tracker.Track(0) == true);
@@ -527,8 +508,7 @@ TEST_CASE("transport - SequenceTracker in-order",
   REQUIRE(tracker.DuplicateCount() == 0);
 }
 
-TEST_CASE("transport - SequenceTracker gap detection",
-          "[transport][sequence][v1]") {
+TEST_CASE("transport - SequenceTracker gap detection", "[transport][sequence][v1]") {
   osp::SequenceTracker tracker;
 
   REQUIRE(tracker.Track(0) == true);
@@ -542,13 +522,12 @@ TEST_CASE("transport - SequenceTracker gap detection",
   REQUIRE(tracker.DuplicateCount() == 0);
 }
 
-TEST_CASE("transport - SequenceTracker reorder detection",
-          "[transport][sequence][v1]") {
+TEST_CASE("transport - SequenceTracker reorder detection", "[transport][sequence][v1]") {
   osp::SequenceTracker tracker;
 
   REQUIRE(tracker.Track(0) == true);
-  REQUIRE(tracker.Track(2) == true);  // Gap: lost 1
-  REQUIRE(tracker.Track(1) == false); // Reordered (within window)
+  REQUIRE(tracker.Track(2) == true);   // Gap: lost 1
+  REQUIRE(tracker.Track(1) == false);  // Reordered (within window)
   REQUIRE(tracker.Track(3) == true);
 
   REQUIRE(tracker.TotalReceived() == 4);
@@ -557,8 +536,7 @@ TEST_CASE("transport - SequenceTracker reorder detection",
   REQUIRE(tracker.DuplicateCount() == 0);
 }
 
-TEST_CASE("transport - SequenceTracker reset",
-          "[transport][sequence][v1]") {
+TEST_CASE("transport - SequenceTracker reset", "[transport][sequence][v1]") {
   osp::SequenceTracker tracker;
 
   tracker.Track(0);
@@ -576,8 +554,7 @@ TEST_CASE("transport - SequenceTracker reset",
   REQUIRE(tracker.DuplicateCount() == 0);
 }
 
-TEST_CASE("transport - SteadyClockNs returns nonzero",
-          "[transport][timestamp][v1]") {
+TEST_CASE("transport - SteadyClockNs returns nonzero", "[transport][timestamp][v1]") {
   uint64_t ts1 = osp::SteadyNowNs();
   REQUIRE(ts1 > 0);
 
@@ -587,8 +564,7 @@ TEST_CASE("transport - SteadyClockNs returns nonzero",
   REQUIRE(ts2 > ts1);
 }
 
-TEST_CASE("transport - TcpTransport SendFrameV1 RecvFrameAuto loopback",
-          "[transport][tcp][v1][integration]") {
+TEST_CASE("transport - TcpTransport SendFrameV1 RecvFrameAuto loopback", "[transport][tcp][v1][integration]") {
   osp::TcpListener listener;
   uint16_t port = SetupListener(listener);
 
@@ -597,12 +573,13 @@ TEST_CASE("transport - TcpTransport SendFrameV1 RecvFrameAuto loopback",
     osp::TcpTransport client;
     auto ep = osp::Endpoint::FromString("127.0.0.1", port);
     auto r = client.Connect(ep);
-    if (!r.has_value()) return;
+    if (!r.has_value())
+      return;
 
     uint8_t payload_buf[64];
-    uint32_t len = osp::Serializer<SensorData>::Serialize(
-        send_data, payload_buf, sizeof(payload_buf));
-    if (len == 0) return;
+    uint32_t len = osp::Serializer<SensorData>::Serialize(send_data, payload_buf, sizeof(payload_buf));
+    if (len == 0)
+      return;
 
     uint64_t ts = osp::SteadyNowNs();
     (void)client.SendFrameV1(0, 42, 100, ts, payload_buf, len);
@@ -627,8 +604,7 @@ TEST_CASE("transport - TcpTransport SendFrameV1 RecvFrameAuto loopback",
   REQUIRE(recv_r.value() == sizeof(SensorData));
 
   SensorData received;
-  bool ok = osp::Serializer<SensorData>::Deserialize(
-      recv_buf, recv_r.value(), received);
+  bool ok = osp::Serializer<SensorData>::Deserialize(recv_buf, recv_r.value(), received);
   REQUIRE(ok);
   REQUIRE(received.temperature == send_data.temperature);
   REQUIRE(received.sensor_id == send_data.sensor_id);
@@ -636,8 +612,7 @@ TEST_CASE("transport - TcpTransport SendFrameV1 RecvFrameAuto loopback",
   client_thread.join();
 }
 
-TEST_CASE("transport - TcpTransport RecvFrameAuto handles v0 frames",
-          "[transport][tcp][v1][integration]") {
+TEST_CASE("transport - TcpTransport RecvFrameAuto handles v0 frames", "[transport][tcp][v1][integration]") {
   osp::TcpListener listener;
   uint16_t port = SetupListener(listener);
 
@@ -646,12 +621,13 @@ TEST_CASE("transport - TcpTransport RecvFrameAuto handles v0 frames",
     osp::TcpTransport client;
     auto ep = osp::Endpoint::FromString("127.0.0.1", port);
     auto r = client.Connect(ep);
-    if (!r.has_value()) return;
+    if (!r.has_value())
+      return;
 
     uint8_t payload_buf[64];
-    uint32_t len = osp::Serializer<SensorData>::Serialize(
-        send_data, payload_buf, sizeof(payload_buf));
-    if (len == 0) return;
+    uint32_t len = osp::Serializer<SensorData>::Serialize(send_data, payload_buf, sizeof(payload_buf));
+    if (len == 0)
+      return;
 
     // Send v0 frame
     (void)client.SendFrame(1, 77, payload_buf, len);
@@ -672,13 +648,12 @@ TEST_CASE("transport - TcpTransport RecvFrameAuto handles v0 frames",
   REQUIRE(hdr.magic == osp::kFrameMagicV0);
   REQUIRE(hdr.type_index == 1);
   REQUIRE(hdr.sender_id == 77);
-  REQUIRE(hdr.seq_num == 0);        // v0 doesn't have seq_num
-  REQUIRE(hdr.timestamp_ns == 0);   // v0 doesn't have timestamp
+  REQUIRE(hdr.seq_num == 0);       // v0 doesn't have seq_num
+  REQUIRE(hdr.timestamp_ns == 0);  // v0 doesn't have timestamp
   REQUIRE(recv_r.value() == sizeof(SensorData));
 
   SensorData received;
-  bool ok = osp::Serializer<SensorData>::Deserialize(
-      recv_buf, recv_r.value(), received);
+  bool ok = osp::Serializer<SensorData>::Deserialize(recv_buf, recv_r.value(), received);
   REQUIRE(ok);
   REQUIRE(received.temperature == send_data.temperature);
   REQUIRE(received.sensor_id == send_data.sensor_id);
@@ -686,15 +661,13 @@ TEST_CASE("transport - TcpTransport RecvFrameAuto handles v0 frames",
   client_thread.join();
 }
 
-TEST_CASE("transport - kFrameMagicV0 and kFrameMagicV1 constants",
-          "[transport][constants][v1]") {
+TEST_CASE("transport - kFrameMagicV0 and kFrameMagicV1 constants", "[transport][constants][v1]") {
   REQUIRE(osp::kFrameMagicV0 == 0x4F535000);
   REQUIRE(osp::kFrameMagicV1 == 0x4F535001);
   REQUIRE(osp::kFrameMagic == osp::kFrameMagicV0);  // Backward compat
 }
 
-TEST_CASE("Transport FrameHeaderV1 encode/decode roundtrip",
-          "[transport][codec][v1]") {
+TEST_CASE("Transport FrameHeaderV1 encode/decode roundtrip", "[transport][codec][v1]") {
   osp::FrameHeaderV1 original;
   original.magic = osp::kFrameMagicV1;
   original.length = 512;
@@ -718,8 +691,7 @@ TEST_CASE("Transport FrameHeaderV1 encode/decode roundtrip",
   REQUIRE(decoded.timestamp_ns == original.timestamp_ns);
 }
 
-TEST_CASE("Transport SequenceTracker gap detection",
-          "[transport][sequence][v1]") {
+TEST_CASE("Transport SequenceTracker gap detection", "[transport][sequence][v1]") {
   osp::SequenceTracker tracker;
 
   REQUIRE(tracker.Track(0) == true);
@@ -744,7 +716,8 @@ TEST_CASE("Transport zero-length payload", "[transport][tcp][integration]") {
     osp::TcpTransport client;
     auto ep = osp::Endpoint::FromString("127.0.0.1", port);
     auto r = client.Connect(ep);
-    if (!r.has_value()) return;
+    if (!r.has_value())
+      return;
 
     // Send frame with empty payload
     uint8_t empty_buf[1] = {0};
@@ -781,7 +754,8 @@ TEST_CASE("Transport maximum payload size", "[transport][tcp][integration]") {
     osp::TcpTransport client;
     auto ep = osp::Endpoint::FromString("127.0.0.1", port);
     auto r = client.Connect(ep);
-    if (!r.has_value()) return;
+    if (!r.has_value())
+      return;
 
     // Create large payload
     uint8_t* large_buf = new uint8_t[kMaxPayload];
@@ -833,13 +807,16 @@ TEST_CASE("Transport frame version mismatch", "[transport][tcp][integration]") {
 
   std::thread client_thread([port]() {
     auto sock_r = osp::TcpSocket::Create();
-    if (!sock_r.has_value()) return;
+    if (!sock_r.has_value())
+      return;
     osp::TcpSocket sock = static_cast<osp::TcpSocket&&>(sock_r.value());
 
     auto addr_r = osp::SocketAddress::FromIpv4("127.0.0.1", port);
-    if (!addr_r.has_value()) return;
+    if (!addr_r.has_value())
+      return;
     auto conn_r = sock.Connect(addr_r.value());
-    if (!conn_r.has_value()) return;
+    if (!conn_r.has_value())
+      return;
 
     // Send v0 frame
     osp::FrameHeader v0_hdr;
@@ -872,8 +849,8 @@ TEST_CASE("Transport frame version mismatch", "[transport][tcp][integration]") {
   REQUIRE(recv_r.has_value());
   REQUIRE(hdr_v1.magic == osp::kFrameMagicV0);
   REQUIRE(hdr_v1.sender_id == 55);
-  REQUIRE(hdr_v1.seq_num == 0);        // v0 doesn't have seq_num
-  REQUIRE(hdr_v1.timestamp_ns == 0);   // v0 doesn't have timestamp
+  REQUIRE(hdr_v1.seq_num == 0);       // v0 doesn't have seq_num
+  REQUIRE(hdr_v1.timestamp_ns == 0);  // v0 doesn't have timestamp
 
   client_thread.join();
 }

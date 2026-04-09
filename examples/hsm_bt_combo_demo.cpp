@@ -33,14 +33,7 @@ struct DeviceContext {
 
 // -- Events -----------------------------------------------------------------
 
-enum EventId : uint32_t {
-  EVENT_START = 1,
-  EVENT_INIT_DONE,
-  EVENT_ERROR,
-  EVENT_RESET,
-  EVENT_STOP,
-  EVENT_TICK
-};
+enum EventId : uint32_t { EVENT_START = 1, EVENT_INIT_DONE, EVENT_ERROR, EVENT_RESET, EVENT_STOP, EVENT_TICK };
 
 // -- BT Actions/Conditions --------------------------------------------------
 
@@ -61,8 +54,7 @@ osp::NodeStatus ExecuteTask(DeviceContext& ctx) {
 }
 
 osp::NodeStatus ReportStatus(DeviceContext& ctx) {
-  std::printf("  [BT] ReportStatus: cycle=%d, task_done=%d\n",
-              ctx.cycle_count, ctx.task_done);
+  std::printf("  [BT] ReportStatus: cycle=%d, task_done=%d\n", ctx.cycle_count, ctx.task_done);
   return osp::NodeStatus::kSuccess;
 }
 
@@ -90,8 +82,7 @@ void InitializingEntry(DeviceContext& ctx) {
   ctx.initialized = true;
 }
 
-osp::TransitionResult InitializingHandler(DeviceContext& ctx,
-                                          const osp::Event& event) {
+osp::TransitionResult InitializingHandler(DeviceContext& ctx, const osp::Event& event) {
   if (event.id == EVENT_INIT_DONE) {
     std::printf("[HSM] Initializing: received INIT_DONE -> Running\n");
     return ctx.hsm_ptr->RequestTransition(s_running);
@@ -100,13 +91,11 @@ osp::TransitionResult InitializingHandler(DeviceContext& ctx,
 }
 
 // Running state: tick BT each cycle
-osp::TransitionResult RunningHandler(DeviceContext& ctx,
-                                     const osp::Event& event) {
+osp::TransitionResult RunningHandler(DeviceContext& ctx, const osp::Event& event) {
   if (event.id == EVENT_TICK) {
     std::printf("[HSM] Running: ticking BT...\n");
     osp::NodeStatus status = ctx.bt_ptr->Tick();
-    std::printf("[HSM] Running: BT status = %s\n",
-                osp::NodeStatusToString(status));
+    std::printf("[HSM] Running: BT status = %s\n", osp::NodeStatusToString(status));
     return osp::TransitionResult::kHandled;
   }
   if (event.id == EVENT_ERROR) {
@@ -126,8 +115,7 @@ void ErrorEntry(DeviceContext& ctx) {
   std::printf("[HSM] Error: entry (error_count=%d)\n", ctx.error_count);
 }
 
-osp::TransitionResult ErrorHandler(DeviceContext& ctx,
-                                   const osp::Event& event) {
+osp::TransitionResult ErrorHandler(DeviceContext& ctx, const osp::Event& event) {
   if (event.id == EVENT_RESET) {
     if (ctx.error_count < 3) {
       std::printf("[HSM] Error: received RESET (count < 3) -> Idle\n");
@@ -181,41 +169,13 @@ int main() {
       nullptr   // no guard
   });
 
-  s_initializing = hsm.AddState({
-      "Initializing",
-      -1,
-      InitializingHandler,
-      InitializingEntry,
-      nullptr,
-      nullptr
-  });
+  s_initializing = hsm.AddState({"Initializing", -1, InitializingHandler, InitializingEntry, nullptr, nullptr});
 
-  s_running = hsm.AddState({
-      "Running",
-      -1,
-      RunningHandler,
-      nullptr,
-      nullptr,
-      nullptr
-  });
+  s_running = hsm.AddState({"Running", -1, RunningHandler, nullptr, nullptr, nullptr});
 
-  s_error = hsm.AddState({
-      "Error",
-      -1,
-      ErrorHandler,
-      ErrorEntry,
-      nullptr,
-      nullptr
-  });
+  s_error = hsm.AddState({"Error", -1, ErrorHandler, ErrorEntry, nullptr, nullptr});
 
-  s_shutdown = hsm.AddState({
-      "Shutdown",
-      -1,
-      ShutdownHandler,
-      ShutdownEntry,
-      nullptr,
-      nullptr
-  });
+  s_shutdown = hsm.AddState({"Shutdown", -1, ShutdownHandler, ShutdownEntry, nullptr, nullptr});
 
   hsm.SetInitialState(s_idle);
   hsm.Start();
@@ -268,8 +228,8 @@ int main() {
   std::printf("Current state: %s\n\n", hsm.CurrentStateName());
 
   std::printf("=== Demo Complete ===\n");
-  std::printf("Final stats: initialized=%d, error_count=%d, cycle_count=%d\n",
-              ctx.initialized, ctx.error_count, ctx.cycle_count);
+  std::printf("Final stats: initialized=%d, error_count=%d, cycle_count=%d\n", ctx.initialized, ctx.error_count,
+              ctx.cycle_count);
 
   return 0;
 }

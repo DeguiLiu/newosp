@@ -5,10 +5,10 @@
 
 #include "osp/config.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <cstdio>
 #include <cstring>
+
+#include <catch2/catch_test_macros.hpp>
 
 // ============================================================================
 // INI Backend Tests
@@ -27,9 +27,7 @@ TEST_CASE("INI LoadBuffer basic", "[config][ini]") {
       "level = INFO\n";
 
   IniCfg cfg;
-  auto result = cfg.LoadBuffer(ini_data,
-                               static_cast<uint32_t>(std::strlen(ini_data)),
-                               osp::ConfigFormat::kIni);
+  auto result = cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
   REQUIRE(result.has_value());
 
   REQUIRE(cfg.GetInt("network", "port", 0) == 5090);
@@ -57,8 +55,7 @@ TEST_CASE("INI GetBool", "[config][ini]") {
       "active = on\n";
 
   IniCfg cfg;
-  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
 
   REQUIRE(cfg.GetBool("flags", "debug") == true);
   REQUIRE(cfg.GetBool("flags", "verbose") == true);
@@ -70,8 +67,7 @@ TEST_CASE("INI GetBool", "[config][ini]") {
 TEST_CASE("INI GetPort", "[config][ini]") {
   const char* ini_data = "[net]\nport = 8080\n";
   IniCfg cfg;
-  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
 
   REQUIRE(cfg.GetPort("net", "port") == 8080);
   REQUIRE(cfg.GetPort("net", "missing", 3000) == 3000);
@@ -80,8 +76,7 @@ TEST_CASE("INI GetPort", "[config][ini]") {
 TEST_CASE("INI GetDouble", "[config][ini]") {
   const char* ini_data = "[math]\npi = 3.14159\n";
   IniCfg cfg;
-  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
 
   REQUIRE(cfg.GetDouble("math", "pi") > 3.14);
   REQUIRE(cfg.GetDouble("math", "pi") < 3.15);
@@ -90,8 +85,7 @@ TEST_CASE("INI GetDouble", "[config][ini]") {
 TEST_CASE("INI HasSection and HasKey", "[config][ini]") {
   const char* ini_data = "[net]\nport = 80\n";
   IniCfg cfg;
-  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
 
   REQUIRE(cfg.HasSection("net"));
   REQUIRE(!cfg.HasSection("missing"));
@@ -102,8 +96,7 @@ TEST_CASE("INI HasSection and HasKey", "[config][ini]") {
 TEST_CASE("INI FindInt optional", "[config][ini]") {
   const char* ini_data = "[data]\ncount = 100\n";
   IniCfg cfg;
-  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
 
   auto found = cfg.FindInt("data", "count");
   REQUIRE(found.has_value());
@@ -117,10 +110,8 @@ TEST_CASE("INI override on reload", "[config][ini]") {
   const char* ini1 = "[s]\nk = v1\n";
   const char* ini2 = "[s]\nk = v2\n";
   IniCfg cfg;
-  cfg.LoadBuffer(ini1, static_cast<uint32_t>(std::strlen(ini1)),
-                 osp::ConfigFormat::kIni);
-  cfg.LoadBuffer(ini2, static_cast<uint32_t>(std::strlen(ini2)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini1, static_cast<uint32_t>(std::strlen(ini1)), osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini2, static_cast<uint32_t>(std::strlen(ini2)), osp::ConfigFormat::kIni);
 
   REQUIRE(std::strcmp(cfg.GetString("s", "k"), "v2") == 0);
 }
@@ -167,16 +158,14 @@ TEST_CASE("INI LoadFile from disk", "[config][ini]") {
 TEST_CASE("INI EntryCount", "[config][ini]") {
   const char* ini_data = "[a]\nk1 = v1\nk2 = v2\n[b]\nk3 = v3\n";
   IniCfg cfg;
-  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
   REQUIRE(cfg.EntryCount() == 3);
 }
 
 TEST_CASE("INI case insensitive keys", "[config][ini]") {
   const char* ini_data = "[Network]\nPort = 80\n";
   IniCfg cfg;
-  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
 
   REQUIRE(cfg.GetInt("network", "port", 0) == 80);
   REQUIRE(cfg.GetInt("NETWORK", "PORT", 0) == 80);
@@ -204,9 +193,7 @@ TEST_CASE("JSON LoadBuffer basic", "[config][json]") {
   })";
 
   JsonCfg cfg;
-  auto result = cfg.LoadBuffer(json_data,
-                                static_cast<uint32_t>(std::strlen(json_data)),
-                                osp::ConfigFormat::kJson);
+  auto result = cfg.LoadBuffer(json_data, static_cast<uint32_t>(std::strlen(json_data)), osp::ConfigFormat::kJson);
   REQUIRE(result.has_value());
 
   REQUIRE(cfg.GetInt("network", "port", 0) == 5090);
@@ -218,9 +205,7 @@ TEST_CASE("JSON flat keys (no section)", "[config][json]") {
   const char* json_data = R"({"name": "test", "count": 42})";
 
   JsonCfg cfg;
-  auto result = cfg.LoadBuffer(json_data,
-                                static_cast<uint32_t>(std::strlen(json_data)),
-                                osp::ConfigFormat::kJson);
+  auto result = cfg.LoadBuffer(json_data, static_cast<uint32_t>(std::strlen(json_data)), osp::ConfigFormat::kJson);
   REQUIRE(result.has_value());
 
   REQUIRE(std::strcmp(cfg.GetString("", "name"), "test") == 0);
@@ -236,8 +221,7 @@ TEST_CASE("JSON boolean values", "[config][json]") {
   })";
 
   JsonCfg cfg;
-  cfg.LoadBuffer(json_data, static_cast<uint32_t>(std::strlen(json_data)),
-                 osp::ConfigFormat::kJson);
+  cfg.LoadBuffer(json_data, static_cast<uint32_t>(std::strlen(json_data)), osp::ConfigFormat::kJson);
 
   REQUIRE(cfg.GetBool("flags", "debug") == true);
   REQUIRE(cfg.GetBool("flags", "verbose") == false);
@@ -253,8 +237,7 @@ TEST_CASE("JSON numeric values", "[config][json]") {
   })";
 
   JsonCfg cfg;
-  cfg.LoadBuffer(json_data, static_cast<uint32_t>(std::strlen(json_data)),
-                 osp::ConfigFormat::kJson);
+  cfg.LoadBuffer(json_data, static_cast<uint32_t>(std::strlen(json_data)), osp::ConfigFormat::kJson);
 
   REQUIRE(cfg.GetDouble("math", "pi") > 3.14);
   REQUIRE(cfg.GetDouble("math", "pi") < 3.15);
@@ -265,9 +248,7 @@ TEST_CASE("JSON numeric values", "[config][json]") {
 TEST_CASE("JSON parse error", "[config][json]") {
   const char* bad_json = "{ invalid json ]";
   JsonCfg cfg;
-  auto result = cfg.LoadBuffer(bad_json,
-                                static_cast<uint32_t>(std::strlen(bad_json)),
-                                osp::ConfigFormat::kJson);
+  auto result = cfg.LoadBuffer(bad_json, static_cast<uint32_t>(std::strlen(bad_json)), osp::ConfigFormat::kJson);
   REQUIRE(!result.has_value());
   REQUIRE(result.get_error() == osp::ConfigError::kParseError);
 }
@@ -314,9 +295,7 @@ TEST_CASE("YAML LoadBuffer basic", "[config][yaml]") {
       "  level: INFO\n";
 
   YamlCfg cfg;
-  auto result = cfg.LoadBuffer(yaml_data,
-                                static_cast<uint32_t>(std::strlen(yaml_data)),
-                                osp::ConfigFormat::kYaml);
+  auto result = cfg.LoadBuffer(yaml_data, static_cast<uint32_t>(std::strlen(yaml_data)), osp::ConfigFormat::kYaml);
   REQUIRE(result.has_value());
 
   REQUIRE(cfg.GetInt("network", "port", 0) == 5090);
@@ -330,9 +309,7 @@ TEST_CASE("YAML flat keys (no section)", "[config][yaml]") {
       "count: 42\n";
 
   YamlCfg cfg;
-  auto result = cfg.LoadBuffer(yaml_data,
-                                static_cast<uint32_t>(std::strlen(yaml_data)),
-                                osp::ConfigFormat::kYaml);
+  auto result = cfg.LoadBuffer(yaml_data, static_cast<uint32_t>(std::strlen(yaml_data)), osp::ConfigFormat::kYaml);
   REQUIRE(result.has_value());
 
   REQUIRE(std::strcmp(cfg.GetString("", "name"), "test") == 0);
@@ -346,8 +323,7 @@ TEST_CASE("YAML boolean values", "[config][yaml]") {
       "  verbose: false\n";
 
   YamlCfg cfg;
-  cfg.LoadBuffer(yaml_data, static_cast<uint32_t>(std::strlen(yaml_data)),
-                 osp::ConfigFormat::kYaml);
+  cfg.LoadBuffer(yaml_data, static_cast<uint32_t>(std::strlen(yaml_data)), osp::ConfigFormat::kYaml);
 
   REQUIRE(cfg.GetBool("flags", "debug") == true);
   REQUIRE(cfg.GetBool("flags", "verbose") == false);
@@ -361,8 +337,7 @@ TEST_CASE("YAML numeric values", "[config][yaml]") {
       "  port: 65535\n";
 
   YamlCfg cfg;
-  cfg.LoadBuffer(yaml_data, static_cast<uint32_t>(std::strlen(yaml_data)),
-                 osp::ConfigFormat::kYaml);
+  cfg.LoadBuffer(yaml_data, static_cast<uint32_t>(std::strlen(yaml_data)), osp::ConfigFormat::kYaml);
 
   REQUIRE(cfg.GetDouble("math", "pi") > 3.14);
   REQUIRE(cfg.GetDouble("math", "pi") < 3.15);
@@ -411,18 +386,14 @@ TEST_CASE("MultiConfig dispatches INI and JSON", "[config][multi]") {
 
   // Load INI
   const char* ini_data = "[sec]\nkey1 = val1\n";
-  auto r1 = cfg.LoadBuffer(ini_data,
-                            static_cast<uint32_t>(std::strlen(ini_data)),
-                            osp::ConfigFormat::kIni);
+  auto r1 = cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
   REQUIRE(r1.has_value());
   REQUIRE(std::strcmp(cfg.GetString("sec", "key1"), "val1") == 0);
 
   // Load JSON (additive - entries accumulate)
   osp::MultiConfig cfg2;
   const char* json_data = R"({"sec": {"key2": "val2"}})";
-  auto r2 = cfg2.LoadBuffer(json_data,
-                             static_cast<uint32_t>(std::strlen(json_data)),
-                             osp::ConfigFormat::kJson);
+  auto r2 = cfg2.LoadBuffer(json_data, static_cast<uint32_t>(std::strlen(json_data)), osp::ConfigFormat::kJson);
   REQUIRE(r2.has_value());
   REQUIRE(std::strcmp(cfg2.GetString("sec", "key2"), "val2") == 0);
 }
@@ -435,16 +406,12 @@ TEST_CASE("MultiConfig dispatches INI and YAML", "[config][multi]") {
   osp::MultiConfig cfg;
 
   const char* ini_data = "[sec]\nkey1 = val1\n";
-  auto r1 = cfg.LoadBuffer(ini_data,
-                            static_cast<uint32_t>(std::strlen(ini_data)),
-                            osp::ConfigFormat::kIni);
+  auto r1 = cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
   REQUIRE(r1.has_value());
 
   osp::MultiConfig cfg2;
   const char* yaml_data = "sec:\n  key2: val2\n";
-  auto r2 = cfg2.LoadBuffer(yaml_data,
-                             static_cast<uint32_t>(std::strlen(yaml_data)),
-                             osp::ConfigFormat::kYaml);
+  auto r2 = cfg2.LoadBuffer(yaml_data, static_cast<uint32_t>(std::strlen(yaml_data)), osp::ConfigFormat::kYaml);
   REQUIRE(r2.has_value());
   REQUIRE(std::strcmp(cfg2.GetString("sec", "key2"), "val2") == 0);
 }
@@ -499,8 +466,7 @@ TEST_CASE("ConfigStore GetPort clamping", "[config][ini]") {
 #ifdef OSP_CONFIG_INI_ENABLED
   const char* ini_data = "[net]\nhigh = 99999\nneg = -1\n";
   IniCfg cfg;
-  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
 
   REQUIRE(cfg.GetPort("net", "high") == 65535);
   REQUIRE(cfg.GetPort("net", "neg") == 0);
@@ -511,8 +477,7 @@ TEST_CASE("ConfigStore FindBool optional", "[config][ini]") {
 #ifdef OSP_CONFIG_INI_ENABLED
   const char* ini_data = "[f]\nok = true\n";
   IniCfg cfg;
-  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)),
-                 osp::ConfigFormat::kIni);
+  cfg.LoadBuffer(ini_data, static_cast<uint32_t>(std::strlen(ini_data)), osp::ConfigFormat::kIni);
 
   auto found = cfg.FindBool("f", "ok");
   REQUIRE(found.has_value());

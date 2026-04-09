@@ -3,16 +3,16 @@
  * @brief Unit tests for ConsoleShell and UartShell backends (shell.hpp).
  */
 
-#include <catch2/catch_test_macros.hpp>
-
 #include "osp/shell.hpp"
 
-#include <chrono>
 #include <cstring>
-#include <thread>
-#include <unistd.h>
+
+#include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <pty.h>
 #include <sys/select.h>
+#include <thread>
+#include <unistd.h>
 
 // ---------------------------------------------------------------------------
 // Helper: non-blocking read with timeout, check if output contains needle
@@ -45,9 +45,11 @@ static void DrainFd(int fd, int timeout_ms = 200) {
     FD_SET(fd, &fds);
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
-    if (select(fd + 1, &fds, nullptr, nullptr, &tv) <= 0) break;
+    if (select(fd + 1, &fds, nullptr, nullptr, &tv) <= 0)
+      break;
     ssize_t n = read(fd, tmp, sizeof(tmp));
-    if (n <= 0) break;
+    if (n <= 0)
+      break;
   }
 }
 
@@ -76,12 +78,9 @@ static int PtyCmd1(int /*argc*/, char* /*argv*/[]) {
 // ---------------------------------------------------------------------------
 // Register unique test commands at static-init time
 // ---------------------------------------------------------------------------
-static osp::ShellAutoReg reg_pipe_cmd_1("pipe_cmd_1", PipeCmd1,
-                                        "pipe test cmd");
-static osp::ShellAutoReg reg_pipe_cmd_printf("pipe_cmd_printf", PipeCmdPrintf,
-                                             "pipe printf cmd");
-static osp::ShellAutoReg reg_pty_cmd_1("pty_cmd_1", PtyCmd1,
-                                       "pty test cmd");
+static osp::ShellAutoReg reg_pipe_cmd_1("pipe_cmd_1", PipeCmd1, "pipe test cmd");
+static osp::ShellAutoReg reg_pipe_cmd_printf("pipe_cmd_printf", PipeCmdPrintf, "pipe printf cmd");
+static osp::ShellAutoReg reg_pty_cmd_1("pty_cmd_1", PtyCmd1, "pty test cmd");
 
 // ============================================================================
 // ConsoleShell tests

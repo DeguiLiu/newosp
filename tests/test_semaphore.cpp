@@ -6,27 +6,25 @@
 
 #include "osp/semaphore.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
-#include <cstdint>
 #include <thread>
 
 // ============================================================================
 // LightSemaphore tests
 // ============================================================================
 
-TEST_CASE("semaphore - LightSemaphore initial count zero TryWait fails",
-          "[semaphore]") {
+TEST_CASE("semaphore - LightSemaphore initial count zero TryWait fails", "[semaphore]") {
   osp::LightSemaphore sem(0);
   REQUIRE(sem.Count() == 0U);
   REQUIRE_FALSE(sem.TryWait());
   REQUIRE(sem.Count() == 0U);
 }
 
-TEST_CASE("semaphore - LightSemaphore Signal then Wait succeeds",
-          "[semaphore]") {
+TEST_CASE("semaphore - LightSemaphore Signal then Wait succeeds", "[semaphore]") {
   osp::LightSemaphore sem(0);
   sem.Signal();
   REQUIRE(sem.Count() == 1U);
@@ -34,8 +32,7 @@ TEST_CASE("semaphore - LightSemaphore Signal then Wait succeeds",
   REQUIRE(sem.Count() == 0U);
 }
 
-TEST_CASE("semaphore - LightSemaphore multiple Signal accumulates count",
-          "[semaphore]") {
+TEST_CASE("semaphore - LightSemaphore multiple Signal accumulates count", "[semaphore]") {
   osp::LightSemaphore sem(0);
   sem.Signal();
   sem.Signal();
@@ -51,8 +48,7 @@ TEST_CASE("semaphore - LightSemaphore multiple Signal accumulates count",
   REQUIRE_FALSE(sem.TryWait());
 }
 
-TEST_CASE("semaphore - LightSemaphore WaitFor timeout returns false",
-          "[semaphore]") {
+TEST_CASE("semaphore - LightSemaphore WaitFor timeout returns false", "[semaphore]") {
   osp::LightSemaphore sem(0);
 
   auto start = std::chrono::steady_clock::now();
@@ -62,13 +58,11 @@ TEST_CASE("semaphore - LightSemaphore WaitFor timeout returns false",
   REQUIRE_FALSE(result);
   REQUIRE(sem.Count() == 0U);
   // Should have waited at least ~10ms (allow some slack)
-  auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
   REQUIRE(elapsed_ms >= 5);
 }
 
-TEST_CASE("semaphore - LightSemaphore WaitFor succeeds when signaled",
-          "[semaphore]") {
+TEST_CASE("semaphore - LightSemaphore WaitFor succeeds when signaled", "[semaphore]") {
   osp::LightSemaphore sem(0);
   std::atomic<bool> done{false};
 
@@ -84,8 +78,7 @@ TEST_CASE("semaphore - LightSemaphore WaitFor succeeds when signaled",
   producer.join();
 }
 
-TEST_CASE("semaphore - LightSemaphore producer-consumer with threads",
-          "[semaphore]") {
+TEST_CASE("semaphore - LightSemaphore producer-consumer with threads", "[semaphore]") {
   osp::LightSemaphore sem(0);
   constexpr int kItemCount = 100;
   std::atomic<int> consumed{0};
@@ -133,8 +126,7 @@ TEST_CASE("semaphore - BinarySemaphore Signal clamps to 1", "[semaphore]") {
   REQUIRE_FALSE(bsem.TryWait());
 }
 
-TEST_CASE("semaphore - BinarySemaphore basic signal/wait cycle",
-          "[semaphore]") {
+TEST_CASE("semaphore - BinarySemaphore basic signal/wait cycle", "[semaphore]") {
   osp::BinarySemaphore bsem(0);
   std::atomic<int> counter{0};
 
@@ -151,8 +143,7 @@ TEST_CASE("semaphore - BinarySemaphore basic signal/wait cycle",
 
   // Wait for first iteration
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (counter.load() < 1 &&
-         std::chrono::steady_clock::now() < deadline) {
+  while (counter.load() < 1 && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   REQUIRE(counter.load() == 1);
@@ -170,8 +161,7 @@ TEST_CASE("semaphore - BinarySemaphore basic signal/wait cycle",
 
 #if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
 
-TEST_CASE("semaphore - PosixSemaphore Post and Wait round-trip",
-          "[semaphore]") {
+TEST_CASE("semaphore - PosixSemaphore Post and Wait round-trip", "[semaphore]") {
   osp::PosixSemaphore psem(0);
   REQUIRE(psem.IsValid());
 
@@ -190,8 +180,7 @@ TEST_CASE("semaphore - PosixSemaphore Post and Wait round-trip",
   REQUIRE_FALSE(psem.TryWait());
 }
 
-TEST_CASE("semaphore - PosixSemaphore TryWait on empty returns false",
-          "[semaphore]") {
+TEST_CASE("semaphore - PosixSemaphore TryWait on empty returns false", "[semaphore]") {
   osp::PosixSemaphore psem(0);
   REQUIRE(psem.IsValid());
 
@@ -213,13 +202,11 @@ TEST_CASE("semaphore - PosixSemaphore WaitFor timeout", "[semaphore]") {
   auto elapsed = std::chrono::steady_clock::now() - start;
 
   REQUIRE_FALSE(result);
-  auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
   REQUIRE(elapsed_ms >= 5);
 }
 
-TEST_CASE("semaphore - PosixSemaphore WaitFor succeeds when posted",
-          "[semaphore]") {
+TEST_CASE("semaphore - PosixSemaphore WaitFor succeeds when posted", "[semaphore]") {
   osp::PosixSemaphore psem(0);
   REQUIRE(psem.IsValid());
 

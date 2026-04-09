@@ -9,9 +9,8 @@
 #include "osp/node_manager.hpp"
 #endif
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <thread>
 
@@ -477,7 +476,8 @@ TEST_CASE("node_manager_hsm - Scheduler injection heartbeat keeps connected", "[
 // Edge Case Tests: Scheduler Injection
 // ============================================================================
 
-TEST_CASE("node_manager_hsm - Scheduler injection multiple modules share scheduler", "[HsmNodeManager][scheduler][edge]") {
+TEST_CASE("node_manager_hsm - Scheduler injection multiple modules share scheduler",
+          "[HsmNodeManager][scheduler][edge]") {
   osp::TimerScheduler<> sched;
   sched.Start();
 
@@ -668,7 +668,8 @@ TEST_CASE("HsmNodeManager: scheduler injection - timeout detection works", "[Hsm
 }
 
 #if OSP_HAS_NETWORK
-TEST_CASE("HsmNodeManager: scheduler injection - shared scheduler with NodeManager", "[HsmNodeManager][scheduler][edge]") {
+TEST_CASE("HsmNodeManager: scheduler injection - shared scheduler with NodeManager",
+          "[HsmNodeManager][scheduler][edge]") {
   osp::TimerScheduler<> sched;
   sched.Start();
 

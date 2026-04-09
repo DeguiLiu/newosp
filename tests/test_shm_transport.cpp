@@ -6,17 +6,16 @@
 
 #include "osp/shm_transport.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <thread>
-#include <vector>
 
+#include <atomic>
+#include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
+#include <vector>
 
 #if defined(OSP_PLATFORM_LINUX)
 
@@ -24,8 +23,7 @@
 // SharedMemorySegment tests
 // ============================================================================
 
-TEST_CASE("shm_transport - SharedMemorySegment create and map",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - SharedMemorySegment create and map", "[shm_transport]") {
   auto result = osp::SharedMemorySegment::Create("test_seg_1", 4096);
   REQUIRE(result.has_value());
 
@@ -41,8 +39,7 @@ TEST_CASE("shm_transport - SharedMemorySegment create and map",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - SharedMemorySegment open existing segment",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - SharedMemorySegment open existing segment", "[shm_transport]") {
   // Create segment
   auto create_result = osp::SharedMemorySegment::Create("test_seg_2", 8192);
   REQUIRE(create_result.has_value());
@@ -61,15 +58,13 @@ TEST_CASE("shm_transport - SharedMemorySegment open existing segment",
   creator.Unlink();
 }
 
-TEST_CASE("shm_transport - SharedMemorySegment open non-existent fails",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - SharedMemorySegment open non-existent fails", "[shm_transport]") {
   auto result = osp::SharedMemorySegment::Open("nonexistent_segment_xyz");
   REQUIRE_FALSE(result.has_value());
   REQUIRE(result.get_error() == osp::ShmError::kOpenFailed);
 }
 
-TEST_CASE("shm_transport - SharedMemorySegment move semantics",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - SharedMemorySegment move semantics", "[shm_transport]") {
   auto result = osp::SharedMemorySegment::Create("test_seg_move", 2048);
   REQUIRE(result.has_value());
 
@@ -88,14 +83,12 @@ TEST_CASE("shm_transport - SharedMemorySegment move semantics",
 // ShmRingBuffer tests
 // ============================================================================
 
-TEST_CASE("shm_transport - ShmRingBuffer single thread push/pop",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmRingBuffer single thread push/pop", "[shm_transport]") {
   constexpr uint32_t kSlotSize = 128;
   constexpr uint32_t kSlotCount = 16;
   using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
 
-  auto seg_result = osp::SharedMemorySegment::Create("test_ring_1",
-                                                      RingBuffer::Size());
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_1", RingBuffer::Size());
   REQUIRE(seg_result.has_value());
   auto& seg = seg_result.value();
 
@@ -119,14 +112,12 @@ TEST_CASE("shm_transport - ShmRingBuffer single thread push/pop",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmRingBuffer full and empty boundaries",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmRingBuffer full and empty boundaries", "[shm_transport]") {
   constexpr uint32_t kSlotSize = 64;
   constexpr uint32_t kSlotCount = 8;
   using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
 
-  auto seg_result = osp::SharedMemorySegment::Create("test_ring_full",
-                                                      RingBuffer::Size());
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_full", RingBuffer::Size());
   REQUIRE(seg_result.has_value());
   auto& seg = seg_result.value();
 
@@ -156,14 +147,12 @@ TEST_CASE("shm_transport - ShmRingBuffer full and empty boundaries",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmRingBuffer oversized message rejected",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmRingBuffer oversized message rejected", "[shm_transport]") {
   constexpr uint32_t kSlotSize = 64;
   constexpr uint32_t kSlotCount = 8;
   using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
 
-  auto seg_result = osp::SharedMemorySegment::Create("test_ring_oversize",
-                                                      RingBuffer::Size());
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_oversize", RingBuffer::Size());
   REQUIRE(seg_result.has_value());
   auto& seg = seg_result.value();
 
@@ -178,16 +167,14 @@ TEST_CASE("shm_transport - ShmRingBuffer oversized message rejected",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmRingBuffer multi-threaded MPSC",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmRingBuffer multi-threaded MPSC", "[shm_transport]") {
   constexpr uint32_t kSlotSize = 256;
   constexpr uint32_t kSlotCount = 64;
   constexpr uint32_t kProducerCount = 4;
   constexpr uint32_t kMessagesPerProducer = 100;
   using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
 
-  auto seg_result = osp::SharedMemorySegment::Create("test_ring_mpsc",
-                                                      RingBuffer::Size());
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_mpsc", RingBuffer::Size());
   REQUIRE(seg_result.has_value());
   auto& seg = seg_result.value();
 
@@ -241,16 +228,14 @@ TEST_CASE("shm_transport - ShmRingBuffer multi-threaded MPSC",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmRingBuffer concurrent MPSC stress",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmRingBuffer concurrent MPSC stress", "[shm_transport]") {
   constexpr uint32_t kSlotSize = 256;
   constexpr uint32_t kSlotCount = 64;
   constexpr uint32_t kProducerCount = 4;
   constexpr uint32_t kMessagesPerProducer = 500;
   using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
 
-  auto seg_result = osp::SharedMemorySegment::Create("test_ring_mpsc_stress",
-                                                      RingBuffer::Size());
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_mpsc_stress", RingBuffer::Size());
   REQUIRE(seg_result.has_value());
   auto& seg = seg_result.value();
 
@@ -309,14 +294,12 @@ TEST_CASE("shm_transport - ShmRingBuffer concurrent MPSC stress",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmRingBuffer cache line separation",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmRingBuffer cache line separation", "[shm_transport]") {
   constexpr uint32_t kSlotSize = 128;
   constexpr uint32_t kSlotCount = 16;
   using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
 
-  auto seg_result = osp::SharedMemorySegment::Create("test_ring_cacheline",
-                                                      RingBuffer::Size());
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_cacheline", RingBuffer::Size());
   REQUIRE(seg_result.has_value());
   auto& seg = seg_result.value();
 
@@ -337,14 +320,12 @@ TEST_CASE("shm_transport - ShmRingBuffer cache line separation",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmRingBuffer full wraparound",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmRingBuffer full wraparound", "[shm_transport]") {
   constexpr uint32_t kSlotSize = 64;
   constexpr uint32_t kSlotCount = 8;
   using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
 
-  auto seg_result = osp::SharedMemorySegment::Create("test_ring_wraparound",
-                                                      RingBuffer::Size());
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_wraparound", RingBuffer::Size());
   REQUIRE(seg_result.has_value());
   auto& seg = seg_result.value();
 
@@ -388,15 +369,13 @@ TEST_CASE("shm_transport - ShmRingBuffer full wraparound",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmRingBuffer memory ordering verification",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmRingBuffer memory ordering verification", "[shm_transport]") {
   constexpr uint32_t kSlotSize = 256;
   constexpr uint32_t kSlotCount = 32;
   constexpr uint32_t kIterations = 1000;
   using RingBuffer = osp::ShmRingBuffer<kSlotSize, kSlotCount>;
 
-  auto seg_result = osp::SharedMemorySegment::Create("test_ring_ordering",
-                                                      RingBuffer::Size());
+  auto seg_result = osp::SharedMemorySegment::Create("test_ring_ordering", RingBuffer::Size());
   REQUIRE(seg_result.has_value());
   auto& seg = seg_result.value();
 
@@ -450,8 +429,7 @@ TEST_CASE("shm_transport - ShmRingBuffer memory ordering verification",
 // ShmChannel tests
 // ============================================================================
 
-TEST_CASE("shm_transport - ShmChannel create writer and open reader",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmChannel create writer and open reader", "[shm_transport]") {
   using Channel = osp::ShmChannel<256, 32>;
 
   auto writer_result = Channel::CreateWriter("test_channel_1");
@@ -465,8 +443,7 @@ TEST_CASE("shm_transport - ShmChannel create writer and open reader",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmChannel write and read",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmChannel write and read", "[shm_transport]") {
   using Channel = osp::ShmChannel<128, 16>;
 
   auto writer_result = Channel::CreateWriter("test_channel_rw");
@@ -494,8 +471,7 @@ TEST_CASE("shm_transport - ShmChannel write and read",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmChannel read empty returns kEmpty",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmChannel read empty returns kEmpty", "[shm_transport]") {
   using Channel = osp::ShmChannel<128, 16>;
 
   auto writer_result = Channel::CreateWriter("test_channel_empty");
@@ -515,8 +491,7 @@ TEST_CASE("shm_transport - ShmChannel read empty returns kEmpty",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmChannel eventfd notification",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmChannel eventfd notification", "[shm_transport]") {
   using Channel = osp::ShmChannel<256, 32>;
 
   // Clean up any leftover segment first
@@ -556,8 +531,7 @@ TEST_CASE("shm_transport - ShmChannel eventfd notification",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmChannel WaitReadable timeout",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmChannel WaitReadable timeout", "[shm_transport]") {
   using Channel = osp::ShmChannel<128, 16>;
 
   auto writer_result = Channel::CreateWriter("test_channel_timeout");
@@ -575,15 +549,13 @@ TEST_CASE("shm_transport - ShmChannel WaitReadable timeout",
   REQUIRE_FALSE(wait_result.has_value());
   REQUIRE(wait_result.get_error() == osp::ShmError::kTimeout);
 
-  auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
   REQUIRE(elapsed_ms >= 40);  // Allow some slack
 
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmChannel multi-threaded concurrent write and read",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmChannel multi-threaded concurrent write and read", "[shm_transport]") {
   using Channel = osp::ShmChannel<256, 64>;
 
   auto writer_result = Channel::CreateWriter("test_channel_concurrent");
@@ -649,8 +621,7 @@ TEST_CASE("shm_transport - ShmChannel multi-threaded concurrent write and read",
 // Cross-process fork tests
 // ============================================================================
 
-TEST_CASE("shm_transport - Cross-process SharedMemorySegment visibility",
-          "[shm_transport][fork]") {
+TEST_CASE("shm_transport - Cross-process SharedMemorySegment visibility", "[shm_transport][fork]") {
   const char* name = "xproc_seg";
 
   auto seg_r = osp::SharedMemorySegment::CreateOrReplace(name, 4096);
@@ -669,11 +640,13 @@ TEST_CASE("shm_transport - Cross-process SharedMemorySegment visibility",
   if (pid == 0) {
     // Child: open same segment and verify
     auto child_r = osp::SharedMemorySegment::Open(name);
-    if (!child_r.has_value()) _exit(1);
+    if (!child_r.has_value())
+      _exit(1);
     auto child_seg = static_cast<osp::SharedMemorySegment&&>(child_r.value());
     auto* child_data = static_cast<uint8_t*>(child_seg.Data());
     for (uint32_t i = 0; i < 256; ++i) {
-      if (child_data[i] != static_cast<uint8_t>(i)) _exit(2);
+      if (child_data[i] != static_cast<uint8_t>(i))
+        _exit(2);
     }
     _exit(0);
   }
@@ -686,8 +659,7 @@ TEST_CASE("shm_transport - Cross-process SharedMemorySegment visibility",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - Cross-process ShmRingBuffer write then read",
-          "[shm_transport][fork]") {
+TEST_CASE("shm_transport - Cross-process ShmRingBuffer write then read", "[shm_transport][fork]") {
   const char* name = "xproc_ring";
   using Ring = osp::ShmRingBuffer<4096, 8>;
 
@@ -709,22 +681,29 @@ TEST_CASE("shm_transport - Cross-process ShmRingBuffer write then read",
   if (pid == 0) {
     // Child: open and read
     auto child_r = osp::SharedMemorySegment::Open(name);
-    if (!child_r.has_value()) _exit(1);
+    if (!child_r.has_value())
+      _exit(1);
     auto child_seg = static_cast<osp::SharedMemorySegment&&>(child_r.value());
     auto* child_ring = Ring::AttachAt(child_seg.Data());
 
-    if (child_ring->Depth() != 2) _exit(2);
+    if (child_ring->Depth() != 2)
+      _exit(2);
 
     char buf[4096];
     uint32_t sz = 4096;
-    if (!child_ring->TryPop(buf, sz)) _exit(3);
-    if (sz != sizeof(msg1) || std::memcmp(buf, msg1, sz) != 0) _exit(4);
+    if (!child_ring->TryPop(buf, sz))
+      _exit(3);
+    if (sz != sizeof(msg1) || std::memcmp(buf, msg1, sz) != 0)
+      _exit(4);
 
     sz = 4096;
-    if (!child_ring->TryPop(buf, sz)) _exit(5);
-    if (sz != sizeof(msg2) || std::memcmp(buf, msg2, sz) != 0) _exit(6);
+    if (!child_ring->TryPop(buf, sz))
+      _exit(5);
+    if (sz != sizeof(msg2) || std::memcmp(buf, msg2, sz) != 0)
+      _exit(6);
 
-    if (child_ring->Depth() != 0) _exit(7);
+    if (child_ring->Depth() != 0)
+      _exit(7);
     _exit(0);
   }
 
@@ -736,8 +715,7 @@ TEST_CASE("shm_transport - Cross-process ShmRingBuffer write then read",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - Cross-process ShmChannel producer-consumer",
-          "[shm_transport][fork]") {
+TEST_CASE("shm_transport - Cross-process ShmChannel producer-consumer", "[shm_transport][fork]") {
   const char* name = "xproc_chan";
   using Channel = osp::ShmChannel<4096, 16>;
 
@@ -760,21 +738,27 @@ TEST_CASE("shm_transport - Cross-process ShmChannel producer-consumer",
   if (pid == 0) {
     // Child: open reader and consume all messages
     auto rd = Channel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<Channel&&>(rd.value());
 
-    if (reader.Depth() != kCount) _exit(2);
+    if (reader.Depth() != kCount)
+      _exit(2);
 
     for (uint32_t i = 0; i < kCount; ++i) {
       uint32_t val = 0;
       uint32_t sz = sizeof(val);
       auto r = reader.Read(&val, sz);
-      if (!r.has_value()) _exit(10 + i);
-      if (sz != sizeof(uint32_t)) _exit(20 + i);
-      if (val != i * 100 + 42) _exit(30 + i);
+      if (!r.has_value())
+        _exit(10 + i);
+      if (sz != sizeof(uint32_t))
+        _exit(20 + i);
+      if (val != i * 100 + 42)
+        _exit(30 + i);
     }
 
-    if (reader.Depth() != 0) _exit(3);
+    if (reader.Depth() != 0)
+      _exit(3);
     _exit(0);
   }
 
@@ -786,8 +770,7 @@ TEST_CASE("shm_transport - Cross-process ShmChannel producer-consumer",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - Cross-process concurrent write and read",
-          "[shm_transport][fork]") {
+TEST_CASE("shm_transport - Cross-process concurrent write and read", "[shm_transport][fork]") {
   const char* name = "xproc_conc";
   using Channel = osp::ShmChannel<256, 32>;
 
@@ -801,23 +784,25 @@ TEST_CASE("shm_transport - Cross-process concurrent write and read",
   if (pid == 0) {
     // Child: reader -- wait for data then consume
     auto rd = Channel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<Channel&&>(rd.value());
 
     uint32_t total_read = 0;
     constexpr uint32_t kExpected = 20;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
 
-    while (total_read < kExpected &&
-           std::chrono::steady_clock::now() < deadline) {
+    while (total_read < kExpected && std::chrono::steady_clock::now() < deadline) {
       auto w = reader.WaitReadable(200);
-      if (!w) continue;
+      if (!w)
+        continue;
 
       uint32_t val = 0;
       uint32_t sz = sizeof(val);
       auto r = reader.Read(&val, sz);
       if (r.has_value() && sz == sizeof(uint32_t)) {
-        if (val != total_read) _exit(10);
+        if (val != total_read)
+          _exit(10);
         ++total_read;
       }
     }
@@ -842,8 +827,7 @@ TEST_CASE("shm_transport - Cross-process concurrent write and read",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - Cross-process large frame transfer",
-          "[shm_transport][fork]") {
+TEST_CASE("shm_transport - Cross-process large frame transfer", "[shm_transport][fork]") {
   const char* name = "xproc_large";
   constexpr uint32_t kSlotSize = 81920;
   constexpr uint32_t kSlotCount = 8;
@@ -867,20 +851,25 @@ TEST_CASE("shm_transport - Cross-process large frame transfer",
 
   if (pid == 0) {
     auto rd = Channel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<Channel&&>(rd.value());
 
-    if (reader.Depth() != 1) _exit(2);
+    if (reader.Depth() != 1)
+      _exit(2);
 
     std::vector<uint8_t> buf(kSlotSize);
     uint32_t sz = kSlotSize;
     auto r = reader.Read(buf.data(), sz);
-    if (!r.has_value()) _exit(3);
-    if (sz != kFrameSize) _exit(4);
+    if (!r.has_value())
+      _exit(3);
+    if (sz != kFrameSize)
+      _exit(4);
 
     // Verify data integrity
     for (uint32_t i = 0; i < kFrameSize; ++i) {
-      if (buf[i] != static_cast<uint8_t>((i * 7 + 13) & 0xFF)) _exit(5);
+      if (buf[i] != static_cast<uint8_t>((i * 7 + 13) & 0xFF))
+        _exit(5);
     }
     _exit(0);
   }
@@ -893,8 +882,7 @@ TEST_CASE("shm_transport - Cross-process large frame transfer",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - Cross-process ShmChannel WaitReadable polling",
-          "[shm_transport][fork]") {
+TEST_CASE("shm_transport - Cross-process ShmChannel WaitReadable polling", "[shm_transport][fork]") {
   // TSan instruments fork'd children differently; shared memory timing
   // becomes unreliable, causing spurious Read failures.  Skip under TSan.
 #if defined(__SANITIZE_THREAD__)
@@ -917,21 +905,25 @@ TEST_CASE("shm_transport - Cross-process ShmChannel WaitReadable polling",
   if (pid == 0) {
     // Child: reader -- WaitReadable should block then succeed
     auto rd = Channel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<Channel&&>(rd.value());
 
     // Should timeout initially (no data yet)
     auto w1 = reader.WaitReadable(100);
-    if (w1.has_value()) _exit(2);  // should timeout
+    if (w1.has_value())
+      _exit(2);  // should timeout
 
     // Wait longer -- parent will write after 300ms
     auto w2 = reader.WaitReadable(2000);
-    if (!w2.has_value()) _exit(3);  // should succeed
+    if (!w2.has_value())
+      _exit(3);  // should succeed
 
     uint32_t val = 0;
     uint32_t sz = sizeof(val);
     auto r = reader.Read(&val, sz);
-    if (!r.has_value() || val != 0xDEAD) _exit(4);
+    if (!r.has_value() || val != 0xDEAD)
+      _exit(4);
 
     _exit(0);
   }
@@ -954,10 +946,8 @@ TEST_CASE("shm_transport - Cross-process ShmChannel WaitReadable polling",
 // ShmSpscByteRing tests
 // ============================================================================
 
-TEST_CASE("shm_transport - ShmSpscByteRing basic write and read",
-          "[shm_transport]") {
-  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_basic",
-                                                          4096);
+TEST_CASE("shm_transport - ShmSpscByteRing basic write and read", "[shm_transport]") {
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_basic", 4096);
   REQUIRE(seg_r.has_value());
   auto& seg = seg_r.value();
 
@@ -982,10 +972,8 @@ TEST_CASE("shm_transport - ShmSpscByteRing basic write and read",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmSpscByteRing multiple messages",
-          "[shm_transport]") {
-  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_multi",
-                                                          8192);
+TEST_CASE("shm_transport - ShmSpscByteRing multiple messages", "[shm_transport]") {
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_multi", 8192);
   REQUIRE(seg_r.has_value());
   auto& seg = seg_r.value();
 
@@ -1016,11 +1004,9 @@ TEST_CASE("shm_transport - ShmSpscByteRing multiple messages",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmSpscByteRing full buffer rejection",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmSpscByteRing full buffer rejection", "[shm_transport]") {
   // Small buffer: 4096 total, ~4080 data after header, rounded to 2048
-  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_full",
-                                                          4096);
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_full", 4096);
   REQUIRE(seg_r.has_value());
   auto& seg = seg_r.value();
 
@@ -1046,10 +1032,8 @@ TEST_CASE("shm_transport - ShmSpscByteRing full buffer rejection",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmSpscByteRing wrap-around",
-          "[shm_transport]") {
-  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_wrap",
-                                                          4096);
+TEST_CASE("shm_transport - ShmSpscByteRing wrap-around", "[shm_transport]") {
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_wrap", 4096);
   REQUIRE(seg_r.has_value());
   auto& seg = seg_r.value();
 
@@ -1081,10 +1065,8 @@ TEST_CASE("shm_transport - ShmSpscByteRing wrap-around",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmSpscByteRing producer/consumer attach",
-          "[shm_transport]") {
-  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_attach",
-                                                          8192);
+TEST_CASE("shm_transport - ShmSpscByteRing producer/consumer attach", "[shm_transport]") {
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_attach", 8192);
   REQUIRE(seg_r.has_value());
   auto& seg = seg_r.value();
 
@@ -1108,12 +1090,10 @@ TEST_CASE("shm_transport - ShmSpscByteRing producer/consumer attach",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmSpscByteRing large payload (simulated LiDAR)",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmSpscByteRing large payload (simulated LiDAR)", "[shm_transport]") {
   // 2 MB buffer for large payloads
   constexpr uint32_t kBufSize = 2 * 1024 * 1024;
-  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_lidar",
-                                                          kBufSize);
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_lidar", kBufSize);
   REQUIRE(seg_r.has_value());
   auto& seg = seg_r.value();
 
@@ -1143,8 +1123,7 @@ TEST_CASE("shm_transport - ShmSpscByteRing large payload (simulated LiDAR)",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmSpscByteRing concurrent SPSC",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmSpscByteRing concurrent SPSC", "[shm_transport]") {
 #if defined(__SANITIZE_THREAD__)
   SKIP("Skipped under ThreadSanitizer (shm + concurrent threads unreliable)");
 #elif defined(__has_feature)
@@ -1155,8 +1134,7 @@ TEST_CASE("shm_transport - ShmSpscByteRing concurrent SPSC",
   constexpr uint32_t kBufSize = 256 * 1024;
   constexpr uint32_t kMsgCount = 1000;
 
-  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_spsc",
-                                                          kBufSize);
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_spsc", kBufSize);
   REQUIRE(seg_r.has_value());
   auto& seg = seg_r.value();
 
@@ -1198,11 +1176,9 @@ TEST_CASE("shm_transport - ShmSpscByteRing concurrent SPSC",
   seg.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmSpscByteRing RoundDownPow2 via capacity",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmSpscByteRing RoundDownPow2 via capacity", "[shm_transport]") {
   // 5000 total - 16 header = 4984 data, rounded down to 4096
-  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_pow2",
-                                                          5000);
+  auto seg_r = osp::SharedMemorySegment::CreateOrReplace("test_byte_ring_pow2", 5000);
   REQUIRE(seg_r.has_value());
   auto& seg = seg_r.value();
 
@@ -1220,8 +1196,7 @@ TEST_CASE("shm_transport - ShmSpscByteRing RoundDownPow2 via capacity",
 // ShmByteChannel tests
 // ============================================================================
 
-TEST_CASE("shm_transport - ShmByteChannel create writer and open reader",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmByteChannel create writer and open reader", "[shm_transport]") {
   auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_1", 4096);
   REQUIRE(wr.has_value());
   auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
@@ -1236,8 +1211,7 @@ TEST_CASE("shm_transport - ShmByteChannel create writer and open reader",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmByteChannel write and read",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmByteChannel write and read", "[shm_transport]") {
   auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_rw", 8192);
   REQUIRE(wr.has_value());
   auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
@@ -1260,8 +1234,7 @@ TEST_CASE("shm_transport - ShmByteChannel write and read",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmByteChannel write full returns kFull",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmByteChannel write full returns kFull", "[shm_transport]") {
   // Small capacity
   auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_full", 4096);
   REQUIRE(wr.has_value());
@@ -1282,10 +1255,8 @@ TEST_CASE("shm_transport - ShmByteChannel write full returns kFull",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmByteChannel futex WaitReadable",
-          "[shm_transport]") {
-  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_futex",
-                                                         8192);
+TEST_CASE("shm_transport - ShmByteChannel futex WaitReadable", "[shm_transport]") {
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_futex", 8192);
   REQUIRE(wr.has_value());
   auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
 
@@ -1318,10 +1289,8 @@ TEST_CASE("shm_transport - ShmByteChannel futex WaitReadable",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmByteChannel WaitReadable timeout",
-          "[shm_transport]") {
-  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_timeout",
-                                                         4096);
+TEST_CASE("shm_transport - ShmByteChannel WaitReadable timeout", "[shm_transport]") {
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_timeout", 4096);
   REQUIRE(wr.has_value());
   auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
 
@@ -1336,20 +1305,17 @@ TEST_CASE("shm_transport - ShmByteChannel WaitReadable timeout",
   REQUIRE_FALSE(wait_result.has_value());
   REQUIRE(wait_result.get_error() == osp::ShmError::kTimeout);
 
-  auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
   REQUIRE(elapsed_ms >= 40);  // Allow some slack
 
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmByteChannel concurrent SPSC throughput",
-          "[shm_transport]") {
+TEST_CASE("shm_transport - ShmByteChannel concurrent SPSC throughput", "[shm_transport]") {
   constexpr uint32_t kCapacity = 256 * 1024;
   constexpr uint32_t kMsgCount = 500;
 
-  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_spsc",
-                                                         kCapacity);
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_spsc", kCapacity);
   REQUIRE(wr.has_value());
   auto writer = static_cast<osp::ShmByteChannel&&>(wr.value());
 
@@ -1390,10 +1356,8 @@ TEST_CASE("shm_transport - ShmByteChannel concurrent SPSC throughput",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - ShmByteChannel move semantics",
-          "[shm_transport]") {
-  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_move",
-                                                         4096);
+TEST_CASE("shm_transport - ShmByteChannel move semantics", "[shm_transport]") {
+  auto wr = osp::ShmByteChannel::CreateOrReplaceWriter("test_byte_ch_move", 4096);
   REQUIRE(wr.has_value());
   auto ch1 = static_cast<osp::ShmByteChannel&&>(wr.value());
   REQUIRE(ch1.Capacity() > 0);
@@ -1419,8 +1383,7 @@ TEST_CASE("shm_transport - ShmByteChannel move semantics",
 // Cross-process ShmByteChannel tests
 // ============================================================================
 
-TEST_CASE("shm_transport - Cross-process ShmByteChannel write then read",
-          "[shm_transport][fork]") {
+TEST_CASE("shm_transport - Cross-process ShmByteChannel write then read", "[shm_transport][fork]") {
   const char* name = "xproc_byte_ch";
   constexpr uint32_t kCapacity = 64 * 1024;
 
@@ -1441,14 +1404,17 @@ TEST_CASE("shm_transport - Cross-process ShmByteChannel write then read",
 
   if (pid == 0) {
     auto rd = osp::ShmByteChannel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
 
     for (uint32_t i = 0; i < kCount; ++i) {
       uint32_t val = 0;
       uint32_t len = reader.Read(&val, sizeof(val));
-      if (len != sizeof(uint32_t)) _exit(10 + i);
-      if (val != i * 100 + 42) _exit(20 + i);
+      if (len != sizeof(uint32_t))
+        _exit(10 + i);
+      if (val != i * 100 + 42)
+        _exit(20 + i);
     }
     _exit(0);
   }
@@ -1461,8 +1427,7 @@ TEST_CASE("shm_transport - Cross-process ShmByteChannel write then read",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - Cross-process ShmByteChannel large frame",
-          "[shm_transport][fork]") {
+TEST_CASE("shm_transport - Cross-process ShmByteChannel large frame", "[shm_transport][fork]") {
   const char* name = "xproc_byte_large";
   constexpr uint32_t kCapacity = 512 * 1024;
   constexpr uint32_t kFrameSize = 200 * 1024;  // 200 KB simulated frame
@@ -1484,15 +1449,18 @@ TEST_CASE("shm_transport - Cross-process ShmByteChannel large frame",
 
   if (pid == 0) {
     auto rd = osp::ShmByteChannel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
 
     std::vector<uint8_t> buf(kFrameSize);
     uint32_t len = reader.Read(buf.data(), kFrameSize);
-    if (len != kFrameSize) _exit(2);
+    if (len != kFrameSize)
+      _exit(2);
 
     for (uint32_t i = 0; i < kFrameSize; ++i) {
-      if (buf[i] != static_cast<uint8_t>((i * 11 + 7) & 0xFF)) _exit(3);
+      if (buf[i] != static_cast<uint8_t>((i * 11 + 7) & 0xFF))
+        _exit(3);
     }
     _exit(0);
   }
@@ -1505,8 +1473,7 @@ TEST_CASE("shm_transport - Cross-process ShmByteChannel large frame",
   writer.Unlink();
 }
 
-TEST_CASE("shm_transport - Cross-process ShmByteChannel futex notification",
-          "[shm_transport][fork]") {
+TEST_CASE("shm_transport - Cross-process ShmByteChannel futex notification", "[shm_transport][fork]") {
 #if defined(__SANITIZE_THREAD__)
   SKIP("Skipped under ThreadSanitizer (fork + shm timing unreliable)");
 #elif defined(__has_feature)
@@ -1526,20 +1493,24 @@ TEST_CASE("shm_transport - Cross-process ShmByteChannel futex notification",
 
   if (pid == 0) {
     auto rd = osp::ShmByteChannel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<osp::ShmByteChannel&&>(rd.value());
 
     // Should timeout initially (no data)
     auto w1 = reader.WaitReadable(100);
-    if (w1.has_value()) _exit(2);
+    if (w1.has_value())
+      _exit(2);
 
     // Wait longer -- parent writes after 300ms
     auto w2 = reader.WaitReadable(2000);
-    if (!w2.has_value()) _exit(3);
+    if (!w2.has_value())
+      _exit(3);
 
     uint32_t val = 0;
     uint32_t len = reader.Read(&val, sizeof(val));
-    if (len != sizeof(uint32_t) || val != 0xBEEF) _exit(4);
+    if (len != sizeof(uint32_t) || val != 0xBEEF)
+      _exit(4);
 
     _exit(0);
   }
@@ -1573,8 +1544,7 @@ TEST_CASE("ShmSpmcByteRing: InitAt and basic properties", "[shm][spmc]") {
   REQUIRE(ring.WriteableBytes() == ring.Capacity());
 }
 
-TEST_CASE("ShmSpmcByteRing: RegisterConsumer and UnregisterConsumer",
-          "[shm][spmc]") {
+TEST_CASE("ShmSpmcByteRing: RegisterConsumer and UnregisterConsumer", "[shm][spmc]") {
   alignas(64) uint8_t buf[8192];
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 8);
 
@@ -1726,8 +1696,7 @@ TEST_CASE("ShmSpmcByteRing: slowest consumer limits writeable", "[shm][spmc]") {
   ring.UnregisterConsumer(c1);
 }
 
-TEST_CASE("ShmSpmcByteRing: consumer re-registration gets current head",
-          "[shm][spmc]") {
+TEST_CASE("ShmSpmcByteRing: consumer re-registration gets current head", "[shm][spmc]") {
   alignas(64) uint8_t buf[8192];
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
 
@@ -1759,8 +1728,7 @@ TEST_CASE("ShmSpmcByteRing: consumer re-registration gets current head",
   ring.UnregisterConsumer(c0);
 }
 
-TEST_CASE("ShmSpmcByteRing: wrap-around with multiple consumers",
-          "[shm][spmc]") {
+TEST_CASE("ShmSpmcByteRing: wrap-around with multiple consumers", "[shm][spmc]") {
   alignas(64) uint8_t buf[4096];
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
 
@@ -1884,15 +1852,13 @@ TEST_CASE("ShmSpmcByteChannel: WaitReadable timeout", "[shm][spmc]") {
   REQUIRE_FALSE(wait_result.has_value());
   REQUIRE(wait_result.get_error() == osp::ShmError::kTimeout);
 
-  auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
   REQUIRE(elapsed_ms >= 40);
 
   writer.Unlink();
 }
 
-TEST_CASE("ShmSpmcByteChannel: reader auto-unregisters on destroy",
-          "[shm][spmc]") {
+TEST_CASE("ShmSpmcByteChannel: reader auto-unregisters on destroy", "[shm][spmc]") {
   const char* name = "osp_test_spmc_unreg";
 
   auto wr = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, 4096, 4);
@@ -1917,8 +1883,7 @@ TEST_CASE("ShmSpmcByteChannel: max consumers returns kFull", "[shm][spmc]") {
   const char* name = "osp_test_spmc_maxcons";
   constexpr uint32_t kMaxConsumers = 3;
 
-  auto wr =
-      osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, 4096, kMaxConsumers);
+  auto wr = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, 4096, kMaxConsumers);
   REQUIRE(wr.has_value());
   auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
 
@@ -1943,13 +1908,11 @@ TEST_CASE("ShmSpmcByteChannel: max consumers returns kFull", "[shm][spmc]") {
 // Cross-process SPMC tests
 // ============================================================================
 
-TEST_CASE("ShmSpmcByteChannel: cross-process multi-consumer",
-          "[shm][spmc][fork]") {
+TEST_CASE("ShmSpmcByteChannel: cross-process multi-consumer", "[shm][spmc][fork]") {
   const char* name = "osp_test_spmc_xproc";
   constexpr uint32_t kCapacity = 64 * 1024;
 
-  auto wr =
-      osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, kCapacity, 4);
+  auto wr = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, kCapacity, 4);
   REQUIRE(wr.has_value());
   auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
 
@@ -1960,16 +1923,20 @@ TEST_CASE("ShmSpmcByteChannel: cross-process multi-consumer",
   if (pid1 == 0) {
     // Child 1: open reader and wait for data
     auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
 
     auto w = reader.WaitReadable(5000);
-    if (!w.has_value()) _exit(2);
+    if (!w.has_value())
+      _exit(2);
 
     char recv[64];
     uint32_t len = reader.Read(recv, sizeof(recv));
-    if (len == 0) _exit(3);
-    if (std::strcmp(recv, "multi-consumer test") != 0) _exit(4);
+    if (len == 0)
+      _exit(3);
+    if (std::strcmp(recv, "multi-consumer test") != 0)
+      _exit(4);
 
     _exit(0);
   }
@@ -1980,16 +1947,20 @@ TEST_CASE("ShmSpmcByteChannel: cross-process multi-consumer",
   if (pid2 == 0) {
     // Child 2: open reader and wait for data
     auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
 
     auto w = reader.WaitReadable(5000);
-    if (!w.has_value()) _exit(2);
+    if (!w.has_value())
+      _exit(2);
 
     char recv[64];
     uint32_t len = reader.Read(recv, sizeof(recv));
-    if (len == 0) _exit(3);
-    if (std::strcmp(recv, "multi-consumer test") != 0) _exit(4);
+    if (len == 0)
+      _exit(3);
+    if (std::strcmp(recv, "multi-consumer test") != 0)
+      _exit(4);
 
     _exit(0);
   }
@@ -2014,8 +1985,7 @@ TEST_CASE("ShmSpmcByteChannel: cross-process multi-consumer",
   writer.Unlink();
 }
 
-TEST_CASE("ShmSpmcByteChannel: cross-process futex wakeall",
-          "[shm][spmc][fork]") {
+TEST_CASE("ShmSpmcByteChannel: cross-process futex wakeall", "[shm][spmc][fork]") {
 #if defined(__SANITIZE_THREAD__)
   SKIP("Skipped under ThreadSanitizer (fork + shm timing unreliable)");
 #elif defined(__has_feature)
@@ -2027,8 +1997,7 @@ TEST_CASE("ShmSpmcByteChannel: cross-process futex wakeall",
   const char* name = "osp_test_spmc_futex";
   constexpr uint32_t kCapacity = 8192;
 
-  auto wr =
-      osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, kCapacity, 4);
+  auto wr = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(name, kCapacity, 4);
   REQUIRE(wr.has_value());
   auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
 
@@ -2038,20 +2007,24 @@ TEST_CASE("ShmSpmcByteChannel: cross-process futex wakeall",
   if (pid == 0) {
     // Child: open reader and wait for futex wakeup
     auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
-    if (!rd.has_value()) _exit(1);
+    if (!rd.has_value())
+      _exit(1);
     auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
 
     // Should timeout initially
     auto w1 = reader.WaitReadable(100);
-    if (w1.has_value()) _exit(2);
+    if (w1.has_value())
+      _exit(2);
 
     // Wait longer -- parent writes after 300ms
     auto w2 = reader.WaitReadable(2000);
-    if (!w2.has_value()) _exit(3);
+    if (!w2.has_value())
+      _exit(3);
 
     uint32_t val = 0;
     uint32_t len = reader.Read(&val, sizeof(val));
-    if (len != sizeof(uint32_t) || val != 0xCAFE) _exit(4);
+    if (len != sizeof(uint32_t) || val != 0xCAFE)
+      _exit(4);
 
     _exit(0);
   }

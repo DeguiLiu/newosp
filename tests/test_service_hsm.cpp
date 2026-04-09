@@ -3,13 +3,13 @@
  * @brief Unit tests for HsmService.
  */
 
-#include "osp/service_hsm.hpp"
 #include "osp/platform.hpp"
+#include "osp/service_hsm.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <cstring>
 
 #include <atomic>
-#include <cstring>
+#include <catch2/catch_test_macros.hpp>
 
 // ============================================================================
 // Tests

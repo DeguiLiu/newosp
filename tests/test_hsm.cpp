@@ -6,7 +6,6 @@
 #include "osp/hsm.hpp"
 
 #include <catch2/catch_test_macros.hpp>
-
 #include <string>
 #include <vector>
 
@@ -61,44 +60,38 @@ static int32_t s_b1 = -1;
 // ============================================================================
 
 static void BuildSimpleSM(SM& sm) {
-  s_root = sm.AddState({
-      "root", -1,
-      [](TestContext& ctx, const osp::Event&) -> osp::TransitionResult {
-        ctx.log.push_back("root:handler");
-        return osp::TransitionResult::kHandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("root:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("root:exit"); },
-      nullptr});
+  s_root = sm.AddState({"root", -1,
+                        [](TestContext& ctx, const osp::Event&) -> osp::TransitionResult {
+                          ctx.log.push_back("root:handler");
+                          return osp::TransitionResult::kHandled;
+                        },
+                        [](TestContext& ctx) { ctx.log.push_back("root:entry"); },
+                        [](TestContext& ctx) { ctx.log.push_back("root:exit"); }, nullptr});
 
-  s_a = sm.AddState({
-      "A", s_root,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        ctx.log.push_back("A:handler");
-        if (ev.id == kEvGo) {
-          return ctx.sm->RequestTransition(s_b);
-        }
-        if (ev.id == kEvSelf) {
-          return ctx.sm->RequestTransition(s_a);
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("A:exit"); },
-      nullptr});
+  s_a = sm.AddState({"A", s_root,
+                     [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                       ctx.log.push_back("A:handler");
+                       if (ev.id == kEvGo) {
+                         return ctx.sm->RequestTransition(s_b);
+                       }
+                       if (ev.id == kEvSelf) {
+                         return ctx.sm->RequestTransition(s_a);
+                       }
+                       return osp::TransitionResult::kUnhandled;
+                     },
+                     [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
+                     [](TestContext& ctx) { ctx.log.push_back("A:exit"); }, nullptr});
 
-  s_b = sm.AddState({
-      "B", s_root,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        ctx.log.push_back("B:handler");
-        if (ev.id == kEvBack) {
-          return ctx.sm->RequestTransition(s_a);
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("B:exit"); },
-      nullptr});
+  s_b = sm.AddState({"B", s_root,
+                     [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                       ctx.log.push_back("B:handler");
+                       if (ev.id == kEvBack) {
+                         return ctx.sm->RequestTransition(s_a);
+                       }
+                       return osp::TransitionResult::kUnhandled;
+                     },
+                     [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
+                     [](TestContext& ctx) { ctx.log.push_back("B:exit"); }, nullptr});
 }
 
 // ============================================================================
@@ -113,78 +106,64 @@ static void BuildSimpleSM(SM& sm) {
 // ============================================================================
 
 static void BuildDeepSM(SM& sm) {
-  s_root = sm.AddState({
-      "root", -1,
-      [](TestContext& ctx, const osp::Event&) -> osp::TransitionResult {
-        ctx.log.push_back("root:handler");
-        return osp::TransitionResult::kHandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("root:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("root:exit"); },
-      nullptr});
+  s_root = sm.AddState({"root", -1,
+                        [](TestContext& ctx, const osp::Event&) -> osp::TransitionResult {
+                          ctx.log.push_back("root:handler");
+                          return osp::TransitionResult::kHandled;
+                        },
+                        [](TestContext& ctx) { ctx.log.push_back("root:entry"); },
+                        [](TestContext& ctx) { ctx.log.push_back("root:exit"); }, nullptr});
 
-  s_a = sm.AddState({
-      "A", s_root,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        ctx.log.push_back("A:handler");
-        if (ev.id == kEvTick) {
-          ++ctx.counter;
-          return osp::TransitionResult::kHandled;
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("A:exit"); },
-      nullptr});
+  s_a = sm.AddState({"A", s_root,
+                     [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                       ctx.log.push_back("A:handler");
+                       if (ev.id == kEvTick) {
+                         ++ctx.counter;
+                         return osp::TransitionResult::kHandled;
+                       }
+                       return osp::TransitionResult::kUnhandled;
+                     },
+                     [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
+                     [](TestContext& ctx) { ctx.log.push_back("A:exit"); }, nullptr});
 
-  s_a1 = sm.AddState({
-      "A1", s_a,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        ctx.log.push_back("A1:handler");
-        if (ev.id == kEvGo) {
-          return ctx.sm->RequestTransition(s_a2);
-        }
-        if (ev.id == kEvDeep) {
-          return ctx.sm->RequestTransition(s_b1);
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("A1:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("A1:exit"); },
-      nullptr});
+  s_a1 = sm.AddState({"A1", s_a,
+                      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                        ctx.log.push_back("A1:handler");
+                        if (ev.id == kEvGo) {
+                          return ctx.sm->RequestTransition(s_a2);
+                        }
+                        if (ev.id == kEvDeep) {
+                          return ctx.sm->RequestTransition(s_b1);
+                        }
+                        return osp::TransitionResult::kUnhandled;
+                      },
+                      [](TestContext& ctx) { ctx.log.push_back("A1:entry"); },
+                      [](TestContext& ctx) { ctx.log.push_back("A1:exit"); }, nullptr});
 
-  s_a2 = sm.AddState({
-      "A2", s_a,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        ctx.log.push_back("A2:handler");
-        if (ev.id == kEvBack) {
-          return ctx.sm->RequestTransition(s_a1);
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("A2:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("A2:exit"); },
-      nullptr});
+  s_a2 = sm.AddState({"A2", s_a,
+                      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                        ctx.log.push_back("A2:handler");
+                        if (ev.id == kEvBack) {
+                          return ctx.sm->RequestTransition(s_a1);
+                        }
+                        return osp::TransitionResult::kUnhandled;
+                      },
+                      [](TestContext& ctx) { ctx.log.push_back("A2:entry"); },
+                      [](TestContext& ctx) { ctx.log.push_back("A2:exit"); }, nullptr});
 
-  s_b = sm.AddState({
-      "B", s_root,
-      nullptr,
-      [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("B:exit"); },
-      nullptr});
+  s_b = sm.AddState({"B", s_root, nullptr, [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
+                     [](TestContext& ctx) { ctx.log.push_back("B:exit"); }, nullptr});
 
-  s_b1 = sm.AddState({
-      "B1", s_b,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        ctx.log.push_back("B1:handler");
-        if (ev.id == kEvBack) {
-          return ctx.sm->RequestTransition(s_a1);
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("B1:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("B1:exit"); },
-      nullptr});
+  s_b1 = sm.AddState({"B1", s_b,
+                      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                        ctx.log.push_back("B1:handler");
+                        if (ev.id == kEvBack) {
+                          return ctx.sm->RequestTransition(s_a1);
+                        }
+                        return osp::TransitionResult::kUnhandled;
+                      },
+                      [](TestContext& ctx) { ctx.log.push_back("B1:entry"); },
+                      [](TestContext& ctx) { ctx.log.push_back("B1:exit"); }, nullptr});
 }
 
 // ============================================================================
@@ -261,8 +240,10 @@ TEST_CASE("hsm - entry exit action order", "[hsm]") {
   size_t exit_pos = 0;
   size_t entry_pos = 0;
   for (size_t i = 0; i < ctx.log.size(); ++i) {
-    if (ctx.log[i] == "A:exit") exit_pos = i;
-    if (ctx.log[i] == "B:entry") entry_pos = i;
+    if (ctx.log[i] == "A:exit")
+      exit_pos = i;
+    if (ctx.log[i] == "B:entry")
+      entry_pos = i;
   }
   REQUIRE(exit_pos < entry_pos);
 }
@@ -329,31 +310,22 @@ TEST_CASE("hsm - guard blocks transition", "[hsm]") {
   SM sm(ctx);
   ctx.sm = &sm;
 
-  s_root = sm.AddState({
-      "root", -1, nullptr, nullptr, nullptr, nullptr});
+  s_root = sm.AddState({"root", -1, nullptr, nullptr, nullptr, nullptr});
 
   // State with a guard that blocks when counter < 5
-  s_a = sm.AddState({
-      "A", s_root,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        ctx.log.push_back("A:handler");
-        if (ev.id == kEvGuarded) {
-          return ctx.sm->RequestTransition(s_b);
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      nullptr, nullptr,
-      // Guard: only handle events when counter >= 5
-      [](const TestContext& ctx, const osp::Event&) -> bool {
-        return ctx.counter >= 5;
-      }});
+  s_a = sm.AddState({"A", s_root,
+                     [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                       ctx.log.push_back("A:handler");
+                       if (ev.id == kEvGuarded) {
+                         return ctx.sm->RequestTransition(s_b);
+                       }
+                       return osp::TransitionResult::kUnhandled;
+                     },
+                     nullptr, nullptr,
+                     // Guard: only handle events when counter >= 5
+                     [](const TestContext& ctx, const osp::Event&) -> bool { return ctx.counter >= 5; }});
 
-  s_b = sm.AddState({
-      "B", s_root,
-      nullptr,
-      [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
-      nullptr,
-      nullptr});
+  s_b = sm.AddState({"B", s_root, nullptr, [](TestContext& ctx) { ctx.log.push_back("B:entry"); }, nullptr, nullptr});
 
   sm.SetInitialState(s_a);
   sm.Start();
@@ -491,28 +463,23 @@ TEST_CASE("hsm - guard condition blocks transition", "[hsm]") {
 
   s_root = sm.AddState({"root", -1, nullptr, nullptr, nullptr, nullptr});
 
-  s_a = sm.AddState({
-      "A", s_root,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        if (ev.id == kEvGuarded) {
-          return ctx.sm->RequestTransition(s_b);
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      nullptr, nullptr,
-      // Guard: only allow transition when counter >= 10
-      [](const TestContext& ctx, const osp::Event& ev) -> bool {
-        if (ev.id == kEvGuarded) {
-          return ctx.counter >= 10;
-        }
-        return true;
-      }});
+  s_a = sm.AddState({"A", s_root,
+                     [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                       if (ev.id == kEvGuarded) {
+                         return ctx.sm->RequestTransition(s_b);
+                       }
+                       return osp::TransitionResult::kUnhandled;
+                     },
+                     nullptr, nullptr,
+                     // Guard: only allow transition when counter >= 10
+                     [](const TestContext& ctx, const osp::Event& ev) -> bool {
+                       if (ev.id == kEvGuarded) {
+                         return ctx.counter >= 10;
+                       }
+                       return true;
+                     }});
 
-  s_b = sm.AddState({
-      "B", s_root,
-      nullptr,
-      [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
-      nullptr, nullptr});
+  s_b = sm.AddState({"B", s_root, nullptr, [](TestContext& ctx) { ctx.log.push_back("B:entry"); }, nullptr, nullptr});
 
   sm.SetInitialState(s_a);
   sm.Start();
@@ -538,47 +505,30 @@ TEST_CASE("hsm - deep hierarchy 3+ levels LCA transition", "[hsm]") {
 
   // Build 4-level hierarchy: root -> A -> A1 -> A1a
   //                          root -> B -> B1 -> B1a
-  s_root = sm.AddState({
-      "root", -1, nullptr,
-      [](TestContext& ctx) { ctx.log.push_back("root:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("root:exit"); },
-      nullptr});
+  s_root = sm.AddState({"root", -1, nullptr, [](TestContext& ctx) { ctx.log.push_back("root:entry"); },
+                        [](TestContext& ctx) { ctx.log.push_back("root:exit"); }, nullptr});
 
-  s_a = sm.AddState({
-      "A", s_root, nullptr,
-      [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("A:exit"); },
-      nullptr});
+  s_a = sm.AddState({"A", s_root, nullptr, [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
+                     [](TestContext& ctx) { ctx.log.push_back("A:exit"); }, nullptr});
 
-  s_a1 = sm.AddState({
-      "A1", s_a, nullptr,
-      [](TestContext& ctx) { ctx.log.push_back("A1:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("A1:exit"); },
-      nullptr});
+  s_a1 = sm.AddState({"A1", s_a, nullptr, [](TestContext& ctx) { ctx.log.push_back("A1:entry"); },
+                      [](TestContext& ctx) { ctx.log.push_back("A1:exit"); }, nullptr});
 
-  static int32_t s_a1a = sm.AddState({
-      "A1a", s_a1,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        if (ev.id == kEvDeep) {
-          return ctx.sm->RequestTransition(s_b1);
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("A1a:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("A1a:exit"); },
-      nullptr});
+  static int32_t s_a1a = sm.AddState({"A1a", s_a1,
+                                      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                                        if (ev.id == kEvDeep) {
+                                          return ctx.sm->RequestTransition(s_b1);
+                                        }
+                                        return osp::TransitionResult::kUnhandled;
+                                      },
+                                      [](TestContext& ctx) { ctx.log.push_back("A1a:entry"); },
+                                      [](TestContext& ctx) { ctx.log.push_back("A1a:exit"); }, nullptr});
 
-  s_b = sm.AddState({
-      "B", s_root, nullptr,
-      [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("B:exit"); },
-      nullptr});
+  s_b = sm.AddState({"B", s_root, nullptr, [](TestContext& ctx) { ctx.log.push_back("B:entry"); },
+                     [](TestContext& ctx) { ctx.log.push_back("B:exit"); }, nullptr});
 
-  s_b1 = sm.AddState({
-      "B1", s_b, nullptr,
-      [](TestContext& ctx) { ctx.log.push_back("B1:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("B1:exit"); },
-      nullptr});
+  s_b1 = sm.AddState({"B1", s_b, nullptr, [](TestContext& ctx) { ctx.log.push_back("B1:entry"); },
+                      [](TestContext& ctx) { ctx.log.push_back("B1:exit"); }, nullptr});
 
   sm.SetInitialState(s_a1a);
   sm.Start();
@@ -605,18 +555,16 @@ TEST_CASE("hsm - self-transition same state", "[hsm]") {
 
   s_root = sm.AddState({"root", -1, nullptr, nullptr, nullptr, nullptr});
 
-  s_a = sm.AddState({
-      "A", s_root,
-      [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
-        ctx.log.push_back("A:handler");
-        if (ev.id == kEvSelf) {
-          return ctx.sm->RequestTransition(s_a);
-        }
-        return osp::TransitionResult::kUnhandled;
-      },
-      [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
-      [](TestContext& ctx) { ctx.log.push_back("A:exit"); },
-      nullptr});
+  s_a = sm.AddState({"A", s_root,
+                     [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                       ctx.log.push_back("A:handler");
+                       if (ev.id == kEvSelf) {
+                         return ctx.sm->RequestTransition(s_a);
+                       }
+                       return osp::TransitionResult::kUnhandled;
+                     },
+                     [](TestContext& ctx) { ctx.log.push_back("A:entry"); },
+                     [](TestContext& ctx) { ctx.log.push_back("A:exit"); }, nullptr});
 
   sm.SetInitialState(s_a);
   sm.Start();
@@ -725,8 +673,10 @@ TEST_CASE("hsm - ForceTransition basic transition", "[hsm]") {
   bool found_a_exit = false;
   bool found_b_entry = false;
   for (const auto& entry : ctx.log) {
-    if (entry == "A:exit") found_a_exit = true;
-    if (entry == "B:entry") found_b_entry = true;
+    if (entry == "A:exit")
+      found_a_exit = true;
+    if (entry == "B:entry")
+      found_b_entry = true;
   }
   REQUIRE(found_a_exit);
   REQUIRE(found_b_entry);
@@ -759,10 +709,22 @@ TEST_CASE("hsm - ForceTransition hierarchical exit/entry", "[hsm]") {
   size_t b_entry_pos = 0, b1_entry_pos = 0;
 
   for (size_t i = 0; i < ctx.log.size(); ++i) {
-    if (ctx.log[i] == "A1:exit") { found_a1_exit = true; a1_exit_pos = i; }
-    if (ctx.log[i] == "A:exit") { found_a_exit = true; a_exit_pos = i; }
-    if (ctx.log[i] == "B:entry") { found_b_entry = true; b_entry_pos = i; }
-    if (ctx.log[i] == "B1:entry") { found_b1_entry = true; b1_entry_pos = i; }
+    if (ctx.log[i] == "A1:exit") {
+      found_a1_exit = true;
+      a1_exit_pos = i;
+    }
+    if (ctx.log[i] == "A:exit") {
+      found_a_exit = true;
+      a_exit_pos = i;
+    }
+    if (ctx.log[i] == "B:entry") {
+      found_b_entry = true;
+      b_entry_pos = i;
+    }
+    if (ctx.log[i] == "B1:entry") {
+      found_b1_entry = true;
+      b1_entry_pos = i;
+    }
   }
 
   REQUIRE(found_a1_exit);
@@ -826,8 +788,10 @@ TEST_CASE("hsm - ForceTransition self-transition", "[hsm]") {
   bool found_a_exit = false;
   bool found_a_entry = false;
   for (const auto& entry : ctx.log) {
-    if (entry == "A:exit") found_a_exit = true;
-    if (entry == "A:entry") found_a_entry = true;
+    if (entry == "A:exit")
+      found_a_exit = true;
+    if (entry == "A:entry")
+      found_a_entry = true;
   }
   REQUIRE(found_a_exit);
   REQUIRE(found_a_entry);

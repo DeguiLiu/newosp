@@ -64,6 +64,7 @@
 #if OSP_HAS_NETWORK
 #include <netinet/in.h>
 #endif
+#include <new>
 #include <poll.h>
 #if OSP_HAS_NETWORK
 #include <sys/socket.h>
@@ -1115,6 +1116,22 @@ class DebugShell final {
     uint8_t buf[3] = {0xFF, cmd, option};
     (void)::send(fd, buf, 3, MSG_NOSIGNAL);
   }
+
+  static inline bool ConstantTimeEquals(const char* lhs, const char* rhs) noexcept {
+    if (lhs == nullptr || rhs == nullptr) {
+      return false;
+    }
+    size_t lhs_len = std::strlen(lhs);
+    size_t rhs_len = std::strlen(rhs);
+    size_t max_len = (lhs_len > rhs_len) ? lhs_len : rhs_len;
+    uint8_t diff = static_cast<uint8_t>(lhs_len ^ rhs_len);
+    for (size_t i = 0; i < max_len; ++i) {
+      uint8_t l = (i < lhs_len) ? static_cast<uint8_t>(lhs[i]) : 0U;
+      uint8_t r = (i < rhs_len) ? static_cast<uint8_t>(rhs[i]) : 0U;
+      diff = static_cast<uint8_t>(diff | static_cast<uint8_t>(l ^ r));
+    }
+    return diff == 0U;
+  }
 };
 
 // ============================================================================
@@ -1160,7 +1177,10 @@ inline expected<void, ShellError> DebugShell::Start() {
   // max_connections is a runtime config value. ShellSession contains
   // std::thread (non-trivially-copyable), precluding FixedVector.
   // Allocated once at Start(), freed at Stop() -- cold path only.
-  sessions_ = new Session[cfg_.max_connections];
+  sessions_ = new (std::nothrow) Session[cfg_.max_connections];
+  if (nullptr == sessions_) {
+    return expected<void, ShellError>::error(ShellError::kPortInUse);
+  }
 
   running_.store(true, std::memory_order_release);
   accept_thread_ = std::thread([this]() { AcceptLoop(); });
@@ -1366,7 +1386,7 @@ inline bool DebugShell::RunAuth(Session& s) {
     detail::ShellSessionWrite(s, "\r\n");
 
     // Verify credentials.
-    if (std::strcmp(user_buf, cfg_.username) == 0 && std::strcmp(pass_buf, cfg_.password) == 0) {
+    if (ConstantTimeEquals(user_buf, cfg_.username) && ConstantTimeEquals(pass_buf, cfg_.password)) {
       s.authenticated = true;
       detail::ShellSessionWrite(s, "\r\nAuthenticated.\r\n\r\n");
       return true;

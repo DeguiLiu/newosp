@@ -73,6 +73,12 @@ graph TB
 
 S = Server, C = Client, M = Monitor
 
+## 实现风格说明
+
+- `Client<Req, Resp>` 在 client HSM 与 file transfer context 中按值原地持有，
+  通过 `Connect()` 返回值的 move assignment 完成连接建立，不额外使用 heap allocation。
+- 这样更贴近 newosp 的 stack-first / explicit ownership 风格，也便于上下文级清理。
+
 ## Client 连接状态机 (HSM)
 
 ```mermaid

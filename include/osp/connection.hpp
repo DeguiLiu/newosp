@@ -118,7 +118,12 @@ class ConnectionPool {
       if (!slots_[i].active) {
         const uint64_t now = SteadyNowUs();
         ConnectionInfo& info = slots_[i].info;
-        info.id = ConnectionId{next_id_++};
+        info.id = ConnectionId{next_id_};
+        ++next_id_;
+        // Skip 0 (invalid) and UINT32_MAX (sentinel) on wraparound
+        if (0U == next_id_ || UINT32_MAX == next_id_) {
+          next_id_ = 1U;
+        }
         info.state = ConnectionState::kIdle;
         info.created_time_us = now;
         info.last_active_us = now;

@@ -9,10 +9,11 @@
 
 #include "osp/net.hpp"
 
-#include <atomic>
-#include <thread>
-#include <chrono>
 #include <cstring>
+
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 using namespace osp::net;
 
@@ -29,8 +30,7 @@ TEST_CASE("TcpServer can listen and accept connections", "[net][tcp]") {
 
   sockaddr_in addr;
   socklen_t addr_len = sizeof(addr);
-  REQUIRE(::getsockname(server_fd, reinterpret_cast<sockaddr*>(&addr),
-                        &addr_len) == 0);
+  REQUIRE(::getsockname(server_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
   uint16_t port = ntohs(addr.sin_port);
   REQUIRE(port > 0);
 
@@ -98,8 +98,7 @@ TEST_CASE("TcpClient can connect to server", "[net][tcp]") {
   // Get port
   sockaddr_in addr;
   socklen_t addr_len = sizeof(addr);
-  REQUIRE(::getsockname(server.Fd(), reinterpret_cast<sockaddr*>(&addr),
-                        &addr_len) == 0);
+  REQUIRE(::getsockname(server.Fd(), reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
   uint16_t port = ntohs(addr.sin_port);
 
   // Connect
@@ -126,8 +125,7 @@ TEST_CASE("TcpClient can send and receive data", "[net][tcp]") {
   // Get port
   sockaddr_in addr;
   socklen_t addr_len = sizeof(addr);
-  REQUIRE(::getsockname(server.Fd(), reinterpret_cast<sockaddr*>(&addr),
-                        &addr_len) == 0);
+  REQUIRE(::getsockname(server.Fd(), reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
   uint16_t port = ntohs(addr.sin_port);
 
   // Server thread
@@ -200,8 +198,7 @@ TEST_CASE("UdpPeer can send and receive datagrams", "[net][udp]") {
   // Get receiver port
   sockaddr_in addr;
   socklen_t addr_len = sizeof(addr);
-  REQUIRE(::getsockname(receiver.Fd(), reinterpret_cast<sockaddr*>(&addr),
-                        &addr_len) == 0);
+  REQUIRE(::getsockname(receiver.Fd(), reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
   uint16_t port = ntohs(addr.sin_port);
 
   // Create sender
@@ -219,8 +216,7 @@ TEST_CASE("UdpPeer can send and receive datagrams", "[net][udp]") {
   char buf[1024] = {};
   char from_host[64] = {};
   uint16_t from_port = 0;
-  auto recv_r = receiver.RecvFrom(buf, sizeof(buf), from_host, sizeof(from_host),
-                                   &from_port);
+  auto recv_r = receiver.RecvFrom(buf, sizeof(buf), from_host, sizeof(from_host), &from_port);
   REQUIRE(recv_r.has_value());
   REQUIRE(recv_r.value() == std::strlen(msg));
   REQUIRE(std::strcmp(buf, msg) == 0);
@@ -234,8 +230,7 @@ TEST_CASE("TcpClient move semantics", "[net][tcp]") {
 
   sockaddr_in addr;
   socklen_t addr_len = sizeof(addr);
-  REQUIRE(::getsockname(server.Fd(), reinterpret_cast<sockaddr*>(&addr),
-                        &addr_len) == 0);
+  REQUIRE(::getsockname(server.Fd(), reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
   uint16_t port = ntohs(addr.sin_port);
 
   auto client1_r = TcpClient::Connect("127.0.0.1", port, 1000);
@@ -308,8 +303,7 @@ TEST_CASE("Multiple clients can connect to server", "[net][tcp]") {
 
   sockaddr_in addr;
   socklen_t addr_len = sizeof(addr);
-  REQUIRE(::getsockname(server.Fd(), reinterpret_cast<sockaddr*>(&addr),
-                        &addr_len) == 0);
+  REQUIRE(::getsockname(server.Fd(), reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
   uint16_t port = ntohs(addr.sin_port);
 
   // Connect 3 clients

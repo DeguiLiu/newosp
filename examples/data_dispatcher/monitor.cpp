@@ -8,13 +8,7 @@
 //
 // Usage: ./osp_dd_monitor [--channel name] [--port P] [--console]
 
-#include <atomic>
-#include <chrono>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <thread>
+#include "common.hpp"
 
 #include "osp/data_dispatcher.hpp"
 #include "osp/log.hpp"
@@ -22,7 +16,15 @@
 #include "osp/shell.hpp"
 #include "osp/shm_transport.hpp"
 #include "osp/shutdown.hpp"
-#include "common.hpp"
+
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 using Store = osp::ShmStore<kFrameDataSize, kPoolMaxBlocks>;
 using Disp = osp::DataDispatcher<Store>;
@@ -78,10 +80,7 @@ static int dd_status(int, char*[]) {
       "  free:      %u\r\n"
       "  allocated: %u\r\n"
       "  polls:     %u\r\n",
-      g_state.pool_name,
-      kPoolMaxBlocks, kFrameDataSize,
-      g_state.disp.FreeBlocks(),
-      g_state.disp.AllocBlocks(),
+      g_state.pool_name, kPoolMaxBlocks, kFrameDataSize, g_state.disp.FreeBlocks(), g_state.disp.AllocBlocks(),
       g_state.poll_count.load(std::memory_order_relaxed));
   return 0;
 }
@@ -106,8 +105,7 @@ static int dd_blocks(int, char*[]) {
   for (uint32_t i = 0; i < kPoolMaxBlocks; ++i) {
     auto st = g_state.disp.GetBlockState(i);
     if (st != osp::BlockState::kFree) {
-      osp::DebugShell::Printf("  block[%u] state=%u\r\n",
-                               i, static_cast<unsigned>(st));
+      osp::DebugShell::Printf("  block[%u] state=%u\r\n", i, static_cast<unsigned>(st));
     }
   }
   return 0;
@@ -123,9 +121,7 @@ static int dd_notify(int, char*[]) {
       "  notify channel: %s\r\n"
       "  consumers:      %u\r\n"
       "  readable:       %u bytes\r\n",
-      g_state.notify_name,
-      g_state.notify_channel.ConsumerCount(),
-      g_state.notify_channel.ReadableBytes());
+      g_state.notify_name, g_state.notify_channel.ConsumerCount(), g_state.notify_channel.ReadableBytes());
   return 0;
 }
 OSP_SHELL_CMD(dd_notify, "Show notification channel status");
@@ -136,21 +132,17 @@ static int dd_peek(int, char*[]) {
     return 1;
   }
   NotifyMsg msg;
-  uint32_t len = g_state.notify_channel.Read(
-      reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+  uint32_t len = g_state.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
   if (len != sizeof(msg)) {
     osp::DebugShell::Printf("  no notification available\r\n");
     return 1;
   }
-  osp::DebugShell::Printf("  block_id=%u payload_size=%u\r\n",
-                           msg.block_id, msg.payload_size);
+  osp::DebugShell::Printf("  block_id=%u payload_size=%u\r\n", msg.block_id, msg.payload_size);
   if (g_state.pool_attached && msg.block_id < kPoolMaxBlocks) {
     const uint8_t* data = g_state.disp.GetReadable(msg.block_id);
     if (ValidateLidarFrame(data, msg.payload_size)) {
       auto* hdr = reinterpret_cast<const LidarFrame*>(data);
-      osp::DebugShell::Printf("  seq=%u pts=%u ts=%u ms\r\n",
-                               hdr->seq_num, hdr->point_count,
-                               hdr->timestamp_ms);
+      osp::DebugShell::Printf("  seq=%u pts=%u ts=%u ms\r\n", hdr->seq_num, hdr->point_count, hdr->timestamp_ms);
     }
     g_state.disp.Release(msg.block_id);
   }
@@ -193,8 +185,7 @@ int main(int argc, char* argv[]) {
   if (g_state.pool_shm != nullptr) {
     g_state.disp.Attach(g_state.pool_shm);
     g_state.pool_attached = true;
-    OSP_LOG_INFO("Monitor", "pool attached: free=%u alloc=%u",
-                 g_state.disp.FreeBlocks(), g_state.disp.AllocBlocks());
+    OSP_LOG_INFO("Monitor", "pool attached: free=%u alloc=%u", g_state.disp.FreeBlocks(), g_state.disp.AllocBlocks());
   } else {
     OSP_LOG_WARN("Monitor", "pool shm not available yet");
   }
@@ -237,7 +228,10 @@ int main(int argc, char* argv[]) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
-  if (console_mode) console_shell.Stop(); else tcp_shell.Stop();
+  if (console_mode)
+    console_shell.Stop();
+  else
+    tcp_shell.Stop();
   poll_thread.join();
   if (g_state.pool_shm != nullptr)
     ClosePoolShm(g_state.pool_shm, g_state.pool_size);

@@ -5,9 +5,9 @@
 
 #include "osp/post.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <cstring>
+
+#include <catch2/catch_test_macros.hpp>
 #include <thread>
 
 // ============================================================================
@@ -91,9 +91,10 @@ TEST_CASE("post - AppRegistry null registration", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  REQUIRE(!reg.Register(1, nullptr,
-      [](void*, uint16_t, uint16_t, const void*, uint32_t,
-         osp::ResponseChannel*) -> bool { return true; }));
+  REQUIRE(
+      !reg.Register(1, nullptr, [](void*, uint16_t, uint16_t, const void*, uint32_t, osp::ResponseChannel*) -> bool {
+        return true;
+      }));
   REQUIRE(!reg.Register(1, reinterpret_cast<void*>(1), nullptr));
   REQUIRE(reg.Count() == 0);
 }
@@ -125,12 +126,22 @@ TEST_CASE("post - OspPost local delivery", "[post]") {
   osp::UnregisterApp(app);
 }
 
-TEST_CASE("post - OspPost to unknown app fails", "[post]") {
+TEST_CASE("post - OspPost large payload fails", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  uint32_t dst = osp::MakeIID(99, 1);
-  REQUIRE(!osp::OspPost(dst, 1, nullptr, 0));
+  osp::Application<PostTestInstance, 8> app(11, "post_large");
+  osp::RegisterApp(app);
+
+  auto r = app.CreateInstance();
+  REQUIRE(r.has_value());
+
+  uint8_t payload[OSP_APP_MSG_INLINE_SIZE + 1U] = {};
+  uint32_t dst = osp::MakeIID(11, r.value());
+  REQUIRE(!osp::OspPost(dst, 43, payload, sizeof(payload)));
+  REQUIRE(app.PendingMessages() == 0U);
+
+  osp::UnregisterApp(app);
 }
 
 TEST_CASE("post - OspPost broadcast via kInsEach", "[post]") {
@@ -189,9 +200,7 @@ TEST_CASE("post - OspSendAndWait with reply data", "[post]") {
     app.ProcessOne();
   });
 
-  auto result = osp::OspSendAndWait(
-      dst, 50, &req_val, sizeof(req_val),
-      &ack_val, sizeof(ack_val), 0, 2000);
+  auto result = osp::OspSendAndWait(dst, 50, &req_val, sizeof(req_val), &ack_val, sizeof(ack_val), 0, 2000);
 
   processor.join();
 
@@ -220,8 +229,7 @@ TEST_CASE("post - OspSendAndWait no request data", "[post]") {
     app.ProcessOne();
   });
 
-  auto result = osp::OspSendAndWait(
-      dst, 7, nullptr, 0, &ack_val, sizeof(ack_val), 0, 2000);
+  auto result = osp::OspSendAndWait(dst, 7, nullptr, 0, &ack_val, sizeof(ack_val), 0, 2000);
 
   processor.join();
 
@@ -250,9 +258,8 @@ TEST_CASE("post - OspSendAndWait timeout when no reply", "[post]") {
     app.ProcessOne();
   });
 
-  auto result = osp::OspSendAndWait(
-      dst, 1, nullptr, 0, &ack_val, sizeof(ack_val), 0,
-      /*timeout_ms=*/200);
+  auto result = osp::OspSendAndWait(dst, 1, nullptr, 0, &ack_val, sizeof(ack_val), 0,
+                                    /*timeout_ms=*/200);
 
   processor.join();
 
@@ -263,8 +270,7 @@ TEST_CASE("post - OspSendAndWait timeout when no reply", "[post]") {
 }
 
 TEST_CASE("post - OspSendAndWait remote fails", "[post]") {
-  auto result = osp::OspSendAndWait(
-      osp::MakeIID(1, 1), 1, nullptr, 0, nullptr, 0, /*dst_node=*/3);
+  auto result = osp::OspSendAndWait(osp::MakeIID(1, 1), 1, nullptr, 0, nullptr, 0, /*dst_node=*/3);
   REQUIRE(!result.has_value());
   REQUIRE(result.get_error() == osp::PostError::kSendFailed);
 }
@@ -273,8 +279,7 @@ TEST_CASE("post - OspSendAndWait unknown app fails", "[post]") {
   auto& reg = osp::AppRegistry::Instance();
   reg.Reset();
 
-  auto result = osp::OspSendAndWait(
-      osp::MakeIID(99, 1), 1, nullptr, 0, nullptr, 0);
+  auto result = osp::OspSendAndWait(osp::MakeIID(99, 1), 1, nullptr, 0, nullptr, 0);
   REQUIRE(!result.has_value());
   REQUIRE(result.get_error() == osp::PostError::kAppNotFound);
 }
@@ -298,9 +303,7 @@ TEST_CASE("post - OspSendAndWait small ack buffer truncates", "[post]") {
     app.ProcessOne();
   });
 
-  auto result = osp::OspSendAndWait(
-      dst, 50, &req_val, sizeof(req_val),
-      &small_buf, sizeof(small_buf), 0, 2000);
+  auto result = osp::OspSendAndWait(dst, 50, &req_val, sizeof(req_val), &small_buf, sizeof(small_buf), 0, 2000);
 
   processor.join();
 

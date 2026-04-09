@@ -24,12 +24,7 @@
 //
 // Usage: ./osp_shm_producer [channel_name] [num_frames]
 
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <chrono>
-#include <thread>
+#include "shm_common.hpp"
 
 #include "osp/fault_collector.hpp"
 #include "osp/hsm.hpp"
@@ -42,7 +37,13 @@
 #include "osp/timer.hpp"
 #include "osp/watchdog.hpp"
 
-#include "shm_common.hpp"
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include <chrono>
+#include <thread>
 
 using Channel = osp::ShmChannel<kSlotSize, kSlotCount>;
 
@@ -131,9 +132,7 @@ struct ProdCtx {
     s.stall_count = pause_count;
     s.queue_depth = channel.Depth();
     s.fps = last_fps;
-    s.mbps = (last_fps > 0.0f)
-        ? last_fps * static_cast<float>(kFrameSize) / (1024.0f * 1024.0f)
-        : 0.0f;
+    s.mbps = (last_fps > 0.0f) ? last_fps * static_cast<float>(kFrameSize) / (1024.0f * 1024.0f) : 0.0f;
     s.role = 0;  // producer
     stats_ring.Push(s);
   }
@@ -143,11 +142,11 @@ struct ProdCtx {
 // Fill frame buffer
 // ---------------------------------------------------------------------------
 static void FillFrame(uint8_t* buf, uint32_t seq) {
-  auto* hdr    = reinterpret_cast<FrameHeader*>(buf);
-  hdr->magic   = kMagic;
+  auto* hdr = reinterpret_cast<FrameHeader*>(buf);
+  hdr->magic = kMagic;
   hdr->seq_num = seq;
-  hdr->width   = kWidth;
-  hdr->height  = kHeight;
+  hdr->width = kWidth;
+  hdr->height = kHeight;
 
   uint8_t* pixels = buf + sizeof(FrameHeader);
   for (uint32_t i = 0; i < kPixelBytes; ++i) {
@@ -160,8 +159,7 @@ static void FillFrame(uint8_t* buf, uint32_t seq) {
 // ---------------------------------------------------------------------------
 
 // --- Operational (root) ---
-static osp::TransitionResult OnOperational(ProdCtx& ctx,
-                                            const osp::Event& event) {
+static osp::TransitionResult OnOperational(ProdCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtShutdown) {
     OSP_LOG_INFO("producer", "shutdown signal received");
     return ctx.sm->RequestTransition(ctx.s_done);
@@ -189,8 +187,7 @@ static void OnEnterRunning(ProdCtx& ctx) {
   OSP_LOG_INFO("producer", "running (seq=%u)", ctx.seq);
 }
 
-static osp::TransitionResult OnRunning(ProdCtx& ctx,
-                                        const osp::Event& event) {
+static osp::TransitionResult OnRunning(ProdCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtLimitReached) {
     OSP_LOG_INFO("producer", "frame limit reached (%u)", ctx.max_frames);
     return ctx.sm->RequestTransition(ctx.s_done);
@@ -205,18 +202,15 @@ static void OnExitRunning(ProdCtx& ctx) {
 // --- Streaming ---
 static void OnEnterStreaming(ProdCtx& ctx) {
   ctx.consecutive_pauses = 0;
-  OSP_LOG_INFO("producer", "streaming (seq=%u, fps=%.1f)",
-               ctx.seq, static_cast<double>(ctx.last_fps));
+  OSP_LOG_INFO("producer", "streaming (seq=%u, fps=%.1f)", ctx.seq, static_cast<double>(ctx.last_fps));
 }
 
-static osp::TransitionResult OnStreaming(ProdCtx& ctx,
-                                          const osp::Event& event) {
+static osp::TransitionResult OnStreaming(ProdCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtRingFull) {
     ++ctx.pause_count;
     ++ctx.consecutive_pauses;
     // Report ring-full fault
-    ctx.fault_collector.ReportFault(
-        FaultCode::kRingFull, ctx.seq, osp::FaultPriority::kMedium);
+    ctx.fault_collector.ReportFault(FaultCode::kRingFull, ctx.seq, osp::FaultPriority::kMedium);
     if (ctx.consecutive_pauses >= ctx.kThrottleThreshold) {
       return ctx.sm->RequestTransition(ctx.s_throttled);
     }
@@ -233,8 +227,7 @@ static void OnEnterPaused(ProdCtx& ctx) {
   ctx.pause_start_us = osp::SteadyNowUs();
 }
 
-static osp::TransitionResult OnPaused(ProdCtx& ctx,
-                                       const osp::Event& event) {
+static osp::TransitionResult OnPaused(ProdCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtRingAvail) {
     return ctx.sm->RequestTransition(ctx.s_streaming);
   }
@@ -244,12 +237,10 @@ static osp::TransitionResult OnPaused(ProdCtx& ctx,
 // --- Throttled ---
 static void OnEnterThrottled(ProdCtx& ctx) {
   ++ctx.throttle_count;
-  OSP_LOG_WARN("producer", "throttled after %u consecutive pauses",
-               ctx.consecutive_pauses);
+  OSP_LOG_WARN("producer", "throttled after %u consecutive pauses", ctx.consecutive_pauses);
 }
 
-static osp::TransitionResult OnThrottled(ProdCtx& ctx,
-                                          const osp::Event& event) {
+static osp::TransitionResult OnThrottled(ProdCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtThrottleEnd) {
     ctx.consecutive_pauses = 0;
     return ctx.sm->RequestTransition(ctx.s_streaming);
@@ -263,14 +254,11 @@ static osp::TransitionResult OnThrottled(ProdCtx& ctx,
 // --- Error ---
 static void OnEnterError(ProdCtx& ctx) {
   ++ctx.error_count;
-  ctx.fault_collector.ReportFault(
-      FaultCode::kConnectFail, ctx.error_count, osp::FaultPriority::kHigh);
-  OSP_LOG_ERROR("producer", "error state (count=%u), will retry...",
-                ctx.error_count);
+  ctx.fault_collector.ReportFault(FaultCode::kConnectFail, ctx.error_count, osp::FaultPriority::kHigh);
+  OSP_LOG_ERROR("producer", "error state (count=%u), will retry...", ctx.error_count);
 }
 
-static osp::TransitionResult OnError(ProdCtx& ctx,
-                                      const osp::Event& event) {
+static osp::TransitionResult OnError(ProdCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtRetry) {
     if (ctx.error_count >= 3) {
       OSP_LOG_ERROR("producer", "too many errors, giving up");
@@ -290,14 +278,11 @@ static void OnEnterDone(ProdCtx& ctx) {
   ctx.channel.Unlink();
   ctx.finished = true;
   ctx.PushStats();  // Final stats snapshot
-  OSP_LOG_INFO("producer",
-               "done. total=%u, dropped=%u, pauses=%u, throttles=%u, errors=%u",
-               ctx.seq, ctx.dropped, ctx.pause_count,
-               ctx.throttle_count, ctx.error_count);
+  OSP_LOG_INFO("producer", "done. total=%u, dropped=%u, pauses=%u, throttles=%u, errors=%u", ctx.seq, ctx.dropped,
+               ctx.pause_count, ctx.throttle_count, ctx.error_count);
 }
 
-static osp::TransitionResult OnDone(ProdCtx& /*ctx*/,
-                                     const osp::Event& /*event*/) {
+static osp::TransitionResult OnDone(ProdCtx& /*ctx*/, const osp::Event& /*event*/) {
   return osp::TransitionResult::kHandled;
 }
 
@@ -306,25 +291,24 @@ static osp::TransitionResult OnDone(ProdCtx& /*ctx*/,
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
   const char* channel_name = (argc > 1) ? argv[1] : "frame_ch";
-  const uint32_t max_frames =
-      (argc > 2) ? static_cast<uint32_t>(std::atoi(argv[2])) : 1000;
+  const uint32_t max_frames = (argc > 2) ? static_cast<uint32_t>(std::atoi(argv[2])) : 1000;
 
   ProdCtx ctx;
   ctx.channel_name = channel_name;
-  ctx.max_frames   = max_frames;
+  ctx.max_frames = max_frames;
   ctx.shutdown.InstallSignalHandlers();
 
   // -- Watchdog setup: monitor main loop with 5s timeout --
-  ctx.watchdog.SetOnTimeout([](uint32_t slot_id, const char* name, void* c) {
-    auto* fc = &static_cast<ProdCtx*>(c)->fault_collector;
-    fc->ReportFault(FaultCode::kThreadDeath, slot_id,
-                    osp::FaultPriority::kCritical);
-    OSP_LOG_ERROR("producer", "watchdog: thread '%s' (slot %u) timed out",
-                  name, slot_id);
-  }, &ctx);
-  ctx.watchdog.SetOnRecovered([](uint32_t, const char* name, void*) {
-    OSP_LOG_INFO("producer", "watchdog: thread '%s' recovered", name);
-  }, nullptr);
+  ctx.watchdog.SetOnTimeout(
+      [](uint32_t slot_id, const char* name, void* c) {
+        auto* fc = &static_cast<ProdCtx*>(c)->fault_collector;
+        fc->ReportFault(FaultCode::kThreadDeath, slot_id, osp::FaultPriority::kCritical);
+        OSP_LOG_ERROR("producer", "watchdog: thread '%s' (slot %u) timed out", name, slot_id);
+      },
+      &ctx);
+  ctx.watchdog.SetOnRecovered(
+      [](uint32_t, const char* name, void*) { OSP_LOG_INFO("producer", "watchdog: thread '%s' recovered", name); },
+      nullptr);
 
   auto wd_reg = ctx.watchdog.Register("main_loop", 5000);
   if (wd_reg.has_value()) {
@@ -335,20 +319,17 @@ int main(int argc, char* argv[]) {
 
   // -- FaultCollector setup --
   ctx.fault_collector.RegisterFault(FaultCode::kThreadDeath, 0xFFFF0001U);
-  ctx.fault_collector.RegisterFault(FaultCode::kRingFull,    0x00010001U);
+  ctx.fault_collector.RegisterFault(FaultCode::kRingFull, 0x00010001U);
   ctx.fault_collector.RegisterFault(FaultCode::kConnectFail, 0x00020001U);
 
-  ctx.fault_collector.RegisterHook(FaultCode::kThreadDeath,
-      [](const osp::FaultEvent& e) {
-        OSP_LOG_ERROR("FAULT", "thread death: slot=%u", e.detail);
-        return osp::HookAction::kEscalate;
-      });
-  ctx.fault_collector.RegisterHook(FaultCode::kRingFull,
-      [](const osp::FaultEvent& e) {
-        OSP_LOG_WARN("FAULT", "ring full at seq=%u (count=%u)",
-                     e.detail, e.occurrence_count);
-        return osp::HookAction::kHandled;
-      });
+  ctx.fault_collector.RegisterHook(FaultCode::kThreadDeath, [](const osp::FaultEvent& e) {
+    OSP_LOG_ERROR("FAULT", "thread death: slot=%u", e.detail);
+    return osp::HookAction::kEscalate;
+  });
+  ctx.fault_collector.RegisterHook(FaultCode::kRingFull, [](const osp::FaultEvent& e) {
+    OSP_LOG_WARN("FAULT", "ring full at seq=%u (count=%u)", e.detail, e.occurrence_count);
+    return osp::HookAction::kHandled;
+  });
 
   // Wire FaultCollector consumer thread to watchdog
   auto fc_reg = ctx.watchdog.Register("fault_consumer", 5000);
@@ -361,49 +342,36 @@ int main(int argc, char* argv[]) {
   osp::StateMachine<ProdCtx, 8> sm(ctx);
   ctx.sm = &sm;
 
-  ctx.s_operational = sm.AddState({
-      "Operational", -1, OnOperational, nullptr, nullptr, nullptr});
-  ctx.s_init = sm.AddState({
-      "Init", ctx.s_operational, OnInit, OnEnterInit, nullptr, nullptr});
-  ctx.s_running = sm.AddState({
-      "Running", ctx.s_operational, OnRunning,
-      OnEnterRunning, OnExitRunning, nullptr});
-  ctx.s_streaming = sm.AddState({
-      "Streaming", ctx.s_running, OnStreaming,
-      OnEnterStreaming, nullptr, nullptr});
-  ctx.s_paused = sm.AddState({
-      "Paused", ctx.s_running, OnPaused,
-      OnEnterPaused, nullptr, nullptr});
-  ctx.s_throttled = sm.AddState({
-      "Throttled", ctx.s_running, OnThrottled,
-      OnEnterThrottled, nullptr, nullptr});
-  ctx.s_error = sm.AddState({
-      "Error", ctx.s_operational, OnError,
-      OnEnterError, nullptr, nullptr});
-  ctx.s_done = sm.AddState({
-      "Done", ctx.s_operational, OnDone,
-      OnEnterDone, nullptr, nullptr});
+  ctx.s_operational = sm.AddState({"Operational", -1, OnOperational, nullptr, nullptr, nullptr});
+  ctx.s_init = sm.AddState({"Init", ctx.s_operational, OnInit, OnEnterInit, nullptr, nullptr});
+  ctx.s_running = sm.AddState({"Running", ctx.s_operational, OnRunning, OnEnterRunning, OnExitRunning, nullptr});
+  ctx.s_streaming = sm.AddState({"Streaming", ctx.s_running, OnStreaming, OnEnterStreaming, nullptr, nullptr});
+  ctx.s_paused = sm.AddState({"Paused", ctx.s_running, OnPaused, OnEnterPaused, nullptr, nullptr});
+  ctx.s_throttled = sm.AddState({"Throttled", ctx.s_running, OnThrottled, OnEnterThrottled, nullptr, nullptr});
+  ctx.s_error = sm.AddState({"Error", ctx.s_operational, OnError, OnEnterError, nullptr, nullptr});
+  ctx.s_done = sm.AddState({"Done", ctx.s_operational, OnDone, OnEnterDone, nullptr, nullptr});
 
   sm.SetInitialState(ctx.s_init);
 
   // -- Stats timer --
   ctx.timer.Start();
-  auto timer_r = ctx.timer.Add(2000, [](void* arg) {
-    auto* c = static_cast<ProdCtx*>(arg);
-    if (c->seq > 0) {
-      c->PushStats();
-      auto fc_stats = c->fault_collector.GetStatistics();
-      OSP_LOG_INFO("producer",
-                   "[timer] seq=%u fps=%.1f pauses=%u throttles=%u "
-                   "faults=%lu pool=%u/%u state=%s",
-                   c->seq, static_cast<double>(c->last_fps),
-                   c->pause_count, c->throttle_count,
-                   static_cast<unsigned long>(fc_stats.total_reported),
-                   c->frame_pool.Capacity() - c->frame_pool.FreeCount(),
-                   c->frame_pool.Capacity(),
-                   c->sm->CurrentStateName());
-    }
-  }, &ctx);
+  auto timer_r = ctx.timer.Add(
+      2000,
+      [](void* arg) {
+        auto* c = static_cast<ProdCtx*>(arg);
+        if (c->seq > 0) {
+          c->PushStats();
+          auto fc_stats = c->fault_collector.GetStatistics();
+          OSP_LOG_INFO("producer",
+                       "[timer] seq=%u fps=%.1f pauses=%u throttles=%u "
+                       "faults=%lu pool=%u/%u state=%s",
+                       c->seq, static_cast<double>(c->last_fps), c->pause_count, c->throttle_count,
+                       static_cast<unsigned long>(fc_stats.total_reported),
+                       c->frame_pool.Capacity() - c->frame_pool.FreeCount(), c->frame_pool.Capacity(),
+                       c->sm->CurrentStateName());
+        }
+      },
+      &ctx);
   if (timer_r) {
     ctx.stats_timer_id = timer_r.value();
   }
@@ -429,8 +397,7 @@ int main(int argc, char* argv[]) {
       // Use CreateOrReplaceWriter to tolerate stale shm files
       auto result = Channel::CreateOrReplaceWriter(ctx.channel_name);
       if (!result) {
-        OSP_LOG_ERROR("producer", "failed to create channel (err=%d)",
-                      static_cast<int>(result.get_error()));
+        OSP_LOG_ERROR("producer", "failed to create channel (err=%d)", static_cast<int>(result.get_error()));
         sm.Dispatch({kEvtInitFail, nullptr});
         continue;
       }
@@ -444,10 +411,8 @@ int main(int argc, char* argv[]) {
       }
 
       ctx.t0_us = osp::SteadyNowUs();
-      OSP_LOG_INFO("producer", "channel created (slot=%u x %u), pool=%u/%u",
-                   kSlotSize, kSlotCount,
-                   ctx.frame_pool.Capacity() - ctx.frame_pool.FreeCount(),
-                   ctx.frame_pool.Capacity());
+      OSP_LOG_INFO("producer", "channel created (slot=%u x %u), pool=%u/%u", kSlotSize, kSlotCount,
+                   ctx.frame_pool.Capacity() - ctx.frame_pool.FreeCount(), ctx.frame_pool.Capacity());
       sm.Dispatch({kEvtInitDone, nullptr});
 
     } else if (state == ctx.s_streaming) {
@@ -464,10 +429,9 @@ int main(int argc, char* argv[]) {
         if (ctx.seq % ctx.kReportInterval == 0) {
           uint64_t t1_us = osp::SteadyNowUs();
           double elapsed_s = static_cast<double>(t1_us - ctx.t0_us) / 1e6;
-          ctx.last_fps = (elapsed_s > 0.0)
-              ? static_cast<float>(ctx.kReportInterval / elapsed_s) : 0.0f;
-          OSP_LOG_INFO("producer", "frame #%u (%u bytes), %.1f fps",
-                       ctx.seq, kFrameSize, static_cast<double>(ctx.last_fps));
+          ctx.last_fps = (elapsed_s > 0.0) ? static_cast<float>(ctx.kReportInterval / elapsed_s) : 0.0f;
+          OSP_LOG_INFO("producer", "frame #%u (%u bytes), %.1f fps", ctx.seq, kFrameSize,
+                       static_cast<double>(ctx.last_fps));
           ctx.t0_us = t1_us;
         }
         sm.Dispatch({kEvtFrameSent, nullptr});

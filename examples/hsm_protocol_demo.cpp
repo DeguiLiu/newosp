@@ -18,6 +18,7 @@
  */
 
 #include "osp/hsm.hpp"
+
 #include <cstdio>
 #include <cstring>
 
@@ -74,8 +75,7 @@ static osp::StateMachine<ProtocolContext, 16>* g_sm = nullptr;
 
 // --- Disconnected ---
 
-osp::TransitionResult OnDisconnected(ProtocolContext& ctx,
-                                      const osp::Event& event) {
+osp::TransitionResult OnDisconnected(ProtocolContext& ctx, const osp::Event& event) {
   if (event.id == CONNECT) {
     printf("  [Disconnected] CONNECT received -> Connecting\n");
     return g_sm->RequestTransition(s_connecting);
@@ -91,8 +91,7 @@ void OnEnterDisconnected(ProtocolContext& ctx) {
 
 // --- Connecting ---
 
-osp::TransitionResult OnConnecting(ProtocolContext& ctx,
-                                    const osp::Event& event) {
+osp::TransitionResult OnConnecting(ProtocolContext& ctx, const osp::Event& event) {
   if (event.id == SYN_ACK) {
     printf("  [Connecting] SYN_ACK received -> Connected/Idle\n");
     ctx.ack_count++;
@@ -113,8 +112,7 @@ void OnEnterConnecting(ProtocolContext& ctx) {
 
 // --- Connected (parent state) ---
 
-osp::TransitionResult OnConnected(ProtocolContext& ctx,
-                                   const osp::Event& event) {
+osp::TransitionResult OnConnected(ProtocolContext& ctx, const osp::Event& event) {
   // Connected handles DISCONNECT for both Idle and Active children
   if (event.id == DISCONNECT) {
     printf("  [Connected] DISCONNECT received -> Disconnecting\n");
@@ -171,8 +169,7 @@ void OnEnterActive(ProtocolContext& ctx) {
 
 // --- Disconnecting ---
 
-osp::TransitionResult OnDisconnecting(ProtocolContext& ctx,
-                                       const osp::Event& event) {
+osp::TransitionResult OnDisconnecting(ProtocolContext& ctx, const osp::Event& event) {
   if (event.id == FIN_ACK) {
     printf("  [Disconnecting] FIN_ACK received -> Disconnected\n");
     return g_sm->RequestTransition(s_disconnected);
@@ -195,74 +192,28 @@ void OnEnterDisconnecting(ProtocolContext& ctx) {
 
 void SetupStateMachine(osp::StateMachine<ProtocolContext, 16>& sm) {
   // Root: Operational
-  s_operational = sm.AddState({
-      "Operational",
-      -1,  // no parent (root)
-      nullptr,
-      nullptr,
-      nullptr,
-      nullptr
-  });
+  s_operational = sm.AddState({"Operational",
+                               -1,  // no parent (root)
+                               nullptr, nullptr, nullptr, nullptr});
 
   // Disconnected
-  s_disconnected = sm.AddState({
-      "Disconnected",
-      s_operational,
-      OnDisconnected,
-      OnEnterDisconnected,
-      nullptr,
-      nullptr
-  });
+  s_disconnected = sm.AddState({"Disconnected", s_operational, OnDisconnected, OnEnterDisconnected, nullptr, nullptr});
 
   // Connecting
-  s_connecting = sm.AddState({
-      "Connecting",
-      s_operational,
-      OnConnecting,
-      OnEnterConnecting,
-      nullptr,
-      nullptr
-  });
+  s_connecting = sm.AddState({"Connecting", s_operational, OnConnecting, OnEnterConnecting, nullptr, nullptr});
 
   // Connected (parent state)
-  s_connected = sm.AddState({
-      "Connected",
-      s_operational,
-      OnConnected,
-      OnEnterConnected,
-      OnExitConnected,
-      nullptr
-  });
+  s_connected = sm.AddState({"Connected", s_operational, OnConnected, OnEnterConnected, OnExitConnected, nullptr});
 
   // Idle (child of Connected)
-  s_idle = sm.AddState({
-      "Idle",
-      s_connected,
-      OnIdle,
-      OnEnterIdle,
-      nullptr,
-      nullptr
-  });
+  s_idle = sm.AddState({"Idle", s_connected, OnIdle, OnEnterIdle, nullptr, nullptr});
 
   // Active (child of Connected)
-  s_active = sm.AddState({
-      "Active",
-      s_connected,
-      OnActive,
-      OnEnterActive,
-      nullptr,
-      nullptr
-  });
+  s_active = sm.AddState({"Active", s_connected, OnActive, OnEnterActive, nullptr, nullptr});
 
   // Disconnecting
-  s_disconnecting = sm.AddState({
-      "Disconnecting",
-      s_operational,
-      OnDisconnecting,
-      OnEnterDisconnecting,
-      nullptr,
-      nullptr
-  });
+  s_disconnecting =
+      sm.AddState({"Disconnecting", s_operational, OnDisconnecting, OnEnterDisconnecting, nullptr, nullptr});
 
   sm.SetInitialState(s_disconnected);
 }

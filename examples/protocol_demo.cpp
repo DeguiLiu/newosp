@@ -19,9 +19,10 @@
 #include "osp/node.hpp"
 #include "osp/timer.hpp"
 
-#include <chrono>
 #include <cstdint>
 #include <cstring>
+
+#include <chrono>
 #include <thread>
 #include <variant>
 
@@ -37,7 +38,7 @@ struct RegisterRequest {
 
 struct RegisterResponse {
   char device_id[32];
-  uint8_t result;       // 0 = success, 1 = rejected
+  uint8_t result;  // 0 = success, 1 = rejected
   uint32_t session_id;
 };
 
@@ -48,8 +49,8 @@ struct HeartbeatMsg {
 
 struct StreamCommand {
   uint32_t session_id;
-  uint8_t action;       // 0 = stop, 1 = start
-  uint8_t media_type;   // 0 = video, 1 = audio, 2 = both
+  uint8_t action;      // 0 = stop, 1 = start
+  uint8_t media_type;  // 0 = video, 1 = audio, 2 = both
 };
 
 struct StreamData {
@@ -60,8 +61,7 @@ struct StreamData {
 };
 
 // Single variant carrying all protocol message types.
-using Payload = std::variant<RegisterRequest, RegisterResponse,
-                             HeartbeatMsg, StreamCommand, StreamData>;
+using Payload = std::variant<RegisterRequest, RegisterResponse, HeartbeatMsg, StreamCommand, StreamData>;
 
 // ============================================================================
 // Protocol Statistics
@@ -94,8 +94,7 @@ static constexpr uint32_t kDemoSessionId = 0x1001;
 
 static uint64_t NowUs() {
   auto dur = std::chrono::steady_clock::now().time_since_epoch();
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(dur).count());
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(dur).count());
 }
 
 // ============================================================================
@@ -129,62 +128,47 @@ int main() {
   osp::Node<Payload> client("client", kClientId);
 
   // ---- Registrar: handle RegisterRequest, reply with RegisterResponse ----
-  registrar.Subscribe<RegisterRequest>(
-      [&](const RegisterRequest& req, const osp::MessageHeader& /*hdr*/) {
-        OSP_LOG_INFO("Registrar", "device %s from %s:%u", req.device_id,
-                     req.ip, static_cast<unsigned>(req.port));
-        RegisterResponse resp{};
-        std::strncpy(resp.device_id, req.device_id,
-                     sizeof(resp.device_id) - 1);
-        resp.result = 0;  // success
-        resp.session_id = kDemoSessionId;
-        registrar.Publish(resp);
-        ++g_state.registered_count;
-      });
+  registrar.Subscribe<RegisterRequest>([&](const RegisterRequest& req, const osp::MessageHeader& /*hdr*/) {
+    OSP_LOG_INFO("Registrar", "device %s from %s:%u", req.device_id, req.ip, static_cast<unsigned>(req.port));
+    RegisterResponse resp{};
+    std::strncpy(resp.device_id, req.device_id, sizeof(resp.device_id) - 1);
+    resp.result = 0;  // success
+    resp.session_id = kDemoSessionId;
+    registrar.Publish(resp);
+    ++g_state.registered_count;
+  });
 
   // ---- Client: receive RegisterResponse ----
-  client.Subscribe<RegisterResponse>(
-      [](const RegisterResponse& resp, const osp::MessageHeader& /*hdr*/) {
-        OSP_LOG_INFO("Client",
-                     "registered device %s, session 0x%X, result %u",
-                     resp.device_id, resp.session_id,
-                     static_cast<unsigned>(resp.result));
-      });
+  client.Subscribe<RegisterResponse>([](const RegisterResponse& resp, const osp::MessageHeader& /*hdr*/) {
+    OSP_LOG_INFO("Client", "registered device %s, session 0x%X, result %u", resp.device_id, resp.session_id,
+                 static_cast<unsigned>(resp.result));
+  });
 
   // ---- Heartbeat monitor: validate heartbeat freshness ----
-  heartbeat_monitor.Subscribe<HeartbeatMsg>(
-      [](const HeartbeatMsg& hb, const osp::MessageHeader& /*hdr*/) {
-        uint64_t age_us = NowUs() - hb.timestamp_us;
-        if (age_us > 500000) {  // > 500 ms is suspicious
-          OSP_LOG_WARN("Heartbeat", "session 0x%X late by %lu us",
-                       hb.session_id, static_cast<unsigned long>(age_us));
-          ++g_state.error_count;
-        } else {
-          OSP_LOG_DEBUG("Heartbeat", "session 0x%X ok (%lu us age)",
-                        hb.session_id, static_cast<unsigned long>(age_us));
-        }
-        ++g_state.heartbeat_count;
-      });
+  heartbeat_monitor.Subscribe<HeartbeatMsg>([](const HeartbeatMsg& hb, const osp::MessageHeader& /*hdr*/) {
+    uint64_t age_us = NowUs() - hb.timestamp_us;
+    if (age_us > 500000) {  // > 500 ms is suspicious
+      OSP_LOG_WARN("Heartbeat", "session 0x%X late by %lu us", hb.session_id, static_cast<unsigned long>(age_us));
+      ++g_state.error_count;
+    } else {
+      OSP_LOG_DEBUG("Heartbeat", "session 0x%X ok (%lu us age)", hb.session_id, static_cast<unsigned long>(age_us));
+    }
+    ++g_state.heartbeat_count;
+  });
 
   // ---- Stream controller: handle commands and data ----
-  stream_controller.Subscribe<StreamCommand>(
-      [](const StreamCommand& cmd, const osp::MessageHeader& /*hdr*/) {
-        const char* action = (cmd.action == 1) ? "START" : "STOP";
-        const char* media = (cmd.media_type == 0)   ? "video"
-                            : (cmd.media_type == 1) ? "audio"
-                                                    : "A/V";
-        OSP_LOG_INFO("StreamCtrl", "session 0x%X %s %s",
-                     cmd.session_id, action, media);
-        ++g_state.stream_count;
-      });
+  stream_controller.Subscribe<StreamCommand>([](const StreamCommand& cmd, const osp::MessageHeader& /*hdr*/) {
+    const char* action = (cmd.action == 1) ? "START" : "STOP";
+    const char* media = (cmd.media_type == 0) ? "video" : (cmd.media_type == 1) ? "audio" : "A/V";
+    OSP_LOG_INFO("StreamCtrl", "session 0x%X %s %s", cmd.session_id, action, media);
+    ++g_state.stream_count;
+  });
 
-  stream_controller.Subscribe<StreamData>(
-      [](const StreamData& sd, const osp::MessageHeader& /*hdr*/) {
-        OSP_LOG_DEBUG("StreamCtrl", "session 0x%X seq=%u size=%u",
-                      sd.session_id, sd.seq,
-                      static_cast<unsigned>(sd.payload_size));
-        ++g_state.stream_count;
-      });
+  stream_controller.Subscribe<StreamData>([](const StreamData& sd, const osp::MessageHeader& /*hdr*/) {
+    OSP_LOG_DEBUG("StreamCtrl", "session 0x%X seq=%u size=%u", sd.session_id, sd.seq,
+                  static_cast<unsigned>(sd.payload_size));
+    ++g_state.stream_count;
+  });
 
   // ---- Start all nodes ----
   registrar.Start();
@@ -195,8 +179,7 @@ int main() {
   // ---- Step 1: device registration (HIGH priority) ----
   OSP_LOG_INFO("Proto", "--- step 1: device registration ---");
   RegisterRequest req{};
-  std::strncpy(req.device_id, "CAM-310200001",
-               sizeof(req.device_id) - 1);
+  std::strncpy(req.device_id, "CAM-310200001", sizeof(req.device_id) - 1);
   std::strncpy(req.ip, "192.168.1.100", sizeof(req.ip) - 1);
   req.port = 5060;
   client.PublishWithPriority(req, osp::MessagePriority::kHigh);
@@ -238,7 +221,7 @@ int main() {
 
   StreamCommand stop_cmd{};
   stop_cmd.session_id = kDemoSessionId;
-  stop_cmd.action = 0;       // stop
+  stop_cmd.action = 0;  // stop
   stop_cmd.media_type = 2;
   client.PublishWithPriority(stop_cmd, osp::MessagePriority::kHigh);
   stream_controller.SpinOnce();
@@ -246,15 +229,11 @@ int main() {
   // ---- Statistics summary ----
   auto stats = osp::AsyncBus<Payload>::Instance().GetStatistics();
   OSP_LOG_INFO("Proto", "=== statistics ===");
-  OSP_LOG_INFO("Proto",
-               "bus: published=%lu processed=%lu dropped=%lu",
-               static_cast<unsigned long>(stats.messages_published),
-               static_cast<unsigned long>(stats.messages_processed),
-               static_cast<unsigned long>(stats.messages_dropped));
-  OSP_LOG_INFO("Proto",
-               "app: registered=%u heartbeats=%u streams=%u errors=%u",
-               g_state.registered_count, g_state.heartbeat_count,
-               g_state.stream_count, g_state.error_count);
+  OSP_LOG_INFO(
+      "Proto", "bus: published=%lu processed=%lu dropped=%lu", static_cast<unsigned long>(stats.messages_published),
+      static_cast<unsigned long>(stats.messages_processed), static_cast<unsigned long>(stats.messages_dropped));
+  OSP_LOG_INFO("Proto", "app: registered=%u heartbeats=%u streams=%u errors=%u", g_state.registered_count,
+               g_state.heartbeat_count, g_state.stream_count, g_state.error_count);
   OSP_LOG_INFO("Proto", "=== streaming protocol demo end ===");
 
   osp::log::Shutdown();

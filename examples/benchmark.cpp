@@ -10,21 +10,22 @@
 // - WorkerPool (task dispatch)
 
 #include "osp/bus.hpp"
+#include "osp/mem_pool.hpp"
 #include "osp/node.hpp"
 #include "osp/platform.hpp"
-#include "osp/static_node.hpp"
 #include "osp/shm_transport.hpp"
-#include "osp/transport.hpp"
-#include "osp/mem_pool.hpp"
+#include "osp/static_node.hpp"
 #include "osp/timer.hpp"
+#include "osp/transport.hpp"
 #include "osp/worker_pool.hpp"
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
 #include <mutex>
 #include <thread>
 #include <variant>
@@ -64,13 +65,12 @@ using Clock = std::chrono::high_resolution_clock;
 using TimePoint = Clock::time_point;
 
 static inline uint64_t ElapsedNs(TimePoint start, TimePoint end) {
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
-          .count());
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
 }
 
 static uint64_t Percentile(std::vector<uint64_t>& samples, double pct) {
-  if (samples.empty()) return 0;
+  if (samples.empty())
+    return 0;
   std::sort(samples.begin(), samples.end());
   size_t idx = static_cast<size_t>(pct / 100.0 * (samples.size() - 1));
   return samples[idx];
@@ -81,8 +81,7 @@ static uint64_t Percentile(std::vector<uint64_t>& samples, double pct) {
 template <typename Msg>
 static void RunThroughput(Bus& bus, const char* label, uint32_t count) {
   uint32_t received = 0;
-  auto handle = bus.template Subscribe<Msg>(
-      [&received](const osp::MessageEnvelope<BenchPayload>&) { ++received; });
+  auto handle = bus.template Subscribe<Msg>([&received](const osp::MessageEnvelope<BenchPayload>&) { ++received; });
 
   Msg msg{};
   msg.ts = 0;
@@ -95,23 +94,22 @@ static void RunThroughput(Bus& bus, const char* label, uint32_t count) {
   }
   // Drain all published messages
   for (uint32_t round = 0; round < 1000; ++round) {
-    if (bus.ProcessBatch() == 0) break;
+    if (bus.ProcessBatch() == 0)
+      break;
   }
   auto t1 = Clock::now();
 
   uint64_t ns = ElapsedNs(t0, t1);
   double secs = static_cast<double>(ns) / 1e9;
   double mps = (secs > 0) ? (static_cast<double>(received) / secs / 1e6) : 0;
-  printf("  %-12s  %8u msgs  %8.2f ms  %8.3f M msgs/s  (rx %u)\n", label,
-         count, secs * 1e3, mps, received);
+  printf("  %-12s  %8u msgs  %8.2f ms  %8.3f M msgs/s  (rx %u)\n", label, count, secs * 1e3, mps, received);
 
   bus.Unsubscribe(handle);
 }
 
 static void BenchThroughput(Bus& bus) {
   printf("\n=== Throughput Test ===\n");
-  printf("  %-12s  %8s        %8s      %8s\n", "Payload", "Count", "Time",
-         "Rate");
+  printf("  %-12s  %8s        %8s      %8s\n", "Payload", "Count", "Time", "Rate");
   printf("  -----------------------------------------------------------\n");
 
   static constexpr uint32_t kCounts[] = {10000, 100000};
@@ -136,24 +134,20 @@ static void BenchLatency(Bus& bus) {
   latencies.reserve(kSamples);
 
   bus.Reset();
-  auto handle = bus.Subscribe<SmallMsg>(
-      [&latencies](const osp::MessageEnvelope<BenchPayload>& env) {
-        auto now = Clock::now();
-        uint64_t send_ns =
-            std::get<SmallMsg>(env.payload).ts;
-        uint64_t recv_ns =
-            static_cast<uint64_t>(now.time_since_epoch().count());
-        if (recv_ns > send_ns) {
-          latencies.push_back(recv_ns - send_ns);
-        }
-      });
+  auto handle = bus.Subscribe<SmallMsg>([&latencies](const osp::MessageEnvelope<BenchPayload>& env) {
+    auto now = Clock::now();
+    uint64_t send_ns = std::get<SmallMsg>(env.payload).ts;
+    uint64_t recv_ns = static_cast<uint64_t>(now.time_since_epoch().count());
+    if (recv_ns > send_ns) {
+      latencies.push_back(recv_ns - send_ns);
+    }
+  });
 
   SmallMsg msg{};
   msg.value = 0;
   for (uint32_t i = 0; i < kSamples; ++i) {
     msg.id = i;
-    msg.ts =
-        static_cast<uint64_t>(Clock::now().time_since_epoch().count());
+    msg.ts = static_cast<uint64_t>(Clock::now().time_since_epoch().count());
     bus.Publish(BenchPayload{msg}, 1);
     bus.ProcessBatch();
   }
@@ -170,7 +164,8 @@ static void BenchLatency(Bus& bus) {
   uint64_t p99 = Percentile(latencies, 99.0);
 
   uint64_t sum = 0;
-  for (uint64_t v : latencies) sum += v;
+  for (uint64_t v : latencies)
+    sum += v;
   uint64_t mean = sum / latencies.size();
 
   printf("  Samples: %zu\n", latencies.size());
@@ -189,13 +184,12 @@ static void BenchBackpressure(Bus& bus) {
   uint32_t high_pub = 0, low_pub = 0;
   uint32_t high_rx = 0, low_rx = 0;
 
-  auto handle = bus.Subscribe<SmallMsg>(
-      [&high_rx, &low_rx](const osp::MessageEnvelope<BenchPayload>& env) {
-        if (std::get<SmallMsg>(env.payload).value == 1)
-          ++high_rx;
-        else
-          ++low_rx;
-      });
+  auto handle = bus.Subscribe<SmallMsg>([&high_rx, &low_rx](const osp::MessageEnvelope<BenchPayload>& env) {
+    if (std::get<SmallMsg>(env.payload).value == 1)
+      ++high_rx;
+    else
+      ++low_rx;
+  });
 
   static constexpr uint32_t kBurst = 100000;
   SmallMsg msg{};
@@ -205,8 +199,7 @@ static void BenchBackpressure(Bus& bus) {
     bool is_high = (i % 2 == 0);
     msg.id = i;
     msg.value = is_high ? 1 : 0;
-    auto prio =
-        is_high ? osp::MessagePriority::kHigh : osp::MessagePriority::kLow;
+    auto prio = is_high ? osp::MessagePriority::kHigh : osp::MessagePriority::kLow;
     if (bus.PublishWithPriority(BenchPayload{msg}, 1, prio)) {
       if (is_high)
         ++high_pub;
@@ -217,24 +210,17 @@ static void BenchBackpressure(Bus& bus) {
 
   // Drain
   for (uint32_t round = 0; round < 2000; ++round) {
-    if (bus.ProcessBatch() == 0) break;
+    if (bus.ProcessBatch() == 0)
+      break;
   }
 
   bus.Unsubscribe(handle);
 
-  double high_drop =
-      high_pub > 0
-          ? 100.0 * (1.0 - static_cast<double>(high_rx) / high_pub)
-          : 0.0;
-  double low_drop =
-      low_pub > 0
-          ? 100.0 * (1.0 - static_cast<double>(low_rx) / low_pub)
-          : 0.0;
+  double high_drop = high_pub > 0 ? 100.0 * (1.0 - static_cast<double>(high_rx) / high_pub) : 0.0;
+  double low_drop = low_pub > 0 ? 100.0 * (1.0 - static_cast<double>(low_rx) / low_pub) : 0.0;
 
-  printf("  HIGH: published %u, received %u, drop ~%.1f%%\n", high_pub,
-         high_rx, high_drop);
-  printf("  LOW : published %u, received %u, drop ~%.1f%%\n", low_pub, low_rx,
-         low_drop);
+  printf("  HIGH: published %u, received %u, drop ~%.1f%%\n", high_pub, high_rx, high_drop);
+  printf("  LOW : published %u, received %u, drop ~%.1f%%\n", low_pub, low_rx, low_drop);
 
   if (high_drop < low_drop) {
     printf("  [PASS] HIGH messages have lower drop rate.\n");
@@ -262,9 +248,11 @@ static void BenchShmRingBuffer() {
   uint32_t read_count = 0;
   auto t0 = Clock::now();
   for (uint32_t i = 0; i < kIterations; ++i) {
-    if (rb->TryPush(write_data, kSlotSize)) ++write_count;
+    if (rb->TryPush(write_data, kSlotSize))
+      ++write_count;
     uint32_t size = 0;
-    if (rb->TryPop(read_data, size)) ++read_count;
+    if (rb->TryPop(read_data, size))
+      ++read_count;
   }
   auto t1 = Clock::now();
   uint64_t ns = ElapsedNs(t0, t1);
@@ -323,7 +311,8 @@ static void BenchMemPool() {
     uint32_t alloc_count = 0;
     for (uint32_t j = 0; j < kMaxBlocks; ++j) {
       ptrs[j] = pool.Allocate();
-      if (ptrs[j]) ++alloc_count;
+      if (ptrs[j])
+        ++alloc_count;
     }
     for (uint32_t j = 0; j < alloc_count; ++j) {
       pool.Free(ptrs[j]);
@@ -508,8 +497,10 @@ static void BenchTimer() {
     uint64_t sum = 0, min_d = UINT64_MAX, max_d = 0;
     for (uint32_t s = 0; s < kSamples; ++s) {
       sum += delays[s];
-      if (delays[s] < min_d) min_d = delays[s];
-      if (delays[s] > max_d) max_d = delays[s];
+      if (delays[s] < min_d)
+        min_d = delays[s];
+      if (delays[s] > max_d)
+        max_d = delays[s];
     }
     double avg = static_cast<double>(sum) / kSamples;
     double error_pct = std::abs(avg - 50.0) / 50.0 * 100.0;
@@ -549,7 +540,8 @@ static void BenchTimer() {
       int64_t sum = 0, max_jitter = INT64_MIN;
       for (int64_t j : jitters) {
         sum += j;
-        if (std::abs(j) > std::abs(max_jitter)) max_jitter = j;
+        if (std::abs(j) > std::abs(max_jitter))
+          max_jitter = j;
       }
       double mean_jitter = static_cast<double>(sum) / jitters.size();
       printf("    Samples   : %zu\n", jitters.size());
@@ -585,18 +577,19 @@ static void BenchTimer() {
         std::vector<int64_t> jitters;
         uint64_t expected_interval_ns = static_cast<uint64_t>(ctxs[i].period_ms) * 1000000ULL;
         for (size_t j = 1; j < ctxs[i].fire_times.size(); ++j) {
-          int64_t actual_interval = static_cast<int64_t>(ctxs[i].fire_times[j] - ctxs[i].fire_times[j-1]);
+          int64_t actual_interval = static_cast<int64_t>(ctxs[i].fire_times[j] - ctxs[i].fire_times[j - 1]);
           int64_t jitter = actual_interval - static_cast<int64_t>(expected_interval_ns);
           jitters.push_back(jitter / 1000);  // convert to us
         }
         int64_t sum = 0, max_jitter = 0;
         for (int64_t j : jitters) {
           sum += j;
-          if (std::abs(j) > std::abs(max_jitter)) max_jitter = j;
+          if (std::abs(j) > std::abs(max_jitter))
+            max_jitter = j;
         }
         double mean_jitter = static_cast<double>(sum) / jitters.size();
-        printf("    %5u       %5u  %15.1f  %15ld\n",
-               ctxs[i].period_ms, fires, mean_jitter, static_cast<long>(max_jitter));
+        printf("    %5u       %5u  %15.1f  %15ld\n", ctxs[i].period_ms, fires, mean_jitter,
+               static_cast<long>(max_jitter));
       }
     }
   }
@@ -734,8 +727,7 @@ static void BenchWorkerPool() {
   auto t0 = Clock::now();
   for (uint32_t i = 0; i < kIterations; ++i) {
     WorkTask task{i};
-    while (!pool.Submit(task, osp::MessagePriority::kMedium)) {
-    }
+    while (!pool.Submit(task, osp::MessagePriority::kMedium)) {}
   }
   while (g_work_processed.load(std::memory_order_relaxed) < kIterations) {
     std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -758,18 +750,9 @@ static void BenchWorkerPool() {
 struct DispatchHandler {
   uint32_t count = 0;
 
-  void operator()(const SmallMsg& /*d*/,
-                  const osp::MessageHeader& /*h*/) noexcept {
-    ++count;
-  }
-  void operator()(const MediumMsg& /*d*/,
-                  const osp::MessageHeader& /*h*/) noexcept {
-    ++count;
-  }
-  void operator()(const LargeMsg& /*d*/,
-                  const osp::MessageHeader& /*h*/) noexcept {
-    ++count;
-  }
+  void operator()(const SmallMsg& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++count; }
+  void operator()(const MediumMsg& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++count; }
+  void operator()(const LargeMsg& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++count; }
 };
 
 static void BenchStaticNodeDispatch() {
@@ -790,8 +773,7 @@ static void BenchStaticNodeDispatch() {
   // --- Direct dispatch (ProcessBatchWith, no Start) ---
   for (uint32_t r = 0; r < kRounds; ++r) {
     bus.Reset();
-    osp::StaticNode<BenchPayload, DispatchHandler> sn(
-        "direct", 1, DispatchHandler{});
+    osp::StaticNode<BenchPayload, DispatchHandler> sn("direct", 1, DispatchHandler{});
     // No Start() -- direct dispatch mode
 
     SmallMsg msg{};
@@ -811,8 +793,7 @@ static void BenchStaticNodeDispatch() {
   // --- Callback dispatch (Start + ProcessBatch) ---
   for (uint32_t r = 0; r < kRounds; ++r) {
     bus.Reset();
-    osp::StaticNode<BenchPayload, DispatchHandler> sn(
-        "callback", 1, DispatchHandler{});
+    osp::StaticNode<BenchPayload, DispatchHandler> sn("callback", 1, DispatchHandler{});
     sn.Start();
 
     SmallMsg msg{};
@@ -835,18 +816,9 @@ static void BenchStaticNodeDispatch() {
     bus.Reset();
     uint32_t count = 0;
     osp::Node<BenchPayload> n("node", 1);
-    n.Subscribe<SmallMsg>(
-        [&count](const SmallMsg&, const osp::MessageHeader&) {
-          ++count;
-        });
-    n.Subscribe<MediumMsg>(
-        [&count](const MediumMsg&, const osp::MessageHeader&) {
-          ++count;
-        });
-    n.Subscribe<LargeMsg>(
-        [&count](const LargeMsg&, const osp::MessageHeader&) {
-          ++count;
-        });
+    n.Subscribe<SmallMsg>([&count](const SmallMsg&, const osp::MessageHeader&) { ++count; });
+    n.Subscribe<MediumMsg>([&count](const MediumMsg&, const osp::MessageHeader&) { ++count; });
+    n.Subscribe<LargeMsg>([&count](const LargeMsg&, const osp::MessageHeader&) { ++count; });
 
     SmallMsg msg{};
     for (uint32_t i = 0; i < kMsgsPerRound; ++i) {
@@ -874,24 +846,14 @@ static void BenchStaticNodeDispatch() {
   double c_per_msg = static_cast<double>(c_p50) / kMsgsPerRound;
   double n_per_msg = static_cast<double>(n_p50) / kMsgsPerRound;
 
-  printf("  %-20s  %8s  %8s  %10s\n",
-         "Mode", "P50(us)", "P99(us)", "ns/msg");
+  printf("  %-20s  %8s  %8s  %10s\n", "Mode", "P50(us)", "P99(us)", "ns/msg");
   printf("  --------------------------------------------------\n");
-  printf("  %-20s  %8.1f  %8.1f  %10.1f\n",
-         "Direct (visit)",
-         static_cast<double>(d_p50) / 1e3,
-         static_cast<double>(d_p99) / 1e3,
-         d_per_msg);
-  printf("  %-20s  %8.1f  %8.1f  %10.1f\n",
-         "Callback (Start+PB)",
-         static_cast<double>(c_p50) / 1e3,
-         static_cast<double>(c_p99) / 1e3,
-         c_per_msg);
-  printf("  %-20s  %8.1f  %8.1f  %10.1f\n",
-         "Node (FixedFunction)",
-         static_cast<double>(n_p50) / 1e3,
-         static_cast<double>(n_p99) / 1e3,
-         n_per_msg);
+  printf("  %-20s  %8.1f  %8.1f  %10.1f\n", "Direct (visit)", static_cast<double>(d_p50) / 1e3,
+         static_cast<double>(d_p99) / 1e3, d_per_msg);
+  printf("  %-20s  %8.1f  %8.1f  %10.1f\n", "Callback (Start+PB)", static_cast<double>(c_p50) / 1e3,
+         static_cast<double>(c_p99) / 1e3, c_per_msg);
+  printf("  %-20s  %8.1f  %8.1f  %10.1f\n", "Node (FixedFunction)", static_cast<double>(n_p50) / 1e3,
+         static_cast<double>(n_p99) / 1e3, n_per_msg);
 
   if (c_per_msg > 0) {
     double speedup = c_per_msg / d_per_msg;

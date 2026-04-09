@@ -5,9 +5,8 @@
 
 #include "osp/bus.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <string>
 #include <thread>
@@ -49,14 +48,13 @@ TEST_CASE("AsyncBus publish and process", "[bus]") {
   std::atomic<int> received{0};
   float last_temp = 0.0f;
 
-  bus.Subscribe<SensorData>(
-      [&received, &last_temp](const TestEnvelope& env) {
-        const SensorData* data = std::get_if<SensorData>(&env.payload);
-        if (data) {
-          last_temp = data->temperature;
-          ++received;
-        }
-      });
+  bus.Subscribe<SensorData>([&received, &last_temp](const TestEnvelope& env) {
+    const SensorData* data = std::get_if<SensorData>(&env.payload);
+    if (data) {
+      last_temp = data->temperature;
+      ++received;
+    }
+  });
 
   REQUIRE(bus.Publish(SensorData{25.5f, 1}, 42));
 
@@ -73,10 +71,8 @@ TEST_CASE("AsyncBus multiple message types", "[bus]") {
   int sensor_count = 0;
   int motor_count = 0;
 
-  bus.Subscribe<SensorData>(
-      [&sensor_count](const TestEnvelope&) { ++sensor_count; });
-  bus.Subscribe<MotorCmd>(
-      [&motor_count](const TestEnvelope&) { ++motor_count; });
+  bus.Subscribe<SensorData>([&sensor_count](const TestEnvelope&) { ++sensor_count; });
+  bus.Subscribe<MotorCmd>([&motor_count](const TestEnvelope&) { ++motor_count; });
 
   bus.Publish(SensorData{20.0f, 1}, 1);
   bus.Publish(MotorCmd{100}, 2);
@@ -93,8 +89,7 @@ TEST_CASE("AsyncBus subscribe and unsubscribe", "[bus]") {
   auto& bus = TestBus::Instance();
 
   int count = 0;
-  auto handle = bus.Subscribe<SensorData>(
-      [&count](const TestEnvelope&) { ++count; });
+  auto handle = bus.Subscribe<SensorData>([&count](const TestEnvelope&) { ++count; });
 
   REQUIRE(handle.IsValid());
 
@@ -116,10 +111,8 @@ TEST_CASE("AsyncBus multiple subscribers same type", "[bus]") {
   int count_a = 0;
   int count_b = 0;
 
-  bus.Subscribe<MotorCmd>(
-      [&count_a](const TestEnvelope&) { ++count_a; });
-  bus.Subscribe<MotorCmd>(
-      [&count_b](const TestEnvelope&) { ++count_b; });
+  bus.Subscribe<MotorCmd>([&count_a](const TestEnvelope&) { ++count_a; });
+  bus.Subscribe<MotorCmd>([&count_b](const TestEnvelope&) { ++count_b; });
 
   bus.Publish(MotorCmd{50}, 1);
   bus.ProcessBatch();
@@ -134,10 +127,7 @@ TEST_CASE("AsyncBus message header populated", "[bus]") {
 
   osp::MessageHeader captured_header;
 
-  bus.Subscribe<AlarmEvent>(
-      [&captured_header](const TestEnvelope& env) {
-        captured_header = env.header;
-      });
+  bus.Subscribe<AlarmEvent>([&captured_header](const TestEnvelope& env) { captured_header = env.header; });
 
   bus.Publish(AlarmEvent{42}, 7);
   bus.ProcessBatch();
@@ -154,10 +144,7 @@ TEST_CASE("AsyncBus priority publish", "[bus]") {
 
   osp::MessagePriority captured_prio = osp::MessagePriority::kMedium;
 
-  bus.Subscribe<AlarmEvent>(
-      [&captured_prio](const TestEnvelope& env) {
-        captured_prio = env.header.priority;
-      });
+  bus.Subscribe<AlarmEvent>([&captured_prio](const TestEnvelope& env) { captured_prio = env.header.priority; });
 
   bus.PublishWithPriority(AlarmEvent{1}, 0, osp::MessagePriority::kHigh);
   bus.ProcessBatch();
@@ -220,10 +207,7 @@ TEST_CASE("AsyncBus PublishFast with timestamp", "[bus]") {
 
   uint64_t captured_ts = 0;
 
-  bus.Subscribe<SensorData>(
-      [&captured_ts](const TestEnvelope& env) {
-        captured_ts = env.header.timestamp_us;
-      });
+  bus.Subscribe<SensorData>([&captured_ts](const TestEnvelope& env) { captured_ts = env.header.timestamp_us; });
 
   bus.PublishFast(SensorData{1.0f, 0}, 0, 123456789);
   bus.ProcessBatch();
@@ -238,9 +222,7 @@ TEST_CASE("AsyncBus error callback", "[bus]") {
 
   static std::atomic<int> error_count{0};
   error_count.store(0);
-  bus.SetErrorCallback([](osp::BusError, uint64_t) {
-    error_count.fetch_add(1);
-  });
+  bus.SetErrorCallback([](osp::BusError, uint64_t) { error_count.fetch_add(1); });
 
   // Normal publish should not trigger error
   bus.Publish(SensorData{1.0f, 0}, 0);
@@ -253,25 +235,23 @@ TEST_CASE("AsyncBus overloaded visitor pattern", "[bus]") {
 
   bool visited = false;
   std::visit(osp::overloaded{
-      [&visited](const SensorData& d) {
-        REQUIRE(d.temperature == 30.0f);
-        REQUIRE(d.sensor_id == 5);
-        visited = true;
-      },
-      [](const MotorCmd&) { REQUIRE(false); },
-      [](const AlarmEvent&) { REQUIRE(false); },
-  }, payload);
+                 [&visited](const SensorData& d) {
+                   REQUIRE(d.temperature == 30.0f);
+                   REQUIRE(d.sensor_id == 5);
+                   visited = true;
+                 },
+                 [](const MotorCmd&) { REQUIRE(false); },
+                 [](const AlarmEvent&) { REQUIRE(false); },
+             },
+             payload);
 
   REQUIRE(visited);
 }
 
 TEST_CASE("AsyncBus VariantIndex compile-time check", "[bus]") {
-  constexpr size_t sensor_idx =
-      osp::VariantIndex<SensorData, TestPayload>::value;
-  constexpr size_t motor_idx =
-      osp::VariantIndex<MotorCmd, TestPayload>::value;
-  constexpr size_t alarm_idx =
-      osp::VariantIndex<AlarmEvent, TestPayload>::value;
+  constexpr size_t sensor_idx = osp::VariantIndex<SensorData, TestPayload>::value;
+  constexpr size_t motor_idx = osp::VariantIndex<MotorCmd, TestPayload>::value;
+  constexpr size_t alarm_idx = osp::VariantIndex<AlarmEvent, TestPayload>::value;
 
   REQUIRE(sensor_idx == 0);
   REQUIRE(motor_idx == 1);
@@ -283,8 +263,7 @@ TEST_CASE("AsyncBus multi-threaded publish", "[bus]") {
   auto& bus = TestBus::Instance();
 
   std::atomic<int> received{0};
-  bus.Subscribe<SensorData>(
-      [&received](const TestEnvelope&) { ++received; });
+  bus.Subscribe<SensorData>([&received](const TestEnvelope&) { ++received; });
 
   static constexpr int kNumThreads = 4;
   static constexpr int kMsgsPerThread = 100;
@@ -293,22 +272,22 @@ TEST_CASE("AsyncBus multi-threaded publish", "[bus]") {
   for (int t = 0; t < kNumThreads; ++t) {
     threads[t] = std::thread([&bus, t]() {
       for (int i = 0; i < kMsgsPerThread; ++i) {
-        bus.Publish(SensorData{static_cast<float>(i),
-                                static_cast<uint32_t>(t)},
-                    static_cast<uint32_t>(t));
+        bus.Publish(SensorData{static_cast<float>(i), static_cast<uint32_t>(t)}, static_cast<uint32_t>(t));
       }
     });
   }
 
-  for (auto& t : threads) t.join();
+  for (auto& t : threads)
+    t.join();
 
   // Drain all messages (multiple rounds to handle timing)
   for (int round = 0; round < 100; ++round) {
-    if (bus.ProcessBatch() == 0 && bus.Depth() == 0) break;
+    if (bus.ProcessBatch() == 0 && bus.Depth() == 0)
+      break;
   }
 
-  // Under high CAS contention, a small number of messages may be dropped
-  // by the MPSC ring buffer (seq != prod_pos race). Accept >= 99% delivery.
+  // Under high CAS contention, the MPSC ring buffer retries on sequence
+  // mismatch (C2 fix). With retry, delivery should be near 100%.
   int total = kNumThreads * kMsgsPerThread;
   REQUIRE(received.load() >= total * 99 / 100);
 }
@@ -338,15 +317,13 @@ TEST_CASE("Bus subscribe and unsubscribe rapidly", "[bus]") {
 
   // Subscribe and unsubscribe in tight loop
   for (int i = 0; i < 100; ++i) {
-    auto handle = bus.Subscribe<SensorData>(
-        [&count](const TestEnvelope&) { ++count; });
+    auto handle = bus.Subscribe<SensorData>([&count](const TestEnvelope&) { ++count; });
     REQUIRE(handle.IsValid());
     REQUIRE(bus.Unsubscribe(handle));
   }
 
   // Final subscription that stays
-  bus.Subscribe<SensorData>(
-      [&count](const TestEnvelope&) { ++count; });
+  bus.Subscribe<SensorData>([&count](const TestEnvelope&) { ++count; });
 
   bus.Publish(SensorData{1.0f, 0}, 0);
   bus.ProcessBatch();
@@ -366,32 +343,29 @@ TEST_CASE("Bus multiple message types", "[bus]") {
   int32_t last_speed = 0;
   uint32_t last_code = 0;
 
-  bus.Subscribe<SensorData>(
-      [&sensor_count, &last_temp](const TestEnvelope& env) {
-        const SensorData* data = std::get_if<SensorData>(&env.payload);
-        if (data) {
-          last_temp = data->temperature;
-          ++sensor_count;
-        }
-      });
+  bus.Subscribe<SensorData>([&sensor_count, &last_temp](const TestEnvelope& env) {
+    const SensorData* data = std::get_if<SensorData>(&env.payload);
+    if (data) {
+      last_temp = data->temperature;
+      ++sensor_count;
+    }
+  });
 
-  bus.Subscribe<MotorCmd>(
-      [&motor_count, &last_speed](const TestEnvelope& env) {
-        const MotorCmd* cmd = std::get_if<MotorCmd>(&env.payload);
-        if (cmd) {
-          last_speed = cmd->speed;
-          ++motor_count;
-        }
-      });
+  bus.Subscribe<MotorCmd>([&motor_count, &last_speed](const TestEnvelope& env) {
+    const MotorCmd* cmd = std::get_if<MotorCmd>(&env.payload);
+    if (cmd) {
+      last_speed = cmd->speed;
+      ++motor_count;
+    }
+  });
 
-  bus.Subscribe<AlarmEvent>(
-      [&alarm_count, &last_code](const TestEnvelope& env) {
-        const AlarmEvent* alarm = std::get_if<AlarmEvent>(&env.payload);
-        if (alarm) {
-          last_code = alarm->code;
-          ++alarm_count;
-        }
-      });
+  bus.Subscribe<AlarmEvent>([&alarm_count, &last_code](const TestEnvelope& env) {
+    const AlarmEvent* alarm = std::get_if<AlarmEvent>(&env.payload);
+    if (alarm) {
+      last_code = alarm->code;
+      ++alarm_count;
+    }
+  });
 
   // Publish different types and verify correct routing
   bus.Publish(SensorData{20.5f, 1}, 1);
@@ -415,8 +389,7 @@ TEST_CASE("Bus queue overflow behavior", "[bus]") {
   auto& bus = TestBus::Instance();
 
   std::atomic<int> received{0};
-  bus.Subscribe<SensorData>(
-      [&received](const TestEnvelope&) { ++received; });
+  bus.Subscribe<SensorData>([&received](const TestEnvelope&) { ++received; });
 
   // Publish more messages than queue depth (4096)
   // The bus should drop messages when full
@@ -425,8 +398,7 @@ TEST_CASE("Bus queue overflow behavior", "[bus]") {
   int publish_failed = 0;
 
   for (int i = 0; i < kOverflowCount; ++i) {
-    if (bus.Publish(SensorData{static_cast<float>(i),
-                                static_cast<uint32_t>(i)}, 0)) {
+    if (bus.Publish(SensorData{static_cast<float>(i), static_cast<uint32_t>(i)}, 0)) {
       ++publish_success;
     } else {
       ++publish_failed;
@@ -438,7 +410,8 @@ TEST_CASE("Bus queue overflow behavior", "[bus]") {
   for (int round = 0; round < 200; ++round) {
     uint32_t batch = bus.ProcessBatch();
     total_processed += batch;
-    if (batch == 0 && bus.Depth() == 0) break;
+    if (batch == 0 && bus.Depth() == 0)
+      break;
   }
 
   auto stats = bus.GetStatistics();
@@ -455,8 +428,7 @@ TEST_CASE("Bus concurrent publish from multiple threads", "[bus]") {
   auto& bus = TestBus::Instance();
 
   std::atomic<int> received{0};
-  bus.Subscribe<SensorData>(
-      [&received](const TestEnvelope&) { ++received; });
+  bus.Subscribe<SensorData>([&received](const TestEnvelope&) { ++received; });
 
   static constexpr int kNumThreads = 4;
   static constexpr int kMsgsPerThread = 250;
@@ -473,9 +445,7 @@ TEST_CASE("Bus concurrent publish from multiple threads", "[bus]") {
       }
 
       for (int i = 0; i < kMsgsPerThread; ++i) {
-        bus.Publish(SensorData{static_cast<float>(i),
-                                static_cast<uint32_t>(t)},
-                    static_cast<uint32_t>(t));
+        bus.Publish(SensorData{static_cast<float>(i), static_cast<uint32_t>(t)}, static_cast<uint32_t>(t));
       }
     });
   }
@@ -483,11 +453,13 @@ TEST_CASE("Bus concurrent publish from multiple threads", "[bus]") {
   // Start all threads simultaneously
   start_flag.store(true, std::memory_order_release);
 
-  for (auto& t : threads) t.join();
+  for (auto& t : threads)
+    t.join();
 
   // Drain all messages
   for (int round = 0; round < 100; ++round) {
-    if (bus.ProcessBatch() == 0 && bus.Depth() == 0) break;
+    if (bus.ProcessBatch() == 0 && bus.Depth() == 0)
+      break;
   }
 
   // Under high CAS contention, accept >= 95% delivery
@@ -508,18 +480,9 @@ TEST_CASE("ProcessBatchWith basic dispatch", "[bus]") {
     uint32_t motor_count = 0;
     uint32_t alarm_count = 0;
 
-    void operator()(const SensorData& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {
-      ++sensor_count;
-    }
-    void operator()(const MotorCmd& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {
-      ++motor_count;
-    }
-    void operator()(const AlarmEvent& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {
-      ++alarm_count;
-    }
+    void operator()(const SensorData& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++sensor_count; }
+    void operator()(const MotorCmd& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++motor_count; }
+    void operator()(const AlarmEvent& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++alarm_count; }
   };
 
   REQUIRE(bus.Publish(SensorData{25.5f, 1}, 0));
@@ -548,14 +511,9 @@ TEST_CASE("ProcessBatchWith processes all messages", "[bus]") {
   uint32_t total_processed = 0;
   struct SinkVisitor {
     uint32_t count = 0;
-    void operator()(const SensorData& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {
-      ++count;
-    }
-    void operator()(const MotorCmd& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {}
-    void operator()(const AlarmEvent& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {}
+    void operator()(const SensorData& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++count; }
+    void operator()(const MotorCmd& /*d*/, const osp::MessageHeader& /*h*/) noexcept {}
+    void operator()(const AlarmEvent& /*d*/, const osp::MessageHeader& /*h*/) noexcept {}
   };
 
   SinkVisitor visitor;
@@ -577,12 +535,9 @@ TEST_CASE("ProcessBatchWith stats update", "[bus]") {
   REQUIRE(bus.Publish(AlarmEvent{99}, 0));
 
   struct NopVisitor {
-    void operator()(const SensorData& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {}
-    void operator()(const MotorCmd& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {}
-    void operator()(const AlarmEvent& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {}
+    void operator()(const SensorData& /*d*/, const osp::MessageHeader& /*h*/) noexcept {}
+    void operator()(const MotorCmd& /*d*/, const osp::MessageHeader& /*h*/) noexcept {}
+    void operator()(const AlarmEvent& /*d*/, const osp::MessageHeader& /*h*/) noexcept {}
   };
 
   auto stats_before = bus.GetStatistics();
@@ -605,18 +560,9 @@ TEST_CASE("ProcessBatchWith empty queue", "[bus]") {
 
   struct TrackVisitor {
     uint32_t call_count = 0;
-    void operator()(const SensorData& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {
-      ++call_count;
-    }
-    void operator()(const MotorCmd& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {
-      ++call_count;
-    }
-    void operator()(const AlarmEvent& /*d*/,
-                    const osp::MessageHeader& /*h*/) noexcept {
-      ++call_count;
-    }
+    void operator()(const SensorData& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++call_count; }
+    void operator()(const MotorCmd& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++call_count; }
+    void operator()(const AlarmEvent& /*d*/, const osp::MessageHeader& /*h*/) noexcept { ++call_count; }
   };
 
   TrackVisitor visitor;
@@ -624,4 +570,37 @@ TEST_CASE("ProcessBatchWith empty queue", "[bus]") {
 
   REQUIRE(processed == 0);
   REQUIRE(visitor.call_count == 0);
+}
+
+// ============================================================================
+// Reset + re-subscribe test (C1 fix: next_callback_id_ inside lock)
+// ============================================================================
+
+TEST_CASE("Bus Reset clears subscriptions and allows re-subscribe", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::atomic<int> count1{0};
+  std::atomic<int> count2{0};
+
+  // Subscribe before reset
+  bus.Subscribe<SensorData>([&count1](const TestEnvelope&) { count1.fetch_add(1); });
+
+  bus.Publish(SensorData{1.0f, 0}, 0);
+  bus.ProcessBatch();
+  REQUIRE(count1.load() == 1);
+
+  // Reset clears all subscriptions
+  bus.Reset();
+
+  // Re-subscribe after reset
+  auto handle = bus.Subscribe<SensorData>([&count2](const TestEnvelope&) { count2.fetch_add(1); });
+  REQUIRE(handle.IsValid());
+
+  bus.Publish(SensorData{2.0f, 0}, 0);
+  bus.ProcessBatch();
+
+  // Old callback should not fire, new one should
+  REQUIRE(count1.load() == 1);
+  REQUIRE(count2.load() == 1);
 }

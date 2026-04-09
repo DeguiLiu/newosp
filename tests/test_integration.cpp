@@ -6,8 +6,8 @@
  * HSM, BehaviorTree, ConnectionPool, DataFusion, Executor, and Semaphore.
  */
 
-#include "osp/bus.hpp"
 #include "osp/bt.hpp"
+#include "osp/bus.hpp"
 #include "osp/connection.hpp"
 #include "osp/data_fusion.hpp"
 #include "osp/executor.hpp"
@@ -17,11 +17,11 @@
 #include "osp/timer.hpp"
 #include "osp/worker_pool.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
-#include <cstdint>
 #include <thread>
 #include <variant>
 
@@ -84,7 +84,8 @@ TEST_CASE("integration - Node + WorkerPool + Bus pipeline", "[integration]") {
   // Wait for all messages with timeout
   for (uint32_t i = 0; i < kMsgCount; ++i) {
     bool ok = g_wp_sem.WaitFor(2000000);  // 2s per message
-    if (!ok) break;
+    if (!ok)
+      break;
   }
 
   pool.Shutdown();
@@ -106,8 +107,7 @@ TimerPubCtx g_timer_pub_ctx;
 void TimerPublishCallback(void* ctx) {
   auto* tctx = static_cast<TimerPubCtx*>(ctx);
   uint32_t seq = tctx->pub_count.fetch_add(1, std::memory_order_relaxed);
-  IntegBus::Instance().Publish(
-      IntegPayload(IntegData{seq, 3.14f}), 99);
+  IntegBus::Instance().Publish(IntegPayload(IntegData{seq, 3.14f}), 99);
 }
 
 }  // namespace
@@ -118,10 +118,9 @@ TEST_CASE("integration - Node + Timer + Bus periodic publish", "[integration]") 
 
   std::atomic<uint32_t> recv_count{0};
   osp::Node<IntegPayload> subscriber("sub_node", 2);
-  subscriber.Subscribe<IntegData>(
-      [&recv_count](const IntegData&, const osp::MessageHeader&) {
-        recv_count.fetch_add(1, std::memory_order_relaxed);
-      });
+  subscriber.Subscribe<IntegData>([&recv_count](const IntegData&, const osp::MessageHeader&) {
+    recv_count.fetch_add(1, std::memory_order_relaxed);
+  });
 
   osp::TimerScheduler<4> sched;
   auto result = sched.Add(20, &TimerPublishCallback, &g_timer_pub_ctx);
@@ -207,11 +206,10 @@ TEST_CASE("integration - HSM + Bus event-driven state transitions", "[integratio
 
   // Subscribe to IntegEvent on bus, dispatch to HSM
   osp::Node<IntegPayload> driver("hsm_driver", 10);
-  driver.Subscribe<IntegEvent>(
-      [&sm](const IntegEvent& evt, const osp::MessageHeader&) {
-        osp::Event hsm_evt{evt.code, nullptr};
-        sm.Dispatch(hsm_evt);
-      });
+  driver.Subscribe<IntegEvent>([&sm](const IntegEvent& evt, const osp::MessageHeader&) {
+    osp::Event hsm_evt{evt.code, nullptr};
+    sm.Dispatch(hsm_evt);
+  });
 
   // Publish events via bus
   driver.Publish(IntegEvent{kEvtGoB});
@@ -267,11 +265,10 @@ TEST_CASE("integration - BehaviorTree + Node action", "[integration]") {
   std::atomic<uint32_t> cmd_count{0};
   uint32_t last_action = 0;
   osp::Node<IntegPayload> observer("observer", 21);
-  observer.Subscribe<IntegCmd>(
-      [&cmd_count, &last_action](const IntegCmd& cmd, const osp::MessageHeader&) {
-        cmd_count.fetch_add(1, std::memory_order_relaxed);
-        last_action = cmd.action;
-      });
+  observer.Subscribe<IntegCmd>([&cmd_count, &last_action](const IntegCmd& cmd, const osp::MessageHeader&) {
+    cmd_count.fetch_add(1, std::memory_order_relaxed);
+    last_action = cmd.action;
+  });
 
   // Tick the tree
   auto status = tree.Tick();
@@ -314,14 +311,17 @@ TEST_CASE("integration - ConnectionPool + Timer timeout cleanup", "[integration]
   osp::TimerScheduler<4> sched;
   // Timer fires every 30ms, touches c1 to keep it alive, then cleans up
   // connections older than 80ms
-  auto task = sched.Add(30, [](void* ctx) {
-    auto* cc = static_cast<CleanupCtx*>(ctx);
-    // Keep c1 alive by touching it each tick
-    cc->pool->Touch(cc->keep_alive);
-    uint32_t removed = cc->pool->RemoveTimedOut(80000);  // 80ms in us
-    cc->cleaned.fetch_add(removed, std::memory_order_relaxed);
-    cc->timer_fires.fetch_add(1, std::memory_order_relaxed);
-  }, &cleanup_ctx);
+  auto task = sched.Add(
+      30,
+      [](void* ctx) {
+        auto* cc = static_cast<CleanupCtx*>(ctx);
+        // Keep c1 alive by touching it each tick
+        cc->pool->Touch(cc->keep_alive);
+        uint32_t removed = cc->pool->RemoveTimedOut(80000);  // 80ms in us
+        cc->cleaned.fetch_add(removed, std::memory_order_relaxed);
+        cc->timer_fires.fetch_add(1, std::memory_order_relaxed);
+      },
+      &cleanup_ctx);
   REQUIRE(task.has_value());
 
   sched.Start();
@@ -408,14 +408,12 @@ TEST_CASE("integration - StaticExecutor + Node scheduling", "[integration]") {
   osp::Node<IntegPayload> node1("exec_node1", 40);
   osp::Node<IntegPayload> node2("exec_node2", 41);
 
-  node1.Subscribe<IntegCmd>(
-      [&node1_recv](const IntegCmd&, const osp::MessageHeader&) {
-        node1_recv.fetch_add(1, std::memory_order_relaxed);
-      });
-  node2.Subscribe<IntegCmd>(
-      [&node2_recv](const IntegCmd&, const osp::MessageHeader&) {
-        node2_recv.fetch_add(1, std::memory_order_relaxed);
-      });
+  node1.Subscribe<IntegCmd>([&node1_recv](const IntegCmd&, const osp::MessageHeader&) {
+    node1_recv.fetch_add(1, std::memory_order_relaxed);
+  });
+  node2.Subscribe<IntegCmd>([&node2_recv](const IntegCmd&, const osp::MessageHeader&) {
+    node2_recv.fetch_add(1, std::memory_order_relaxed);
+  });
 
   osp::StaticExecutor<IntegPayload> exec;
   exec.AddNode(node1);
@@ -432,9 +430,9 @@ TEST_CASE("integration - StaticExecutor + Node scheduling", "[integration]") {
   // Wait for processing
   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
   while (std::chrono::steady_clock::now() < deadline) {
-    uint32_t total = node1_recv.load(std::memory_order_relaxed) +
-                     node2_recv.load(std::memory_order_relaxed);
-    if (total >= kCount * 2) break;
+    uint32_t total = node1_recv.load(std::memory_order_relaxed) + node2_recv.load(std::memory_order_relaxed);
+    if (total >= kCount * 2)
+      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 

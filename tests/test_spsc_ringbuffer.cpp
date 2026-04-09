@@ -6,18 +6,17 @@
  * FakeTSO mode, custom index types, and concurrent SPSC correctness.
  */
 
-#include <catch2/catch_test_macros.hpp>
-
+#include "osp/bus.hpp"
 #include "osp/spsc_ringbuffer.hpp"
 
-#include <atomic>
 #include <cstdint>
+
+#include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <thread>
 #include <variant>
 #include <vector>
-
-#include "osp/bus.hpp"
 
 // ============================================================================
 // Basic Push / Pop
@@ -467,11 +466,9 @@ TEST_CASE("SpscRingbuffer: concurrent batch SPSC", "[spsc][concurrent]") {
 // Non-trivially Copyable Type Support
 // ============================================================================
 
-TEST_CASE("SpscRingbuffer: non-trivially copyable std::variant Push/Pop",
-          "[spsc][nontrivial]") {
+TEST_CASE("SpscRingbuffer: non-trivially copyable std::variant Push/Pop", "[spsc][nontrivial]") {
   using Var = std::variant<int, double, std::string>;
-  static_assert(!std::is_trivially_copyable<Var>::value,
-                "std::variant must not be trivially copyable for this test");
+  static_assert(!std::is_trivially_copyable<Var>::value, "std::variant must not be trivially copyable for this test");
 
   osp::SpscRingbuffer<Var, 8> rb;
 
@@ -498,16 +495,13 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable std::variant Push/Pop",
   REQUIRE(rb.IsEmpty());
 }
 
-TEST_CASE("SpscRingbuffer: non-trivially copyable PushBatch/PopBatch",
-          "[spsc][nontrivial]") {
+TEST_CASE("SpscRingbuffer: non-trivially copyable PushBatch/PopBatch", "[spsc][nontrivial]") {
   using Var = std::variant<int, std::string>;
-  static_assert(!std::is_trivially_copyable<Var>::value,
-                "std::variant<int, string> must not be trivially copyable");
+  static_assert(!std::is_trivially_copyable<Var>::value, "std::variant<int, string> must not be trivially copyable");
 
   osp::SpscRingbuffer<Var, 8> rb;
 
-  Var src[6] = {Var{10}, Var{std::string("a")}, Var{20},
-                Var{std::string("b")}, Var{30}, Var{std::string("c")}};
+  Var src[6] = {Var{10}, Var{std::string("a")}, Var{20}, Var{std::string("b")}, Var{30}, Var{std::string("c")}};
   REQUIRE(rb.PushBatch(src, 6) == 6);
   REQUIRE(rb.Size() == 6);
 
@@ -535,8 +529,7 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable PushBatch/PopBatch",
   REQUIRE(rb.IsEmpty());
 }
 
-TEST_CASE("SpscRingbuffer: non-trivially copyable concurrent SPSC",
-          "[spsc][nontrivial][concurrent]") {
+TEST_CASE("SpscRingbuffer: non-trivially copyable concurrent SPSC", "[spsc][nontrivial][concurrent]") {
   using Var = std::variant<int, double>;
   constexpr size_t kCount = 100000;
   osp::SpscRingbuffer<Var, 256> rb;
@@ -564,14 +557,12 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable concurrent SPSC",
         std::this_thread::yield();
       }
       if (i % 2 == 0) {
-        if (!std::holds_alternative<int>(val) ||
-            std::get<int>(val) != static_cast<int>(i)) {
+        if (!std::holds_alternative<int>(val) || std::get<int>(val) != static_cast<int>(i)) {
           consumer_ok.store(false, std::memory_order_relaxed);
           return;
         }
       } else {
-        if (!std::holds_alternative<double>(val) ||
-            std::get<double>(val) != static_cast<double>(i) * 0.5) {
+        if (!std::holds_alternative<double>(val) || std::get<double>(val) != static_cast<double>(i) * 0.5) {
           consumer_ok.store(false, std::memory_order_relaxed);
           return;
         }
@@ -586,8 +577,7 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable concurrent SPSC",
   REQUIRE(rb.IsEmpty());
 }
 
-TEST_CASE("SpscRingbuffer: non-trivially copyable move semantics verification",
-          "[spsc][nontrivial]") {
+TEST_CASE("SpscRingbuffer: non-trivially copyable move semantics verification", "[spsc][nontrivial]") {
   struct MoveTracker {
     int val;
     int move_count;
@@ -595,18 +585,14 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable move semantics verification",
     MoveTracker() noexcept : val(0), move_count(0) {}
     explicit MoveTracker(int v) noexcept : val(v), move_count(0) {}
 
-    MoveTracker(const MoveTracker& o) noexcept
-        : val(o.val), move_count(o.move_count) {}
+    MoveTracker(const MoveTracker& o) noexcept : val(o.val), move_count(o.move_count) {}
     MoveTracker& operator=(const MoveTracker& o) noexcept {
       val = o.val;
       move_count = o.move_count;
       return *this;
     }
 
-    MoveTracker(MoveTracker&& o) noexcept
-        : val(o.val), move_count(o.move_count + 1) {
-      o.val = -1;
-    }
+    MoveTracker(MoveTracker&& o) noexcept : val(o.val), move_count(o.move_count + 1) { o.val = -1; }
     MoveTracker& operator=(MoveTracker&& o) noexcept {
       val = o.val;
       move_count = o.move_count + 1;
@@ -615,8 +601,7 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable move semantics verification",
     }
   };
 
-  static_assert(!std::is_trivially_copyable<MoveTracker>::value,
-                "MoveTracker must not be trivially copyable");
+  static_assert(!std::is_trivially_copyable<MoveTracker>::value, "MoveTracker must not be trivially copyable");
 
   osp::SpscRingbuffer<MoveTracker, 4> rb;
 
@@ -634,8 +619,7 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable move semantics verification",
   REQUIRE(dst.move_count == 2);
 }
 
-TEST_CASE("SpscRingbuffer: MessageEnvelope compatibility",
-          "[spsc][nontrivial]") {
+TEST_CASE("SpscRingbuffer: MessageEnvelope compatibility", "[spsc][nontrivial]") {
   using Payload = std::variant<int, float, std::string>;
   using Envelope = osp::MessageEnvelope<Payload>;
   static_assert(!std::is_trivially_copyable<Envelope>::value,

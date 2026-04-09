@@ -66,8 +66,7 @@ osp::NodeStatus EmergencyStop(PatrolContext& ctx) {
 }
 
 osp::NodeStatus MoveToWaypoint(PatrolContext& ctx) {
-  printf("  [ACTION] MoveToWaypoint: Moving to waypoint %d/%d\n",
-         ctx.current_waypoint + 1, ctx.total_waypoints);
+  printf("  [ACTION] MoveToWaypoint: Moving to waypoint %d/%d\n", ctx.current_waypoint + 1, ctx.total_waypoints);
   ctx.current_waypoint = (ctx.current_waypoint + 1) % ctx.total_waypoints;
   return osp::NodeStatus::kSuccess;
 }
@@ -135,9 +134,8 @@ int main() {
   const int max_ticks = 20;
 
   while (tick_count < max_ticks && !ctx.at_base) {
-    printf("--- Tick %d (Battery: %d%%, Waypoint: %d, Patrols: %d) ---\n",
-           tick_count + 1, ctx.battery_level, ctx.current_waypoint,
-           ctx.patrol_count);
+    printf("--- Tick %d (Battery: %d%%, Waypoint: %d, Patrols: %d) ---\n", tick_count + 1, ctx.battery_level,
+           ctx.current_waypoint, ctx.patrol_count);
 
     // Simulate emergency after completing 2 patrols (only once)
     if (ctx.patrol_count == 2 && !ctx.emergency_triggered) {

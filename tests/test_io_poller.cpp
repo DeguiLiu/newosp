@@ -3,10 +3,11 @@
  * @brief Tests for io_poller.hpp: IoPoller, PollResult, IoEvent.
  */
 
-#include <catch2/catch_test_macros.hpp>
 #include "osp/io_poller.hpp"
 
 #include <cstring>
+
+#include <catch2/catch_test_macros.hpp>
 #include <unistd.h>
 
 // ============================================================================
@@ -48,8 +49,7 @@ TEST_CASE("io_poller - Remove fd succeeds", "[io_poller]") {
   int pipefd[2];
   REQUIRE(::pipe(pipefd) == 0);
 
-  auto add_r = poller.Add(pipefd[0],
-                           static_cast<uint8_t>(osp::IoEvent::kReadable));
+  auto add_r = poller.Add(pipefd[0], static_cast<uint8_t>(osp::IoEvent::kReadable));
   REQUIRE(add_r.has_value());
 
   auto rm_r = poller.Remove(pipefd[0]);
@@ -63,16 +63,14 @@ TEST_CASE("io_poller - Remove fd succeeds", "[io_poller]") {
 // Wait with non-blocking timeout returns 0
 // ============================================================================
 
-TEST_CASE("io_poller - Wait non-blocking returns 0 when no events",
-          "[io_poller]") {
+TEST_CASE("io_poller - Wait non-blocking returns 0 when no events", "[io_poller]") {
   osp::IoPoller poller;
   REQUIRE(poller.IsValid());
 
   int pipefd[2];
   REQUIRE(::pipe(pipefd) == 0);
 
-  auto add_r = poller.Add(pipefd[0],
-                           static_cast<uint8_t>(osp::IoEvent::kReadable));
+  auto add_r = poller.Add(pipefd[0], static_cast<uint8_t>(osp::IoEvent::kReadable));
   REQUIRE(add_r.has_value());
 
   // Non-blocking poll: no data written, should return 0 events
@@ -96,8 +94,7 @@ TEST_CASE("io_poller - readable event on pipe", "[io_poller]") {
   int pipefd[2];
   REQUIRE(::pipe(pipefd) == 0);
 
-  auto add_r = poller.Add(pipefd[0],
-                           static_cast<uint8_t>(osp::IoEvent::kReadable));
+  auto add_r = poller.Add(pipefd[0], static_cast<uint8_t>(osp::IoEvent::kReadable));
   REQUIRE(add_r.has_value());
 
   // Write data to make the read end readable
@@ -132,14 +129,12 @@ TEST_CASE("io_poller - modify events", "[io_poller]") {
   REQUIRE(::pipe(pipefd) == 0);
 
   // Add with readable
-  auto add_r = poller.Add(pipefd[0],
-                           static_cast<uint8_t>(osp::IoEvent::kReadable));
+  auto add_r = poller.Add(pipefd[0], static_cast<uint8_t>(osp::IoEvent::kReadable));
   REQUIRE(add_r.has_value());
 
   // Modify to writable only (pipe read end is not writable, so this tests
   // that Modify itself does not fail)
-  auto mod_r = poller.Modify(pipefd[0],
-                              static_cast<uint8_t>(osp::IoEvent::kWritable));
+  auto mod_r = poller.Modify(pipefd[0], static_cast<uint8_t>(osp::IoEvent::kWritable));
   REQUIRE(mod_r.has_value());
 
   ::close(pipefd[0]);
@@ -173,8 +168,7 @@ TEST_CASE("io_poller - Results accessor with internal buffer", "[io_poller]") {
   int pipefd[2];
   REQUIRE(::pipe(pipefd) == 0);
 
-  auto add_r = poller.Add(pipefd[0],
-                           static_cast<uint8_t>(osp::IoEvent::kReadable));
+  auto add_r = poller.Add(pipefd[0], static_cast<uint8_t>(osp::IoEvent::kReadable));
   REQUIRE(add_r.has_value());
 
   // Write to make readable

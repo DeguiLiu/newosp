@@ -5,11 +5,11 @@
 
 #include "osp/worker_pool.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
-#include <cstdint>
 #include <thread>
 #include <variant>
 
@@ -36,7 +36,9 @@ using TestBus = osp::AsyncBus<TestPayload>;
 // Bus reset helper - called before each test section
 // ============================================================================
 
-static void ResetBus() { TestBus::Instance().Reset(); }
+static void ResetBus() {
+  TestBus::Instance().Reset();
+}
 
 // ============================================================================
 // Shared counters for handler verification
@@ -220,8 +222,7 @@ TEST_CASE("WorkerPool submit and process messages", "[worker_pool]") {
     REQUIRE(pool.Submit(TaskB{2.5f}));
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while ((g_task_a_count.load() < 1 || g_task_b_count.load() < 1) &&
-           std::chrono::steady_clock::now() < deadline) {
+    while ((g_task_a_count.load() < 1 || g_task_b_count.load() < 1) && std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     REQUIRE(g_task_a_count.load() == 1);
@@ -350,9 +351,8 @@ TEST_CASE("WorkerPool FlushAndPause timeout", "[worker_pool]") {
   osp::WorkerPool<TestPayload> pool(cfg);
 
   // Register a handler that blocks indefinitely
-  pool.RegisterHandler<TaskA>([](const TaskA&, const osp::MessageHeader&) {
-    std::this_thread::sleep_for(std::chrono::seconds(10));
-  });
+  pool.RegisterHandler<TaskA>(
+      [](const TaskA&, const osp::MessageHeader&) { std::this_thread::sleep_for(std::chrono::seconds(10)); });
 
   pool.Start();
 

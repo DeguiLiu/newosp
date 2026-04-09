@@ -17,23 +17,21 @@
 #include "osp/shell.hpp"
 #include "osp/timer.hpp"
 
-#include <chrono>
 #include <cstdint>
 #include <cstring>
+
+#include <chrono>
 #include <thread>
 
 // ============================================================================
 // Compile-time event<->message binding verification (ospgen v2)
 // ============================================================================
 
-static_assert(protocol::EventIdOf<protocol::RegisterRequest>() ==
-                  protocol::kProtocolRegister,
+static_assert(protocol::EventIdOf<protocol::RegisterRequest>() == protocol::kProtocolRegister,
               "RegisterRequest must bind to REGISTER event");
-static_assert(protocol::EventIdOf<protocol::HeartbeatMsg>() ==
-                  protocol::kProtocolHeartbeat,
+static_assert(protocol::EventIdOf<protocol::HeartbeatMsg>() == protocol::kProtocolHeartbeat,
               "HeartbeatMsg must bind to HEARTBEAT event");
-static_assert(protocol::EventIdOf<protocol::StreamData>() ==
-                  protocol::kProtocolStreamData,
+static_assert(protocol::EventIdOf<protocol::StreamData>() == protocol::kProtocolStreamData,
               "StreamData must bind to STREAM_DATA event");
 
 // Compile-time sizeof verification (ospgen v2)
@@ -71,12 +69,9 @@ static int cmd_bus(int /*argc*/, char* /*argv*/[]) {
     return -1;
   }
   auto stats = g_bus->GetStatistics();
-  osp::DebugShell::Printf("  published  : %lu\r\n",
-                           static_cast<unsigned long>(stats.messages_published));
-  osp::DebugShell::Printf("  processed  : %lu\r\n",
-                           static_cast<unsigned long>(stats.messages_processed));
-  osp::DebugShell::Printf("  dropped    : %lu\r\n",
-                           static_cast<unsigned long>(stats.messages_dropped));
+  osp::DebugShell::Printf("  published  : %lu\r\n", static_cast<unsigned long>(stats.messages_published));
+  osp::DebugShell::Printf("  processed  : %lu\r\n", static_cast<unsigned long>(stats.messages_processed));
+  osp::DebugShell::Printf("  dropped    : %lu\r\n", static_cast<unsigned long>(stats.messages_dropped));
   return 0;
 }
 OSP_SHELL_CMD(cmd_bus, "Show bus statistics");
@@ -89,8 +84,7 @@ int main(int argc, char* argv[]) {
   osp::log::Init();
   osp::log::SetLevel(osp::log::Level::kDebug);
   OSP_LOG_INFO("Proto", "=== streaming protocol demo (ospgen v2) ===");
-  OSP_LOG_INFO("Proto", "protocol version=%u, node count=%u",
-               protocol::kVersion, kNodeCount);
+  OSP_LOG_INFO("Proto", "protocol version=%u, node count=%u", protocol::kVersion, kNodeCount);
 
   // -- Parse CLI: --console selects ConsoleShell, else DebugShell -----------
   bool use_console = false;
@@ -118,11 +112,9 @@ int main(int argc, char* argv[]) {
   } else {
     auto res = tcp_shell.Start();
     if (!res) {
-      OSP_LOG_WARN("Proto", "debug shell start failed on port %u",
-                   static_cast<unsigned>(tcp_cfg.port));
+      OSP_LOG_WARN("Proto", "debug shell start failed on port %u", static_cast<unsigned>(tcp_cfg.port));
     } else {
-      OSP_LOG_INFO("Proto", "debug shell started on port %u",
-                   static_cast<unsigned>(tcp_cfg.port));
+      OSP_LOG_INFO("Proto", "debug shell started on port %u", static_cast<unsigned>(tcp_cfg.port));
     }
   }
 
@@ -137,17 +129,11 @@ int main(int argc, char* argv[]) {
 
   // -- Server-side: StaticNode with ospgen topology constants ----------------
 
-  RegistrarNode registrar(
-      kNodeName_registrar, kNodeId_registrar,
-      RegistrarHandler{&state, &bus});
+  RegistrarNode registrar(kNodeName_registrar, kNodeId_registrar, RegistrarHandler{&state, &bus});
 
-  HeartbeatNode heartbeat_monitor(
-      kNodeName_heartbeat_monitor, kNodeId_heartbeat_monitor,
-      HeartbeatHandler{&state});
+  HeartbeatNode heartbeat_monitor(kNodeName_heartbeat_monitor, kNodeId_heartbeat_monitor, HeartbeatHandler{&state});
 
-  StreamCtrlNode stream_controller(
-      kNodeName_stream_controller, kNodeId_stream_controller,
-      StreamHandler{&state});
+  StreamCtrlNode stream_controller(kNodeName_stream_controller, kNodeId_stream_controller, StreamHandler{&state});
 
   // -- Client-side: regular Node with ospgen topology constants --------------
 
@@ -187,10 +173,8 @@ int main(int argc, char* argv[]) {
   OSP_LOG_INFO("Proto", "--- step 3: stream control ---");
   protocol::StreamCommand start_cmd{};
   start_cmd.session_id = kDemoSessionId;
-  start_cmd.action =
-      static_cast<uint8_t>(protocol::StreamAction::kStart);
-  start_cmd.media_type =
-      static_cast<uint8_t>(protocol::MediaType::kAv);
+  start_cmd.action = static_cast<uint8_t>(protocol::StreamAction::kStart);
+  start_cmd.media_type = static_cast<uint8_t>(protocol::MediaType::kAv);
   client.PublishWithPriority(start_cmd, osp::MessagePriority::kHigh);
   stream_controller.SpinOnce();
 
@@ -206,29 +190,22 @@ int main(int argc, char* argv[]) {
 
   protocol::StreamCommand stop_cmd{};
   stop_cmd.session_id = kDemoSessionId;
-  stop_cmd.action =
-      static_cast<uint8_t>(protocol::StreamAction::kStop);
-  stop_cmd.media_type =
-      static_cast<uint8_t>(protocol::MediaType::kAv);
+  stop_cmd.action = static_cast<uint8_t>(protocol::StreamAction::kStop);
+  stop_cmd.media_type = static_cast<uint8_t>(protocol::MediaType::kAv);
   client.PublishWithPriority(stop_cmd, osp::MessagePriority::kHigh);
   stream_controller.SpinOnce();
 
   // Statistics
   auto bus_stats = bus.GetStatistics();
   OSP_LOG_INFO("Proto", "=== statistics ===");
-  OSP_LOG_INFO("Proto", "bus: published=%lu processed=%lu dropped=%lu",
-               static_cast<unsigned long>(bus_stats.messages_published),
-               static_cast<unsigned long>(bus_stats.messages_processed),
-               static_cast<unsigned long>(bus_stats.messages_dropped));
-  OSP_LOG_INFO("Proto", "app: registered=%u heartbeats=%u streams=%u errors=%u",
-               state.registered_count, state.heartbeat_count,
-               state.stream_count, state.error_count);
-  OSP_LOG_INFO("Proto",
-               "topology: %s(subs=%u) %s(subs=%u) %s(subs=%u) %s(subs=%u)",
-               kNodeName_registrar, kNodeSubCount_registrar,
-               kNodeName_heartbeat_monitor, kNodeSubCount_heartbeat_monitor,
-               kNodeName_stream_controller, kNodeSubCount_stream_controller,
-               kNodeName_client, kNodeSubCount_client);
+  OSP_LOG_INFO(
+      "Proto", "bus: published=%lu processed=%lu dropped=%lu", static_cast<unsigned long>(bus_stats.messages_published),
+      static_cast<unsigned long>(bus_stats.messages_processed), static_cast<unsigned long>(bus_stats.messages_dropped));
+  OSP_LOG_INFO("Proto", "app: registered=%u heartbeats=%u streams=%u errors=%u", state.registered_count,
+               state.heartbeat_count, state.stream_count, state.error_count);
+  OSP_LOG_INFO("Proto", "topology: %s(subs=%u) %s(subs=%u) %s(subs=%u) %s(subs=%u)", kNodeName_registrar,
+               kNodeSubCount_registrar, kNodeName_heartbeat_monitor, kNodeSubCount_heartbeat_monitor,
+               kNodeName_stream_controller, kNodeSubCount_stream_controller, kNodeName_client, kNodeSubCount_client);
   OSP_LOG_INFO("Proto", "=== streaming protocol demo end ===");
 
   // -- Shell teardown -------------------------------------------------------

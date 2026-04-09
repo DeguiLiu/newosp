@@ -46,6 +46,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include <atomic>
 #include <mutex>
 #include <new>
 #include <type_traits>
@@ -278,18 +279,18 @@ class ObjectPool {
  public:
   ObjectPool() {
     for (uint32_t i = 0; i < MaxObjects; ++i) {
-      alive_[i] = false;
+      alive_[i].store(false, std::memory_order_relaxed);
     }
   }
 
   ~ObjectPool() {
     // Destroy all alive objects
     for (uint32_t i = 0; i < MaxObjects; ++i) {
-      if (alive_[i]) {
+      if (alive_[i].load(std::memory_order_relaxed)) {
         void* ptr = pool_.BlockPtr(i);
         T* obj = static_cast<T*>(ptr);
         obj->~T();
-        alive_[i] = false;
+        alive_[i].store(false, std::memory_order_relaxed);
       }
     }
   }
@@ -311,7 +312,7 @@ class ObjectPool {
     }
     uint32_t idx = pool_.PtrToIndex(mem);
     T* obj = ::new (mem) T(std::forward<Args>(args)...);
-    alive_[idx] = true;
+    alive_[idx].store(true, std::memory_order_relaxed);
     return obj;
   }
 
@@ -326,7 +327,7 @@ class ObjectPool {
     }
     uint32_t idx = pool_.PtrToIndex(result.value());
     T* obj = ::new (result.value()) T(std::forward<Args>(args)...);
-    alive_[idx] = true;
+    alive_[idx].store(true, std::memory_order_relaxed);
     return expected<T*, MemPoolError>::success(obj);
   }
 
@@ -338,9 +339,9 @@ class ObjectPool {
       return;
     }
     uint32_t idx = pool_.PtrToIndex(obj);
-    OSP_ASSERT(alive_[idx]);
+    OSP_ASSERT(alive_[idx].load(std::memory_order_relaxed));
     obj->~T();
-    alive_[idx] = false;
+    alive_[idx].store(false, std::memory_order_relaxed);
     pool_.Free(obj);
   }
 
@@ -369,7 +370,7 @@ class ObjectPool {
 
  private:
   FixedPool<kBlockSize, MaxObjects> pool_;
-  bool alive_[MaxObjects];
+  std::atomic<bool> alive_[MaxObjects];
 };
 
 }  // namespace osp

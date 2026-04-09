@@ -17,6 +17,8 @@
  *   - osp::log             -- structured logging
  */
 
+#include "protocol.hpp"
+
 #include "osp/bus.hpp"
 #include "osp/log.hpp"
 #include "osp/node.hpp"
@@ -24,13 +26,13 @@
 #include "osp/shell.hpp"
 #include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
-#include "protocol.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <atomic>
+#include <chrono>
 #include <thread>
 
 using namespace net_stress;
@@ -52,20 +54,20 @@ struct ProbeStats {
   std::atomic<uint64_t> sum_rtt_us{0};
 };
 
-static ProbeStats             g_probe;
-static osp::FixedString<63>  g_server_host(osp::TruncateToCapacity, "127.0.0.1");
-static uint16_t               g_echo_port = kEchoPort;
-static std::atomic<bool>      g_running{true};
-static uint64_t               g_start_ms = 0;
+static ProbeStats g_probe;
+static osp::FixedString<63> g_server_host(osp::TruncateToCapacity, "127.0.0.1");
+static uint16_t g_echo_port = kEchoPort;
+static std::atomic<bool> g_running{true};
+static uint64_t g_start_ms = 0;
 
 // Bus for local events
 struct ProbeResult {
   uint32_t seq;
   uint64_t rtt_us;
-  bool     ok;
+  bool ok;
 };
 using MonBusPayload = std::variant<ProbeResult, StatsSnapshot>;
-using MonBus  = osp::AsyncBus<MonBusPayload>;
+using MonBus = osp::AsyncBus<MonBusPayload>;
 using MonNode = osp::Node<MonBusPayload>;
 
 // ============================================================================
@@ -75,8 +77,7 @@ using MonNode = osp::Node<MonBusPayload>;
 static void ProbeCallback(void* ctx) {
   auto* node = static_cast<MonNode*>(ctx);
 
-  auto cli_r = osp::Client<EchoReq, EchoResp>::Connect(
-      g_server_host.c_str(), g_echo_port, 2000);
+  auto cli_r = osp::Client<EchoReq, EchoResp>::Connect(g_server_host.c_str(), g_echo_port, 2000);
 
   ProbeResult pr{};
   pr.seq = g_probe.probe_sent.fetch_add(1, std::memory_order_relaxed);
@@ -110,17 +111,13 @@ static void ProbeCallback(void* ctx) {
 
     // Update min_rtt_us using CAS loop
     uint64_t old_min = g_probe.min_rtt_us.load(std::memory_order_relaxed);
-    while (rtt < old_min &&
-           !g_probe.min_rtt_us.compare_exchange_weak(old_min, rtt,
-                                                      std::memory_order_relaxed)) {
+    while (rtt < old_min && !g_probe.min_rtt_us.compare_exchange_weak(old_min, rtt, std::memory_order_relaxed)) {
       // CAS failed, retry with updated old_min
     }
 
     // Update max_rtt_us using CAS loop
     uint64_t old_max = g_probe.max_rtt_us.load(std::memory_order_relaxed);
-    while (rtt > old_max &&
-           !g_probe.max_rtt_us.compare_exchange_weak(old_max, rtt,
-                                                      std::memory_order_relaxed)) {
+    while (rtt > old_max && !g_probe.max_rtt_us.compare_exchange_weak(old_max, rtt, std::memory_order_relaxed)) {
       // CAS failed, retry with updated old_max
     }
 
@@ -142,29 +139,26 @@ static void ProbeCallback(void* ctx) {
 
 static int cmd_probe(int /*argc*/, char* /*argv*/[]) {
   uint32_t sent = g_probe.probe_sent.load(std::memory_order_relaxed);
-  uint32_t ok   = g_probe.probe_ok.load(std::memory_order_relaxed);
+  uint32_t ok = g_probe.probe_ok.load(std::memory_order_relaxed);
   uint32_t fail = g_probe.probe_fail.load(std::memory_order_relaxed);
 
   osp::DebugShell::Printf("=== Probe Statistics ===\r\n");
-  osp::DebugShell::Printf("  Target:  %s:%u\r\n",
-                           g_server_host.c_str(), g_echo_port);
+  osp::DebugShell::Printf("  Target:  %s:%u\r\n", g_server_host.c_str(), g_echo_port);
   osp::DebugShell::Printf("  Sent:    %u\r\n", sent);
   osp::DebugShell::Printf("  OK:      %u\r\n", ok);
   osp::DebugShell::Printf("  Failed:  %u\r\n", fail);
 
   if (ok > 0) {
-    double avg = static_cast<double>(g_probe.sum_rtt_us.load(std::memory_order_relaxed)) /
-                 static_cast<double>(ok);
+    double avg = static_cast<double>(g_probe.sum_rtt_us.load(std::memory_order_relaxed)) / static_cast<double>(ok);
     osp::DebugShell::Printf("  Min RTT: %lu us\r\n",
-                             static_cast<unsigned long>(g_probe.min_rtt_us.load(std::memory_order_relaxed)));
+                            static_cast<unsigned long>(g_probe.min_rtt_us.load(std::memory_order_relaxed)));
     osp::DebugShell::Printf("  Max RTT: %lu us\r\n",
-                             static_cast<unsigned long>(g_probe.max_rtt_us.load(std::memory_order_relaxed)));
+                            static_cast<unsigned long>(g_probe.max_rtt_us.load(std::memory_order_relaxed)));
     osp::DebugShell::Printf("  Avg RTT: %.1f us\r\n", avg);
   }
 
   if (sent > 0) {
-    double loss = static_cast<double>(fail) * 100.0 /
-                  static_cast<double>(sent);
+    double loss = static_cast<double>(fail) * 100.0 / static_cast<double>(sent);
     osp::DebugShell::Printf("  Loss:    %.1f%%\r\n", loss);
   }
   return 0;
@@ -172,11 +166,9 @@ static int cmd_probe(int /*argc*/, char* /*argv*/[]) {
 OSP_SHELL_CMD(cmd_probe, "Show probe latency statistics");
 
 static int cmd_history(int /*argc*/, char* /*argv*/[]) {
-  osp::DebugShell::Printf("=== RTT History (last %u) ===\r\n",
-                           g_probe.rtt_history.size());
+  osp::DebugShell::Printf("=== RTT History (last %u) ===\r\n", g_probe.rtt_history.size());
   for (uint32_t i = 0; i < g_probe.rtt_history.size(); ++i) {
-    osp::DebugShell::Printf("  [%2u] %lu us\r\n", i,
-                             static_cast<unsigned long>(g_probe.rtt_history[i]));
+    osp::DebugShell::Printf("  [%2u] %lu us\r\n", i, static_cast<unsigned long>(g_probe.rtt_history[i]));
   }
   return 0;
 }
@@ -185,12 +177,9 @@ OSP_SHELL_CMD(cmd_history, "Show RTT history");
 static int cmd_bus_stats(int /*argc*/, char* /*argv*/[]) {
   auto stats = MonBus::Instance().GetStatistics();
   osp::DebugShell::Printf("=== Bus Statistics ===\r\n");
-  osp::DebugShell::Printf("  Published: %lu\r\n",
-                           static_cast<unsigned long>(stats.messages_published));
-  osp::DebugShell::Printf("  Processed: %lu\r\n",
-                           static_cast<unsigned long>(stats.messages_processed));
-  osp::DebugShell::Printf("  Dropped:   %lu\r\n",
-                           static_cast<unsigned long>(stats.messages_dropped));
+  osp::DebugShell::Printf("  Published: %lu\r\n", static_cast<unsigned long>(stats.messages_published));
+  osp::DebugShell::Printf("  Processed: %lu\r\n", static_cast<unsigned long>(stats.messages_processed));
+  osp::DebugShell::Printf("  Dropped:   %lu\r\n", static_cast<unsigned long>(stats.messages_dropped));
   return 0;
 }
 OSP_SHELL_CMD(cmd_bus_stats, "Show monitor bus statistics");
@@ -216,25 +205,31 @@ int main(int argc, char* argv[]) {
   const char* pos_args[8] = {};
   int pos_count = 0;
   for (int i = 1; i < argc && pos_count < 8; ++i) {
-    if (std::strcmp(argv[i], "--config") == 0) { ++i; continue; }
+    if (std::strcmp(argv[i], "--config") == 0) {
+      ++i;
+      continue;
+    }
     pos_args[pos_count++] = argv[i];
   }
 
   if (pos_count < 1) {
-    std::printf("Usage: %s [--config net_stress.ini] <server_ip> "
-                "[echo_port] [probe_interval_ms]\n", argv[0]);
+    std::printf(
+        "Usage: %s [--config net_stress.ini] <server_ip> "
+        "[echo_port] [probe_interval_ms]\n",
+        argv[0]);
     return 1;
   }
 
   g_server_host.assign(osp::TruncateToCapacity, pos_args[0]);
   g_echo_port = cfg.server_echo_port;
-  if (pos_count >= 2) g_echo_port = static_cast<uint16_t>(std::atoi(pos_args[1]));
+  if (pos_count >= 2)
+    g_echo_port = static_cast<uint16_t>(std::atoi(pos_args[1]));
   uint32_t probe_interval = cfg.monitor_probe_ms;
-  if (pos_count >= 3) probe_interval = static_cast<uint32_t>(std::atoi(pos_args[2]));
+  if (pos_count >= 3)
+    probe_interval = static_cast<uint32_t>(std::atoi(pos_args[2]));
 
   OSP_LOG_INFO("MONITOR", "=== Net Stress Monitor ===");
-  OSP_LOG_INFO("MONITOR", "Target: %s:%u, Probe interval: %u ms",
-               g_server_host.c_str(), g_echo_port, probe_interval);
+  OSP_LOG_INFO("MONITOR", "Target: %s:%u, Probe interval: %u ms", g_server_host.c_str(), g_echo_port, probe_interval);
 
   g_start_ms = NowMs();
 
@@ -244,15 +239,13 @@ int main(int argc, char* argv[]) {
   node.Start();
 
   // Subscribe to probe results
-  node.Subscribe<ProbeResult>(
-      [](const ProbeResult& pr, const osp::MessageHeader& /*hdr*/) {
-        if (pr.ok) {
-          OSP_LOG_INFO("PROBE", "seq=%u rtt=%lu us", pr.seq,
-                       static_cast<unsigned long>(pr.rtt_us));
-        } else {
-          OSP_LOG_WARN("PROBE", "seq=%u FAILED", pr.seq);
-        }
-      });
+  node.Subscribe<ProbeResult>([](const ProbeResult& pr, const osp::MessageHeader& /*hdr*/) {
+    if (pr.ok) {
+      OSP_LOG_INFO("PROBE", "seq=%u rtt=%lu us", pr.seq, static_cast<unsigned long>(pr.rtt_us));
+    } else {
+      OSP_LOG_WARN("PROBE", "seq=%u FAILED", pr.seq);
+    }
+  });
 
   // --- Debug Shell ---
   osp::DebugShell::Config shell_cfg;
@@ -260,9 +253,9 @@ int main(int argc, char* argv[]) {
   osp::DebugShell shell(shell_cfg);
   auto shell_r = shell.Start();
   if (shell_r) {
-    OSP_LOG_INFO("MONITOR", "Debug shell: telnet localhost %u",
-                 cfg.monitor_shell_port);
-    OSP_LOG_INFO("MONITOR", "  Commands: cmd_probe, cmd_history, "
+    OSP_LOG_INFO("MONITOR", "Debug shell: telnet localhost %u", cfg.monitor_shell_port);
+    OSP_LOG_INFO("MONITOR",
+                 "  Commands: cmd_probe, cmd_history, "
                  "cmd_bus_stats, cmd_quit");
   }
   OSP_SCOPE_EXIT(shell.Stop());
@@ -289,12 +282,10 @@ int main(int argc, char* argv[]) {
   uint32_t ok = g_probe.probe_ok.load(std::memory_order_relaxed);
   OSP_LOG_INFO("MONITOR", "");
   OSP_LOG_INFO("MONITOR", "========== Final Report ==========");
-  OSP_LOG_INFO("MONITOR", "Probes: %u sent, %u ok, %u failed",
-               g_probe.probe_sent.load(std::memory_order_relaxed),
-               ok, g_probe.probe_fail.load(std::memory_order_relaxed));
+  OSP_LOG_INFO("MONITOR", "Probes: %u sent, %u ok, %u failed", g_probe.probe_sent.load(std::memory_order_relaxed), ok,
+               g_probe.probe_fail.load(std::memory_order_relaxed));
   if (ok > 0) {
-    double avg = static_cast<double>(g_probe.sum_rtt_us.load(std::memory_order_relaxed)) /
-                 static_cast<double>(ok);
+    double avg = static_cast<double>(g_probe.sum_rtt_us.load(std::memory_order_relaxed)) / static_cast<double>(ok);
     OSP_LOG_INFO("MONITOR", "RTT: min=%lu avg=%.1f max=%lu us",
                  static_cast<unsigned long>(g_probe.min_rtt_us.load(std::memory_order_relaxed)), avg,
                  static_cast<unsigned long>(g_probe.max_rtt_us.load(std::memory_order_relaxed)));

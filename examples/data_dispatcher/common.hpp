@@ -11,11 +11,11 @@
 
 #include <cstdint>
 #include <cstring>
-#include <type_traits>
 
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <type_traits>
 #include <unistd.h>
 
 // ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ struct LidarPoint {
 static_assert(sizeof(LidarPoint) == 16, "LidarPoint must be 16 bytes");
 
 struct LidarFrame {
-  uint32_t magic;       // 0x4C494441 ('LIDA')
+  uint32_t magic;  // 0x4C494441 ('LIDA')
   uint32_t seq_num;
   uint32_t point_count;
   uint32_t timestamp_ms;
@@ -42,8 +42,7 @@ static_assert(sizeof(LidarFrame) == 16, "LidarFrame header must be 16 bytes");
 
 static constexpr uint32_t kLidarMagic = 0x4C494441u;
 static constexpr uint32_t kPointsPerFrame = 1000;
-static constexpr uint32_t kFrameDataSize =
-    sizeof(LidarFrame) + kPointsPerFrame * sizeof(LidarPoint);
+static constexpr uint32_t kFrameDataSize = sizeof(LidarFrame) + kPointsPerFrame * sizeof(LidarPoint);
 static constexpr uint32_t kProduceFps = 10;
 static constexpr uint32_t kProduceIntervalMs = 1000 / kProduceFps;
 
@@ -72,8 +71,7 @@ struct NotifyMsg {
   uint32_t payload_size;
 };
 static_assert(sizeof(NotifyMsg) == 8, "NotifyMsg must be 8 bytes");
-static_assert(std::is_trivially_copyable<NotifyMsg>::value,
-              "NotifyMsg must be trivially copyable");
+static_assert(std::is_trivially_copyable<NotifyMsg>::value, "NotifyMsg must be trivially copyable");
 
 // ---------------------------------------------------------------------------
 // Fill / validate LiDAR frame
@@ -99,12 +97,14 @@ inline void FillLidarFrame(uint8_t* buf, uint32_t seq, uint32_t ts_ms) {
 }
 
 inline bool ValidateLidarFrame(const uint8_t* buf, uint32_t len) {
-  if (len < sizeof(LidarFrame)) return false;
+  if (len < sizeof(LidarFrame))
+    return false;
   auto* hdr = reinterpret_cast<const LidarFrame*>(buf);
-  if (hdr->magic != kLidarMagic) return false;
-  if (hdr->point_count == 0 || hdr->point_count > 100000) return false;
-  uint32_t expected =
-      sizeof(LidarFrame) + hdr->point_count * sizeof(LidarPoint);
+  if (hdr->magic != kLidarMagic)
+    return false;
+  if (hdr->point_count == 0 || hdr->point_count > 100000)
+    return false;
+  uint32_t expected = sizeof(LidarFrame) + hdr->point_count * sizeof(LidarPoint);
   return len >= expected;
 }
 
@@ -115,8 +115,12 @@ inline bool ValidateLidarFrame(const uint8_t* buf, uint32_t len) {
 inline void* CreatePoolShm(const char* name, uint32_t size) {
   shm_unlink(name);
   int fd = shm_open(name, O_CREAT | O_RDWR, 0666);
-  if (fd < 0) return nullptr;
-  if (ftruncate(fd, size) < 0) { close(fd); return nullptr; }
+  if (fd < 0)
+    return nullptr;
+  if (ftruncate(fd, size) < 0) {
+    close(fd);
+    return nullptr;
+  }
   void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
   return (ptr == MAP_FAILED) ? nullptr : ptr;
@@ -124,16 +128,20 @@ inline void* CreatePoolShm(const char* name, uint32_t size) {
 
 inline void* OpenPoolShm(const char* name, uint32_t size) {
   int fd = shm_open(name, O_RDWR, 0666);
-  if (fd < 0) return nullptr;
+  if (fd < 0)
+    return nullptr;
   void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
   return (ptr == MAP_FAILED) ? nullptr : ptr;
 }
 
 inline void ClosePoolShm(void* ptr, uint32_t size) {
-  if (ptr != nullptr) munmap(ptr, size);
+  if (ptr != nullptr)
+    munmap(ptr, size);
 }
 
-inline void UnlinkPoolShm(const char* name) { shm_unlink(name); }
+inline void UnlinkPoolShm(const char* name) {
+  shm_unlink(name);
+}
 
 #endif  // EXAMPLES_DATA_DISPATCHER_COMMON_HPP_

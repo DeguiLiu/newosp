@@ -17,9 +17,10 @@
 #include "osp/qos.hpp"
 #include "osp/timer.hpp"
 
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
+
+#include <chrono>
 #include <variant>
 
 // -- Message types ----------------------------------------------------------
@@ -105,20 +106,18 @@ void ControlOnShutdown() {
 
 void OnSensorData(const SensorData& data, const osp::MessageHeader& header) {
   ++control_recv_count;
-  std::printf("[ControlNode] Received sensor data: temp=%.1f, pressure=%.1f, "
-              "timestamp=%lu (msg #%lu)\n",
-              static_cast<double>(data.temperature),
-              static_cast<double>(data.pressure),
-              static_cast<unsigned long>(data.timestamp_us),
-              static_cast<unsigned long>(header.msg_id));
+  std::printf(
+      "[ControlNode] Received sensor data: temp=%.1f, pressure=%.1f, "
+      "timestamp=%lu (msg #%lu)\n",
+      static_cast<double>(data.temperature), static_cast<double>(data.pressure),
+      static_cast<unsigned long>(data.timestamp_us), static_cast<unsigned long>(header.msg_id));
 }
 
 // -- Helper: get timestamp in microseconds ----------------------------------
 
 uint64_t GetTimestampUs() {
   auto now = std::chrono::steady_clock::now();
-  auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-      now.time_since_epoch());
+  auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
   return static_cast<uint64_t>(us.count());
 }
 
@@ -196,26 +195,21 @@ int main() {
   // Publish sensor data with QoS profile (kQosSensorData: best-effort, keep last 1)
   std::printf("--- Publishing Sensor Data ---\n\n");
   for (uint32_t i = 0; i < 5; ++i) {
-    SensorData data{
-        20.0f + static_cast<float>(i) * 0.5f,  // temperature
-        1013.25f + static_cast<float>(i) * 0.1f,  // pressure
-        GetTimestampUs()
-    };
+    SensorData data{20.0f + static_cast<float>(i) * 0.5f,     // temperature
+                    1013.25f + static_cast<float>(i) * 0.1f,  // pressure
+                    GetTimestampUs()};
 
     // Publish with HIGH priority (simulating critical sensor data)
-    bool published = sensor_node.PublishWithPriority(
-        data, osp::MessagePriority::kHigh);
+    bool published = sensor_node.PublishWithPriority(data, osp::MessagePriority::kHigh);
 
     if (published) {
       ++sensor_publish_count;
-      std::printf("[SensorNode] Published sensor data #%u: temp=%.1f, "
-                  "pressure=%.1f\n",
-                  sensor_publish_count,
-                  static_cast<double>(data.temperature),
-                  static_cast<double>(data.pressure));
+      std::printf(
+          "[SensorNode] Published sensor data #%u: temp=%.1f, "
+          "pressure=%.1f\n",
+          sensor_publish_count, static_cast<double>(data.temperature), static_cast<double>(data.pressure));
     } else {
-      std::printf("[SensorNode] WARNING: Failed to publish sensor data #%u\n",
-                  sensor_publish_count + 1);
+      std::printf("[SensorNode] WARNING: Failed to publish sensor data #%u\n", sensor_publish_count + 1);
     }
 
     // Process messages after each publish
@@ -260,12 +254,9 @@ int main() {
   // Show bus statistics
   auto stats = Bus::Instance().GetStatistics();
   std::printf("--- Bus Statistics ---\n");
-  std::printf("  Published : %lu\n",
-              static_cast<unsigned long>(stats.messages_published));
-  std::printf("  Processed : %lu\n",
-              static_cast<unsigned long>(stats.messages_processed));
-  std::printf("  Dropped   : %lu\n",
-              static_cast<unsigned long>(stats.messages_dropped));
+  std::printf("  Published : %lu\n", static_cast<unsigned long>(stats.messages_published));
+  std::printf("  Processed : %lu\n", static_cast<unsigned long>(stats.messages_processed));
+  std::printf("  Dropped   : %lu\n", static_cast<unsigned long>(stats.messages_dropped));
   std::printf("\n");
 
   std::printf("--- Summary ---\n");
@@ -291,19 +282,21 @@ int main() {
     std::atomic<int> counter{0};
     osp::TimerScheduler<4> sched;  // Default: SteadyTickSource
 
-    sched.Add(20, [](void* ctx) {
-      auto* c = static_cast<std::atomic<int>*>(ctx);
-      int count = c->fetch_add(1) + 1;
-      std::printf("  [SteadyTimer] Fire #%d\n", count);
-    }, &counter);
+    sched.Add(
+        20,
+        [](void* ctx) {
+          auto* c = static_cast<std::atomic<int>*>(ctx);
+          int count = c->fetch_add(1) + 1;
+          std::printf("  [SteadyTimer] Fire #%d\n", count);
+        },
+        &counter);
 
     std::printf("Starting scheduler with 20ms periodic timer...\n");
     sched.Start();
 
     // Query NsToNextTask
     uint64_t ns = sched.NsToNextTask();
-    std::printf("  NsToNextTask: %lu ns (~%lu ms)\n",
-                static_cast<unsigned long>(ns),
+    std::printf("  NsToNextTask: %lu ns (~%lu ms)\n", static_cast<unsigned long>(ns),
                 static_cast<unsigned long>(ns / 1000000ULL));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -320,13 +313,15 @@ int main() {
     std::atomic<int> counter{0};
     osp::TimerScheduler<4, osp::ManualTickSource> sched;
 
-    sched.Add(10, [](void* ctx) {
-      auto* c = static_cast<std::atomic<int>*>(ctx);
-      int count = c->fetch_add(1) + 1;
-      std::printf("  [ManualTimer] Fire #%d at tick %lu\n",
-                  count,
-                  static_cast<unsigned long>(osp::ManualTickSource::GetTicks()));
-    }, &counter);
+    sched.Add(
+        10,
+        [](void* ctx) {
+          auto* c = static_cast<std::atomic<int>*>(ctx);
+          int count = c->fetch_add(1) + 1;
+          std::printf("  [ManualTimer] Fire #%d at tick %lu\n", count,
+                      static_cast<unsigned long>(osp::ManualTickSource::GetTicks()));
+        },
+        &counter);
 
     std::printf("Starting scheduler with 10ms periodic timer (tick-driven)...\n");
     sched.Start();
@@ -356,8 +351,7 @@ int main() {
 
     std::printf("Added tasks: 50ms, 100ms\n");
     uint64_t ns = sched.NsToNextTask();
-    std::printf("  NsToNextTask: %lu ns (~%lu ms)\n",
-                static_cast<unsigned long>(ns),
+    std::printf("  NsToNextTask: %lu ns (~%lu ms)\n", static_cast<unsigned long>(ns),
                 static_cast<unsigned long>(ns / 1000000ULL));
 
     // Advance time by 30ms
@@ -367,8 +361,7 @@ int main() {
 
     ns = sched.NsToNextTask();
     std::printf("After 30ms:\n");
-    std::printf("  NsToNextTask: %lu ns (~%lu ms, expected ~20ms)\n",
-                static_cast<unsigned long>(ns),
+    std::printf("  NsToNextTask: %lu ns (~%lu ms, expected ~20ms)\n", static_cast<unsigned long>(ns),
                 static_cast<unsigned long>(ns / 1000000ULL));
 
     // Advance past first task
@@ -378,8 +371,7 @@ int main() {
 
     ns = sched.NsToNextTask();
     std::printf("After 55ms (past first task):\n");
-    std::printf("  NsToNextTask: %lu ns (~%lu ms, expected ~45ms)\n\n",
-                static_cast<unsigned long>(ns),
+    std::printf("  NsToNextTask: %lu ns (~%lu ms, expected ~45ms)\n\n", static_cast<unsigned long>(ns),
                 static_cast<unsigned long>(ns / 1000000ULL));
   }
 
@@ -400,8 +392,7 @@ int main() {
   std::atomic<uint32_t> imu_recv_count{0};
   auto imu_sub = processor.Subscribe<SensorData>([&](const SensorData& data, const auto&) {
     imu_recv_count.fetch_add(1, std::memory_order_relaxed);
-    std::printf("  [Processor] Received IMU data: temp=%.1f, pressure=%.1f\n",
-                static_cast<double>(data.temperature),
+    std::printf("  [Processor] Received IMU data: temp=%.1f, pressure=%.1f\n", static_cast<double>(data.temperature),
                 static_cast<double>(data.pressure));
   });
 
@@ -429,8 +420,7 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     exec.Stop();
 
-    std::printf("  Received: %u messages\n",
-                imu_recv_count.load(std::memory_order_relaxed));
+    std::printf("  Received: %u messages\n", imu_recv_count.load(std::memory_order_relaxed));
     std::printf("  Note: Executor uses yield(), may cause CPU spinning\n\n");
   }
 
@@ -458,8 +448,7 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     exec.Stop();
 
-    std::printf("  Received: %u messages\n",
-                imu_recv_count.load(std::memory_order_relaxed));
+    std::printf("  Received: %u messages\n", imu_recv_count.load(std::memory_order_relaxed));
     std::printf("  Note: Executor sleeps 1ms when idle, reducing CPU usage\n\n");
   }
 
@@ -471,7 +460,7 @@ int main() {
   {
     std::printf("--- Demo 3: RealtimeExecutor + PreciseSleepStrategy ---\n");
     osp::RealtimeConfig cfg;
-    cfg.cpu_affinity = 0;  // Pin to core 0
+    cfg.cpu_affinity = 0;                        // Pin to core 0
     osp::PreciseSleepStrategy sleep(500000ULL);  // 500us default sleep
     osp::RealtimeExecutor<Payload, osp::PreciseSleepStrategy> exec(cfg, sleep);
     exec.AddNode(imu_sensor);
@@ -489,8 +478,7 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     exec.Stop();
 
-    std::printf("  Received: %u messages\n",
-                imu_recv_count.load(std::memory_order_relaxed));
+    std::printf("  Received: %u messages\n", imu_recv_count.load(std::memory_order_relaxed));
     std::printf("  Note: Realtime executor with 500us sleep, CPU pinned to core 0\n\n");
   }
 

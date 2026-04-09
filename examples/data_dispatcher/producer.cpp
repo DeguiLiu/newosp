@@ -19,12 +19,7 @@
 //
 // Usage: ./osp_dd_producer [--channel name] [--frames N]
 
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <chrono>
-#include <thread>
+#include "common.hpp"
 
 #include "osp/data_dispatcher.hpp"
 #include "osp/fault_collector.hpp"
@@ -36,7 +31,13 @@
 #include "osp/timer.hpp"
 #include "osp/watchdog.hpp"
 
-#include "common.hpp"
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include <chrono>
+#include <thread>
 
 // ---------------------------------------------------------------------------
 // Type aliases
@@ -49,8 +50,7 @@ using Disp = osp::DataDispatcher<Store, osp::ShmNotify>;
 // ShmNotify callback: push NotifyMsg to SPMC channel
 // ---------------------------------------------------------------------------
 
-static void NotifyCallback(uint32_t block_id, uint32_t payload_size,
-                           void* ctx) {
+static void NotifyCallback(uint32_t block_id, uint32_t payload_size, void* ctx) {
   auto* ch = static_cast<osp::ShmSpmcByteChannel*>(ctx);
   NotifyMsg msg{block_id, payload_size};
   ch->Write(reinterpret_cast<const uint8_t*>(&msg), sizeof(msg));
@@ -61,8 +61,13 @@ static void NotifyCallback(uint32_t block_id, uint32_t payload_size,
 // ---------------------------------------------------------------------------
 
 enum ProdEvt : uint32_t {
-  kEvtInitDone = 1, kEvtInitFail, kEvtRingFull, kEvtRingAvail,
-  kEvtLimitReached, kEvtRetry, kEvtShutdown,
+  kEvtInitDone = 1,
+  kEvtInitFail,
+  kEvtRingFull,
+  kEvtRingAvail,
+  kEvtLimitReached,
+  kEvtRetry,
+  kEvtShutdown,
 };
 
 // ---------------------------------------------------------------------------
@@ -103,8 +108,7 @@ struct ProdCtx {
 // ---------------------------------------------------------------------------
 
 static void OnEnterInit(ProdCtx& ctx) {
-  OSP_LOG_INFO("Producer", "creating pool shm '%s' + notify '%s'",
-               ctx.pool_name, ctx.notify_name);
+  OSP_LOG_INFO("Producer", "creating pool shm '%s' + notify '%s'", ctx.pool_name, ctx.notify_name);
 
   // Create block pool shared memory
   ctx.pool_size = Store::RequiredShmSize();
@@ -115,8 +119,7 @@ static void OnEnterInit(ProdCtx& ctx) {
   }
 
   // Create notification SPMC channel
-  auto ch = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(
-      ctx.notify_name, kNotifyCapacity, kNotifyMaxConsumers);
+  auto ch = osp::ShmSpmcByteChannel::CreateOrReplaceWriter(ctx.notify_name, kNotifyCapacity, kNotifyMaxConsumers);
   if (!ch.has_value()) {
     OSP_LOG_ERROR("Producer", "failed to create notify channel");
     ClosePoolShm(ctx.pool_shm, ctx.pool_size);
@@ -138,18 +141,21 @@ static void OnEnterInit(ProdCtx& ctx) {
   notify.ctx = &ctx.notify_channel;
 
   ctx.t0_us = osp::SteadyNowUs();
-  OSP_LOG_INFO("Producer", "pool created: %u blocks x %u bytes = %u bytes shm",
-               kPoolMaxBlocks, kFrameDataSize, ctx.pool_size);
+  OSP_LOG_INFO("Producer", "pool created: %u blocks x %u bytes = %u bytes shm", kPoolMaxBlocks, kFrameDataSize,
+               ctx.pool_size);
 }
 
 static osp::TransitionResult OnInit(ProdCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtInitDone) return ctx.sm->RequestTransition(ctx.s_streaming);
-  if (ev.id == kEvtInitFail) return ctx.sm->RequestTransition(ctx.s_error);
+  if (ev.id == kEvtInitDone)
+    return ctx.sm->RequestTransition(ctx.s_streaming);
+  if (ev.id == kEvtInitFail)
+    return ctx.sm->RequestTransition(ctx.s_error);
   return osp::TransitionResult::kUnhandled;
 }
 
 static osp::TransitionResult OnOp(ProdCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtShutdown) return ctx.sm->RequestTransition(ctx.s_done);
+  if (ev.id == kEvtShutdown)
+    return ctx.sm->RequestTransition(ctx.s_done);
   return osp::TransitionResult::kUnhandled;
 }
 
@@ -166,18 +172,19 @@ static void OnEnterStreaming(ProdCtx& /*ctx*/) {
 }
 
 static osp::TransitionResult OnStreaming(ProdCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtRingFull) return ctx.sm->RequestTransition(ctx.s_paused);
+  if (ev.id == kEvtRingFull)
+    return ctx.sm->RequestTransition(ctx.s_paused);
   return osp::TransitionResult::kUnhandled;
 }
 
 static void OnEnterPaused(ProdCtx& ctx) {
   ++ctx.pause_count;
-  OSP_LOG_WARN("Producer", "pool exhausted, paused (count=%u)",
-               ctx.pause_count);
+  OSP_LOG_WARN("Producer", "pool exhausted, paused (count=%u)", ctx.pause_count);
 }
 
 static osp::TransitionResult OnPaused(ProdCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtRingAvail) return ctx.sm->RequestTransition(ctx.s_streaming);
+  if (ev.id == kEvtRingAvail)
+    return ctx.sm->RequestTransition(ctx.s_streaming);
   return osp::TransitionResult::kUnhandled;
 }
 
@@ -187,23 +194,22 @@ static void OnEnterError(ProdCtx& ctx) {
 }
 
 static osp::TransitionResult OnError(ProdCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtRetry) return ctx.sm->RequestTransition(ctx.s_init);
+  if (ev.id == kEvtRetry)
+    return ctx.sm->RequestTransition(ctx.s_init);
   return osp::TransitionResult::kUnhandled;
 }
 
 static void OnEnterDone(ProdCtx& ctx) {
   uint64_t dt = osp::SteadyNowUs() - ctx.t0_us;
-  float fps = (dt > 0) ? static_cast<float>(ctx.frames_sent) * 1e6f
-                         / static_cast<float>(dt) : 0.0f;
-  OSP_LOG_INFO("Producer", "done: sent=%u dropped=%u paused=%u fps=%.1f "
+  float fps = (dt > 0) ? static_cast<float>(ctx.frames_sent) * 1e6f / static_cast<float>(dt) : 0.0f;
+  OSP_LOG_INFO("Producer",
+               "done: sent=%u dropped=%u paused=%u fps=%.1f "
                "pool(free=%u alloc=%u)",
-               ctx.frames_sent, ctx.frames_dropped, ctx.pause_count,
-               static_cast<double>(fps),
-               ctx.disp.FreeBlocks(), ctx.disp.AllocBlocks());
+               ctx.frames_sent, ctx.frames_dropped, ctx.pause_count, static_cast<double>(fps), ctx.disp.FreeBlocks(),
+               ctx.disp.AllocBlocks());
 
   // Cleanup: force-release any leaked blocks
-  uint32_t cleaned = ctx.disp.ForceCleanup(
-      [](uint32_t, void*) -> bool { return true; }, nullptr);
+  uint32_t cleaned = ctx.disp.ForceCleanup([](uint32_t, void*) -> bool { return true; }, nullptr);
   if (cleaned > 0)
     OSP_LOG_INFO("Producer", "ForceCleanup reclaimed %u blocks", cleaned);
 
@@ -235,14 +241,14 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  OSP_LOG_INFO("Producer", "starting: pool='%s' frames=%u",
-               ctx.pool_name, ctx.max_frames);
+  OSP_LOG_INFO("Producer", "starting: pool='%s' frames=%u", ctx.pool_name, ctx.max_frames);
 
   ctx.shutdown.InstallSignalHandlers();
   ctx.shutdown.Register([](int) {});
 
   auto wd_reg = ctx.watchdog.Register("main", 5000);
-  if (wd_reg.has_value()) ctx.wd_hb = wd_reg.value().heartbeat;
+  if (wd_reg.has_value())
+    ctx.wd_hb = wd_reg.value().heartbeat;
   ctx.watchdog.StartAutoCheck(1000);
 
   ctx.fault_collector.RegisterFault(0, 0x00010001U);
@@ -264,25 +270,30 @@ int main(int argc, char* argv[]) {
 
   // Stats timer
   ctx.timer.Start();
-  ctx.timer.Add(2000, [](void* arg) {
-    auto* c = static_cast<ProdCtx*>(arg);
-    uint64_t dt = osp::SteadyNowUs() - c->t0_us;
-    float fps = (dt > 0) ? static_cast<float>(c->frames_sent) * 1e6f
-                           / static_cast<float>(dt) : 0.0f;
-    OSP_LOG_INFO("Producer", "stats: sent=%u dropped=%u fps=%.1f "
-                 "consumers=%u pool(free=%u alloc=%u)",
-                 c->frames_sent, c->frames_dropped,
-                 static_cast<double>(fps),
-                 c->notify_channel.ConsumerCount(),
-                 c->disp.FreeBlocks(), c->disp.AllocBlocks());
-  }, &ctx);
+  ctx.timer.Add(
+      2000,
+      [](void* arg) {
+        auto* c = static_cast<ProdCtx*>(arg);
+        uint64_t dt = osp::SteadyNowUs() - c->t0_us;
+        float fps = (dt > 0) ? static_cast<float>(c->frames_sent) * 1e6f / static_cast<float>(dt) : 0.0f;
+        OSP_LOG_INFO("Producer",
+                     "stats: sent=%u dropped=%u fps=%.1f "
+                     "consumers=%u pool(free=%u alloc=%u)",
+                     c->frames_sent, c->frames_dropped, static_cast<double>(fps), c->notify_channel.ConsumerCount(),
+                     c->disp.FreeBlocks(), c->disp.AllocBlocks());
+      },
+      &ctx);
 
   // ScanTimeout timer
-  ctx.timer.Add(1000, [](void* arg) {
-    auto* c = static_cast<ProdCtx*>(arg);
-    uint32_t t = c->disp.ScanTimeout();
-    if (t > 0) OSP_LOG_WARN("Producer", "ScanTimeout reclaimed %u blocks", t);
-  }, &ctx);
+  ctx.timer.Add(
+      1000,
+      [](void* arg) {
+        auto* c = static_cast<ProdCtx*>(arg);
+        uint32_t t = c->disp.ScanTimeout();
+        if (t > 0)
+          OSP_LOG_WARN("Producer", "ScanTimeout reclaimed %u blocks", t);
+      },
+      &ctx);
 
   sm.Start();
 
@@ -299,7 +310,8 @@ int main(int argc, char* argv[]) {
       sm.Dispatch({kEvtShutdown});
       break;
     }
-    if (ctx.wd_hb) ctx.wd_hb->Beat();
+    if (ctx.wd_hb)
+      ctx.wd_hb->Beat();
 
     int32_t cur = sm.CurrentState();
 
@@ -311,8 +323,7 @@ int main(int argc, char* argv[]) {
         continue;
       }
       uint8_t* payload = ctx.disp.GetWritable(bid.value());
-      uint32_t ts_ms = static_cast<uint32_t>(
-          (osp::SteadyNowUs() - ctx.t0_us) / 1000);
+      uint32_t ts_ms = static_cast<uint32_t>((osp::SteadyNowUs() - ctx.t0_us) / 1000);
       FillLidarFrame(payload, ctx.seq, ts_ms);
 
       // Submit with explicit consumer_count from notification channel
@@ -331,8 +342,7 @@ int main(int argc, char* argv[]) {
         sm.Dispatch({kEvtLimitReached});
         continue;
       }
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(kProduceIntervalMs));
+      std::this_thread::sleep_for(std::chrono::milliseconds(kProduceIntervalMs));
 
     } else if (cur == ctx.s_paused) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));

@@ -6,7 +6,6 @@
 #include "osp/vocabulary.hpp"
 
 #include <catch2/catch_test_macros.hpp>
-
 #include <string>
 
 // ============================================================================
@@ -21,8 +20,7 @@ TEST_CASE("expected success path", "[vocabulary][expected]") {
 }
 
 TEST_CASE("expected error path", "[vocabulary][expected]") {
-  auto r = osp::expected<int, osp::ConfigError>::error(
-      osp::ConfigError::kFileNotFound);
+  auto r = osp::expected<int, osp::ConfigError>::error(osp::ConfigError::kFileNotFound);
   REQUIRE(!r.has_value());
   REQUIRE(!static_cast<bool>(r));
   REQUIRE(r.get_error() == osp::ConfigError::kFileNotFound);
@@ -32,8 +30,7 @@ TEST_CASE("expected void specialization", "[vocabulary][expected]") {
   auto ok = osp::expected<void, osp::TimerError>::success();
   REQUIRE(ok.has_value());
 
-  auto err =
-      osp::expected<void, osp::TimerError>::error(osp::TimerError::kSlotsFull);
+  auto err = osp::expected<void, osp::TimerError>::error(osp::TimerError::kSlotsFull);
   REQUIRE(!err.has_value());
   REQUIRE(err.get_error() == osp::TimerError::kSlotsFull);
 }
@@ -42,8 +39,7 @@ TEST_CASE("expected value_or", "[vocabulary][expected]") {
   auto ok = osp::expected<int, osp::ConfigError>::success(10);
   REQUIRE(ok.value_or(99) == 10);
 
-  auto err =
-      osp::expected<int, osp::ConfigError>::error(osp::ConfigError::kParseError);
+  auto err = osp::expected<int, osp::ConfigError>::error(osp::ConfigError::kParseError);
   REQUIRE(err.value_or(99) == 99);
 }
 
@@ -101,7 +97,9 @@ TEST_CASE("optional copy/move", "[vocabulary][optional]") {
 // ============================================================================
 
 static int free_fn_result = 0;
-static void free_fn() { free_fn_result = 42; }
+static void free_fn() {
+  free_fn_result = 42;
+}
 
 TEST_CASE("FixedFunction from lambda", "[vocabulary][fixed_function]") {
   int captured = 0;
@@ -131,8 +129,7 @@ TEST_CASE("FixedFunction with return value", "[vocabulary][fixed_function]") {
 TEST_CASE("FixedFunction move", "[vocabulary][fixed_function]") {
   int val = 0;
   osp::FixedFunction<void()> fn1([&val]() { val = 100; });
-  osp::FixedFunction<void()> fn2 =
-      static_cast<osp::FixedFunction<void()>&&>(fn1);
+  osp::FixedFunction<void()> fn2 = static_cast<osp::FixedFunction<void()>&&>(fn1);
   REQUIRE(!static_cast<bool>(fn1));
   REQUIRE(static_cast<bool>(fn2));
   fn2();
@@ -143,7 +140,9 @@ TEST_CASE("FixedFunction move", "[vocabulary][fixed_function]") {
 // function_ref tests
 // ============================================================================
 
-static int ref_fn(int x) { return x * 2; }
+static int ref_fn(int x) {
+  return x * 2;
+}
 
 TEST_CASE("function_ref from lambda", "[vocabulary][function_ref]") {
   auto lam = [](int x) { return x + 1; };
@@ -154,6 +153,22 @@ TEST_CASE("function_ref from lambda", "[vocabulary][function_ref]") {
 TEST_CASE("function_ref from function pointer", "[vocabulary][function_ref]") {
   osp::function_ref<int(int)> ref(ref_fn);
   REQUIRE(ref(3) == 6);
+}
+
+TEST_CASE("function_ref from const callable object", "[vocabulary][function_ref]") {
+  struct ConstCallable {
+    int operator()(int x) const { return x + 5; }
+  };
+
+  const ConstCallable callable{};
+  osp::function_ref<int(int)> ref(callable);
+  REQUIRE(ref(7) == 12);
+}
+
+TEST_CASE("function_ref from const lambda", "[vocabulary][function_ref]") {
+  const auto lam = [](int x) { return x - 2; };
+  osp::function_ref<int(int)> ref(lam);
+  REQUIRE(ref(9) == 7);
 }
 
 // ============================================================================
@@ -272,8 +287,7 @@ TEST_CASE("FixedVector move", "[vocabulary][fixed_vector]") {
   v1.push_back(5);
   v1.push_back(6);
 
-  osp::FixedVector<int, 4> v2 =
-      static_cast<osp::FixedVector<int, 4>&&>(v1);
+  osp::FixedVector<int, 4> v2 = static_cast<osp::FixedVector<int, 4>&&>(v1);
   REQUIRE(v2.size() == 2);
   REQUIRE(v2[0] == 5);
   REQUIRE(v1.empty());
@@ -327,8 +341,7 @@ TEST_CASE("NewType prevents mixing", "[vocabulary][newtype]") {
 TEST_CASE("ScopeGuard executes on exit", "[vocabulary][scope_guard]") {
   int val = 0;
   {
-    osp::ScopeGuard guard(
-        osp::FixedFunction<void()>([&val]() { val = 42; }));
+    osp::ScopeGuard guard(osp::FixedFunction<void()>([&val]() { val = 42; }));
     REQUIRE(val == 0);
   }
   REQUIRE(val == 42);
@@ -337,8 +350,7 @@ TEST_CASE("ScopeGuard executes on exit", "[vocabulary][scope_guard]") {
 TEST_CASE("ScopeGuard release prevents execution", "[vocabulary][scope_guard]") {
   int val = 0;
   {
-    osp::ScopeGuard guard(
-        osp::FixedFunction<void()>([&val]() { val = 42; }));
+    osp::ScopeGuard guard(osp::FixedFunction<void()>([&val]() { val = 42; }));
     guard.release();
   }
   REQUIRE(val == 0);
@@ -347,8 +359,7 @@ TEST_CASE("ScopeGuard release prevents execution", "[vocabulary][scope_guard]") 
 TEST_CASE("ScopeGuard move", "[vocabulary][scope_guard]") {
   int val = 0;
   {
-    osp::ScopeGuard guard1(
-        osp::FixedFunction<void()>([&val]() { val = 99; }));
+    osp::ScopeGuard guard1(osp::FixedFunction<void()>([&val]() { val = 99; }));
     osp::ScopeGuard guard2 = static_cast<osp::ScopeGuard&&>(guard1);
     // guard1 is released, guard2 owns the cleanup
   }
@@ -370,25 +381,19 @@ TEST_CASE("OSP_SCOPE_EXIT macro", "[vocabulary][scope_guard]") {
 
 TEST_CASE("and_then on success", "[vocabulary][functional]") {
   auto r = osp::expected<int, osp::ConfigError>::success(10);
-  auto r2 = osp::and_then(r, [](int v) {
-    return osp::expected<int, osp::ConfigError>::success(v * 2);
-  });
+  auto r2 = osp::and_then(r, [](int v) { return osp::expected<int, osp::ConfigError>::success(v * 2); });
   REQUIRE(r2.value() == 20);
 }
 
 TEST_CASE("and_then on error propagates", "[vocabulary][functional]") {
-  auto r = osp::expected<int, osp::ConfigError>::error(
-      osp::ConfigError::kParseError);
-  auto r2 = osp::and_then(r, [](int v) {
-    return osp::expected<int, osp::ConfigError>::success(v * 2);
-  });
+  auto r = osp::expected<int, osp::ConfigError>::error(osp::ConfigError::kParseError);
+  auto r2 = osp::and_then(r, [](int v) { return osp::expected<int, osp::ConfigError>::success(v * 2); });
   REQUIRE(!r2.has_value());
   REQUIRE(r2.get_error() == osp::ConfigError::kParseError);
 }
 
 TEST_CASE("or_else on error", "[vocabulary][functional]") {
-  auto r = osp::expected<int, osp::ConfigError>::error(
-      osp::ConfigError::kFileNotFound);
+  auto r = osp::expected<int, osp::ConfigError>::error(osp::ConfigError::kFileNotFound);
   osp::ConfigError captured{};
   osp::or_else(r, [&captured](osp::ConfigError e) { captured = e; });
   REQUIRE(captured == osp::ConfigError::kFileNotFound);

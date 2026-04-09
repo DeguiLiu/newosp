@@ -5,16 +5,15 @@
 
 #include "osp/transport_factory.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <cstring>
+
+#include <catch2/catch_test_macros.hpp>
 
 // ============================================================================
 // TransportFactory::DetectBestTransport tests
 // ============================================================================
 
-TEST_CASE("transport_factory - DetectBestTransport local inproc",
-          "[transport_factory]") {
+TEST_CASE("transport_factory - DetectBestTransport local inproc", "[transport_factory]") {
   osp::TransportConfig cfg;
   cfg.remote_host = "127.0.0.1";
   cfg.shm_channel_name.clear();
@@ -23,8 +22,7 @@ TEST_CASE("transport_factory - DetectBestTransport local inproc",
   REQUIRE(type == osp::TransportType::kInproc);
 }
 
-TEST_CASE("transport_factory - DetectBestTransport local shm",
-          "[transport_factory]") {
+TEST_CASE("transport_factory - DetectBestTransport local shm", "[transport_factory]") {
   osp::TransportConfig cfg;
   cfg.remote_host = "127.0.0.1";
   cfg.shm_channel_name = "test_channel";
@@ -33,8 +31,7 @@ TEST_CASE("transport_factory - DetectBestTransport local shm",
   REQUIRE(type == osp::TransportType::kShm);
 }
 
-TEST_CASE("transport_factory - DetectBestTransport remote tcp",
-          "[transport_factory]") {
+TEST_CASE("transport_factory - DetectBestTransport remote tcp", "[transport_factory]") {
   osp::TransportConfig cfg;
   cfg.remote_host.assign(osp::TruncateToCapacity, "192.168.1.100");
   cfg.shm_channel_name.clear();
@@ -43,8 +40,7 @@ TEST_CASE("transport_factory - DetectBestTransport remote tcp",
   REQUIRE(type == osp::TransportType::kTcp);
 }
 
-TEST_CASE("transport_factory - DetectBestTransport auto resolution",
-          "[transport_factory]") {
+TEST_CASE("transport_factory - DetectBestTransport auto resolution", "[transport_factory]") {
   // Test auto resolution with localhost
   osp::TransportConfig cfg1;
   cfg1.remote_host = "localhost";
@@ -90,8 +86,7 @@ TEST_CASE("transport_factory - localhost detection", "[transport_factory]") {
   REQUIRE(type2 == osp::TransportType::kInproc);
 }
 
-TEST_CASE("transport_factory - empty host defaults to inproc",
-          "[transport_factory]") {
+TEST_CASE("transport_factory - empty host defaults to inproc", "[transport_factory]") {
   osp::TransportConfig cfg;
   cfg.remote_host.clear();
   cfg.shm_channel_name.clear();
@@ -104,20 +99,11 @@ TEST_CASE("transport_factory - empty host defaults to inproc",
 // TransportFactory::TransportTypeName tests
 // ============================================================================
 
-TEST_CASE("transport_factory - TransportTypeName strings",
-          "[transport_factory]") {
-  REQUIRE(std::strcmp(
-              osp::TransportFactory::TransportTypeName(osp::TransportType::kInproc),
-              "inproc") == 0);
-  REQUIRE(std::strcmp(
-              osp::TransportFactory::TransportTypeName(osp::TransportType::kShm),
-              "shm") == 0);
-  REQUIRE(std::strcmp(
-              osp::TransportFactory::TransportTypeName(osp::TransportType::kTcp),
-              "tcp") == 0);
-  REQUIRE(std::strcmp(
-              osp::TransportFactory::TransportTypeName(osp::TransportType::kAuto),
-              "auto") == 0);
+TEST_CASE("transport_factory - TransportTypeName strings", "[transport_factory]") {
+  REQUIRE(std::strcmp(osp::TransportFactory::TransportTypeName(osp::TransportType::kInproc), "inproc") == 0);
+  REQUIRE(std::strcmp(osp::TransportFactory::TransportTypeName(osp::TransportType::kShm), "shm") == 0);
+  REQUIRE(std::strcmp(osp::TransportFactory::TransportTypeName(osp::TransportType::kTcp), "tcp") == 0);
+  REQUIRE(std::strcmp(osp::TransportFactory::TransportTypeName(osp::TransportType::kAuto), "auto") == 0);
 }
 
 // ============================================================================
@@ -126,8 +112,7 @@ TEST_CASE("transport_factory - TransportTypeName strings",
 
 struct DummyPayload {};
 
-TEST_CASE("transport_factory - TransportSelector configure auto",
-          "[transport_factory]") {
+TEST_CASE("transport_factory - TransportSelector configure auto", "[transport_factory]") {
   osp::TransportSelector<DummyPayload> selector;
 
   // Configure with auto and local host
@@ -157,8 +142,7 @@ TEST_CASE("transport_factory - TransportSelector configure auto",
   REQUIRE(selector.ResolvedType() == osp::TransportType::kTcp);
 }
 
-TEST_CASE("transport_factory - TransportSelector IsLocal/IsRemote",
-          "[transport_factory]") {
+TEST_CASE("transport_factory - TransportSelector IsLocal/IsRemote", "[transport_factory]") {
   osp::TransportSelector<DummyPayload> selector;
 
   // Test inproc (local)

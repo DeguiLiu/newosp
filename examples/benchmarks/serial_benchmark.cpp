@@ -4,14 +4,15 @@
 // Tests: 8B, 32B, 64B, 128B, 256B, 512B, 900B payloads
 // Modes: with/without ACK, with/without CRC verification
 
-#include "osp/serial_transport.hpp"
 #include "osp/platform.hpp"
+#include "osp/serial_transport.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#include <atomic>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -53,8 +54,10 @@ static PtyPair CreatePtyPair() {
 }
 
 static void ClosePty(PtyPair& p) {
-  if (p.master_a >= 0) ::close(p.master_a);
-  if (p.master_b >= 0) ::close(p.master_b);
+  if (p.master_a >= 0)
+    ::close(p.master_a);
+  if (p.master_b >= 0)
+    ::close(p.master_b);
   p.master_a = p.master_b = -1;
   p.valid = false;
 }
@@ -86,8 +89,7 @@ struct BenchResult {
 };
 
 #if defined(OSP_PLATFORM_LINUX)
-static BenchResult RunSerialBench(uint32_t payload_size, uint32_t count,
-                                  bool enable_ack) {
+static BenchResult RunSerialBench(uint32_t payload_size, uint32_t count, bool enable_ack) {
   BenchResult result{};
   result.payload_size = payload_size;
 
@@ -128,8 +130,7 @@ static BenchResult RunSerialBench(uint32_t payload_size, uint32_t count,
   std::atomic<uint32_t> rx_count{0};
   receiver.SetRxCallback(
       [](const void*, uint32_t, uint16_t, uint16_t, void* ctx) {
-        static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(
-            1, std::memory_order_relaxed);
+        static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
       },
       &rx_count);
 
@@ -153,21 +154,25 @@ static BenchResult RunSerialBench(uint32_t payload_size, uint32_t count,
   uint32_t tx_ok = 0;
   for (uint32_t i = 0; i < count; ++i) {
     auto sr = sender.Send(1, payload.data(), payload_size);
-    if (sr) ++tx_ok;
+    if (sr)
+      ++tx_ok;
 
     // Poll receiver to process incoming data
     for (int p = 0; p < 10; ++p) {
       receiver.Poll();
-      if (enable_ack) sender.Poll();  // process ACKs
+      if (enable_ack)
+        sender.Poll();  // process ACKs
     }
   }
 
   // Drain remaining
   for (int drain = 0; drain < 500; ++drain) {
     receiver.Poll();
-    if (enable_ack) sender.Poll();
+    if (enable_ack)
+      sender.Poll();
     std::this_thread::sleep_for(std::chrono::microseconds(200));
-    if (rx_count.load(std::memory_order_relaxed) >= tx_ok) break;
+    if (rx_count.load(std::memory_order_relaxed) >= tx_ok)
+      break;
   }
   auto t1 = Clock::now();
 
@@ -182,9 +187,7 @@ static BenchResult RunSerialBench(uint32_t payload_size, uint32_t count,
   result.elapsed_ms = elapsed_ms;
   result.throughput_fps = (elapsed_ms > 0) ? (rx / (elapsed_ms / 1000.0)) : 0;
   result.throughput_kbps =
-      (elapsed_ms > 0)
-          ? (static_cast<double>(rx) * payload_size / 1024.0 / (elapsed_ms / 1000.0))
-          : 0;
+      (elapsed_ms > 0) ? (static_cast<double>(rx) * payload_size / 1024.0 / (elapsed_ms / 1000.0)) : 0;
   result.avg_frame_us = (rx > 0) ? (elapsed_ms * 1000.0 / rx) : 0;
 
   sender.Close();
@@ -208,14 +211,12 @@ int main() {
 
   // --- Without ACK ---
   printf("=== Throughput (no ACK, %u frames per size) ===\n", kCount);
-  printf("  %-10s  %6s  %6s  %10s  %10s  %10s\n",
-         "Payload", "Sent", "Recv", "Time(ms)", "FPS", "KB/s");
+  printf("  %-10s  %6s  %6s  %10s  %10s  %10s\n", "Payload", "Sent", "Recv", "Time(ms)", "FPS", "KB/s");
   printf("  ---------------------------------------------------------------\n");
 
   for (uint32_t sz : kPayloadSizes) {
     auto r = RunSerialBench(sz, kCount, false);
-    printf("  %-10u  %6u  %6u  %10.1f  %10.0f  %10.1f\n",
-           r.payload_size, r.sent, r.received, r.elapsed_ms,
+    printf("  %-10u  %6u  %6u  %10.1f  %10.0f  %10.1f\n", r.payload_size, r.sent, r.received, r.elapsed_ms,
            r.throughput_fps, r.throughput_kbps);
   }
 
@@ -223,20 +224,18 @@ int main() {
 
   // --- With ACK ---
   printf("=== Throughput (ACK enabled, %u frames per size) ===\n", kCount);
-  printf("  %-10s  %6s  %6s  %10s  %10s  %10s  %10s\n",
-         "Payload", "Sent", "Recv", "Time(ms)", "FPS", "KB/s", "us/frame");
+  printf("  %-10s  %6s  %6s  %10s  %10s  %10s  %10s\n", "Payload", "Sent", "Recv", "Time(ms)", "FPS", "KB/s",
+         "us/frame");
   printf("  --------------------------------------------------------------------------\n");
 
   for (uint32_t sz : kPayloadSizes) {
     auto r = RunSerialBench(sz, kCount, true);
-    printf("  %-10u  %6u  %6u  %10.1f  %10.0f  %10.1f  %10.1f\n",
-           r.payload_size, r.sent, r.received, r.elapsed_ms,
+    printf("  %-10u  %6u  %6u  %10.1f  %10.0f  %10.1f  %10.1f\n", r.payload_size, r.sent, r.received, r.elapsed_ms,
            r.throughput_fps, r.throughput_kbps, r.avg_frame_us);
   }
 
   printf("\nFrame overhead: %u bytes (header %u + CRC %u + tail 1)\n",
-         osp::kSerialHeaderSize + osp::kSerialCrcSize + 1U,
-         osp::kSerialHeaderSize, osp::kSerialCrcSize);
+         osp::kSerialHeaderSize + osp::kSerialCrcSize + 1U, osp::kSerialHeaderSize, osp::kSerialCrcSize);
 
 #else
   printf("Serial benchmark requires Linux (PTY support).\n");

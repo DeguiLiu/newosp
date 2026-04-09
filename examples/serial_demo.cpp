@@ -10,22 +10,23 @@
  * - PTY pairs for hardware-free testing
  */
 
-#include "osp/serial_transport.hpp"
-#include "osp/hsm.hpp"
 #include "osp/bt.hpp"
-#include "osp/timer.hpp"
+#include "osp/hsm.hpp"
 #include "osp/log.hpp"
+#include "osp/serial_transport.hpp"
+#include "osp/timer.hpp"
 
 #include <cstdio>
 #include <cstring>
-#include <thread>
-#include <chrono>
+
 #include <atomic>
+#include <chrono>
+#include <thread>
 
 #if defined(OSP_PLATFORM_LINUX)
+#include <fcntl.h>
 #include <pty.h>
 #include <unistd.h>
-#include <fcntl.h>
 #endif
 
 // ============================================================================
@@ -132,8 +133,10 @@ static PtyPair CreatePtyPair() {
 }
 
 static void ClosePty(PtyPair& p) {
-  if (p.master_a >= 0) ::close(p.master_a);
-  if (p.master_b >= 0) ::close(p.master_b);
+  if (p.master_a >= 0)
+    ::close(p.master_a);
+  if (p.master_b >= 0)
+    ::close(p.master_b);
   p.master_a = p.master_b = -1;
   p.valid = false;
 }
@@ -219,14 +222,14 @@ static osp::NodeStatus BtCheckSensorValid(ControllerContext& ctx) {
 
 static osp::NodeStatus BtEvaluateThreshold(ControllerContext& ctx) {
   if (ctx.last_sensor_data.temperature > ctx.threshold_high) {
-    ctx.action_mode = 1; // Cool down
+    ctx.action_mode = 1;  // Cool down
     return osp::NodeStatus::kSuccess;
   }
   if (ctx.last_sensor_data.temperature < ctx.threshold_low) {
-    ctx.action_mode = 2; // Heat up
+    ctx.action_mode = 2;  // Heat up
     return osp::NodeStatus::kSuccess;
   }
-  ctx.action_mode = 0; // Normal
+  ctx.action_mode = 0;  // Normal
   return osp::NodeStatus::kSuccess;
 }
 
@@ -242,8 +245,7 @@ static osp::NodeStatus BtSendCommand(ControllerContext& ctx) {
 
   auto r = ctx.transport->Send(kMsgTypeControlCommand, &cmd, sizeof(cmd));
   if (r) {
-    OSP_LOG_INFO("Controller", "Sent command: mode=%u, target=%.1f",
-                 cmd.mode, cmd.target_value);
+    OSP_LOG_INFO("Controller", "Sent command: mode=%u, target=%.1f", cmd.mode, cmd.target_value);
     return osp::NodeStatus::kSuccess;
   }
   return osp::NodeStatus::kFailure;
@@ -253,29 +255,25 @@ static osp::NodeStatus BtSendCommand(ControllerContext& ctx) {
 // Serial RX Callbacks
 // ============================================================================
 
-static void SensorRxCallback(const void* payload, uint32_t size,
-                             uint16_t type_index, uint16_t seq, void* ctx) {
+static void SensorRxCallback(const void* payload, uint32_t size, uint16_t type_index, uint16_t seq, void* ctx) {
   (void)seq;
   auto* sensor_ctx = static_cast<SensorContext*>(ctx);
 
   if (type_index == kMsgTypeControlCommand && size == sizeof(ControlCommand)) {
     ControlCommand cmd;
     std::memcpy(&cmd, payload, sizeof(cmd));
-    OSP_LOG_INFO("Sensor", "Received command: mode=%u, target=%.1f",
-                 cmd.mode, cmd.target_value);
+    OSP_LOG_INFO("Sensor", "Received command: mode=%u, target=%.1f", cmd.mode, cmd.target_value);
   }
 }
 
-static void ControllerRxCallback(const void* payload, uint32_t size,
-                                 uint16_t type_index, uint16_t seq, void* ctx) {
+static void ControllerRxCallback(const void* payload, uint32_t size, uint16_t type_index, uint16_t seq, void* ctx) {
   (void)seq;
   auto* ctrl_ctx = static_cast<ControllerContext*>(ctx);
 
   if (type_index == kMsgTypeSensorData && size == sizeof(SensorData)) {
     std::memcpy(&ctrl_ctx->last_sensor_data, payload, sizeof(SensorData));
     ctrl_ctx->sensor_data_valid = true;
-    OSP_LOG_INFO("Controller", "Received sensor data: temp=%.1f, pressure=%.1f",
-                 ctrl_ctx->last_sensor_data.temperature,
+    OSP_LOG_INFO("Controller", "Received sensor data: temp=%.1f, pressure=%.1f", ctrl_ctx->last_sensor_data.temperature,
                  ctrl_ctx->last_sensor_data.pressure);
   }
 }
@@ -298,13 +296,13 @@ static void SensorPublishCallback(void* ctx) {
   SensorData data;
   data.temperature = sensor_ctx->temperature;
   data.pressure = sensor_ctx->pressure;
-  data.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
-      std::chrono::steady_clock::now().time_since_epoch()).count();
+  data.timestamp_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+          .count();
 
   auto r = sensor_ctx->transport->Send(kMsgTypeSensorData, &data, sizeof(data));
   if (r) {
-    OSP_LOG_DEBUG("Sensor", "Published: temp=%.1f, pressure=%.1f",
-                  data.temperature, data.pressure);
+    OSP_LOG_DEBUG("Sensor", "Published: temp=%.1f, pressure=%.1f", data.temperature, data.pressure);
   }
 }
 
@@ -369,21 +367,14 @@ int main() {
   osp::StateMachine<SensorContext, 8> sensor_sm(sensor_ctx);
   sensor_ctx.sm = &sensor_sm;
 
-  int32_t s_unconfigured = sensor_sm.AddState({
-    "Unconfigured", -1, SensorUnconfiguredHandler, nullptr, nullptr, nullptr
-  });
+  int32_t s_unconfigured =
+      sensor_sm.AddState({"Unconfigured", -1, SensorUnconfiguredHandler, nullptr, nullptr, nullptr});
 
-  int32_t s_calibrating = sensor_sm.AddState({
-    "Calibrating", -1, SensorCalibratingHandler, nullptr, nullptr, nullptr
-  });
+  int32_t s_calibrating = sensor_sm.AddState({"Calibrating", -1, SensorCalibratingHandler, nullptr, nullptr, nullptr});
 
-  int32_t s_running = sensor_sm.AddState({
-    "Running", -1, SensorRunningHandler, SensorRunningEntry, nullptr, nullptr
-  });
+  int32_t s_running = sensor_sm.AddState({"Running", -1, SensorRunningHandler, SensorRunningEntry, nullptr, nullptr});
 
-  int32_t s_error = sensor_sm.AddState({
-    "Error", -1, SensorErrorHandler, SensorErrorEntry, nullptr, nullptr
-  });
+  int32_t s_error = sensor_sm.AddState({"Error", -1, SensorErrorHandler, SensorErrorEntry, nullptr, nullptr});
 
   sensor_ctx.state_calibrating = s_calibrating;
   sensor_ctx.state_running = s_running;
@@ -416,7 +407,7 @@ int main() {
   // Setup Timer for periodic sensor publishing
   osp::TimerScheduler<4> timer;
   timer.Start();
-  timer.Add(500, SensorPublishCallback, &sensor_ctx); // 500ms period
+  timer.Add(500, SensorPublishCallback, &sensor_ctx);  // 500ms period
 
   OSP_LOG_INFO("Demo", "Starting demo loop (5 seconds)...");
 

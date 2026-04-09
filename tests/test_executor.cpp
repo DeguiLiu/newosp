@@ -6,11 +6,11 @@
 
 #include "osp/executor.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
-#include <cstdint>
 #include <thread>
 #include <variant>
 
@@ -64,21 +64,11 @@ TEST_CASE("executor - SingleThreadExecutor add nodes", "[executor]") {
   SECTION("returns false when full") {
     // Fill up with unique nodes
     osp::Node<TestPayload> pool[OSP_EXECUTOR_MAX_NODES] = {
-        osp::Node<TestPayload>("n0", 100),
-        osp::Node<TestPayload>("n1", 101),
-        osp::Node<TestPayload>("n2", 102),
-        osp::Node<TestPayload>("n3", 103),
-        osp::Node<TestPayload>("n4", 104),
-        osp::Node<TestPayload>("n5", 105),
-        osp::Node<TestPayload>("n6", 106),
-        osp::Node<TestPayload>("n7", 107),
-        osp::Node<TestPayload>("n8", 108),
-        osp::Node<TestPayload>("n9", 109),
-        osp::Node<TestPayload>("n10", 110),
-        osp::Node<TestPayload>("n11", 111),
-        osp::Node<TestPayload>("n12", 112),
-        osp::Node<TestPayload>("n13", 113),
-        osp::Node<TestPayload>("n14", 114),
+        osp::Node<TestPayload>("n0", 100),  osp::Node<TestPayload>("n1", 101),  osp::Node<TestPayload>("n2", 102),
+        osp::Node<TestPayload>("n3", 103),  osp::Node<TestPayload>("n4", 104),  osp::Node<TestPayload>("n5", 105),
+        osp::Node<TestPayload>("n6", 106),  osp::Node<TestPayload>("n7", 107),  osp::Node<TestPayload>("n8", 108),
+        osp::Node<TestPayload>("n9", 109),  osp::Node<TestPayload>("n10", 110), osp::Node<TestPayload>("n11", 111),
+        osp::Node<TestPayload>("n12", 112), osp::Node<TestPayload>("n13", 113), osp::Node<TestPayload>("n14", 114),
         osp::Node<TestPayload>("n15", 115),
     };
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
@@ -91,18 +81,15 @@ TEST_CASE("executor - SingleThreadExecutor add nodes", "[executor]") {
   }
 }
 
-TEST_CASE("executor - SingleThreadExecutor SpinOnce processes messages",
-          "[executor]") {
+TEST_CASE("executor - SingleThreadExecutor SpinOnce processes messages", "[executor]") {
   ExecutorBusFixture fix;
 
   osp::Node<TestPayload> sender("sender", 1);
   osp::Node<TestPayload> receiver("receiver", 2);
 
   std::atomic<int> received_value{0};
-  auto sub_result =
-      receiver.Subscribe<TestMsg>([&](const TestMsg& msg, const auto&) {
-        received_value.store(msg.value, std::memory_order_relaxed);
-      });
+  auto sub_result = receiver.Subscribe<TestMsg>(
+      [&](const TestMsg& msg, const auto&) { received_value.store(msg.value, std::memory_order_relaxed); });
   REQUIRE(sub_result.has_value());
 
   osp::SingleThreadExecutor<TestPayload> exec;
@@ -118,8 +105,7 @@ TEST_CASE("executor - SingleThreadExecutor SpinOnce processes messages",
   REQUIRE(received_value.load(std::memory_order_relaxed) == 42);
 }
 
-TEST_CASE("executor - SingleThreadExecutor Stop terminates Spin",
-          "[executor]") {
+TEST_CASE("executor - SingleThreadExecutor Stop terminates Spin", "[executor]") {
   ExecutorBusFixture fix;
 
   osp::Node<TestPayload> node("node", 1);
@@ -167,18 +153,15 @@ TEST_CASE("executor - StaticExecutor Start/Stop lifecycle", "[executor]") {
   REQUIRE_FALSE(exec.IsRunning());
 }
 
-TEST_CASE("executor - StaticExecutor processes messages in background",
-          "[executor]") {
+TEST_CASE("executor - StaticExecutor processes messages in background", "[executor]") {
   ExecutorBusFixture fix;
 
   osp::Node<TestPayload> sender("sender", 1);
   osp::Node<TestPayload> receiver("receiver", 2);
 
   std::atomic<int> received_count{0};
-  auto sub_result =
-      receiver.Subscribe<TestMsg>([&](const TestMsg&, const auto&) {
-        received_count.fetch_add(1, std::memory_order_relaxed);
-      });
+  auto sub_result = receiver.Subscribe<TestMsg>(
+      [&](const TestMsg&, const auto&) { received_count.fetch_add(1, std::memory_order_relaxed); });
   REQUIRE(sub_result.has_value());
 
   osp::StaticExecutor<TestPayload> exec;
@@ -193,10 +176,8 @@ TEST_CASE("executor - StaticExecutor processes messages in background",
   }
 
   // Wait for dispatch thread to process
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-  while (received_count.load(std::memory_order_relaxed) < 5 &&
-         std::chrono::steady_clock::now() < deadline) {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (received_count.load(std::memory_order_relaxed) < 5 && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
@@ -348,10 +329,8 @@ TEST_CASE("executor - RealtimeExecutor processes messages", "[executor]") {
   osp::Node<TestPayload> receiver("receiver", 2);
 
   std::atomic<int> received_count{0};
-  auto sub_result =
-      receiver.Subscribe<TestMsg>([&](const TestMsg&, const auto&) {
-        received_count.fetch_add(1, std::memory_order_relaxed);
-      });
+  auto sub_result = receiver.Subscribe<TestMsg>(
+      [&](const TestMsg&, const auto&) { received_count.fetch_add(1, std::memory_order_relaxed); });
   REQUIRE(sub_result.has_value());
 
   osp::RealtimeConfig cfg;
@@ -367,10 +346,8 @@ TEST_CASE("executor - RealtimeExecutor processes messages", "[executor]") {
   }
 
   // Wait for dispatch thread to process
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-  while (received_count.load(std::memory_order_relaxed) < 5 &&
-         std::chrono::steady_clock::now() < deadline) {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (received_count.load(std::memory_order_relaxed) < 5 && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
@@ -401,8 +378,7 @@ TEST_CASE("executor - RealtimeExecutor AddNode", "[executor]") {
   }
 }
 
-TEST_CASE("executor - RealtimeExecutor GetConfig returns configured values",
-          "[executor]") {
+TEST_CASE("executor - RealtimeExecutor GetConfig returns configured values", "[executor]") {
   ExecutorBusFixture fix;
 
   osp::RealtimeConfig cfg;
@@ -467,8 +443,7 @@ TEST_CASE("executor - PreciseSleepStrategy OnIdle sleeps", "[executor]") {
   sleep.OnIdle();
   auto end = std::chrono::steady_clock::now();
 
-  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                        end - start).count();
+  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 
   // Should sleep at least 500us (allowing for scheduling jitter)
   REQUIRE(elapsed_us >= 500);
@@ -485,8 +460,7 @@ TEST_CASE("executor - PreciseSleepStrategy SetNextWakeup", "[executor]") {
   sleep.OnIdle();
   auto end = std::chrono::steady_clock::now();
 
-  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                        end - start).count();
+  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 
   // Should sleep approximately 2ms (1ms to 4ms range for jitter)
   REQUIRE(elapsed_us >= 1000);
@@ -508,8 +482,7 @@ TEST_CASE("executor - PreciseSleepStrategy OnBusy resets", "[executor]") {
   sleep.OnIdle();
   auto end = std::chrono::steady_clock::now();
 
-  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                        end - start).count();
+  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 
   // Should be closer to 1ms than 5ms
   REQUIRE(elapsed_us < 3000);
@@ -522,10 +495,8 @@ TEST_CASE("executor - StaticExecutor with PreciseSleepStrategy", "[executor]") {
   osp::Node<TestPayload> receiver("receiver", 2);
 
   std::atomic<int> received_count{0};
-  auto sub_result =
-      receiver.Subscribe<TestMsg>([&](const TestMsg&, const auto&) {
-        received_count.fetch_add(1, std::memory_order_relaxed);
-      });
+  auto sub_result = receiver.Subscribe<TestMsg>(
+      [&](const TestMsg&, const auto&) { received_count.fetch_add(1, std::memory_order_relaxed); });
   REQUIRE(sub_result.has_value());
 
   osp::PreciseSleepStrategy sleep(1000000ULL);  // 1ms sleep
@@ -541,10 +512,8 @@ TEST_CASE("executor - StaticExecutor with PreciseSleepStrategy", "[executor]") {
   }
 
   // Wait for processing
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-  while (received_count.load(std::memory_order_relaxed) < 3 &&
-         std::chrono::steady_clock::now() < deadline) {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (received_count.load(std::memory_order_relaxed) < 3 && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
@@ -560,10 +529,8 @@ TEST_CASE("executor - PinnedExecutor with PreciseSleepStrategy", "[executor]") {
   osp::Node<TestPayload> receiver("receiver", 2);
 
   std::atomic<int> received_count{0};
-  auto sub_result =
-      receiver.Subscribe<TestMsg>([&](const TestMsg&, const auto&) {
-        received_count.fetch_add(1, std::memory_order_relaxed);
-      });
+  auto sub_result = receiver.Subscribe<TestMsg>(
+      [&](const TestMsg&, const auto&) { received_count.fetch_add(1, std::memory_order_relaxed); });
   REQUIRE(sub_result.has_value());
 
   osp::PreciseSleepStrategy sleep(1000000ULL);  // 1ms sleep
@@ -579,10 +546,8 @@ TEST_CASE("executor - PinnedExecutor with PreciseSleepStrategy", "[executor]") {
   }
 
   // Wait for processing
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-  while (received_count.load(std::memory_order_relaxed) < 3 &&
-         std::chrono::steady_clock::now() < deadline) {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (received_count.load(std::memory_order_relaxed) < 3 && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
@@ -598,10 +563,8 @@ TEST_CASE("executor - RealtimeExecutor with PreciseSleepStrategy", "[executor]")
   osp::Node<TestPayload> receiver("receiver", 2);
 
   std::atomic<int> received_count{0};
-  auto sub_result =
-      receiver.Subscribe<TestMsg>([&](const TestMsg&, const auto&) {
-        received_count.fetch_add(1, std::memory_order_relaxed);
-      });
+  auto sub_result = receiver.Subscribe<TestMsg>(
+      [&](const TestMsg&, const auto&) { received_count.fetch_add(1, std::memory_order_relaxed); });
   REQUIRE(sub_result.has_value());
 
   osp::RealtimeConfig cfg;
@@ -618,10 +581,8 @@ TEST_CASE("executor - RealtimeExecutor with PreciseSleepStrategy", "[executor]")
   }
 
   // Wait for processing
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-  while (received_count.load(std::memory_order_relaxed) < 3 &&
-         std::chrono::steady_clock::now() < deadline) {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (received_count.load(std::memory_order_relaxed) < 3 && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
@@ -637,10 +598,8 @@ TEST_CASE("executor - YieldSleepStrategy backward compatibility", "[executor]") 
   osp::Node<TestPayload> receiver("receiver", 2);
 
   std::atomic<int> received_count{0};
-  auto sub_result =
-      receiver.Subscribe<TestMsg>([&](const TestMsg&, const auto&) {
-        received_count.fetch_add(1, std::memory_order_relaxed);
-      });
+  auto sub_result = receiver.Subscribe<TestMsg>(
+      [&](const TestMsg&, const auto&) { received_count.fetch_add(1, std::memory_order_relaxed); });
   REQUIRE(sub_result.has_value());
 
   // Default template parameter should be YieldSleepStrategy
@@ -656,10 +615,8 @@ TEST_CASE("executor - YieldSleepStrategy backward compatibility", "[executor]") 
   }
 
   // Wait for processing
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-  while (received_count.load(std::memory_order_relaxed) < 3 &&
-         std::chrono::steady_clock::now() < deadline) {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (received_count.load(std::memory_order_relaxed) < 3 && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 

@@ -5,12 +5,12 @@
 
 #include "osp/process.hpp"
 
+#include <cstdlib>
+
+#include <catch2/catch_test_macros.hpp>
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-#include <catch2/catch_test_macros.hpp>
-#include <cstdlib>
 
 // ============================================================================
 // Helper: fork a dummy child process that sleeps
@@ -108,8 +108,7 @@ TEST_CASE("FindPidByName does exact match, not substring", "[process]") {
   auto r_sh = osp::FindPidByName("sh", pid_sh);
 
   // If both found, they should be different PIDs (unless "sh" is actually sh)
-  if (r_bash == osp::ProcessResult::kSuccess &&
-      r_sh == osp::ProcessResult::kSuccess) {
+  if (r_bash == osp::ProcessResult::kSuccess && r_sh == osp::ProcessResult::kSuccess) {
     // "sh" PID's comm should actually be "sh", not "bash"
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/comm", static_cast<int>(pid_sh));
@@ -120,7 +119,8 @@ TEST_CASE("FindPidByName does exact match, not substring", "[process]") {
       close(n);  // NOLINT
       if (sz > 0) {
         buf[sz] = '\0';
-        if (sz > 0 && buf[sz - 1] == '\n') buf[sz - 1] = '\0';
+        if (sz > 0 && buf[sz - 1] == '\n')
+          buf[sz - 1] = '\0';
         // The comm should be "sh", not "bash"
         REQUIRE(std::string(buf) == "sh");
       }

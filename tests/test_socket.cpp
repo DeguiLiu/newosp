@@ -3,10 +3,11 @@
  * @brief Tests for socket.hpp: SocketAddress, TcpSocket, UdpSocket, TcpListener.
  */
 
-#include <catch2/catch_test_macros.hpp>
 #include "osp/socket.hpp"
 
 #include <cstring>
+
+#include <catch2/catch_test_macros.hpp>
 #include <thread>
 #include <unistd.h>
 
@@ -55,8 +56,7 @@ TEST_CASE("socket - SocketAddress::FromIpv4 valid", "[socket][address]") {
   REQUIRE(result.value().Port() == 8080);
 }
 
-TEST_CASE("socket - SocketAddress::FromIpv4 invalid returns error",
-          "[socket][address]") {
+TEST_CASE("socket - SocketAddress::FromIpv4 invalid returns error", "[socket][address]") {
   auto result = osp::SocketAddress::FromIpv4("not.an.ip.address", 80);
   REQUIRE(!result.has_value());
   REQUIRE(result.get_error() == osp::SocketError::kInvalidFd);
@@ -152,18 +152,15 @@ TEST_CASE("socket - TcpSocket SetNonBlocking", "[socket][tcp]") {
 // TcpListener bind + listen + accept (loopback)
 // ============================================================================
 
-TEST_CASE("socket - TcpListener bind listen accept loopback",
-          "[socket][tcp][integration]") {
+TEST_CASE("socket - TcpListener bind listen accept loopback", "[socket][tcp][integration]") {
   // Create listener
   auto listener_r = osp::TcpListener::Create();
   REQUIRE(listener_r.has_value());
-  osp::TcpListener listener =
-      static_cast<osp::TcpListener&&>(listener_r.value());
+  osp::TcpListener listener = static_cast<osp::TcpListener&&>(listener_r.value());
 
   // Set SO_REUSEADDR on the listener fd directly
   int opt = 1;
-  ::setsockopt(listener.Fd(), SOL_SOCKET, SO_REUSEADDR, &opt,
-               static_cast<socklen_t>(sizeof(opt)));
+  ::setsockopt(listener.Fd(), SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
 
   // Bind to loopback on port 0 (OS picks a free port)
   auto addr_r = osp::SocketAddress::FromIpv4("127.0.0.1", 0);
@@ -174,8 +171,7 @@ TEST_CASE("socket - TcpListener bind listen accept loopback",
   // Retrieve the actual port assigned by the OS
   sockaddr_in bound_addr{};
   socklen_t addr_len = sizeof(bound_addr);
-  ::getsockname(listener.Fd(), reinterpret_cast<sockaddr*>(&bound_addr),
-                &addr_len);
+  ::getsockname(listener.Fd(), reinterpret_cast<sockaddr*>(&bound_addr), &addr_len);
   uint16_t port = ntohs(bound_addr.sin_port);
   REQUIRE(port > 0);
 
@@ -224,13 +220,11 @@ TEST_CASE("socket - TcpListener bind listen accept loopback",
 // UdpSocket SendTo / RecvFrom loopback
 // ============================================================================
 
-TEST_CASE("socket - UdpSocket SendTo RecvFrom loopback",
-          "[socket][udp][integration]") {
+TEST_CASE("socket - UdpSocket SendTo RecvFrom loopback", "[socket][udp][integration]") {
   // Create receiver
   auto recv_sock_r = osp::UdpSocket::Create();
   REQUIRE(recv_sock_r.has_value());
-  osp::UdpSocket recv_sock =
-      static_cast<osp::UdpSocket&&>(recv_sock_r.value());
+  osp::UdpSocket recv_sock = static_cast<osp::UdpSocket&&>(recv_sock_r.value());
 
   // Bind receiver to loopback port 0
   auto bind_addr = osp::SocketAddress::FromIpv4("127.0.0.1", 0);
@@ -241,24 +235,21 @@ TEST_CASE("socket - UdpSocket SendTo RecvFrom loopback",
   // Retrieve the actual port
   sockaddr_in bound_addr{};
   socklen_t addr_len = sizeof(bound_addr);
-  ::getsockname(recv_sock.Fd(), reinterpret_cast<sockaddr*>(&bound_addr),
-                &addr_len);
+  ::getsockname(recv_sock.Fd(), reinterpret_cast<sockaddr*>(&bound_addr), &addr_len);
   uint16_t port = ntohs(bound_addr.sin_port);
   REQUIRE(port > 0);
 
   // Create sender
   auto send_sock_r = osp::UdpSocket::Create();
   REQUIRE(send_sock_r.has_value());
-  osp::UdpSocket send_sock =
-      static_cast<osp::UdpSocket&&>(send_sock_r.value());
+  osp::UdpSocket send_sock = static_cast<osp::UdpSocket&&>(send_sock_r.value());
 
   // Send data to receiver
   auto dest_addr = osp::SocketAddress::FromIpv4("127.0.0.1", port);
   REQUIRE(dest_addr.has_value());
 
   const char* payload = "udp_test";
-  auto send_r =
-      send_sock.SendTo(payload, std::strlen(payload), dest_addr.value());
+  auto send_r = send_sock.SendTo(payload, std::strlen(payload), dest_addr.value());
   REQUIRE(send_r.has_value());
   REQUIRE(send_r.value() == static_cast<int32_t>(std::strlen(payload)));
 
@@ -332,22 +323,27 @@ TEST_CASE("socket - Unix domain echo round-trip", "[socket][unix]") {
   std::atomic<bool> client_ok{false};
   std::thread client([path, &client_ok]() {
     auto client_addr_r = osp::UnixAddress::FromPath(path);
-    if (!client_addr_r.has_value()) return;
+    if (!client_addr_r.has_value())
+      return;
 
     auto sock_r = osp::UnixSocket::Create();
-    if (!sock_r.has_value()) return;
+    if (!sock_r.has_value())
+      return;
     auto& sock = sock_r.value();
 
     auto conn_r = sock.Connect(client_addr_r.value());
-    if (!conn_r.has_value()) return;
+    if (!conn_r.has_value())
+      return;
 
     const char msg[] = "hello unix";
     auto send_r = sock.Send(msg, sizeof(msg));
-    if (!send_r.has_value()) return;
+    if (!send_r.has_value())
+      return;
 
     char buf[64] = {};
     auto recv_r = sock.Recv(buf, sizeof(buf));
-    if (!recv_r.has_value()) return;
+    if (!recv_r.has_value())
+      return;
 
     if (std::strcmp(buf, "hello unix") == 0) {
       client_ok.store(true, std::memory_order_release);

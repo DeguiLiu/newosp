@@ -3,13 +3,13 @@
  * @brief Tests for static_node.hpp (compile-time handler binding node)
  */
 
-#include "osp/static_node.hpp"
 #include "osp/node.hpp"
+#include "osp/static_node.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <cstring>
 
 #include <atomic>
-#include <cstring>
+#include <catch2/catch_test_macros.hpp>
 #include <variant>
 
 // --- Test message types ---
@@ -95,8 +95,7 @@ struct SensorOnlyHandler {
 TEST_CASE("StaticNode - basic creation and accessors", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "test_static", 42, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("test_static", 42, CountingHandler{});
 
   REQUIRE(std::strcmp(node.Name(), "test_static") == 0);
   REQUIRE(node.Id() == 42);
@@ -108,8 +107,7 @@ TEST_CASE("StaticNode - name truncation", "[static_node]") {
   StaticNodeBusFixture fix;
 
   const char* long_name = "this_is_a_very_long_static_node_name_exceeding_max";
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      long_name, 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node(long_name, 1, CountingHandler{});
 
   REQUIRE(std::strlen(node.Name()) == osp::kNodeNameMaxLen);
 }
@@ -117,8 +115,7 @@ TEST_CASE("StaticNode - name truncation", "[static_node]") {
 TEST_CASE("StaticNode - null name", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      nullptr, 0, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node(nullptr, 0, CountingHandler{});
 
   REQUIRE(std::strcmp(node.Name(), "") == 0);
 }
@@ -126,8 +123,7 @@ TEST_CASE("StaticNode - null name", "[static_node]") {
 TEST_CASE("StaticNode - Start subscribes to all types", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "starter", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("starter", 1, CountingHandler{});
 
   auto result = node.Start();
   REQUIRE(result.has_value());
@@ -139,8 +135,7 @@ TEST_CASE("StaticNode - Start subscribes to all types", "[static_node]") {
 TEST_CASE("StaticNode - double Start returns error", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "double_start", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("double_start", 1, CountingHandler{});
 
   auto r1 = node.Start();
   REQUIRE(r1.has_value());
@@ -153,8 +148,7 @@ TEST_CASE("StaticNode - double Start returns error", "[static_node]") {
 TEST_CASE("StaticNode - basic dispatch all types", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "dispatch", 10, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("dispatch", 10, CountingHandler{});
 
   auto result = node.Start();
   REQUIRE(result.has_value());
@@ -178,8 +172,7 @@ TEST_CASE("StaticNode - basic dispatch all types", "[static_node]") {
 TEST_CASE("StaticNode - multiple messages of same type", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "multi_msg", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("multi_msg", 1, CountingHandler{});
 
   node.Start();
 
@@ -197,8 +190,7 @@ TEST_CASE("StaticNode - topic filtering", "[static_node]") {
   StaticNodeBusFixture fix;
 
   // Node with topic filter "sensor/imu"
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "topic_filter", 1, CountingHandler{}, "sensor/imu");
+  osp::StaticNode<TestPayload, CountingHandler> node("topic_filter", 1, CountingHandler{}, "sensor/imu");
 
   node.Start();
 
@@ -227,8 +219,7 @@ TEST_CASE("StaticNode - no topic filter receives all", "[static_node]") {
   StaticNodeBusFixture fix;
 
   // Node without topic filter
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "no_filter", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("no_filter", 1, CountingHandler{});
 
   node.Start();
 
@@ -248,8 +239,14 @@ TEST_CASE("StaticNode - no topic filter receives all", "[static_node]") {
 
 TEST_CASE("StaticNode - bus injection", "[static_node]") {
   // Use a separate variant type to get a distinct bus singleton
-  struct InjSensor { float val; uint32_t pad_ = 0; };
-  struct InjMotor { int32_t spd; uint32_t pad_ = 0; };
+  struct InjSensor {
+    float val;
+    uint32_t pad_ = 0;
+  };
+  struct InjMotor {
+    int32_t spd;
+    uint32_t pad_ = 0;
+  };
   using InjPayload = std::variant<InjSensor, InjMotor>;
   using InjBus = osp::AsyncBus<InjPayload>;
 
@@ -268,8 +265,7 @@ TEST_CASE("StaticNode - bus injection", "[static_node]") {
   };
 
   // Inject the global singleton explicitly
-  osp::StaticNode<InjPayload, InjHandler> node(
-      "injected", 5, InjHandler{}, InjBus::Instance());
+  osp::StaticNode<InjPayload, InjHandler> node("injected", 5, InjHandler{}, InjBus::Instance());
 
   node.Start();
 
@@ -287,8 +283,14 @@ TEST_CASE("StaticNode - bus injection", "[static_node]") {
 
 TEST_CASE("StaticNode - bus injection with topic", "[static_node]") {
   // Use a separate variant type to get a distinct bus singleton
-  struct InjSensor2 { float val; uint32_t pad_ = 0; };
-  struct InjMotor2 { int32_t spd; uint32_t pad_ = 0; };
+  struct InjSensor2 {
+    float val;
+    uint32_t pad_ = 0;
+  };
+  struct InjMotor2 {
+    int32_t spd;
+    uint32_t pad_ = 0;
+  };
   using InjPayload2 = std::variant<InjSensor2, InjMotor2>;
   using InjBus2 = osp::AsyncBus<InjPayload2>;
 
@@ -304,8 +306,7 @@ TEST_CASE("StaticNode - bus injection with topic", "[static_node]") {
     }
   };
 
-  osp::StaticNode<InjPayload2, InjHandler2> node(
-      "injected_topic", 5, InjHandler2{}, "ctrl/motor", InjBus2::Instance());
+  osp::StaticNode<InjPayload2, InjHandler2> node("injected_topic", 5, InjHandler2{}, "ctrl/motor", InjBus2::Instance());
 
   node.Start();
 
@@ -329,8 +330,7 @@ TEST_CASE("StaticNode - bus injection with topic", "[static_node]") {
 TEST_CASE("StaticNode - Stop clears subscriptions", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "stoppable", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("stoppable", 1, CountingHandler{});
 
   node.Start();
   REQUIRE(node.SubscriptionCount() == 3);
@@ -355,8 +355,7 @@ TEST_CASE("StaticNode - Stop clears subscriptions", "[static_node]") {
 TEST_CASE("StaticNode - Stop and restart", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "restartable", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("restartable", 1, CountingHandler{});
 
   // First start
   auto r1 = node.Start();
@@ -390,16 +389,13 @@ TEST_CASE("StaticNode - RAII unsubscribe on destroy", "[static_node]") {
   struct ExternalHandler {
     std::atomic<int32_t>* counter;
 
-    void operator()(const SensorData&, const osp::MessageHeader&) noexcept {
-      counter->fetch_add(1);
-    }
+    void operator()(const SensorData&, const osp::MessageHeader&) noexcept { counter->fetch_add(1); }
     void operator()(const MotorCmd&, const osp::MessageHeader&) noexcept {}
     void operator()(const StatusMsg&, const osp::MessageHeader&) noexcept {}
   };
 
   {
-    osp::StaticNode<TestPayload, ExternalHandler> node(
-        "raii_test", 1, ExternalHandler{&external_count});
+    osp::StaticNode<TestPayload, ExternalHandler> node("raii_test", 1, ExternalHandler{&external_count});
 
     node.Start();
 
@@ -417,10 +413,8 @@ TEST_CASE("StaticNode - RAII unsubscribe on destroy", "[static_node]") {
 TEST_CASE("StaticNode - multiple nodes on same bus", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node_a(
-      "node_a", 1, CountingHandler{});
-  osp::StaticNode<TestPayload, CountingHandler> node_b(
-      "node_b", 2, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node_a("node_a", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node_b("node_b", 2, CountingHandler{});
 
   node_a.Start();
   node_b.Start();
@@ -443,17 +437,14 @@ TEST_CASE("StaticNode - mixed with regular Node", "[static_node]") {
   StaticNodeBusFixture fix;
 
   // StaticNode and regular Node on same bus
-  osp::StaticNode<TestPayload, CountingHandler> static_node(
-      "static", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> static_node("static", 1, CountingHandler{});
   osp::Node<TestPayload> regular_node("regular", 2);
 
   static_node.Start();
 
   int32_t regular_count = 0;
   regular_node.Subscribe<SensorData>(
-      [&regular_count](const SensorData&, const osp::MessageHeader&) {
-        ++regular_count;
-      });
+      [&regular_count](const SensorData&, const osp::MessageHeader&) { ++regular_count; });
 
   // Publish via static node
   static_node.Publish(SensorData{10.0f});
@@ -467,8 +458,7 @@ TEST_CASE("StaticNode - mixed with regular Node", "[static_node]") {
 TEST_CASE("StaticNode - selective handler", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, SensorOnlyHandler> node(
-      "selective", 1, SensorOnlyHandler{});
+  osp::StaticNode<TestPayload, SensorOnlyHandler> node("selective", 1, SensorOnlyHandler{});
 
   node.Start();
 
@@ -487,8 +477,7 @@ TEST_CASE("StaticNode - selective handler", "[static_node]") {
 TEST_CASE("StaticNode - Publish and CreatePublisher", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "publisher", 5, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("publisher", 5, CountingHandler{});
 
   node.Start();
 
@@ -507,16 +496,13 @@ TEST_CASE("StaticNode - Publish and CreatePublisher", "[static_node]") {
 TEST_CASE("StaticNode - PublishWithPriority", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "prio_pub", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("prio_pub", 1, CountingHandler{});
 
   // Subscribe a regular Node to check priority
   osp::Node<TestPayload> checker("checker", 2);
   osp::MessagePriority captured_prio = osp::MessagePriority::kMedium;
   checker.Subscribe<SensorData>(
-      [&captured_prio](const SensorData&, const osp::MessageHeader& h) {
-        captured_prio = h.priority;
-      });
+      [&captured_prio](const SensorData&, const osp::MessageHeader& h) { captured_prio = h.priority; });
 
   node.Start();
 
@@ -530,14 +516,12 @@ TEST_CASE("StaticNode - topic publish", "[static_node]") {
   StaticNodeBusFixture fix;
 
   // Subscriber with topic filter
-  osp::StaticNode<TestPayload, CountingHandler> sub_node(
-      "topic_sub", 1, CountingHandler{}, "data/stream");
+  osp::StaticNode<TestPayload, CountingHandler> sub_node("topic_sub", 1, CountingHandler{}, "data/stream");
 
   sub_node.Start();
 
   // Publisher node (no topic filter needed for publishing)
-  osp::StaticNode<TestPayload, CountingHandler> pub_node(
-      "topic_pub", 2, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> pub_node("topic_pub", 2, CountingHandler{});
 
   pub_node.Start();
 
@@ -558,8 +542,7 @@ TEST_CASE("StaticNode - topic publish", "[static_node]") {
 TEST_CASE("StaticNode - sender ID tracking", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> receiver(
-      "receiver", 100, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> receiver("receiver", 100, CountingHandler{});
 
   receiver.Start();
 
@@ -580,8 +563,7 @@ TEST_CASE("StaticNode - sender ID tracking", "[static_node]") {
 TEST_CASE("StaticNode direct dispatch without Start", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "direct_no_start", 7, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("direct_no_start", 7, CountingHandler{});
 
   // Do NOT call Start() - node should use direct dispatch mode
   REQUIRE(!node.IsStarted());
@@ -609,8 +591,7 @@ TEST_CASE("StaticNode direct dispatch without Start", "[static_node]") {
 TEST_CASE("StaticNode direct dispatch message delivery", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "direct_delivery", 10, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("direct_delivery", 10, CountingHandler{});
 
   // No Start() - direct dispatch mode
 
@@ -635,8 +616,7 @@ TEST_CASE("StaticNode direct dispatch message delivery", "[static_node]") {
 TEST_CASE("StaticNode direct dispatch handler state", "[static_node]") {
   StaticNodeBusFixture fix;
 
-  osp::StaticNode<TestPayload, CountingHandler> node(
-      "direct_state", 1, CountingHandler{});
+  osp::StaticNode<TestPayload, CountingHandler> node("direct_state", 1, CountingHandler{});
 
   // No Start() - direct dispatch mode
 
@@ -658,9 +638,18 @@ TEST_CASE("StaticNode direct dispatch handler state", "[static_node]") {
 
 TEST_CASE("StaticNode direct vs callback mode parity", "[static_node]") {
   // Use separate variant types so each mode has its own bus instance
-  struct ParitySensor { float temp; uint32_t pad_ = 0; };
-  struct ParityMotor { int32_t speed; uint32_t pad_ = 0; };
-  struct ParityStatus { uint8_t code; uint8_t pad_[7] = {}; };
+  struct ParitySensor {
+    float temp;
+    uint32_t pad_ = 0;
+  };
+  struct ParityMotor {
+    int32_t speed;
+    uint32_t pad_ = 0;
+  };
+  struct ParityStatus {
+    uint8_t code;
+    uint8_t pad_[7] = {};
+  };
 
   using DirectPayload = std::variant<ParitySensor, ParityMotor, ParityStatus>;
   using DirectBus = osp::AsyncBus<DirectPayload>;
@@ -674,20 +663,17 @@ TEST_CASE("StaticNode direct vs callback mode parity", "[static_node]") {
     uint8_t last_code = 0;
     uint32_t last_sender_id = 0;
 
-    void operator()(const ParitySensor& d,
-                    const osp::MessageHeader& h) noexcept {
+    void operator()(const ParitySensor& d, const osp::MessageHeader& h) noexcept {
       ++sensor_count;
       last_temp = d.temp;
       last_sender_id = h.sender_id;
     }
-    void operator()(const ParityMotor& c,
-                    const osp::MessageHeader& h) noexcept {
+    void operator()(const ParityMotor& c, const osp::MessageHeader& h) noexcept {
       ++motor_count;
       last_speed = c.speed;
       last_sender_id = h.sender_id;
     }
-    void operator()(const ParityStatus& s,
-                    const osp::MessageHeader& h) noexcept {
+    void operator()(const ParityStatus& s, const osp::MessageHeader& h) noexcept {
       ++status_count;
       last_code = s.code;
       last_sender_id = h.sender_id;
@@ -697,8 +683,7 @@ TEST_CASE("StaticNode direct vs callback mode parity", "[static_node]") {
   DirectBus::Instance().Reset();
 
   // --- Callback mode (with Start) ---
-  osp::StaticNode<DirectPayload, ParityHandler> callback_node(
-      "callback_mode", 5, ParityHandler{});
+  osp::StaticNode<DirectPayload, ParityHandler> callback_node("callback_mode", 5, ParityHandler{});
   callback_node.Start();
 
   DirectBus::Instance().Publish(DirectPayload(ParitySensor{25.5f}), 10);
@@ -722,8 +707,7 @@ TEST_CASE("StaticNode direct vs callback mode parity", "[static_node]") {
   DirectBus::Instance().Reset();
 
   // --- Direct mode (without Start) ---
-  osp::StaticNode<DirectPayload, ParityHandler> direct_node(
-      "direct_mode", 5, ParityHandler{});
+  osp::StaticNode<DirectPayload, ParityHandler> direct_node("direct_mode", 5, ParityHandler{});
   // No Start() call - uses direct dispatch
 
   DirectBus::Instance().Publish(DirectPayload(ParitySensor{25.5f}), 10);

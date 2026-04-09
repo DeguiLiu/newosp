@@ -3,13 +3,13 @@
  * @brief Unit tests for the async logging backend (async_log.hpp).
  */
 
-#include <catch2/catch_test_macros.hpp>
-
 #include "osp/async_log.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstring>
+
+#include <atomic>
+#include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -30,8 +30,7 @@ struct TestSinkState {
 
 static TestSinkState g_test_sink;
 
-static void TestSink(const osp::log::LogEntry* entries, uint32_t n,
-                     void* /*ctx*/) {
+static void TestSink(const osp::log::LogEntry* entries, uint32_t n, void* /*ctx*/) {
   uint32_t base = g_test_sink.count.fetch_add(n, std::memory_order_relaxed);
   for (uint32_t i = 0; i < n && (base + i) < 1024; ++i) {
     g_test_sink.entries[base + i] = entries[i];
@@ -40,8 +39,7 @@ static void TestSink(const osp::log::LogEntry* entries, uint32_t n,
 
 /// @brief Wait until at least `target` entries arrive, with timeout.
 static bool WaitForEntries(uint32_t target, int timeout_ms = 500) {
-  auto deadline = std::chrono::steady_clock::now() +
-                  std::chrono::milliseconds(timeout_ms);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (std::chrono::steady_clock::now() < deadline) {
     if (g_test_sink.count.load(std::memory_order_relaxed) >= target) {
       return true;
@@ -142,8 +140,7 @@ TEST_CASE("AsyncLog: drop policy on full queue", "[async_log]") {
 
   // Use a sink that blocks, preventing the writer from draining the queue.
   static std::atomic<bool> sink_blocked{true};
-  auto slow_sink = [](const osp::log::LogEntry* /*entries*/, uint32_t /*n*/,
-                      void* /*ctx*/) {
+  auto slow_sink = [](const osp::log::LogEntry* /*entries*/, uint32_t /*n*/, void* /*ctx*/) {
     while (sink_blocked.load(std::memory_order_relaxed)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -216,9 +213,7 @@ TEST_CASE("AsyncLog: thread registration and deregistration", "[async_log]") {
 
   // Spawn a thread that logs and exits.
   {
-    std::thread t([]() {
-      OSP_LOG_INFO("Temp", "from temporary thread");
-    });
+    std::thread t([]() { OSP_LOG_INFO("Temp", "from temporary thread"); });
     t.join();
   }
 
@@ -227,9 +222,7 @@ TEST_CASE("AsyncLog: thread registration and deregistration", "[async_log]") {
   // The thread's buffer slot should be released after thread exit.
   // Spawn another thread to verify slot reuse.
   {
-    std::thread t([]() {
-      OSP_LOG_INFO("Reuse", "from reused slot");
-    });
+    std::thread t([]() { OSP_LOG_INFO("Reuse", "from reused slot"); });
     t.join();
   }
 

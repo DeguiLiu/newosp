@@ -399,10 +399,10 @@ class StaticExecutor {
    * shared AsyncBus, yielding when no messages are available.
    */
   void Start() noexcept {
-    if (running_.load(std::memory_order_acquire)) {
+    bool expected = false;
+    if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       return;  // Already running
     }
-    running_.store(true, std::memory_order_release);
     dispatch_thread_ = std::thread([this]() { DispatchLoop(); });
   }
 
@@ -538,10 +538,10 @@ class PinnedExecutor {
    * that continuously calls ProcessBatch() on the shared AsyncBus.
    */
   void Start() noexcept {
-    if (running_.load(std::memory_order_acquire)) {
+    bool expected = false;
+    if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       return;  // Already running
     }
-    running_.store(true, std::memory_order_release);
     dispatch_thread_ = std::thread([this]() {
       PinThread(cpu_core_);
       DispatchLoop();
@@ -595,6 +595,10 @@ class PinnedExecutor {
    */
   static void PinThread(int32_t core) noexcept {
 #if defined(OSP_PLATFORM_LINUX)
+    if (0 > core || core >= CPU_SETSIZE) {
+      (void)std::fprintf(stderr, "PinnedExecutor: invalid core %d (max %d)\n", core, CPU_SETSIZE - 1);
+      return;
+    }
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(core, &cpuset);
@@ -727,10 +731,10 @@ class RealtimeExecutor {
    * On non-Linux: falls back to normal thread (logs warning).
    */
   void Start() noexcept {
-    if (running_.load(std::memory_order_acquire)) {
+    bool expected = false;
+    if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       return;  // Already running
     }
-    running_.store(true, std::memory_order_release);
 
 #if defined(OSP_PLATFORM_LINUX)
     // If custom stack size is requested, use pthread_create directly
@@ -839,7 +843,7 @@ class RealtimeExecutor {
     }
 
     // 2. Set CPU affinity if requested
-    if (cfg.cpu_affinity >= 0) {
+    if (cfg.cpu_affinity >= 0 && cfg.cpu_affinity < CPU_SETSIZE) {
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
       CPU_SET(cfg.cpu_affinity, &cpuset);

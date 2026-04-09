@@ -10,6 +10,10 @@
 //   5. Priority-based admission control
 //   6. Statistics and monitoring
 //
+// This example is primarily intended to show WorkerPool dispatch behavior,
+// scaling trends, and backpressure-related effects. It is not a peak-throughput
+// benchmark harness.
+//
 // NOTE: This demo also exposes a known architectural limitation --
 // DispatchToWorker silently drops messages when all worker queues are full.
 // See Demo 4 output for evidence.
@@ -18,10 +22,11 @@
 #include "osp/platform.hpp"
 #include "osp/worker_pool.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
+
+#include <atomic>
+#include <chrono>
 #include <thread>
 #include <variant>
 
@@ -32,17 +37,23 @@
 using Clock = std::chrono::high_resolution_clock;
 
 static inline uint64_t ElapsedUs(Clock::time_point t0, Clock::time_point t1) {
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
 }
 
 // ============================================================================
 // Demo 1: Multi-Type Task Dispatch
 // ============================================================================
 
-struct ComputeTask { uint32_t id; uint32_t iterations; };
-struct IoTask { uint32_t id; };
-struct LogTask { uint32_t id; };
+struct ComputeTask {
+  uint32_t id;
+  uint32_t iterations;
+};
+struct IoTask {
+  uint32_t id;
+};
+struct LogTask {
+  uint32_t id;
+};
 using MultiPayload = std::variant<ComputeTask, IoTask, LogTask>;
 
 static std::atomic<uint32_t> g_compute_n{0};
@@ -51,7 +62,9 @@ static std::atomic<uint32_t> g_log_n{0};
 
 static void DemoMultiType() {
   printf("\n=== Demo 1: Multi-Type Task Dispatch ===\n");
-  g_compute_n.store(0); g_io_n.store(0); g_log_n.store(0);
+  g_compute_n.store(0);
+  g_io_n.store(0);
+  g_log_n.store(0);
   osp::AsyncBus<MultiPayload>::Instance().Reset();
 
   osp::WorkerPoolConfig cfg;
@@ -59,21 +72,17 @@ static void DemoMultiType() {
   cfg.worker_num = 2;
 
   osp::WorkerPool<MultiPayload> pool(cfg);
-  pool.RegisterHandler<ComputeTask>(
-      +[](const ComputeTask& t, const osp::MessageHeader&) {
-        volatile uint32_t sum = 0;
-        for (uint32_t i = 0; i < t.iterations; ++i) sum += i;
-        (void)sum;
-        g_compute_n.fetch_add(1, std::memory_order_relaxed);
-      });
+  pool.RegisterHandler<ComputeTask>(+[](const ComputeTask& t, const osp::MessageHeader&) {
+    volatile uint32_t sum = 0;
+    for (uint32_t i = 0; i < t.iterations; ++i)
+      sum += i;
+    (void)sum;
+    g_compute_n.fetch_add(1, std::memory_order_relaxed);
+  });
   pool.RegisterHandler<IoTask>(
-      +[](const IoTask&, const osp::MessageHeader&) {
-        g_io_n.fetch_add(1, std::memory_order_relaxed);
-      });
+      +[](const IoTask&, const osp::MessageHeader&) { g_io_n.fetch_add(1, std::memory_order_relaxed); });
   pool.RegisterHandler<LogTask>(
-      +[](const LogTask&, const osp::MessageHeader&) {
-        g_log_n.fetch_add(1, std::memory_order_relaxed);
-      });
+      +[](const LogTask&, const osp::MessageHeader&) { g_log_n.fetch_add(1, std::memory_order_relaxed); });
   pool.Start();
 
   for (uint32_t i = 0; i < 100; ++i) {
@@ -83,6 +92,7 @@ static void DemoMultiType() {
   }
 
   // Wait for all tasks
+  /* Demo synchronization only; real deployments should prefer explicit completion signals. */
   while (g_compute_n.load() + g_io_n.load() + g_log_n.load() < 300) {
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
@@ -91,15 +101,16 @@ static void DemoMultiType() {
   printf("  ComputeTask: %u processed\n", g_compute_n.load());
   printf("  IoTask     : %u processed\n", g_io_n.load());
   printf("  LogTask    : %u processed\n", g_log_n.load());
-  printf("  Total      : %u tasks (expected 300)\n",
-         g_compute_n.load() + g_io_n.load() + g_log_n.load());
+  printf("  Total      : %u tasks (expected 300)\n", g_compute_n.load() + g_io_n.load() + g_log_n.load());
 }
 
 // ============================================================================
 // Demo 2: FlushAndPause / Resume
 // ============================================================================
 
-struct FlushTask { uint32_t id; };
+struct FlushTask {
+  uint32_t id;
+};
 using FlushPayload = std::variant<FlushTask>;
 static std::atomic<uint32_t> g_flush_n{0};
 
@@ -114,13 +125,12 @@ static void DemoFlushAndPause() {
 
   osp::WorkerPool<FlushPayload> pool(cfg);
   pool.RegisterHandler<FlushTask>(
-      +[](const FlushTask&, const osp::MessageHeader&) {
-        g_flush_n.fetch_add(1, std::memory_order_relaxed);
-      });
+      +[](const FlushTask&, const osp::MessageHeader&) { g_flush_n.fetch_add(1, std::memory_order_relaxed); });
   pool.Start();
 
   // Phase 1: Submit batch
   for (uint32_t i = 0; i < 200; ++i) {
+    /* Demo submission loop; retry-until-accepted keeps the example simple. */
     while (!pool.Submit(FlushTask{i})) {}
   }
 
@@ -129,8 +139,7 @@ static void DemoFlushAndPause() {
   auto t1 = Clock::now();
 
   uint32_t phase1 = g_flush_n.load();
-  printf("  Phase 1: %u tasks flushed in %lu us\n", phase1,
-         static_cast<unsigned long>(ElapsedUs(t0, t1)));
+  printf("  Phase 1: %u tasks flushed in %lu us\n", phase1, static_cast<unsigned long>(ElapsedUs(t0, t1)));
 
   // While paused, Submit should return false
   bool rejected = !pool.Submit(FlushTask{999});
@@ -139,12 +148,12 @@ static void DemoFlushAndPause() {
   // Resume and submit more
   pool.Resume();
   for (uint32_t i = 0; i < 100; ++i) {
+    /* Demo submission loop; retry-until-accepted keeps the example simple. */
     while (!pool.Submit(FlushTask{200 + i})) {}
   }
 
   pool.FlushAndPause();
-  printf("  Phase 2: %u total tasks (added 100 after resume)\n",
-         g_flush_n.load());
+  printf("  Phase 2: %u total tasks (added 100 after resume)\n", g_flush_n.load());
 
   pool.Shutdown();
 }
@@ -153,8 +162,12 @@ static void DemoFlushAndPause() {
 // Demo 3: SubmitSync (Synchronous Bypass)
 // ============================================================================
 
-struct SyncTask { uint32_t id; };
-struct SyncOther { uint32_t id; };
+struct SyncTask {
+  uint32_t id;
+};
+struct SyncOther {
+  uint32_t id;
+};
 using SyncPayload = std::variant<SyncTask, SyncOther>;
 static std::atomic<uint32_t> g_sync_n{0};
 
@@ -168,9 +181,7 @@ static void DemoSubmitSync() {
 
   osp::WorkerPool<SyncPayload> pool(cfg);
   pool.RegisterHandler<SyncTask>(
-      +[](const SyncTask&, const osp::MessageHeader&) {
-        g_sync_n.fetch_add(1, std::memory_order_relaxed);
-      });
+      +[](const SyncTask&, const osp::MessageHeader&) { g_sync_n.fetch_add(1, std::memory_order_relaxed); });
   // Note: NOT starting the pool -- SubmitSync doesn't need worker threads
 
   static constexpr uint32_t kCount = 10000;
@@ -181,8 +192,7 @@ static void DemoSubmitSync() {
   auto t1 = Clock::now();
 
   uint64_t us = ElapsedUs(t0, t1);
-  printf("  SubmitSync: %u tasks in %lu us (%.1f us/task)\n", kCount,
-         static_cast<unsigned long>(us),
+  printf("  SubmitSync: %u tasks in %lu us (%.1f us/task)\n", kCount, static_cast<unsigned long>(us),
          static_cast<double>(us) / kCount);
   printf("  Processed : %u (all in caller thread)\n", g_sync_n.load());
 
@@ -194,16 +204,21 @@ static void DemoSubmitSync() {
 // ============================================================================
 // Demo 4: Worker Scaling Comparison
 //
+// This scenario is meant to show scaling behavior and queue-full effects.
+// It is useful for observing trends, but it is not a strict peak benchmark.
+//
 // This demo intentionally uses a high task count to expose the
 // DispatchToWorker drop behavior when worker queues are full.
 // ============================================================================
 
-struct ScaleTask { uint32_t id; uint32_t iters; };
+struct ScaleTask {
+  uint32_t id;
+  uint32_t iters;
+};
 using ScalePayload = std::variant<ScaleTask>;
 static std::atomic<uint32_t> g_scale_done{0};
 
-static void RunScaling(uint32_t worker_num, uint32_t task_count,
-                       uint32_t iters) {
+static void RunScaling(uint32_t worker_num, uint32_t task_count, uint32_t iters) {
   g_scale_done.store(0, std::memory_order_relaxed);
   osp::AsyncBus<ScalePayload>::Instance().Reset();
 
@@ -212,29 +227,30 @@ static void RunScaling(uint32_t worker_num, uint32_t task_count,
   cfg.worker_num = worker_num;
 
   osp::WorkerPool<ScalePayload> pool(cfg);
-  pool.RegisterHandler<ScaleTask>(
-      +[](const ScaleTask& t, const osp::MessageHeader&) {
-        volatile uint32_t sum = 0;
-        for (uint32_t i = 0; i < t.iters; ++i) sum += i;
-        (void)sum;
-        g_scale_done.fetch_add(1, std::memory_order_relaxed);
-      });
+  pool.RegisterHandler<ScaleTask>(+[](const ScaleTask& t, const osp::MessageHeader&) {
+    volatile uint32_t sum = 0;
+    for (uint32_t i = 0; i < t.iters; ++i)
+      sum += i;
+    (void)sum;
+    g_scale_done.fetch_add(1, std::memory_order_relaxed);
+  });
   pool.Start();
 
   auto t0 = Clock::now();
   for (uint32_t i = 0; i < task_count; ++i) {
+    /* Demo submission loop; retry-until-accepted keeps pressure generation deterministic. */
     while (!pool.Submit(ScaleTask{i, iters})) {}
   }
 
   // Wait until dispatcher drains Bus and workers finish processing.
   // Use a stable snapshot: if dispatched == processed for 3 consecutive
   // checks with Bus empty, we're done.
+  /* Demo synchronization only; real deployments should prefer explicit completion signals. */
   uint32_t stable = 0;
   while (stable < 3) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     auto s = pool.GetStats();
-    if (s.dispatched == s.processed &&
-        osp::AsyncBus<ScalePayload>::Instance().Depth() == 0) {
+    if (s.dispatched == s.processed && osp::AsyncBus<ScalePayload>::Instance().Depth() == 0) {
       ++stable;
     } else {
       stable = 0;
@@ -246,15 +262,13 @@ static void RunScaling(uint32_t worker_num, uint32_t task_count,
   auto stats = pool.GetStats();
   uint64_t us = ElapsedUs(t0, t1);
   double secs = static_cast<double>(us) / 1e6;
-  double mops = (secs > 0)
-                    ? (static_cast<double>(g_scale_done.load()) / secs / 1e6)
-                    : 0;
+  double mops = (secs > 0) ? (static_cast<double>(g_scale_done.load()) / secs / 1e6) : 0;
 
-  printf("  %u workers: %8.2f ms  %6.3f M tasks/s  "
-         "processed=%u/%u  dropped=%lu\n",
-         worker_num, secs * 1e3, mops,
-         g_scale_done.load(), task_count,
-         static_cast<unsigned long>(stats.worker_queue_full));
+  printf(
+      "  %u workers: %8.2f ms  %6.3f M tasks/s  "
+      "processed=%u/%u  dropped=%lu\n",
+      worker_num, secs * 1e3, mops, g_scale_done.load(), task_count,
+      static_cast<unsigned long>(stats.worker_queue_full));
 }
 
 static void DemoWorkerScaling() {
@@ -265,23 +279,29 @@ static void DemoWorkerScaling() {
   RunScaling(2, 10000, 500);
   RunScaling(4, 10000, 500);
 
-  printf("\n  NOTE: 'dropped' shows messages lost when worker queues are full.\n"
-         "  This is a known limitation -- DispatchToWorker has no backpressure.\n");
+  printf(
+      "\n  NOTE: 'dropped' shows messages lost when worker queues are full.\n"
+      "  This is a known limitation -- DispatchToWorker has no backpressure.\n");
 }
 
 // ============================================================================
 // Demo 5: Priority-Based Admission
 // ============================================================================
 
-struct HighTask { uint32_t id; };
-struct LowTask { uint32_t id; };
+struct HighTask {
+  uint32_t id;
+};
+struct LowTask {
+  uint32_t id;
+};
 using PrioPayload = std::variant<HighTask, LowTask>;
 static std::atomic<uint32_t> g_high_n{0};
 static std::atomic<uint32_t> g_low_n{0};
 
 static void DemoPriority() {
   printf("\n=== Demo 5: Priority-Based Admission ===\n");
-  g_high_n.store(0); g_low_n.store(0);
+  g_high_n.store(0);
+  g_low_n.store(0);
   osp::AsyncBus<PrioPayload>::Instance().Reset();
 
   osp::WorkerPoolConfig cfg;
@@ -289,16 +309,14 @@ static void DemoPriority() {
   cfg.worker_num = 1;
 
   osp::WorkerPool<PrioPayload> pool(cfg);
-  pool.RegisterHandler<HighTask>(
-      +[](const HighTask&, const osp::MessageHeader&) {
-        g_high_n.fetch_add(1, std::memory_order_relaxed);
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
-      });
-  pool.RegisterHandler<LowTask>(
-      +[](const LowTask&, const osp::MessageHeader&) {
-        g_low_n.fetch_add(1, std::memory_order_relaxed);
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
-      });
+  pool.RegisterHandler<HighTask>(+[](const HighTask&, const osp::MessageHeader&) {
+    g_high_n.fetch_add(1, std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::microseconds(10));
+  });
+  pool.RegisterHandler<LowTask>(+[](const LowTask&, const osp::MessageHeader&) {
+    g_low_n.fetch_add(1, std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::microseconds(10));
+  });
   pool.Start();
 
   uint32_t high_ok = 0, low_ok = 0, high_fail = 0, low_fail = 0;
@@ -319,8 +337,7 @@ static void DemoPriority() {
     while (stable < 3) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
       auto s = pool.GetStats();
-      if (s.dispatched == s.processed &&
-          osp::AsyncBus<PrioPayload>::Instance().Depth() == 0) {
+      if (s.dispatched == s.processed && osp::AsyncBus<PrioPayload>::Instance().Depth() == 0) {
         ++stable;
       } else {
         stable = 0;
@@ -329,17 +346,17 @@ static void DemoPriority() {
   }
   pool.Shutdown();
 
-  printf("  HIGH: submitted=%u, rejected=%u, processed=%u\n",
-         high_ok, high_fail, g_high_n.load());
-  printf("  LOW : submitted=%u, rejected=%u, processed=%u\n",
-         low_ok, low_fail, g_low_n.load());
+  printf("  HIGH: submitted=%u, rejected=%u, processed=%u\n", high_ok, high_fail, g_high_n.load());
+  printf("  LOW : submitted=%u, rejected=%u, processed=%u\n", low_ok, low_fail, g_low_n.load());
 }
 
 // ============================================================================
 // Demo 6: Statistics and Monitoring
 // ============================================================================
 
-struct StatsTask { uint32_t id; };
+struct StatsTask {
+  uint32_t id;
+};
 using StatsPayload = std::variant<StatsTask>;
 static std::atomic<uint32_t> g_stats_n{0};
 
@@ -354,15 +371,11 @@ static void DemoStats() {
 
   osp::WorkerPool<StatsPayload> pool(cfg);
   pool.RegisterHandler<StatsTask>(
-      +[](const StatsTask&, const osp::MessageHeader&) {
-        g_stats_n.fetch_add(1, std::memory_order_relaxed);
-      });
+      +[](const StatsTask&, const osp::MessageHeader&) { g_stats_n.fetch_add(1, std::memory_order_relaxed); });
   pool.Start();
 
-  printf("  IsRunning: %s, IsPaused: %s, Workers: %u\n",
-         pool.IsRunning() ? "yes" : "no",
-         pool.IsPaused() ? "yes" : "no",
-         pool.WorkerCount());
+  printf("  IsRunning: %s, IsPaused: %s, Workers: %u\n", pool.IsRunning() ? "yes" : "no",
+         pool.IsPaused() ? "yes" : "no", pool.WorkerCount());
 
   for (int wave = 1; wave <= 3; ++wave) {
     for (uint32_t i = 0; i < 1000; ++i) {
@@ -371,10 +384,8 @@ static void DemoStats() {
     pool.FlushAndPause();
 
     auto stats = pool.GetStats();
-    printf("  Wave %d: dispatched=%lu, processed=%lu, queue_full=%lu\n",
-           wave,
-           static_cast<unsigned long>(stats.dispatched),
-           static_cast<unsigned long>(stats.processed),
+    printf("  Wave %d: dispatched=%lu, processed=%lu, queue_full=%lu\n", wave,
+           static_cast<unsigned long>(stats.dispatched), static_cast<unsigned long>(stats.processed),
            static_cast<unsigned long>(stats.worker_queue_full));
 
     pool.Resume();

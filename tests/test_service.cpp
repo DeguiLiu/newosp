@@ -3,12 +3,13 @@
  * @brief Tests for service.hpp: Service and Client.
  */
 
-#include <catch2/catch_test_macros.hpp>
 #include "osp/service.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstring>
+
+#include <atomic>
+#include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <thread>
 
 // ============================================================================
@@ -70,12 +71,11 @@ TEST_CASE("service - Client connect and single call", "[service][client]") {
   cfg.port = 0;  // OS-assigned
   osp::Service<AddRequest, AddResponse> service(cfg);
 
-  service.SetHandler(
-      [](const AddRequest& req, void* /*ctx*/) -> AddResponse {
-        AddResponse resp;
-        resp.sum = req.a + req.b;
-        return resp;
-      });
+  service.SetHandler([](const AddRequest& req, void* /*ctx*/) -> AddResponse {
+    AddResponse resp;
+    resp.sum = req.a + req.b;
+    return resp;
+  });
 
   auto start_r = service.Start();
   REQUIRE(start_r.has_value());
@@ -112,12 +112,11 @@ TEST_CASE("service - Client multiple calls", "[service][client]") {
   cfg.port = 0;  // OS-assigned
   osp::Service<AddRequest, AddResponse> service(cfg);
 
-  service.SetHandler(
-      [](const AddRequest& req, void* /*ctx*/) -> AddResponse {
-        AddResponse resp;
-        resp.sum = req.a + req.b;
-        return resp;
-      });
+  service.SetHandler([](const AddRequest& req, void* /*ctx*/) -> AddResponse {
+    AddResponse resp;
+    resp.sum = req.a + req.b;
+    return resp;
+  });
 
   auto start_r = service.Start();
   REQUIRE(start_r.has_value());
@@ -165,13 +164,12 @@ TEST_CASE("service - Client call timeout", "[service][client]") {
   osp::Service<AddRequest, AddResponse> service(cfg);
 
   // Handler that sleeps longer than timeout
-  service.SetHandler(
-      [](const AddRequest& req, void* /*ctx*/) -> AddResponse {
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-        AddResponse resp;
-        resp.sum = req.a + req.b;
-        return resp;
-      });
+  service.SetHandler([](const AddRequest& req, void* /*ctx*/) -> AddResponse {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    AddResponse resp;
+    resp.sum = req.a + req.b;
+    return resp;
+  });
 
   auto start_r = service.Start();
   REQUIRE(start_r.has_value());
@@ -233,15 +231,15 @@ TEST_CASE("service - Multiple concurrent clients", "[service][client]") {
   for (uint32_t i = 0; i < kNumClients; ++i) {
     clients[i] = std::thread([i, port, &success_count]() {
       auto client_r = osp::Client<AddRequest, AddResponse>::Connect("127.0.0.1", port);
-      if (!client_r.has_value()) return;
+      if (!client_r.has_value())
+        return;
 
       auto client = std::move(client_r.value());
 
       for (int j = 0; j < 5; ++j) {
         AddRequest req{static_cast<int32_t>(i), static_cast<int32_t>(j)};
         auto resp_r = client.Call(req);
-        if (resp_r.has_value() &&
-            resp_r.value().sum == static_cast<int32_t>(i + j)) {
+        if (resp_r.has_value() && resp_r.value().sum == static_cast<int32_t>(i + j)) {
           success_count.fetch_add(1, std::memory_order_relaxed);
         }
       }
@@ -269,12 +267,11 @@ TEST_CASE("service - Echo service", "[service]") {
   cfg.port = 0;  // OS-assigned
   osp::Service<EchoRequest, EchoResponse> service(cfg);
 
-  service.SetHandler(
-      [](const EchoRequest& req, void* /*ctx*/) -> EchoResponse {
-        EchoResponse resp;
-        std::strcpy(resp.message, req.message);
-        return resp;
-      });
+  service.SetHandler([](const EchoRequest& req, void* /*ctx*/) -> EchoResponse {
+    EchoResponse resp;
+    std::strcpy(resp.message, req.message);
+    return resp;
+  });
 
   auto start_r = service.Start();
   REQUIRE(start_r.has_value());
@@ -339,12 +336,11 @@ TEST_CASE("service - Client move semantics", "[service][client]") {
   cfg.port = 0;  // OS-assigned
   osp::Service<AddRequest, AddResponse> service(cfg);
 
-  service.SetHandler(
-      [](const AddRequest& req, void* /*ctx*/) -> AddResponse {
-        AddResponse resp;
-        resp.sum = req.a + req.b;
-        return resp;
-      });
+  service.SetHandler([](const AddRequest& req, void* /*ctx*/) -> AddResponse {
+    AddResponse resp;
+    resp.sum = req.a + req.b;
+    return resp;
+  });
 
   auto start_r = service.Start();
   REQUIRE(start_r.has_value());
@@ -501,12 +497,11 @@ TEST_CASE("service - AsyncClient connect and call", "[service][async]") {
   cfg.port = 0;  // OS-assigned
   osp::Service<AddRequest, AddResponse> service(cfg);
 
-  service.SetHandler(
-      [](const AddRequest& req, void* /*ctx*/) -> AddResponse {
-        AddResponse resp;
-        resp.sum = req.a + req.b;
-        return resp;
-      });
+  service.SetHandler([](const AddRequest& req, void* /*ctx*/) -> AddResponse {
+    AddResponse resp;
+    resp.sum = req.a + req.b;
+    return resp;
+  });
 
   auto start_r = service.Start();
   REQUIRE(start_r.has_value());
@@ -547,13 +542,12 @@ TEST_CASE("service - AsyncClient IsReady check", "[service][async]") {
   cfg.port = 0;  // OS-assigned
   osp::Service<AddRequest, AddResponse> service(cfg);
 
-  service.SetHandler(
-      [](const AddRequest& req, void* /*ctx*/) -> AddResponse {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        AddResponse resp;
-        resp.sum = req.a + req.b;
-        return resp;
-      });
+  service.SetHandler([](const AddRequest& req, void* /*ctx*/) -> AddResponse {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    AddResponse resp;
+    resp.sum = req.a + req.b;
+    return resp;
+  });
 
   auto start_r = service.Start();
   REQUIRE(start_r.has_value());

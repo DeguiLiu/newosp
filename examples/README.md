@@ -15,6 +15,34 @@ Executables will be generated in `build/examples/`.
 
 ## Example Overview
 
+## Recommended Reading Paths
+
+Different examples in this directory serve different goals:
+some prioritize readability and feature coverage, while others are better
+references for low-overhead and performance-oriented usage.
+
+### Quick start / concept-first examples
+
+- `basic_demo`
+- `hsm_protocol_demo`
+- `client_demo`
+
+These examples favor readability and phase-by-phase behavior illustration.
+Some of them intentionally use `sleep_for()` to separate phases and make logs
+easier to observe. Those delays are for demonstration only and should not be
+treated as the recommended low-latency usage pattern.
+
+### Performance-oriented examples
+
+- `basic_demo` (StaticNode section)
+- `priority_demo`
+- `worker_pool_demo`
+- `benchmark`
+
+These examples are the best entry points if you want to understand where OSP
+gets its performance advantages: compile-time dispatch, batching, reduced
+runtime indirection, and explicit backpressure behavior.
+
 ### Single-File Demos
 
 | Example | Description | Key Modules |

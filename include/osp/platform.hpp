@@ -39,6 +39,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <thread>
 
 namespace osp {
 
@@ -155,6 +156,73 @@ inline uint64_t SteadyNowUs() noexcept {
 }
 
 // ============================================================================
+// CpuRelax - Architecture-specific pause hint for spin loops
+// ============================================================================
+
+/**
+ * @brief Issue a CPU relax/pause hint for spin-wait loops.
+ *
+ * Reduces power consumption and avoids pipeline stalls on x86 (PAUSE) and
+ * ARM (YIELD). Falls back to std::this_thread::yield() on unknown architectures.
+ */
+inline void CpuRelax() noexcept {
+#if defined(__x86_64__) || defined(__i386__)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+  asm volatile("yield" ::: "memory");
+#else
+  std::this_thread::yield();
+#endif
+}
+
+// ============================================================================
+// AdaptiveBackoff - Three-phase backoff: spin -> yield -> sleep
+// ============================================================================
+
+/**
+ * @brief Adaptive backoff strategy for busy-wait loops.
+ *
+ * Three phases:
+ *   1. Spin with CPU relax hint (exponential: 1..64 iterations)
+ *   2. Thread yield (kYieldLimit times)
+ *   3. Sleep (50us, coarse wait)
+ *
+ * Stack-only, no heap allocation. -fno-exceptions -fno-rtti safe.
+ */
+class AdaptiveBackoff {
+ public:
+  void Reset() noexcept { spin_count_ = 0U; }
+
+  void Wait() noexcept {
+    if (spin_count_ < kSpinLimit) {
+      const uint32_t iters = 1U << spin_count_;
+      for (uint32_t i = 0U; i < iters; ++i) {
+        CpuRelax();
+      }
+      ++spin_count_;
+    } else if (spin_count_ < kSpinLimit + kYieldLimit) {
+      std::this_thread::yield();
+      ++spin_count_;
+    } else {
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+  }
+
+  /**
+   * @brief Check if still in the spin phase (before yield/sleep).
+   *
+   * Useful for worker loops that want to spin briefly before falling
+   * through to a condition_variable wait.
+   */
+  bool InSpinPhase() const noexcept { return spin_count_ < kSpinLimit; }
+
+ private:
+  static constexpr uint32_t kSpinLimit = 6U;   ///< ~1-64 spins
+  static constexpr uint32_t kYieldLimit = 4U;  ///< 4 yields before sleep
+  uint32_t spin_count_{0U};
+};
+
+// ============================================================================
 // ThreadHeartbeat - Lightweight liveness signal for thread monitoring
 // ============================================================================
 
@@ -173,8 +241,8 @@ struct ThreadHeartbeat {
   /** @brief Record a heartbeat (hot path, single relaxed store). */
   void Beat() noexcept { last_beat_us.store(SteadyNowUs(), std::memory_order_relaxed); }
 
-  /** @brief Read last heartbeat timestamp. */
-  [[nodiscard]] uint64_t LastBeatUs() const noexcept { return last_beat_us.load(std::memory_order_acquire); }
+  /** @brief Read last heartbeat timestamp (relaxed: only carries timestamp, no data dependency). */
+  [[nodiscard]] uint64_t LastBeatUs() const noexcept { return last_beat_us.load(std::memory_order_relaxed); }
 };
 
 // ============================================================================

@@ -8,18 +8,19 @@
 //
 // Usage: ./osp_dd_launcher [--restart] [--frames N] [--port P]
 
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <chrono>
-#include <thread>
+#include "common.hpp"
 
 #include "osp/log.hpp"
 #include "osp/process.hpp"
 #include "osp/shutdown.hpp"
 
-#include "common.hpp"
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include <chrono>
+#include <thread>
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -51,15 +52,15 @@ static ChildSlot g_children[kMaxChildren];
 static uint32_t g_num_children = 0;
 
 static bool SpawnChild(uint32_t idx) {
-  if (idx >= g_num_children) return false;
+  if (idx >= g_num_children)
+    return false;
   osp::SubprocessConfig cfg;
   cfg.argv = g_children[idx].argv;
   cfg.capture_stdout = true;
   cfg.merge_stderr = true;
   auto result = g_children[idx].proc.Start(cfg);
   if (result == osp::ProcessResult::kSuccess) {
-    OSP_LOG_INFO("Launcher", "[%s] started pid=%d",
-                 g_children[idx].label,
+    OSP_LOG_INFO("Launcher", "[%s] started pid=%d", g_children[idx].label,
                  static_cast<int>(g_children[idx].proc.GetPid()));
     return true;
   }
@@ -70,12 +71,15 @@ static bool SpawnChild(uint32_t idx) {
 static void DrainOutput() {
   char buf[512];
   for (uint32_t i = 0; i < g_num_children; ++i) {
-    if (g_children[i].proc.GetPid() <= 0) continue;
+    if (g_children[i].proc.GetPid() <= 0)
+      continue;
     int n = g_children[i].proc.ReadStdout(buf, sizeof(buf) - 1);
     while (n > 0) {
       buf[n] = '\0';
-      if (n > 0 && buf[n - 1] == '\n') buf[n - 1] = '\0';
-      if (buf[0] != '\0') OSP_LOG_INFO(g_children[i].label, "%s", buf);
+      if (n > 0 && buf[n - 1] == '\n')
+        buf[n - 1] = '\0';
+      if (buf[0] != '\0')
+        OSP_LOG_INFO(g_children[i].label, "%s", buf);
       n = g_children[i].proc.ReadStdout(buf, sizeof(buf) - 1);
     }
   }
@@ -84,25 +88,22 @@ static void DrainOutput() {
 static bool HealthCheck(osp::ShutdownManager& shutdown) {
   for (uint32_t i = 0; i < g_num_children; ++i) {
     pid_t pid = g_children[i].proc.GetPid();
-    if (pid <= 0) continue;
+    if (pid <= 0)
+      continue;
     if (!osp::IsProcessAlive(pid)) {
       auto wr = g_children[i].proc.Wait(0);
       if (wr.exited) {
-        OSP_LOG_WARN("Launcher", "[%s] exited code=%d",
-                     g_children[i].label, wr.exit_code);
+        OSP_LOG_WARN("Launcher", "[%s] exited code=%d", g_children[i].label, wr.exit_code);
       } else if (wr.signaled) {
-        OSP_LOG_WARN("Launcher", "[%s] signal=%d",
-                     g_children[i].label, wr.term_signal);
+        OSP_LOG_WARN("Launcher", "[%s] signal=%d", g_children[i].label, wr.term_signal);
       }
       if (g_children[i].critical && !g_config.auto_restart) {
-        OSP_LOG_ERROR("Launcher", "[%s] critical, shutting down",
-                      g_children[i].label);
+        OSP_LOG_ERROR("Launcher", "[%s] critical, shutting down", g_children[i].label);
         return false;
       }
       if (g_config.auto_restart && !shutdown.IsShutdownRequested()) {
         ++g_children[i].restarts;
-        OSP_LOG_INFO("Launcher", "[%s] restarting (#%u)...",
-                     g_children[i].label, g_children[i].restarts);
+        OSP_LOG_INFO("Launcher", "[%s] restarting (#%u)...", g_children[i].label, g_children[i].restarts);
         SpawnChild(i);
       }
     }
@@ -123,9 +124,13 @@ static void StopAll() {
     bool all_dead = true;
     for (uint32_t i = 0; i < g_num_children; ++i) {
       pid_t pid = g_children[i].proc.GetPid();
-      if (pid > 0 && osp::IsProcessAlive(pid)) { all_dead = false; break; }
+      if (pid > 0 && osp::IsProcessAlive(pid)) {
+        all_dead = false;
+        break;
+      }
     }
-    if (all_dead) break;
+    if (all_dead)
+      break;
   }
   for (uint32_t i = 0; i < g_num_children; ++i) {
     pid_t pid = g_children[i].proc.GetPid();
@@ -135,7 +140,8 @@ static void StopAll() {
     }
   }
   for (uint32_t i = 0; i < g_num_children; ++i) {
-    if (g_children[i].proc.GetPid() > 0) g_children[i].proc.Wait(1000);
+    if (g_children[i].proc.GetPid() > 0)
+      g_children[i].proc.Wait(1000);
   }
   OSP_LOG_INFO("Launcher", "all children stopped");
 }
@@ -156,8 +162,7 @@ int main(int argc, char* argv[]) {
   }
 
   OSP_LOG_INFO("Launcher", "starting data-dispatcher demo");
-  OSP_LOG_INFO("Launcher", "  frames: %u  auto-restart: %s",
-               g_config.frame_count,
+  OSP_LOG_INFO("Launcher", "  frames: %u  auto-restart: %s", g_config.frame_count,
                g_config.auto_restart ? "yes" : "no");
 
   osp::ShutdownManager shutdown;
@@ -168,15 +173,13 @@ int main(int argc, char* argv[]) {
   char port_str[16];
   std::snprintf(port_str, sizeof(port_str), "%u", g_config.shell_port);
 
-  static const char* prod_argv[] = {
-      "./osp_dd_producer", "--frames", nullptr, nullptr};
+  static const char* prod_argv[] = {"./osp_dd_producer", "--frames", nullptr, nullptr};
   prod_argv[2] = frames_str;
 
   static const char* clog_argv[] = {"./osp_dd_consumer_logging", nullptr};
   static const char* cfus_argv[] = {"./osp_dd_consumer_fusion", nullptr};
 
-  static const char* mon_argv[] = {
-      "./osp_dd_monitor", "--port", nullptr, nullptr};
+  static const char* mon_argv[] = {"./osp_dd_monitor", "--port", nullptr, nullptr};
   mon_argv[2] = port_str;
 
   g_children[0] = {osp::Subprocess{}, "Producer", prod_argv, 0, true};
@@ -197,7 +200,8 @@ int main(int argc, char* argv[]) {
 
   while (!shutdown.IsShutdownRequested()) {
     DrainOutput();
-    if (!HealthCheck(shutdown)) break;
+    if (!HealthCheck(shutdown))
+      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 

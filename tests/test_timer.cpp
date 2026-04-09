@@ -5,9 +5,8 @@
 
 #include "osp/timer.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -64,10 +63,13 @@ TEST_CASE("TimerScheduler fires callback", "[timer]") {
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;
 
-  sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
 
   sched.Start();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -130,20 +132,29 @@ TEST_CASE("TimerScheduler multiple timers firing in order", "[timer]") {
   osp::TimerScheduler<8> sched;
 
   // Add multiple timers with different periods
-  sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter1);
+  sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter1);
 
-  sched.Add(20, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter2);
+  sched.Add(
+      20,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter2);
 
-  sched.Add(30, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter3);
+  sched.Add(
+      30,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter3);
 
   sched.Start();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -162,10 +173,13 @@ TEST_CASE("TimerScheduler timer reschedule", "[timer]") {
   osp::TimerScheduler<4> sched;
 
   // Add a timer
-  auto r1 = sched.Add(50, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r1 = sched.Add(
+      50,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r1.has_value());
 
   sched.Start();
@@ -178,10 +192,13 @@ TEST_CASE("TimerScheduler timer reschedule", "[timer]") {
   int count_after_cancel = counter.load();
 
   // Re-add with different period
-  auto r2 = sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r2 = sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r2.has_value());
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -248,14 +265,13 @@ TEST_CASE("TimerScheduler<32> large capacity", "[timer]") {
 
   // Fill all slots
   osp::TimerTaskId ids[32] = {
-    osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
-    osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
-    osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
-    osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
-    osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
-    osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
-    osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
-    osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
+      osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
+      osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
+      osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
+      osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
+      osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
+      osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0), osp::TimerTaskId(0),
+      osp::TimerTaskId(0), osp::TimerTaskId(0),
   };
   for (uint32_t i = 0; i < 32; ++i) {
     auto r = sched.Add(100, [](void*) {});
@@ -300,12 +316,15 @@ TEST_CASE("TimerScheduler callback executes outside mutex", "[timer]") {
   std::atomic<bool> add_succeeded{false};
 
   // Register a callback that holds for a while
-  sched.Add(1, [](void* ctx) {
-    auto* running = static_cast<std::atomic<bool>*>(ctx);
-    running->store(true, std::memory_order_release);
-    // Sleep to give the main thread time to call Add()
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }, &callback_running);
+  sched.Add(
+      1,
+      [](void* ctx) {
+        auto* running = static_cast<std::atomic<bool>*>(ctx);
+        running->store(true, std::memory_order_release);
+        // Sleep to give the main thread time to call Add()
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      },
+      &callback_running);
 
   sched.Start();
 
@@ -318,8 +337,7 @@ TEST_CASE("TimerScheduler callback executes outside mutex", "[timer]") {
   // If mutex is held during callback, this would block for 50ms+.
   auto start = std::chrono::steady_clock::now();
   auto r = sched.Add(1000, [](void*) {});
-  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - start);
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
 
   // Add() should complete quickly (< 20ms), not wait for callback
   REQUIRE(r.has_value());
@@ -341,11 +359,14 @@ TEST_CASE("TimerScheduler callback can safely acquire external mutex", "[timer]"
   };
   Ctx ctx{&external_mutex, &counter};
 
-  sched.Add(10, [](void* raw) {
-    auto* c = static_cast<Ctx*>(raw);
-    std::lock_guard<std::mutex> lock(*c->mtx);
-    c->counter->fetch_add(1);
-  }, &ctx);
+  sched.Add(
+      10,
+      [](void* raw) {
+        auto* c = static_cast<Ctx*>(raw);
+        std::lock_guard<std::mutex> lock(*c->mtx);
+        c->counter->fetch_add(1);
+      },
+      &ctx);
 
   sched.Start();
 
@@ -380,12 +401,15 @@ TEST_CASE("TimerScheduler Remove during callback execution", "[timer]") {
 
   osp::TimerTaskId task_id(0);
 
-  auto r = sched.Add(1, [](void* ctx) {
-    auto* started = static_cast<std::atomic<bool>*>(ctx);
-    started->store(true, std::memory_order_release);
-    // Hold callback for a bit
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-  }, &callback_started);
+  auto r = sched.Add(
+      1,
+      [](void* ctx) {
+        auto* started = static_cast<std::atomic<bool>*>(ctx);
+        started->store(true, std::memory_order_release);
+        // Hold callback for a bit
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      },
+      &callback_started);
   REQUIRE(r.has_value());
   task_id = r.value();
 
@@ -399,8 +423,7 @@ TEST_CASE("TimerScheduler Remove during callback execution", "[timer]") {
   // Remove while callback is running — should not block
   auto start = std::chrono::steady_clock::now();
   auto rm = sched.Remove(task_id);
-  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - start);
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
 
   REQUIRE(rm.has_value());
   REQUIRE(elapsed.count() < 20);
@@ -414,11 +437,14 @@ TEST_CASE("TimerScheduler Add during callback execution", "[timer]") {
   std::atomic<bool> callback_started{false};
   std::atomic<int> new_task_fires{0};
 
-  sched.Add(1, [](void* ctx) {
-    auto* started = static_cast<std::atomic<bool>*>(ctx);
-    started->store(true, std::memory_order_release);
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-  }, &callback_started);
+  sched.Add(
+      1,
+      [](void* ctx) {
+        auto* started = static_cast<std::atomic<bool>*>(ctx);
+        started->store(true, std::memory_order_release);
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+      },
+      &callback_started);
 
   sched.Start();
 
@@ -428,10 +454,13 @@ TEST_CASE("TimerScheduler Add during callback execution", "[timer]") {
   }
 
   // Add new task while callback is running
-  auto r = sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &new_task_fires);
+  auto r = sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &new_task_fires);
   REQUIRE(r.has_value());
 
   // Wait for new task to fire
@@ -456,10 +485,13 @@ TEST_CASE("TimerScheduler concurrent Add/Remove stress", "[timer]") {
   for (int t = 0; t < 4; ++t) {
     threads[t] = std::thread([&sched, &total_fires]() {
       for (int i = 0; i < 20; ++i) {
-        auto r = sched.Add(1, [](void* ctx) {
-          auto* c = static_cast<std::atomic<int>*>(ctx);
-          c->fetch_add(1);
-        }, &total_fires);
+        auto r = sched.Add(
+            1,
+            [](void* ctx) {
+              auto* c = static_cast<std::atomic<int>*>(ctx);
+              c->fetch_add(1);
+            },
+            &total_fires);
         if (r.has_value()) {
           // Sleep long enough for at least one callback to fire
           std::this_thread::sleep_for(std::chrono::milliseconds(15));
@@ -504,10 +536,13 @@ TEST_CASE("TimerScheduler destructor stops thread", "[timer]") {
   std::atomic<int> counter{0};
   {
     osp::TimerScheduler<4> sched;
-    sched.Add(10, [](void* ctx) {
-      auto* c = static_cast<std::atomic<int>*>(ctx);
-      c->fetch_add(1);
-    }, &counter);
+    sched.Add(
+        10,
+        [](void* ctx) {
+          auto* c = static_cast<std::atomic<int>*>(ctx);
+          c->fetch_add(1);
+        },
+        &counter);
     sched.Start();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     // Destructor should call Stop() and join the thread
@@ -559,9 +594,7 @@ TEST_CASE("TimerScheduler callback with nullptr context", "[timer]") {
   // Use a static variable since ctx is nullptr
   static std::atomic<int>* s_fired = &fired;
 
-  sched.Add(10, [](void*) {
-    s_fired->fetch_add(1);
-  }, nullptr);
+  sched.Add(10, [](void*) { s_fired->fetch_add(1); }, nullptr);
 
   sched.Start();
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -574,10 +607,13 @@ TEST_CASE("TimerScheduler Start after Stop can restart", "[timer]") {
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;
 
-  sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
 
   // First run
   sched.Start();
@@ -602,10 +638,13 @@ TEST_CASE("TimerScheduler AddOneShot fires once", "[timer][oneshot]") {
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;
 
-  auto r = sched.AddOneShot(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.AddOneShot(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
   REQUIRE(sched.TaskCount() == 1);
 
@@ -641,10 +680,13 @@ TEST_CASE("TimerScheduler AddOneShot Remove before fire", "[timer][oneshot]") {
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;
 
-  auto r = sched.AddOneShot(500, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.AddOneShot(
+      500,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
 
   // Remove before it fires
@@ -664,10 +706,13 @@ TEST_CASE("TimerScheduler AddOneShot Remove after fire returns kNotRunning", "[t
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;
 
-  auto r = sched.AddOneShot(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.AddOneShot(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
   osp::TimerTaskId task_id = r.value();
 
@@ -708,15 +753,21 @@ TEST_CASE("TimerScheduler mixed periodic and one-shot", "[timer][oneshot]") {
   std::atomic<int> oneshot_count{0};
   osp::TimerScheduler<4> sched;
 
-  sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &periodic_count);
+  sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &periodic_count);
 
-  sched.AddOneShot(20, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &oneshot_count);
+  sched.AddOneShot(
+      20,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &oneshot_count);
 
   sched.Start();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -777,16 +828,22 @@ TEST_CASE("TimerScheduler AddOneShot from within callback", "[timer][edge][onesh
   Ctx ctx{&sched, &counter};
 
   // Register a one-shot that adds another one-shot in its callback
-  auto r1 = sched.AddOneShot(10, [](void* raw) {
-    auto* c = static_cast<Ctx*>(raw);
-    c->counter->fetch_add(1);
+  auto r1 = sched.AddOneShot(
+      10,
+      [](void* raw) {
+        auto* c = static_cast<Ctx*>(raw);
+        c->counter->fetch_add(1);
 
-    // Add another one-shot from within the callback
-    c->sched->AddOneShot(10, [](void* raw2) {
-      auto* c2 = static_cast<Ctx*>(raw2);
-      c2->counter->fetch_add(1);
-    }, raw);
-  }, &ctx);
+        // Add another one-shot from within the callback
+        c->sched->AddOneShot(
+            10,
+            [](void* raw2) {
+              auto* c2 = static_cast<Ctx*>(raw2);
+              c2->counter->fetch_add(1);
+            },
+            raw);
+      },
+      &ctx);
 
   REQUIRE(r1.has_value());
   REQUIRE(sched.TaskCount() == 1);
@@ -816,20 +873,26 @@ TEST_CASE("TimerScheduler Remove from within callback", "[timer][edge]") {
   Ctx ctx{&sched, osp::TimerTaskId(0), &counter1, &counter2};
 
   // Add task 1 that removes task 2 on first fire
-  auto r1 = sched.Add(10, [](void* raw) {
-    auto* c = static_cast<Ctx*>(raw);
-    int prev = c->counter1->fetch_add(1);
-    if (prev == 0) {
-      // First fire: remove task 2
-      c->sched->Remove(c->task2_id);
-    }
-  }, &ctx);
+  auto r1 = sched.Add(
+      10,
+      [](void* raw) {
+        auto* c = static_cast<Ctx*>(raw);
+        int prev = c->counter1->fetch_add(1);
+        if (prev == 0) {
+          // First fire: remove task 2
+          c->sched->Remove(c->task2_id);
+        }
+      },
+      &ctx);
 
   // Add task 2
-  auto r2 = sched.Add(10, [](void* raw) {
-    auto* c = static_cast<Ctx*>(raw);
-    c->counter2->fetch_add(1);
-  }, &ctx);
+  auto r2 = sched.Add(
+      10,
+      [](void* raw) {
+        auto* c = static_cast<Ctx*>(raw);
+        c->counter2->fetch_add(1);
+      },
+      &ctx);
 
   REQUIRE(r1.has_value());
   REQUIRE(r2.has_value());
@@ -859,16 +922,19 @@ TEST_CASE("TimerScheduler Add from within callback fills slots", "[timer][edge]"
   Ctx ctx{&sched, &counter, &tried_add};
 
   // Add first task that tries to add another task
-  auto r1 = sched.Add(10, [](void* raw) {
-    auto* c = static_cast<Ctx*>(raw);
-    c->counter->fetch_add(1);
+  auto r1 = sched.Add(
+      10,
+      [](void* raw) {
+        auto* c = static_cast<Ctx*>(raw);
+        c->counter->fetch_add(1);
 
-    if (!c->tried_add->load()) {
-      c->tried_add->store(true);
-      // Try to add another task from callback
-      c->sched->Add(50, [](void*) {});
-    }
-  }, &ctx);
+        if (!c->tried_add->load()) {
+          c->tried_add->store(true);
+          // Try to add another task from callback
+          c->sched->Add(50, [](void*) {});
+        }
+      },
+      &ctx);
 
   REQUIRE(r1.has_value());
   REQUIRE(sched.TaskCount() == 1);
@@ -892,10 +958,13 @@ TEST_CASE("TimerScheduler multiple one-shots same delay", "[timer][edge][oneshot
 
   // Add 4 one-shots all with same delay
   for (int i = 0; i < 4; ++i) {
-    auto r = sched.AddOneShot(10, [](void* ctx) {
-      auto* c = static_cast<std::atomic<int>*>(ctx);
-      c->fetch_add(1);
-    }, &counter);
+    auto r = sched.AddOneShot(
+        10,
+        [](void* ctx) {
+          auto* c = static_cast<std::atomic<int>*>(ctx);
+          c->fetch_add(1);
+        },
+        &counter);
     REQUIRE(r.has_value());
   }
 
@@ -917,16 +986,22 @@ TEST_CASE("TimerScheduler one-shot during periodic execution", "[timer][edge][on
   osp::TimerScheduler<4> sched;
 
   // Add periodic task (10ms)
-  auto r1 = sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &periodic_count);
+  auto r1 = sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &periodic_count);
 
   // Add one-shot (30ms)
-  auto r2 = sched.AddOneShot(30, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &oneshot_count);
+  auto r2 = sched.AddOneShot(
+      30,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &oneshot_count);
 
   REQUIRE(r1.has_value());
   REQUIRE(r2.has_value());
@@ -959,10 +1034,13 @@ TEST_CASE("TimerScheduler rapid AddOneShot and Remove cycles", "[timer][edge][on
 
   // Add one and verify it fires
   std::atomic<int> counter{0};
-  auto r = sched.AddOneShot(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.AddOneShot(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
 
   sched.Start();
@@ -978,10 +1056,13 @@ TEST_CASE("TimerScheduler Start Stop Start with one-shot", "[timer][edge][onesho
   osp::TimerScheduler<4> sched;
 
   // Add a one-shot with 500ms delay
-  auto r = sched.AddOneShot(500, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.AddOneShot(
+      500,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
 
   // Start, wait 20ms (not enough to fire), Stop
@@ -1013,10 +1094,13 @@ TEST_CASE("TimerScheduler concurrent AddOneShot stress", "[timer][edge][oneshot]
   for (int t = 0; t < 4; ++t) {
     threads[t] = std::thread([&sched, &counter]() {
       for (int i = 0; i < 10; ++i) {
-        sched.AddOneShot(10, [](void* ctx) {
-          auto* c = static_cast<std::atomic<int>*>(ctx);
-          c->fetch_add(1);
-        }, &counter);
+        sched.AddOneShot(
+            10,
+            [](void* ctx) {
+              auto* c = static_cast<std::atomic<int>*>(ctx);
+              c->fetch_add(1);
+            },
+            &counter);
       }
     });
   }
@@ -1051,15 +1135,17 @@ TEST_CASE("TimerScheduler periodic timer accuracy", "[timer][edge]") {
   Ctx ctx{&counter, timestamps};
 
   // Add a 50ms periodic timer
-  auto r = sched.Add(50, [](void* raw) {
-    auto* c = static_cast<Ctx*>(raw);
-    int idx = c->counter->fetch_add(1);
-    if (idx < 20) {
-      auto now = std::chrono::steady_clock::now().time_since_epoch();
-      c->timestamps[idx].store(
-          std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
-    }
-  }, &ctx);
+  auto r = sched.Add(
+      50,
+      [](void* raw) {
+        auto* c = static_cast<Ctx*>(raw);
+        int idx = c->counter->fetch_add(1);
+        if (idx < 20) {
+          auto now = std::chrono::steady_clock::now().time_since_epoch();
+          c->timestamps[idx].store(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+        }
+      },
+      &ctx);
 
   REQUIRE(r.has_value());
 
@@ -1092,10 +1178,13 @@ TEST_CASE("TimerScheduler: period_ms=1 minimum legal period fires rapidly", "[ti
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;
 
-  auto r = sched.Add(1, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.Add(
+      1,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
 
   sched.Start();
@@ -1130,10 +1219,13 @@ TEST_CASE("TimerScheduler: all one-shots same delay fire exactly once each", "[t
 
   // Add MaxTasks one-shots all with same delay (30ms)
   for (uint32_t i = 0; i < 16; ++i) {
-    auto r = sched.AddOneShot(30, [](void* ctx) {
-      auto* c = static_cast<std::atomic<int>*>(ctx);
-      c->fetch_add(1);
-    }, &counter);
+    auto r = sched.AddOneShot(
+        30,
+        [](void* ctx) {
+          auto* c = static_cast<std::atomic<int>*>(ctx);
+          c->fetch_add(1);
+        },
+        &counter);
     REQUIRE(r.has_value());
   }
 
@@ -1153,10 +1245,13 @@ TEST_CASE("TimerScheduler: one-shot TaskCount decrements after fire", "[timer][e
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;
 
-  auto r = sched.AddOneShot(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.AddOneShot(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
   REQUIRE(sched.TaskCount() == 1);
 
@@ -1174,10 +1269,13 @@ TEST_CASE("TimerScheduler: Remove already-fired one-shot returns error", "[timer
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;
 
-  auto r = sched.AddOneShot(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.AddOneShot(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
   osp::TimerTaskId task_id = r.value();
 
@@ -1202,13 +1300,16 @@ TEST_CASE("TimerScheduler: Stop waits for executing callback to finish", "[timer
   flags[1].store(false, std::memory_order_relaxed);  // callback_finished
   osp::TimerScheduler<4> sched;
 
-  auto r = sched.Add(1, [](void* ctx) {
-    auto* f = static_cast<std::atomic<bool>*>(ctx);
-    f[0].store(true, std::memory_order_release);
-    // Sleep for 100ms in callback
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    f[1].store(true, std::memory_order_release);
-  }, &flags[0]);
+  auto r = sched.Add(
+      1,
+      [](void* ctx) {
+        auto* f = static_cast<std::atomic<bool>*>(ctx);
+        f[0].store(true, std::memory_order_release);
+        // Sleep for 100ms in callback
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        f[1].store(true, std::memory_order_release);
+      },
+      &flags[0]);
   REQUIRE(r.has_value());
 
   sched.Start();
@@ -1251,10 +1352,13 @@ TEST_CASE("TimerScheduler: Add many one-shots before Start all fire", "[timer][e
 
   // Add 16 one-shots with delay=10ms BEFORE Start
   for (int i = 0; i < 16; ++i) {
-    auto r = sched.AddOneShot(10, [](void* ctx) {
-      auto* c = static_cast<std::atomic<int>*>(ctx);
-      c->fetch_add(1);
-    }, &counter);
+    auto r = sched.AddOneShot(
+        10,
+        [](void* ctx) {
+          auto* c = static_cast<std::atomic<int>*>(ctx);
+          c->fetch_add(1);
+        },
+        &counter);
     REQUIRE(r.has_value());
   }
 
@@ -1282,10 +1386,13 @@ TEST_CASE("TimerScheduler: concurrent AddOneShot stress from 8 threads", "[timer
   for (int t = 0; t < 8; ++t) {
     threads[t] = std::thread([&sched, &counter, &add_success]() {
       for (int i = 0; i < 5; ++i) {
-        auto r = sched.AddOneShot(10, [](void* ctx) {
-          auto* c = static_cast<std::atomic<int>*>(ctx);
-          c->fetch_add(1);
-        }, &counter);
+        auto r = sched.AddOneShot(
+            10,
+            [](void* ctx) {
+              auto* c = static_cast<std::atomic<int>*>(ctx);
+              c->fetch_add(1);
+            },
+            &counter);
         if (r.has_value()) {
           add_success.fetch_add(1);
         }
@@ -1325,19 +1432,25 @@ TEST_CASE("TimerScheduler: Remove from callback then re-Add same slot", "[timer]
   Ctx ctx{&sched, osp::TimerTaskId(0), &counter1, &counter2};
 
   // Add a one-shot that removes itself and adds a new timer
-  auto r = sched.AddOneShot(10, [](void* raw) {
-    auto* c = static_cast<Ctx*>(raw);
-    c->counter1->fetch_add(1);
+  auto r = sched.AddOneShot(
+      10,
+      [](void* raw) {
+        auto* c = static_cast<Ctx*>(raw);
+        c->counter1->fetch_add(1);
 
-    // Remove self
-    c->sched->Remove(c->self_id);
+        // Remove self
+        c->sched->Remove(c->self_id);
 
-    // Add a new timer in the same slot
-    c->sched->Add(10, [](void* raw2) {
-      auto* c2 = static_cast<Ctx*>(raw2);
-      c2->counter2->fetch_add(1);
-    }, raw);
-  }, &ctx);
+        // Add a new timer in the same slot
+        c->sched->Add(
+            10,
+            [](void* raw2) {
+              auto* c2 = static_cast<Ctx*>(raw2);
+              c2->counter2->fetch_add(1);
+            },
+            raw);
+      },
+      &ctx);
 
   REQUIRE(r.has_value());
   ctx.self_id = r.value();
@@ -1384,10 +1497,13 @@ TEST_CASE("TimerScheduler: Add with nullptr fn returns error or fires safely", "
 
   // Verify scheduler still works after nullptr attempts
   std::atomic<int> counter{0};
-  auto r3 = sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r3 = sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r3.has_value());
 
   sched.Start();
@@ -1448,10 +1564,13 @@ TEST_CASE("TimerScheduler<ManualTickSource> deterministic periodic", "[timer][ti
   osp::TimerScheduler<4, osp::ManualTickSource> sched;
 
   // Add 10ms periodic timer
-  auto r = sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
 
   sched.Start();
@@ -1476,10 +1595,13 @@ TEST_CASE("TimerScheduler<ManualTickSource> one-shot fires once", "[timer][ticks
   osp::TimerScheduler<4, osp::ManualTickSource> sched;
 
   // Add 15ms one-shot
-  auto r = sched.AddOneShot(15, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.AddOneShot(
+      15,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
 
   sched.Start();
@@ -1569,10 +1691,13 @@ TEST_CASE("TimerScheduler<SteadyTickSource> backward compatibility", "[timer][ti
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;  // No explicit TickSource
 
-  auto r = sched.Add(10, [](void* ctx) {
-    auto* c = static_cast<std::atomic<int>*>(ctx);
-    c->fetch_add(1);
-  }, &counter);
+  auto r = sched.Add(
+      10,
+      [](void* ctx) {
+        auto* c = static_cast<std::atomic<int>*>(ctx);
+        c->fetch_add(1);
+      },
+      &counter);
   REQUIRE(r.has_value());
 
   sched.Start();

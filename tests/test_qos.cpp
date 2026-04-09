@@ -252,13 +252,7 @@ TEST_CASE("IsLifespanExpired", "[qos]") {
 TEST_CASE("Custom QosProfile construction", "[qos]") {
   SECTION("Aggregate initialization") {
     QosProfile custom{
-      ReliabilityPolicy::kReliable,
-      HistoryPolicy::kKeepAll,
-      DurabilityPolicy::kTransientLocal,
-      100,
-      500,
-      2000
-    };
+        ReliabilityPolicy::kReliable, HistoryPolicy::kKeepAll, DurabilityPolicy::kTransientLocal, 100, 500, 2000};
 
     REQUIRE(custom.reliability == ReliabilityPolicy::kReliable);
     REQUIRE(custom.history == HistoryPolicy::kKeepAll);
@@ -269,10 +263,7 @@ TEST_CASE("Custom QosProfile construction", "[qos]") {
   }
 
   SECTION("Partial initialization with defaults") {
-    QosProfile custom{
-      ReliabilityPolicy::kReliable,
-      HistoryPolicy::kKeepAll
-    };
+    QosProfile custom{ReliabilityPolicy::kReliable, HistoryPolicy::kKeepAll};
 
     REQUIRE(custom.reliability == ReliabilityPolicy::kReliable);
     REQUIRE(custom.history == HistoryPolicy::kKeepAll);

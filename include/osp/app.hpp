@@ -516,17 +516,19 @@ struct alignas(8) AppMessage {
   void Store(const void* data, uint32_t len) noexcept {
     if (data == nullptr || len == 0) {
       flags_and_len = 0;
+      payload.ext_ptr = nullptr;
       return;
     }
-    if (len > kMaxDataLen)
+    if (len > kMaxDataLen) {
       len = kMaxDataLen;
+    }
 
     if (len <= OSP_APP_MSG_INLINE_SIZE) {
       flags_and_len = (len << kLenShift);
       std::memcpy(payload.inline_data, data, len);
     } else {
-      flags_and_len = (len << kLenShift) | kExternalFlag;
-      payload.ext_ptr = data;
+      flags_and_len = 0;
+      payload.ext_ptr = nullptr;
     }
   }
 };
@@ -614,10 +616,13 @@ class Application {
   }
 
   // Post a message to this application's queue. Thread-safe (MPSC).
-  // NOTE: if len > OSP_APP_MSG_INLINE_SIZE, only the pointer is stored —
-  // caller must keep the buffer alive until ProcessOne() consumes it.
+  // Only inline payload is supported. If len > OSP_APP_MSG_INLINE_SIZE,
+  // the message is rejected and Post() returns false.
   bool Post(uint16_t ins_id, uint16_t event, const void* data, uint32_t len,
             ResponseChannel* response_ch = nullptr) noexcept {
+    if (len > OSP_APP_MSG_INLINE_SIZE) {
+      return false;
+    }
     std::lock_guard<std::mutex> lock(post_mutex_);
     uint32_t tail = queue_tail_.load(std::memory_order_relaxed);
     uint32_t next_tail = (tail + 1U) % OSP_APP_QUEUE_DEPTH;

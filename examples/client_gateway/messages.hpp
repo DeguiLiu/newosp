@@ -6,6 +6,7 @@
 #define OSP_EXAMPLES_CLIENT_GATEWAY_MESSAGES_HPP_
 
 #include <cstdint>
+
 #include <variant>
 
 struct ClientConnect {
@@ -36,7 +37,6 @@ struct ProcessResult {
   uint32_t processed_bytes;
 };
 
-using Payload = std::variant<ClientConnect, ClientDisconnect, ClientData,
-                             ClientHeartbeat, ProcessResult>;
+using Payload = std::variant<ClientConnect, ClientDisconnect, ClientData, ClientHeartbeat, ProcessResult>;
 
 #endif  // OSP_EXAMPLES_CLIENT_GATEWAY_MESSAGES_HPP_

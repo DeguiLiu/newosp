@@ -5,9 +5,9 @@
 
 #include "osp/app.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <cstring>
+
+#include <catch2/catch_test_macros.hpp>
 
 // ============================================================================
 // Test Instance implementation
@@ -25,8 +25,6 @@ struct TestInstance : public osp::Instance {
     (void)data;
   }
 };
-
-
 
 // ============================================================================
 // IID encoding/decoding
@@ -244,16 +242,16 @@ TEST_CASE("app - AppMessage inline at threshold", "[app]") {
   REQUIRE(std::memcmp(msg.Data(), buf, sizeof(buf)) == 0);
 }
 
-TEST_CASE("app - AppMessage external large data", "[app]") {
+TEST_CASE("app - AppMessage large data is rejected", "[app]") {
   uint8_t large[256];
   std::memset(large, 0xCD, sizeof(large));
 
   osp::AppMessage msg{};
   msg.Store(large, sizeof(large));
 
-  REQUIRE(msg.IsExternal());
-  REQUIRE(msg.DataLen() == sizeof(large));
-  REQUIRE(msg.Data() == large);  // pointer, not copy
+  REQUIRE(!msg.IsExternal());
+  REQUIRE(msg.DataLen() == 0U);
+  REQUIRE(msg.Data() != large);
 }
 
 TEST_CASE("app - AppMessage null data", "[app]") {
@@ -286,24 +284,18 @@ TEST_CASE("app - AppMessage size and alignment", "[app]") {
   CHECK(pl_off % 8 == 0);   // 64-bit aligned (union)
 }
 
-TEST_CASE("app - Post and process large message via pointer", "[app]") {
+TEST_CASE("app - Post large message fails", "[app]") {
   osp::Application<DataCapture, 4> app(50, "large_msg");
   auto r = app.CreateInstance();
   REQUIRE(r.has_value());
 
-  // Large payload > inline threshold
   uint8_t large[128];
   for (uint32_t i = 0; i < sizeof(large); ++i) {
     large[i] = static_cast<uint8_t>(i & 0xFF);
   }
 
-  REQUIRE(app.Post(r.value(), 99, large, sizeof(large)));
-  REQUIRE(app.ProcessOne());
-
-  auto* inst = app.GetInstance(r.value());
-  REQUIRE(inst != nullptr);
-  REQUIRE(inst->captured_len == sizeof(large));
-  REQUIRE(std::memcmp(inst->captured, large, sizeof(large)) == 0);
+  REQUIRE(!app.Post(r.value(), 99, large, sizeof(large)));
+  REQUIRE(app.PendingMessages() == 0U);
 }
 
 TEST_CASE("app - Post and process small message inline", "[app]") {
@@ -463,7 +455,6 @@ TEST_CASE("app - Post+ProcessOne transitions through Processing", "[app][hsm]") 
   uint32_t payload = 99;
   REQUIRE(app.Post(r.value(), 42, &payload, sizeof(payload)));
   REQUIRE(app.ProcessOne());
-
 
   REQUIRE(inst->last_event == 42);
   REQUIRE(inst->msg_count == 1);

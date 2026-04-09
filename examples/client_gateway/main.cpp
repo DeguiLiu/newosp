@@ -13,9 +13,10 @@
 #include "osp/shutdown.hpp"
 #include "osp/worker_pool.hpp"
 
-#include <chrono>
 #include <cstdint>
 #include <cstring>
+
+#include <chrono>
 #include <thread>
 
 static constexpr uint32_t kNumClients = 4;
@@ -39,17 +40,12 @@ static int cmd_stats(int /*argc*/, char* /*argv*/[]) {
     return -1;
   }
   osp::DebugShell::Printf("=== Gateway Stats ===\r\n");
-  osp::DebugShell::Printf("  connected      : %u\r\n",
-                           g_stats->connected.load(std::memory_order_relaxed));
-  osp::DebugShell::Printf("  disconnected   : %u\r\n",
-                           g_stats->disconnected.load(std::memory_order_relaxed));
-  osp::DebugShell::Printf("  data_processed : %u\r\n",
-                           g_stats->data_processed.load(std::memory_order_relaxed));
+  osp::DebugShell::Printf("  connected      : %u\r\n", g_stats->connected.load(std::memory_order_relaxed));
+  osp::DebugShell::Printf("  disconnected   : %u\r\n", g_stats->disconnected.load(std::memory_order_relaxed));
+  osp::DebugShell::Printf("  data_processed : %u\r\n", g_stats->data_processed.load(std::memory_order_relaxed));
   osp::DebugShell::Printf("  bytes_processed: %lu\r\n",
-                           static_cast<unsigned long>(
-                               g_stats->bytes_processed.load(std::memory_order_relaxed)));
-  osp::DebugShell::Printf("  heartbeats     : %u\r\n",
-                           g_stats->heartbeats.load(std::memory_order_relaxed));
+                          static_cast<unsigned long>(g_stats->bytes_processed.load(std::memory_order_relaxed)));
+  osp::DebugShell::Printf("  heartbeats     : %u\r\n", g_stats->heartbeats.load(std::memory_order_relaxed));
   return 0;
 }
 OSP_SHELL_CMD(cmd_stats, "Show gateway statistics");
@@ -58,10 +54,8 @@ OSP_SHELL_CMD(cmd_stats, "Show gateway statistics");
 static int cmd_bus(int /*argc*/, char* /*argv*/[]) {
   auto bs = osp::AsyncBus<Payload>::Instance().GetStatistics();
   osp::DebugShell::Printf("=== Bus Stats ===\r\n");
-  osp::DebugShell::Printf("  published: %lu\r\n",
-                           static_cast<unsigned long>(bs.messages_published));
-  osp::DebugShell::Printf("  dropped  : %lu\r\n",
-                           static_cast<unsigned long>(bs.messages_dropped));
+  osp::DebugShell::Printf("  published: %lu\r\n", static_cast<unsigned long>(bs.messages_published));
+  osp::DebugShell::Printf("  dropped  : %lu\r\n", static_cast<unsigned long>(bs.messages_dropped));
   return 0;
 }
 OSP_SHELL_CMD(cmd_bus, "Show bus statistics");
@@ -74,12 +68,9 @@ static int cmd_pool(int /*argc*/, char* /*argv*/[]) {
   }
   auto ps = g_pool->GetStats();
   osp::DebugShell::Printf("=== Worker Pool Stats ===\r\n");
-  osp::DebugShell::Printf("  dispatched : %lu\r\n",
-                           static_cast<unsigned long>(ps.dispatched));
-  osp::DebugShell::Printf("  processed  : %lu\r\n",
-                           static_cast<unsigned long>(ps.processed));
-  osp::DebugShell::Printf("  queue_full : %lu\r\n",
-                           static_cast<unsigned long>(ps.worker_queue_full));
+  osp::DebugShell::Printf("  dispatched : %lu\r\n", static_cast<unsigned long>(ps.dispatched));
+  osp::DebugShell::Printf("  processed  : %lu\r\n", static_cast<unsigned long>(ps.processed));
+  osp::DebugShell::Printf("  queue_full : %lu\r\n", static_cast<unsigned long>(ps.worker_queue_full));
   return 0;
 }
 OSP_SHELL_CMD(cmd_pool, "Show worker pool statistics");
@@ -197,8 +188,7 @@ int main(int argc, char* argv[]) {
     ProcessResult msg{};
     msg.client_id = id;
     msg.status = 0;
-    msg.processed_bytes = static_cast<uint32_t>(
-        stats.bytes_processed.load(std::memory_order_relaxed) / kNumClients);
+    msg.processed_bytes = static_cast<uint32_t>(stats.bytes_processed.load(std::memory_order_relaxed) / kNumClients);
     gateway.Publish(msg);
   }
   pool.Resume();
@@ -236,19 +226,13 @@ int main(int argc, char* argv[]) {
   auto ps = pool.GetStats();
   auto bs = osp::AsyncBus<Payload>::Instance().GetStatistics();
   OSP_LOG_INFO("main", "=== Statistics ===");
-  OSP_LOG_INFO("main", "  connected=%u disconnected=%u",
-               stats.connected.load(), stats.disconnected.load());
-  OSP_LOG_INFO("main", "  data_processed=%u bytes=%lu heartbeats=%u",
-               stats.data_processed.load(),
-               static_cast<unsigned long>(stats.bytes_processed.load()),
-               stats.heartbeats.load());
-  OSP_LOG_INFO("main", "  bus: published=%lu dropped=%lu",
-               static_cast<unsigned long>(bs.messages_published),
+  OSP_LOG_INFO("main", "  connected=%u disconnected=%u", stats.connected.load(), stats.disconnected.load());
+  OSP_LOG_INFO("main", "  data_processed=%u bytes=%lu heartbeats=%u", stats.data_processed.load(),
+               static_cast<unsigned long>(stats.bytes_processed.load()), stats.heartbeats.load());
+  OSP_LOG_INFO("main", "  bus: published=%lu dropped=%lu", static_cast<unsigned long>(bs.messages_published),
                static_cast<unsigned long>(bs.messages_dropped));
-  OSP_LOG_INFO("main", "  pool: dispatched=%lu processed=%lu qfull=%lu",
-               static_cast<unsigned long>(ps.dispatched),
-               static_cast<unsigned long>(ps.processed),
-               static_cast<unsigned long>(ps.worker_queue_full));
+  OSP_LOG_INFO("main", "  pool: dispatched=%lu processed=%lu qfull=%lu", static_cast<unsigned long>(ps.dispatched),
+               static_cast<unsigned long>(ps.processed), static_cast<unsigned long>(ps.worker_queue_full));
   OSP_LOG_INFO("main", "=== Demo Complete ===");
 
   osp::log::Shutdown();

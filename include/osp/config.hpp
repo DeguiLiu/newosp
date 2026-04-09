@@ -59,6 +59,13 @@
 #include <cstdlib>
 #include <cstring>
 
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+#include <cerrno>
+
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #ifdef OSP_CONFIG_INI_ENABLED
 #include "osp/inicpp.hpp"
 #endif
@@ -142,11 +149,18 @@ class ConfigStore {
 
   int32_t GetInt(const char* section, const char* key, int32_t default_val = 0) const {
     const Entry* e = FindEntry(section, key);
-    if (e == nullptr)
+    if (e == nullptr) {
       return default_val;
+    }
     char* end = nullptr;
     long val = std::strtol(e->value, &end, 10);
-    return (end == e->value) ? default_val : static_cast<int32_t>(val);
+    if (end == e->value) {
+      return default_val;
+    }
+    if (val < static_cast<long>(INT32_MIN) || val > static_cast<long>(INT32_MAX)) {
+      return default_val;
+    }
+    return static_cast<int32_t>(val);
   }
 
   uint16_t GetPort(const char* section, const char* key, uint16_t default_val = 0) const {
@@ -259,13 +273,41 @@ class ConfigStore {
   }
 
   static expected<uint32_t, ConfigError> ReadFileToBuffer(const char* path, char* buf, uint32_t buf_size) {
-    FILE* f = std::fopen(path, "r");
-    if (f == nullptr)
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+    int fd = ::open(path, O_RDONLY);
+    if (0 > fd) {
       return expected<uint32_t, ConfigError>::error(ConfigError::kFileNotFound);
+    }
+    uint32_t total = 0U;
+    for (;;) {
+      if (total >= buf_size - 1U) {
+        break;
+      }
+      ssize_t n = ::read(fd, buf + total, buf_size - 1U - total);
+      if (0 > n) {
+        if (errno == EINTR) {
+          continue;
+        }
+        break;
+      }
+      if (0 == n) {
+        break;
+      }
+      total += static_cast<uint32_t>(n);
+    }
+    ::close(fd);
+    buf[total] = '\0';
+    return expected<uint32_t, ConfigError>::success(total);
+#else
+    FILE* f = std::fopen(path, "r");
+    if (nullptr == f) {
+      return expected<uint32_t, ConfigError>::error(ConfigError::kFileNotFound);
+    }
     size_t bytes = std::fread(buf, 1, buf_size - 1, f);
     std::fclose(f);
     buf[bytes] = '\0';
     return expected<uint32_t, ConfigError>::success(static_cast<uint32_t>(bytes));
+#endif
   }
 
   const Entry* FindEntry(const char* section, const char* key) const {
@@ -344,11 +386,19 @@ struct ConfigParser<IniBackend> {
   static expected<void, ConfigError> ParseFile(ConfigStore& store, const char* path) {
     // Check file existence before loading (inicpp silently ignores missing files)
     {
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+      int fd = ::open(path, O_RDONLY);
+      if (0 > fd) {
+        return expected<void, ConfigError>::error(ConfigError::kFileNotFound);
+      }
+      ::close(fd);
+#else
       FILE* f = std::fopen(path, "r");
-      if (f == nullptr) {
+      if (nullptr == f) {
         return expected<void, ConfigError>::error(ConfigError::kFileNotFound);
       }
       std::fclose(f);
+#endif
     }
 #if defined(__cpp_exceptions)
     try {

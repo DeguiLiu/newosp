@@ -1,8 +1,9 @@
 // Copyright (c) 2025 newosp
 // SPDX-License-Identifier: MIT
 
-#include <catch2/catch_test_macros.hpp>
 #include "osp/system_monitor.hpp"
+
+#include <catch2/catch_test_macros.hpp>
 
 // --- POD snapshot tests ---
 TEST_CASE("SystemMonitor: snapshot structs are POD-like", "[system_monitor]") {
@@ -73,9 +74,8 @@ TEST_CASE("SystemMonitor: SetThresholds", "[system_monitor]") {
 TEST_CASE("SystemMonitor: SetAlertCallback", "[system_monitor]") {
   osp::SystemMonitor<4> mon;
   uint32_t alert_count = 0;
-  mon.SetAlertCallback([](const osp::SystemSnapshot&, const char*, void* ctx) {
-    ++(*static_cast<uint32_t*>(ctx));
-  }, &alert_count);
+  mon.SetAlertCallback([](const osp::SystemSnapshot&, const char*, void* ctx) { ++(*static_cast<uint32_t*>(ctx)); },
+                       &alert_count);
   // No crash
 }
 
@@ -132,7 +132,7 @@ TEST_CASE("SystemMonitor: ReadCpu first call returns zeros", "[system_monitor]")
 
 TEST_CASE("SystemMonitor: ReadCpu second call returns valid data", "[system_monitor]") {
   osp::SystemMonitor<4> mon;
-  mon.ReadCpu();  // First call (baseline)
+  mon.ReadCpu();             // First call (baseline)
   auto cpu = mon.ReadCpu();  // Second call (delta)
   // Percentages should be in valid range
   CHECK(cpu.total_percent <= 100);
@@ -196,16 +196,15 @@ TEST_CASE("SystemMonitor: alert fires on threshold crossing", "[system_monitor]"
   // Set memory threshold very low so it triggers
   osp::SystemMonitor<4> mon;
   osp::AlertThresholds t;
-  t.cpu_percent = 100;       // Won't trigger (CPU rarely 100%)
-  t.memory_percent = 1;      // Will trigger (memory always > 1%)
-  t.disk_percent = 100;      // Won't trigger
-  t.cpu_temp_mc = 200000;    // Won't trigger (200°C)
+  t.cpu_percent = 100;     // Won't trigger (CPU rarely 100%)
+  t.memory_percent = 1;    // Will trigger (memory always > 1%)
+  t.disk_percent = 100;    // Won't trigger
+  t.cpu_temp_mc = 200000;  // Won't trigger (200°C)
   mon.SetThresholds(t);
 
   uint32_t alert_count = 0;
-  mon.SetAlertCallback([](const osp::SystemSnapshot&, const char*, void* ctx) {
-    ++(*static_cast<uint32_t*>(ctx));
-  }, &alert_count);
+  mon.SetAlertCallback([](const osp::SystemSnapshot&, const char*, void* ctx) { ++(*static_cast<uint32_t*>(ctx)); },
+                       &alert_count);
 
   mon.Sample();  // First sample (baseline, prev=0, curr>1 => crosses threshold)
   mon.Sample();  // Second sample
@@ -216,16 +215,15 @@ TEST_CASE("SystemMonitor: alert fires on threshold crossing", "[system_monitor]"
 TEST_CASE("SystemMonitor: no repeated alerts without state change", "[system_monitor]") {
   osp::SystemMonitor<4> mon;
   osp::AlertThresholds t;
-  t.cpu_percent = 1;         // Will trigger once
-  t.memory_percent = 1;      // Will trigger once
+  t.cpu_percent = 1;     // Will trigger once
+  t.memory_percent = 1;  // Will trigger once
   t.disk_percent = 100;
   t.cpu_temp_mc = 200000;
   mon.SetThresholds(t);
 
   uint32_t alert_count = 0;
-  mon.SetAlertCallback([](const osp::SystemSnapshot&, const char*, void* ctx) {
-    ++(*static_cast<uint32_t*>(ctx));
-  }, &alert_count);
+  mon.SetAlertCallback([](const osp::SystemSnapshot&, const char*, void* ctx) { ++(*static_cast<uint32_t*>(ctx)); },
+                       &alert_count);
 
   mon.Sample();  // baseline
   uint32_t first_count = alert_count;

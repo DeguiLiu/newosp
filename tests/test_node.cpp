@@ -5,10 +5,10 @@
 
 #include "osp/node.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <cstring>
 
 #include <atomic>
-#include <cstring>
+#include <catch2/catch_test_macros.hpp>
 #include <variant>
 
 // --- Test message types ---
@@ -93,8 +93,7 @@ TEST_CASE("Node publish and subscribe", "[node]") {
   uint32_t received_sender = 0;
 
   auto r = sub_node.Subscribe<Heartbeat>(
-      [&received_seq, &received_sender](
-          const Heartbeat& hb, const osp::MessageHeader& hdr) {
+      [&received_seq, &received_sender](const Heartbeat& hb, const osp::MessageHeader& hdr) {
         received_seq = static_cast<int>(hb.seq);
         received_sender = hdr.sender_id;
       });
@@ -116,10 +115,7 @@ TEST_CASE("Node SubscribeSimple", "[node]") {
   osp::Node<NodePayload> node("simple_sub", 1);
 
   int32_t received_action = 0;
-  auto r = node.SubscribeSimple<Command>(
-      [&received_action](const Command& cmd) {
-        received_action = cmd.action;
-      });
+  auto r = node.SubscribeSimple<Command>([&received_action](const Command& cmd) { received_action = cmd.action; });
   REQUIRE(r.has_value());
 
   node.Publish(Command{42});
@@ -135,10 +131,7 @@ TEST_CASE("Node RAII unsubscribe on destroy", "[node]") {
 
   {
     osp::Node<NodePayload> temp_node("temp", 1);
-    temp_node.Subscribe<Heartbeat>(
-        [&count](const Heartbeat&, const osp::MessageHeader&) {
-          count.fetch_add(1);
-        });
+    temp_node.Subscribe<Heartbeat>([&count](const Heartbeat&, const osp::MessageHeader&) { count.fetch_add(1); });
 
     // Publish and process while node is alive
     NodeBus::Instance().Publish(Heartbeat{1}, 0);
@@ -158,8 +151,7 @@ TEST_CASE("Node Stop clears subscriptions", "[node]") {
   osp::Node<NodePayload> node("stoppable", 1);
   int count = 0;
 
-  node.Subscribe<Status>(
-      [&count](const Status&, const osp::MessageHeader&) { ++count; });
+  node.Subscribe<Status>([&count](const Status&, const osp::MessageHeader&) { ++count; });
   REQUIRE(node.SubscriptionCount() == 1);
 
   node.Publish(Status{1});
@@ -186,12 +178,10 @@ TEST_CASE("Node Publisher factory", "[node]") {
   int received = 0;
   uint32_t received_sender = 0;
 
-  node.Subscribe<Command>(
-      [&received, &received_sender](
-          const Command& cmd, const osp::MessageHeader& hdr) {
-        received = cmd.action;
-        received_sender = hdr.sender_id;
-      });
+  node.Subscribe<Command>([&received, &received_sender](const Command& cmd, const osp::MessageHeader& hdr) {
+    received = cmd.action;
+    received_sender = hdr.sender_id;
+  });
 
   REQUIRE(pub.Publish(Command{99}));
   node.SpinOnce();
@@ -208,9 +198,7 @@ TEST_CASE("Node Publisher with priority", "[node]") {
 
   osp::MessagePriority captured_prio = osp::MessagePriority::kMedium;
   node.Subscribe<Heartbeat>(
-      [&captured_prio](const Heartbeat&, const osp::MessageHeader& hdr) {
-        captured_prio = hdr.priority;
-      });
+      [&captured_prio](const Heartbeat&, const osp::MessageHeader& hdr) { captured_prio = hdr.priority; });
 
   REQUIRE(pub.PublishWithPriority(Heartbeat{1}, osp::MessagePriority::kHigh));
   node.SpinOnce();
@@ -227,18 +215,9 @@ TEST_CASE("Node multiple subscriptions", "[node]") {
   int cmd_count = 0;
   int status_count = 0;
 
-  node.Subscribe<Heartbeat>(
-      [&hb_count](const Heartbeat&, const osp::MessageHeader&) {
-        ++hb_count;
-      });
-  node.Subscribe<Command>(
-      [&cmd_count](const Command&, const osp::MessageHeader&) {
-        ++cmd_count;
-      });
-  node.Subscribe<Status>(
-      [&status_count](const Status&, const osp::MessageHeader&) {
-        ++status_count;
-      });
+  node.Subscribe<Heartbeat>([&hb_count](const Heartbeat&, const osp::MessageHeader&) { ++hb_count; });
+  node.Subscribe<Command>([&cmd_count](const Command&, const osp::MessageHeader&) { ++cmd_count; });
+  node.Subscribe<Status>([&status_count](const Status&, const osp::MessageHeader&) { ++status_count; });
 
   REQUIRE(node.SubscriptionCount() == 3);
 
@@ -265,15 +244,12 @@ TEST_CASE("Node cross-node communication", "[node]") {
 
   int32_t final_action = 0;
 
-  controller.Subscribe<Heartbeat>(
-      [&controller](const Heartbeat& hb, const osp::MessageHeader&) {
-        controller.Publish(Command{static_cast<int32_t>(hb.seq * 2)});
-      });
+  controller.Subscribe<Heartbeat>([&controller](const Heartbeat& hb, const osp::MessageHeader&) {
+    controller.Publish(Command{static_cast<int32_t>(hb.seq * 2)});
+  });
 
   actuator.Subscribe<Command>(
-      [&final_action](const Command& cmd, const osp::MessageHeader&) {
-        final_action = cmd.action;
-      });
+      [&final_action](const Command& cmd, const osp::MessageHeader&) { final_action = cmd.action; });
 
   // Sensor publishes heartbeat
   sensor.Publish(Heartbeat{50});
@@ -293,10 +269,7 @@ TEST_CASE("Node PublishWithPriority", "[node]") {
   osp::Node<NodePayload> node("prio", 1);
 
   osp::MessagePriority cap = osp::MessagePriority::kMedium;
-  node.Subscribe<Heartbeat>(
-      [&cap](const Heartbeat&, const osp::MessageHeader& hdr) {
-        cap = hdr.priority;
-      });
+  node.Subscribe<Heartbeat>([&cap](const Heartbeat&, const osp::MessageHeader& hdr) { cap = hdr.priority; });
 
   node.PublishWithPriority(Heartbeat{1}, osp::MessagePriority::kLow);
   node.SpinOnce();
@@ -319,9 +292,7 @@ TEST_CASE("node - Topic publish and subscribe", "[node]") {
   uint32_t received_sender = 0;
 
   auto r = sub_node.Subscribe<Heartbeat>(
-      "sensor/imu",
-      [&received_seq, &received_sender](
-          const Heartbeat& hb, const osp::MessageHeader& hdr) {
+      "sensor/imu", [&received_seq, &received_sender](const Heartbeat& hb, const osp::MessageHeader& hdr) {
         received_seq = static_cast<int>(hb.seq);
         received_sender = hdr.sender_id;
       });
@@ -345,10 +316,7 @@ TEST_CASE("node - Topic filtering", "[node]") {
 
   // Subscribe to "topicA"
   auto r = sub_node.Subscribe<Heartbeat>(
-      "topicA",
-      [&received_count](const Heartbeat&, const osp::MessageHeader&) {
-        ++received_count;
-      });
+      "topicA", [&received_count](const Heartbeat&, const osp::MessageHeader&) { ++received_count; });
   REQUIRE(r.has_value());
 
   // Publish to "topicB" - should NOT be received
@@ -372,17 +340,11 @@ TEST_CASE("node - Topic and non-topic coexistence", "[node]") {
   int topic_count = 0;
 
   // Non-topic subscriber (receives all)
-  sub_node.Subscribe<Heartbeat>(
-      [&non_topic_count](const Heartbeat&, const osp::MessageHeader&) {
-        ++non_topic_count;
-      });
+  sub_node.Subscribe<Heartbeat>([&non_topic_count](const Heartbeat&, const osp::MessageHeader&) { ++non_topic_count; });
 
   // Topic subscriber (receives only matching topic)
-  sub_node.Subscribe<Heartbeat>(
-      "specific_topic",
-      [&topic_count](const Heartbeat&, const osp::MessageHeader&) {
-        ++topic_count;
-      });
+  sub_node.Subscribe<Heartbeat>("specific_topic",
+                                [&topic_count](const Heartbeat&, const osp::MessageHeader&) { ++topic_count; });
 
   // Publish without topic
   REQUIRE(pub_node.Publish(Heartbeat{1}));
@@ -413,17 +375,11 @@ TEST_CASE("node - Multiple topics same type", "[node]") {
   int gps_count = 0;
 
   // Subscribe to different topics of same type
-  sub_node.Subscribe<Heartbeat>(
-      "sensor/imu",
-      [&imu_count](const Heartbeat&, const osp::MessageHeader&) {
-        ++imu_count;
-      });
+  sub_node.Subscribe<Heartbeat>("sensor/imu",
+                                [&imu_count](const Heartbeat&, const osp::MessageHeader&) { ++imu_count; });
 
-  sub_node.Subscribe<Heartbeat>(
-      "sensor/gps",
-      [&gps_count](const Heartbeat&, const osp::MessageHeader&) {
-        ++gps_count;
-      });
+  sub_node.Subscribe<Heartbeat>("sensor/gps",
+                                [&gps_count](const Heartbeat&, const osp::MessageHeader&) { ++gps_count; });
 
   // Publish to IMU topic
   REQUIRE(pub_node.Publish(Heartbeat{1}, "sensor/imu"));

@@ -9,11 +9,11 @@
 
 #include "osp/inicpp.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/catch_approx.hpp>
-
 #include <cstdio>
 #include <cstring>
+
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sstream>
 #include <string>

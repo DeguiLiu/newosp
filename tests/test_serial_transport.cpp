@@ -3,13 +3,14 @@
  * @brief Tests for serial_transport.hpp using PTY pairs to simulate serial ports.
  */
 
-#include <catch2/catch_test_macros.hpp>
 #include "osp/serial_transport.hpp"
 
-#include <cstring>
-#include <unistd.h>
-#include <fcntl.h>
 #include <cstdlib>
+#include <cstring>
+
+#include <catch2/catch_test_macros.hpp>
+#include <fcntl.h>
+#include <unistd.h>
 
 #if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
 #include <pty.h>
@@ -40,16 +41,17 @@ static PtyPair CreatePtyPair() {
 }
 
 static void ClosePty(PtyPair& p) {
-  if (p.master >= 0) ::close(p.master);
-  if (p.slave >= 0) ::close(p.slave);
+  if (p.master >= 0)
+    ::close(p.master);
+  if (p.slave >= 0)
+    ::close(p.slave);
   p.master = p.slave = -1;
   p.valid = false;
 }
 
 // Helper: build a valid frame in a buffer, returns total frame size
-static uint32_t BuildFrame(uint8_t* buf, uint32_t buf_size,
-                           uint16_t type_index, uint16_t seq,
-                           const void* payload, uint32_t payload_size) {
+static uint32_t BuildFrame(uint8_t* buf, uint32_t buf_size, uint16_t type_index, uint16_t seq, const void* payload,
+                           uint32_t payload_size) {
   if (buf_size < osp::kSerialHeaderSize + payload_size + osp::kSerialTrailerSize)
     return 0;
 
@@ -64,10 +66,14 @@ static uint32_t BuildFrame(uint8_t* buf, uint32_t buf_size,
   // sync word: fixed byte order 0xAA, 0x55
   buf[pos++] = 0xAA;
   buf[pos++] = 0x55;
-  WriteLE16(buf + pos, osp::kSerialMagic);    pos += 2;
-  WriteLE16(buf + pos, msg_len);              pos += 2;
-  WriteLE16(buf + pos, seq);                  pos += 2;
-  WriteLE16(buf + pos, type_index);           pos += 2;
+  WriteLE16(buf + pos, osp::kSerialMagic);
+  pos += 2;
+  WriteLE16(buf + pos, msg_len);
+  pos += 2;
+  WriteLE16(buf + pos, seq);
+  pos += 2;
+  WriteLE16(buf + pos, type_index);
+  pos += 2;
 
   if (payload_size > 0 && payload != nullptr) {
     std::memcpy(buf + pos, payload, payload_size);
@@ -75,7 +81,8 @@ static uint32_t BuildFrame(uint8_t* buf, uint32_t buf_size,
   }
 
   uint16_t crc = osp::Crc16Ccitt::Calculate(buf, pos);
-  WriteLE16(buf + pos, crc); pos += 2;
+  WriteLE16(buf + pos, crc);
+  pos += 2;
   buf[pos++] = osp::kSerialTailByte;
 
   return pos;
@@ -169,8 +176,7 @@ struct RxRecord {
   uint32_t count = 0;
 };
 
-static void TestRxCallback(const void* payload, uint32_t size,
-                            uint16_t type_index, uint16_t seq, void* ctx) {
+static void TestRxCallback(const void* payload, uint32_t size, uint16_t type_index, uint16_t seq, void* ctx) {
   auto* rec = static_cast<RxRecord*>(ctx);
   rec->type_index = type_index;
   rec->seq = seq;
@@ -183,7 +189,8 @@ static void TestRxCallback(const void* payload, uint32_t size,
 
 TEST_CASE("serial - Send and receive single frame", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   // Sender uses slave_name
   osp::SerialConfig tx_cfg;
@@ -253,15 +260,18 @@ TEST_CASE("serial - Send and receive single frame", "[serial]") {
 TEST_CASE("serial - Send and receive multiple frames", "[serial]") {
   auto pty_tx = CreatePtyPair();
   auto pty_rx = CreatePtyPair();
-  if (!pty_tx.valid || !pty_rx.valid) SKIP("PTY not available");
+  if (!pty_tx.valid || !pty_rx.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig tx_cfg;
   tx_cfg.port_name.assign(osp::TruncateToCapacity, pty_tx.slave_name);
-  ::close(pty_tx.slave); pty_tx.slave = -1;
+  ::close(pty_tx.slave);
+  pty_tx.slave = -1;
 
   osp::SerialConfig rx_cfg;
   rx_cfg.port_name.assign(osp::TruncateToCapacity, pty_rx.slave_name);
-  ::close(pty_rx.slave); pty_rx.slave = -1;
+  ::close(pty_rx.slave);
+  pty_rx.slave = -1;
 
   osp::SerialTransport sender(tx_cfg);
   osp::SerialTransport receiver(rx_cfg);
@@ -305,16 +315,19 @@ TEST_CASE("serial - Send and receive multiple frames", "[serial]") {
 TEST_CASE("serial - Sequence number tracking", "[serial]") {
   auto pty_tx = CreatePtyPair();
   auto pty_rx = CreatePtyPair();
-  if (!pty_tx.valid || !pty_rx.valid) SKIP("PTY not available");
+  if (!pty_tx.valid || !pty_rx.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig tx_cfg;
   tx_cfg.port_name.assign(osp::TruncateToCapacity, pty_tx.slave_name);
-  ::close(pty_tx.slave); pty_tx.slave = -1;
+  ::close(pty_tx.slave);
+  pty_tx.slave = -1;
 
   osp::SerialConfig rx_cfg;
   rx_cfg.reliability.enable_seq_check = true;
   rx_cfg.port_name.assign(osp::TruncateToCapacity, pty_rx.slave_name);
-  ::close(pty_rx.slave); pty_rx.slave = -1;
+  ::close(pty_rx.slave);
+  pty_rx.slave = -1;
 
   osp::SerialTransport sender(tx_cfg);
   osp::SerialTransport receiver(rx_cfg);
@@ -354,11 +367,13 @@ TEST_CASE("serial - Sequence number tracking", "[serial]") {
 
 TEST_CASE("serial - CRC error detection", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
   REQUIRE(receiver.Open().has_value());
@@ -395,12 +410,14 @@ TEST_CASE("serial - CRC error detection", "[serial]") {
 
 TEST_CASE("serial - Oversize frame rejection", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.frame_max_size = 32;  // Very small limit
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
   REQUIRE(receiver.Open().has_value());
@@ -434,11 +451,13 @@ TEST_CASE("serial - Oversize frame rejection", "[serial]") {
 
 TEST_CASE("serial - Statistics tracking", "[serial]") {
   auto pty_tx = CreatePtyPair();
-  if (!pty_tx.valid) SKIP("PTY not available");
+  if (!pty_tx.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.port_name.assign(osp::TruncateToCapacity, pty_tx.slave_name);
-  ::close(pty_tx.slave); pty_tx.slave = -1;
+  ::close(pty_tx.slave);
+  pty_tx.slave = -1;
 
   osp::SerialTransport tx(cfg);
   REQUIRE(tx.Open().has_value());
@@ -466,11 +485,13 @@ TEST_CASE("serial - Statistics tracking", "[serial]") {
 
 TEST_CASE("serial - Frame sync recovery", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
   REQUIRE(receiver.Open().has_value());
@@ -506,12 +527,14 @@ TEST_CASE("serial - Frame sync recovery", "[serial]") {
 
 TEST_CASE("serial - Health monitoring healthy state", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.watchdog_timeout_ms = 1000;
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport transport(cfg);
   REQUIRE(transport.Open().has_value());
@@ -533,13 +556,15 @@ TEST_CASE("serial - Health monitoring healthy state", "[serial]") {
 
 TEST_CASE("serial - Health monitoring degraded state", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.degraded_error_threshold = 2;
   cfg.failed_error_threshold = 10;
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
   REQUIRE(receiver.Open().has_value());
@@ -562,8 +587,7 @@ TEST_CASE("serial - Health monitoring degraded state", "[serial]") {
 
   // Should be degraded after multiple errors
   auto health = receiver.GetHealth();
-  REQUIRE((health == osp::SerialPortHealth::kDegraded ||
-           health == osp::SerialPortHealth::kFailed));
+  REQUIRE((health == osp::SerialPortHealth::kDegraded || health == osp::SerialPortHealth::kFailed));
   REQUIRE_FALSE(receiver.IsHealthy());
 
   receiver.Close();
@@ -576,12 +600,14 @@ TEST_CASE("serial - Health monitoring degraded state", "[serial]") {
 
 TEST_CASE("serial - Rate limiting", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.max_frames_per_second = 5;  // Very low limit for testing
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport tx(cfg);
   REQUIRE(tx.Open().has_value());
@@ -618,16 +644,19 @@ TEST_CASE("serial - Rate limiting", "[serial]") {
 TEST_CASE("serial - Sequence number wraparound", "[serial]") {
   auto pty_tx = CreatePtyPair();
   auto pty_rx = CreatePtyPair();
-  if (!pty_tx.valid || !pty_rx.valid) SKIP("PTY not available");
+  if (!pty_tx.valid || !pty_rx.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig tx_cfg;
   tx_cfg.port_name.assign(osp::TruncateToCapacity, pty_tx.slave_name);
-  ::close(pty_tx.slave); pty_tx.slave = -1;
+  ::close(pty_tx.slave);
+  pty_tx.slave = -1;
 
   osp::SerialConfig rx_cfg;
   rx_cfg.reliability.enable_seq_check = true;
   rx_cfg.port_name.assign(osp::TruncateToCapacity, pty_rx.slave_name);
-  ::close(pty_rx.slave); pty_rx.slave = -1;
+  ::close(pty_rx.slave);
+  pty_rx.slave = -1;
 
   osp::SerialTransport sender(tx_cfg);
   osp::SerialTransport receiver(rx_cfg);
@@ -666,13 +695,15 @@ TEST_CASE("serial - Sequence number wraparound", "[serial]") {
 
 TEST_CASE("serial - Write retry tracking", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.write_retry_count = 5;
   cfg.write_retry_delay_us = 100;
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport tx(cfg);
   REQUIRE(tx.Open().has_value());
@@ -698,11 +729,13 @@ TEST_CASE("serial - Write retry tracking", "[serial]") {
 
 TEST_CASE("serial - Rx callback invocation", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
   REQUIRE(receiver.Open().has_value());
@@ -740,12 +773,14 @@ TEST_CASE("serial - Rx callback invocation", "[serial]") {
 
 TEST_CASE("serial - Partial frame timeout", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.inter_byte_timeout_ms = 1;  // Very short timeout for testing
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
   REQUIRE(receiver.Open().has_value());
@@ -799,11 +834,13 @@ TEST_CASE("serial - Port not open error", "[serial]") {
 
 TEST_CASE("serial - Zero-payload frame", "[serial]") {
   auto pty = CreatePtyPair();
-  if (!pty.valid) SKIP("PTY not available");
+  if (!pty.valid)
+    SKIP("PTY not available");
 
   osp::SerialConfig cfg;
   cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
-  ::close(pty.slave); pty.slave = -1;
+  ::close(pty.slave);
+  pty.slave = -1;
 
   osp::SerialTransport receiver(cfg);
   REQUIRE(receiver.Open().has_value());

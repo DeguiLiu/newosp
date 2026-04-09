@@ -23,11 +23,7 @@
 //
 // Usage: ./osp_shm_consumer [channel_name]
 
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <chrono>
-#include <thread>
+#include "shm_common.hpp"
 
 #include "osp/fault_collector.hpp"
 #include "osp/hsm.hpp"
@@ -40,7 +36,12 @@
 #include "osp/timer.hpp"
 #include "osp/watchdog.hpp"
 
-#include "shm_common.hpp"
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
+#include <chrono>
+#include <thread>
 
 using Channel = osp::ShmChannel<kSlotSize, kSlotCount>;
 
@@ -141,16 +142,21 @@ struct ConsCtx {
 // Verify frame data integrity
 // ---------------------------------------------------------------------------
 static bool VerifyFrame(const uint8_t* buf, uint32_t size) {
-  if (size < sizeof(FrameHeader)) return false;
+  if (size < sizeof(FrameHeader))
+    return false;
   const auto* hdr = reinterpret_cast<const FrameHeader*>(buf);
-  if (hdr->magic != kMagic) return false;
-  if (hdr->width != kWidth || hdr->height != kHeight) return false;
+  if (hdr->magic != kMagic)
+    return false;
+  if (hdr->width != kWidth || hdr->height != kHeight)
+    return false;
   uint32_t expected_size = sizeof(FrameHeader) + hdr->width * hdr->height;
-  if (size != expected_size) return false;
+  if (size != expected_size)
+    return false;
   const uint8_t* pixels = buf + sizeof(FrameHeader);
   uint32_t seq = hdr->seq_num;
   for (uint32_t i = 0; i < kPixelBytes; ++i) {
-    if (pixels[i] != static_cast<uint8_t>((seq + i) & 0xFFu)) return false;
+    if (pixels[i] != static_cast<uint8_t>((seq + i) & 0xFFu))
+      return false;
   }
   return true;
 }
@@ -159,8 +165,7 @@ static bool VerifyFrame(const uint8_t* buf, uint32_t size) {
 // State handlers
 // ---------------------------------------------------------------------------
 
-static osp::TransitionResult OnOperational(ConsCtx& ctx,
-                                            const osp::Event& event) {
+static osp::TransitionResult OnOperational(ConsCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtShutdown) {
     OSP_LOG_INFO("consumer", "shutdown signal received");
     return ctx.sm->RequestTransition(ctx.s_done);
@@ -170,21 +175,18 @@ static osp::TransitionResult OnOperational(ConsCtx& ctx,
 
 static void OnEnterConnecting(ConsCtx& ctx) {
   ++ctx.connect_retries;
-  OSP_LOG_INFO("consumer", "connecting to %s (attempt %u/%u) ...",
-               ctx.channel_name, ctx.connect_retries, ctx.kMaxConnectRetries);
+  OSP_LOG_INFO("consumer", "connecting to %s (attempt %u/%u) ...", ctx.channel_name, ctx.connect_retries,
+               ctx.kMaxConnectRetries);
 }
 
-static osp::TransitionResult OnConnecting(ConsCtx& ctx,
-                                           const osp::Event& event) {
+static osp::TransitionResult OnConnecting(ConsCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtConnected) {
     return ctx.sm->RequestTransition(ctx.s_receiving);
   }
   if (event.id == kEvtConnectFail) {
     if (ctx.connect_retries >= ctx.kMaxConnectRetries) {
       OSP_LOG_ERROR("consumer", "max retries reached");
-      ctx.fault_collector.ReportFault(
-          FaultCode::kConnectFail, ctx.connect_retries,
-          osp::FaultPriority::kHigh);
+      ctx.fault_collector.ReportFault(FaultCode::kConnectFail, ctx.connect_retries, osp::FaultPriority::kHigh);
       return ctx.sm->RequestTransition(ctx.s_error);
     }
     return osp::TransitionResult::kHandled;
@@ -195,30 +197,25 @@ static osp::TransitionResult OnConnecting(ConsCtx& ctx,
 static void OnEnterRunning(ConsCtx& ctx) {
   ctx.t0_us = osp::SteadyNowUs();
   ctx.last_frame_us = ctx.t0_us;
-  OSP_LOG_INFO("consumer", "running -- receiving frames from %s",
-               ctx.channel_name);
+  OSP_LOG_INFO("consumer", "running -- receiving frames from %s", ctx.channel_name);
 }
 
-static osp::TransitionResult OnRunning(ConsCtx& ctx,
-                                        const osp::Event& event) {
+static osp::TransitionResult OnRunning(ConsCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtTimeout) {
     ++ctx.stall_count;
-    ctx.fault_collector.ReportFault(
-        FaultCode::kStall, ctx.stall_count, osp::FaultPriority::kMedium);
+    ctx.fault_collector.ReportFault(FaultCode::kStall, ctx.stall_count, osp::FaultPriority::kMedium);
     return ctx.sm->RequestTransition(ctx.s_stalled);
   }
   return osp::TransitionResult::kUnhandled;
 }
 
 static void OnExitRunning(ConsCtx& ctx) {
-  OSP_LOG_INFO("consumer", "leaving running (ok=%u, bad=%u, gaps=%u)",
-               ctx.frames_ok, ctx.frames_bad, ctx.gaps);
+  OSP_LOG_INFO("consumer", "leaving running (ok=%u, bad=%u, gaps=%u)", ctx.frames_ok, ctx.frames_bad, ctx.gaps);
 }
 
 static void OnEnterReceiving(ConsCtx& /*ctx*/) {}
 
-static osp::TransitionResult OnReceiving(ConsCtx& ctx,
-                                          const osp::Event& event) {
+static osp::TransitionResult OnReceiving(ConsCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtFrameReady) {
     return ctx.sm->RequestTransition(ctx.s_validating);
   }
@@ -227,8 +224,7 @@ static osp::TransitionResult OnReceiving(ConsCtx& ctx,
 
 static void OnEnterValidating(ConsCtx& /*ctx*/) {}
 
-static osp::TransitionResult OnValidating(ConsCtx& ctx,
-                                           const osp::Event& event) {
+static osp::TransitionResult OnValidating(ConsCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtFrameValid) {
     auto* buf = static_cast<uint8_t*>(ctx.recv_buf);
     const auto* hdr = reinterpret_cast<const FrameHeader*>(buf);
@@ -243,17 +239,12 @@ static osp::TransitionResult OnValidating(ConsCtx& ctx,
     if (ctx.frames_ok == 1 || ctx.frames_ok % ctx.kReportInterval == 0) {
       uint64_t t1_us = osp::SteadyNowUs();
       double elapsed_s = static_cast<double>(t1_us - ctx.t0_us) / 1e6;
-      ctx.last_fps = (elapsed_s > 0.0)
-          ? static_cast<float>(ctx.kReportInterval / elapsed_s) : 0.0f;
-      ctx.last_mbps = (elapsed_s > 0.0)
-          ? static_cast<float>(
-              static_cast<double>(ctx.kReportInterval) * ctx.recv_size
-              / (elapsed_s * 1024.0 * 1024.0))
-          : 0.0f;
-      OSP_LOG_INFO("consumer",
-                   "frame #%u OK, seq=%u, %ux%u, %.1f fps, %.1f MB/s, gaps=%u",
-                   ctx.frames_ok, hdr->seq_num, hdr->width, hdr->height,
-                   (ctx.frames_ok == 1) ? 0.0 : static_cast<double>(ctx.last_fps),
+      ctx.last_fps = (elapsed_s > 0.0) ? static_cast<float>(ctx.kReportInterval / elapsed_s) : 0.0f;
+      ctx.last_mbps = (elapsed_s > 0.0) ? static_cast<float>(static_cast<double>(ctx.kReportInterval) * ctx.recv_size /
+                                                             (elapsed_s * 1024.0 * 1024.0))
+                                        : 0.0f;
+      OSP_LOG_INFO("consumer", "frame #%u OK, seq=%u, %ux%u, %.1f fps, %.1f MB/s, gaps=%u", ctx.frames_ok, hdr->seq_num,
+                   hdr->width, hdr->height, (ctx.frames_ok == 1) ? 0.0 : static_cast<double>(ctx.last_fps),
                    static_cast<double>(ctx.last_mbps), ctx.gaps);
       ctx.t0_us = t1_us;
     }
@@ -261,22 +252,18 @@ static osp::TransitionResult OnValidating(ConsCtx& ctx,
   }
   if (event.id == kEvtFrameInvalid) {
     ++ctx.frames_bad;
-    ctx.fault_collector.ReportFault(
-        FaultCode::kFrameInvalid, ctx.frames_bad, osp::FaultPriority::kHigh);
-    OSP_LOG_WARN("consumer", "frame verification FAILED (bad=%u)",
-                 ctx.frames_bad);
+    ctx.fault_collector.ReportFault(FaultCode::kFrameInvalid, ctx.frames_bad, osp::FaultPriority::kHigh);
+    OSP_LOG_WARN("consumer", "frame verification FAILED (bad=%u)", ctx.frames_bad);
     return ctx.sm->RequestTransition(ctx.s_receiving);
   }
   return osp::TransitionResult::kUnhandled;
 }
 
 static void OnEnterStalled(ConsCtx& ctx) {
-  OSP_LOG_WARN("consumer", "stalled -- no data for %u ms (stalls=%u)",
-               ctx.kStallTimeoutMs, ctx.stall_count);
+  OSP_LOG_WARN("consumer", "stalled -- no data for %u ms (stalls=%u)", ctx.kStallTimeoutMs, ctx.stall_count);
 }
 
-static osp::TransitionResult OnStalled(ConsCtx& ctx,
-                                        const osp::Event& event) {
+static osp::TransitionResult OnStalled(ConsCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtDataResumed) {
     OSP_LOG_INFO("consumer", "data resumed after stall");
     return ctx.sm->RequestTransition(ctx.s_receiving);
@@ -289,8 +276,7 @@ static void OnEnterError(ConsCtx& ctx) {
   OSP_LOG_ERROR("consumer", "error state (count=%u)", ctx.error_count);
 }
 
-static osp::TransitionResult OnError(ConsCtx& ctx,
-                                      const osp::Event& event) {
+static osp::TransitionResult OnError(ConsCtx& ctx, const osp::Event& event) {
   if (event.id == kEvtRetry) {
     if (ctx.error_count >= 3) {
       OSP_LOG_ERROR("consumer", "too many errors, giving up");
@@ -312,14 +298,11 @@ static void OnEnterDone(ConsCtx& ctx) {
   OSP_LOG_INFO("consumer",
                "done. ok=%u, bad=%u, gaps=%u, stalls=%u, errors=%u, "
                "last_fps=%.1f, last_mbps=%.1f",
-               ctx.frames_ok, ctx.frames_bad, ctx.gaps,
-               ctx.stall_count, ctx.error_count,
-               static_cast<double>(ctx.last_fps),
-               static_cast<double>(ctx.last_mbps));
+               ctx.frames_ok, ctx.frames_bad, ctx.gaps, ctx.stall_count, ctx.error_count,
+               static_cast<double>(ctx.last_fps), static_cast<double>(ctx.last_mbps));
 }
 
-static osp::TransitionResult OnDone(ConsCtx& /*ctx*/,
-                                     const osp::Event& /*event*/) {
+static osp::TransitionResult OnDone(ConsCtx& /*ctx*/, const osp::Event& /*event*/) {
   return osp::TransitionResult::kHandled;
 }
 
@@ -341,16 +324,16 @@ int main(int argc, char* argv[]) {
   }
 
   // -- Watchdog setup --
-  ctx.watchdog.SetOnTimeout([](uint32_t slot_id, const char* name, void* c) {
-    auto* fc = &static_cast<ConsCtx*>(c)->fault_collector;
-    fc->ReportFault(FaultCode::kThreadDeath, slot_id,
-                    osp::FaultPriority::kCritical);
-    OSP_LOG_ERROR("consumer", "watchdog: thread '%s' (slot %u) timed out",
-                  name, slot_id);
-  }, &ctx);
-  ctx.watchdog.SetOnRecovered([](uint32_t, const char* name, void*) {
-    OSP_LOG_INFO("consumer", "watchdog: thread '%s' recovered", name);
-  }, nullptr);
+  ctx.watchdog.SetOnTimeout(
+      [](uint32_t slot_id, const char* name, void* c) {
+        auto* fc = &static_cast<ConsCtx*>(c)->fault_collector;
+        fc->ReportFault(FaultCode::kThreadDeath, slot_id, osp::FaultPriority::kCritical);
+        OSP_LOG_ERROR("consumer", "watchdog: thread '%s' (slot %u) timed out", name, slot_id);
+      },
+      &ctx);
+  ctx.watchdog.SetOnRecovered(
+      [](uint32_t, const char* name, void*) { OSP_LOG_INFO("consumer", "watchdog: thread '%s' recovered", name); },
+      nullptr);
 
   auto wd_reg = ctx.watchdog.Register("main_loop", 5000);
   if (wd_reg.has_value()) {
@@ -360,21 +343,19 @@ int main(int argc, char* argv[]) {
   ctx.watchdog.StartAutoCheck(1000);
 
   // -- FaultCollector setup --
-  ctx.fault_collector.RegisterFault(FaultCode::kThreadDeath,  0xFFFF0001U);
+  ctx.fault_collector.RegisterFault(FaultCode::kThreadDeath, 0xFFFF0001U);
   ctx.fault_collector.RegisterFault(FaultCode::kFrameInvalid, 0x00030001U);
-  ctx.fault_collector.RegisterFault(FaultCode::kStall,        0x00040001U);
-  ctx.fault_collector.RegisterFault(FaultCode::kConnectFail,  0x00020001U);
+  ctx.fault_collector.RegisterFault(FaultCode::kStall, 0x00040001U);
+  ctx.fault_collector.RegisterFault(FaultCode::kConnectFail, 0x00020001U);
 
-  ctx.fault_collector.RegisterHook(FaultCode::kFrameInvalid,
-      [](const osp::FaultEvent& e) {
-        OSP_LOG_WARN("FAULT", "frame invalid (count=%u)", e.occurrence_count);
-        return osp::HookAction::kHandled;
-      });
-  ctx.fault_collector.RegisterHook(FaultCode::kStall,
-      [](const osp::FaultEvent& e) {
-        OSP_LOG_WARN("FAULT", "stall detected (count=%u)", e.occurrence_count);
-        return osp::HookAction::kHandled;
-      });
+  ctx.fault_collector.RegisterHook(FaultCode::kFrameInvalid, [](const osp::FaultEvent& e) {
+    OSP_LOG_WARN("FAULT", "frame invalid (count=%u)", e.occurrence_count);
+    return osp::HookAction::kHandled;
+  });
+  ctx.fault_collector.RegisterHook(FaultCode::kStall, [](const osp::FaultEvent& e) {
+    OSP_LOG_WARN("FAULT", "stall detected (count=%u)", e.occurrence_count);
+    return osp::HookAction::kHandled;
+  });
 
   auto fc_reg = ctx.watchdog.Register("fault_consumer", 5000);
   if (fc_reg.has_value()) {
@@ -386,51 +367,36 @@ int main(int argc, char* argv[]) {
   osp::StateMachine<ConsCtx, 8> sm(ctx);
   ctx.sm = &sm;
 
-  ctx.s_operational = sm.AddState({
-      "Operational", -1, OnOperational, nullptr, nullptr, nullptr});
-  ctx.s_connecting = sm.AddState({
-      "Connecting", ctx.s_operational, OnConnecting,
-      OnEnterConnecting, nullptr, nullptr});
-  ctx.s_running = sm.AddState({
-      "Running", ctx.s_operational, OnRunning,
-      OnEnterRunning, OnExitRunning, nullptr});
-  ctx.s_receiving = sm.AddState({
-      "Receiving", ctx.s_running, OnReceiving,
-      OnEnterReceiving, nullptr, nullptr});
-  ctx.s_validating = sm.AddState({
-      "Validating", ctx.s_running, OnValidating,
-      OnEnterValidating, nullptr, nullptr});
-  ctx.s_stalled = sm.AddState({
-      "Stalled", ctx.s_running, OnStalled,
-      OnEnterStalled, nullptr, nullptr});
-  ctx.s_error = sm.AddState({
-      "Error", ctx.s_operational, OnError,
-      OnEnterError, nullptr, nullptr});
-  ctx.s_done = sm.AddState({
-      "Done", ctx.s_operational, OnDone,
-      OnEnterDone, nullptr, nullptr});
+  ctx.s_operational = sm.AddState({"Operational", -1, OnOperational, nullptr, nullptr, nullptr});
+  ctx.s_connecting = sm.AddState({"Connecting", ctx.s_operational, OnConnecting, OnEnterConnecting, nullptr, nullptr});
+  ctx.s_running = sm.AddState({"Running", ctx.s_operational, OnRunning, OnEnterRunning, OnExitRunning, nullptr});
+  ctx.s_receiving = sm.AddState({"Receiving", ctx.s_running, OnReceiving, OnEnterReceiving, nullptr, nullptr});
+  ctx.s_validating = sm.AddState({"Validating", ctx.s_running, OnValidating, OnEnterValidating, nullptr, nullptr});
+  ctx.s_stalled = sm.AddState({"Stalled", ctx.s_running, OnStalled, OnEnterStalled, nullptr, nullptr});
+  ctx.s_error = sm.AddState({"Error", ctx.s_operational, OnError, OnEnterError, nullptr, nullptr});
+  ctx.s_done = sm.AddState({"Done", ctx.s_operational, OnDone, OnEnterDone, nullptr, nullptr});
 
   sm.SetInitialState(ctx.s_connecting);
 
   // -- Stats timer --
   ctx.timer.Start();
-  auto timer_r = ctx.timer.Add(3000, [](void* arg) {
-    auto* c = static_cast<ConsCtx*>(arg);
-    if (c->frames_ok > 0) {
-      c->PushStats();
-      auto fc_stats = c->fault_collector.GetStatistics();
-      OSP_LOG_INFO("consumer",
-                   "[timer] ok=%u bad=%u gaps=%u stalls=%u fps=%.1f MB/s=%.1f "
-                   "faults=%lu state=%s pool=%u/%u",
-                   c->frames_ok, c->frames_bad, c->gaps, c->stall_count,
-                   static_cast<double>(c->last_fps),
-                   static_cast<double>(c->last_mbps),
-                   static_cast<unsigned long>(fc_stats.total_reported),
-                   c->sm->CurrentStateName(),
-                   c->frame_pool.Capacity() - c->frame_pool.FreeCount(),
-                   c->frame_pool.Capacity());
-    }
-  }, &ctx);
+  auto timer_r = ctx.timer.Add(
+      3000,
+      [](void* arg) {
+        auto* c = static_cast<ConsCtx*>(arg);
+        if (c->frames_ok > 0) {
+          c->PushStats();
+          auto fc_stats = c->fault_collector.GetStatistics();
+          OSP_LOG_INFO("consumer",
+                       "[timer] ok=%u bad=%u gaps=%u stalls=%u fps=%.1f MB/s=%.1f "
+                       "faults=%lu state=%s pool=%u/%u",
+                       c->frames_ok, c->frames_bad, c->gaps, c->stall_count, static_cast<double>(c->last_fps),
+                       static_cast<double>(c->last_mbps), static_cast<unsigned long>(fc_stats.total_reported),
+                       c->sm->CurrentStateName(), c->frame_pool.Capacity() - c->frame_pool.FreeCount(),
+                       c->frame_pool.Capacity());
+        }
+      },
+      &ctx);
   if (timer_r) {
     ctx.stats_timer_id = timer_r.value();
   }

@@ -86,21 +86,22 @@ namespace detail {
  * Uses function-local static for header-only inline safety (C++14+).
  * Default: kDebug in debug builds, kInfo in release builds.
  */
-inline Level& LogLevelRef() noexcept {
-  static Level level =
+inline std::atomic<Level>& LogLevelRef() noexcept {
+  static std::atomic<Level> level{
 #ifdef NDEBUG
-      Level::kInfo;
+      Level::kInfo
 #else
-      Level::kDebug;
+      Level::kDebug
 #endif
+  };
   return level;
 }
 
 /**
  * @brief Returns a mutable reference to the global initialized flag.
  */
-inline bool& InitializedRef() noexcept {
-  static bool init = false;
+inline std::atomic<bool>& InitializedRef() noexcept {
+  static std::atomic<bool> init{false};
   return init;
 }
 
@@ -165,7 +166,7 @@ inline void FormatTimestamp(char* buf, size_t bufsz) noexcept {
  * @brief Gets the current runtime minimum log level.
  */
 inline Level GetLevel() noexcept {
-  return detail::LogLevelRef();
+  return detail::LogLevelRef().load(std::memory_order_relaxed);
 }
 
 /**
@@ -175,7 +176,7 @@ inline Level GetLevel() noexcept {
  * For compile-time filtering, define OSP_LOG_MIN_LEVEL instead.
  */
 inline void SetLevel(Level level) noexcept {
-  detail::LogLevelRef() = level;
+  detail::LogLevelRef().store(level, std::memory_order_relaxed);
 }
 
 // ============================================================================
@@ -192,7 +193,7 @@ inline void SetLevel(Level level) noexcept {
  */
 inline void Init(const char* conf_path = nullptr) noexcept {
   (void)conf_path;
-  detail::InitializedRef() = true;
+  detail::InitializedRef().store(true, std::memory_order_relaxed);
 }
 
 /**
@@ -200,14 +201,14 @@ inline void Init(const char* conf_path = nullptr) noexcept {
  */
 inline void Shutdown() noexcept {
   std::fflush(stderr);
-  detail::InitializedRef() = false;
+  detail::InitializedRef().store(false, std::memory_order_relaxed);
 }
 
 /**
  * @brief Returns whether Init() has been called.
  */
 inline bool IsInitialized() noexcept {
-  return detail::InitializedRef();
+  return detail::InitializedRef().load(std::memory_order_relaxed);
 }
 
 // ============================================================================
@@ -215,10 +216,50 @@ inline bool IsInitialized() noexcept {
 // ============================================================================
 
 /**
- * @brief Writes a log message to stderr.
+ * @brief va_list variant of LogWrite, for use by async_log.hpp fallback path.
  *
  * Performs runtime level check, formats a timestamped message, and writes
  * it atomically to stderr (POSIX guarantees fprintf thread-safety).
+ *
+ * The caller is responsible for va_start/va_end.
+ */
+inline void LogWriteVa(Level level, const char* category, const char* file, int line, const char* fmt,
+                       va_list args) noexcept {
+  if (static_cast<uint8_t>(level) < static_cast<uint8_t>(detail::LogLevelRef().load(std::memory_order_relaxed))) {
+    return;
+  }
+
+  char ts_buf[64];
+  detail::FormatTimestamp(ts_buf, sizeof(ts_buf));
+
+  char msg_buf[512];
+  (void)vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
+
+#ifdef NDEBUG
+  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n", ts_buf, detail::LevelTag(level), category ? category : "-",
+                     msg_buf);
+#else
+  const char* basename = file;
+  if (file != nullptr) {
+    const char* slash = std::strrchr(file, '/');
+    if (slash != nullptr) {
+      basename = slash + 1;
+    }
+  }
+  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%d)\n", ts_buf, detail::LevelTag(level), category ? category : "-",
+                     msg_buf, basename ? basename : "?", line);
+#endif
+
+  if (level == Level::kFatal) {
+    std::fflush(stderr);
+    std::abort();
+  }
+}
+
+/**
+ * @brief Writes a log message to stderr.
+ *
+ * Thin wrapper over LogWriteVa that accepts variadic arguments.
  *
  * Output format:
  *   [2024-01-01 12:00:00.123] [LEVEL] [category] message
@@ -235,85 +276,10 @@ inline bool IsInitialized() noexcept {
  * @param ...      Format arguments.
  */
 inline void LogWrite(Level level, const char* category, const char* file, int line, const char* fmt, ...) noexcept {
-  // --- Runtime level gate ---
-  if (static_cast<uint8_t>(level) < static_cast<uint8_t>(detail::LogLevelRef())) {
-    return;
-  }
-
-  // --- Timestamp ---
-  char ts_buf[64];
-  detail::FormatTimestamp(ts_buf, sizeof(ts_buf));
-
-  // --- Format user message ---
-  char msg_buf[512];
   va_list args;
   va_start(args, fmt);
-  (void)vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
+  LogWriteVa(level, category, file, line, fmt, args);
   va_end(args);
-
-  // --- Output ---
-#ifdef NDEBUG
-  // Release: no file:line
-  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n", ts_buf, detail::LevelTag(level), category ? category : "-",
-                     msg_buf);
-#else
-  // Debug: include file:line
-  // Strip path prefix - show only filename
-  const char* basename = file;
-  if (file != nullptr) {
-    const char* slash = std::strrchr(file, '/');
-    if (slash != nullptr) {
-      basename = slash + 1;
-    }
-  }
-  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%d)\n", ts_buf, detail::LevelTag(level), category ? category : "-",
-                     msg_buf, basename ? basename : "?", line);
-#endif
-
-  // --- Fatal: flush and abort ---
-  if (level == Level::kFatal) {
-    std::fflush(stderr);
-    std::abort();
-  }
-}
-
-/**
- * @brief va_list variant of LogWrite, for use by async_log.hpp fallback path.
- *
- * Same logic as LogWrite but accepts a pre-started va_list instead of
- * variadic arguments. The caller is responsible for va_start/va_end.
- */
-inline void LogWriteVa(Level level, const char* category, const char* file, int line, const char* fmt,
-                       va_list args) noexcept {
-  if (static_cast<uint8_t>(level) < static_cast<uint8_t>(detail::LogLevelRef())) {
-    return;
-  }
-
-  char ts_buf[64];
-  detail::FormatTimestamp(ts_buf, sizeof(ts_buf));
-
-  char msg_buf[512];
-  (void)vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
-
-#ifdef NDEBUG
-  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n", ts_buf, detail::LevelTag(level), category ? category : "-",
-                     msg_buf);
-#else
-  const char* basename = file;
-  if (file != nullptr) {
-    const char* slash = std::strrchr(file, '/');
-    if (slash != nullptr) {
-      basename = slash + 1;
-    }
-  }
-  (void)std::fprintf(stderr, "[%s] [%s] [%s] %s (%s:%d)\n", ts_buf, detail::LevelTag(level), category ? category : "-",
-                     msg_buf, basename ? basename : "?", line);
-#endif
-
-  if (level == Level::kFatal) {
-    std::fflush(stderr);
-    std::abort();
-  }
 }
 
 }  // namespace log

@@ -19,17 +19,17 @@
 #include "osp/log.hpp"
 #include "osp/system_monitor.hpp"
 
-#include <chrono>
 #include <cinttypes>
 #include <cstdio>
+
+#include <chrono>
 #include <thread>
 
 // Default config path (relative to working directory)
 static constexpr const char* kDefaultConfigPath = "system_monitor.yaml";
 
 // Alert callback: print to stderr
-static void OnAlert(const osp::SystemSnapshot& /*snap*/,
-                    const char* msg, void* /*ctx*/) {
+static void OnAlert(const osp::SystemSnapshot& /*snap*/, const char* msg, void* /*ctx*/) {
   std::fprintf(stderr, "  ** ALERT: %s\n", msg);
 }
 
@@ -59,13 +59,10 @@ int main(int argc, char* argv[]) {
 
   // ---- 2. Read thresholds from config (with defaults) ----
   osp::AlertThresholds thresholds;
-  thresholds.cpu_percent = static_cast<uint32_t>(
-      cfg.GetInt("thresholds", "cpu_percent", 90));
+  thresholds.cpu_percent = static_cast<uint32_t>(cfg.GetInt("thresholds", "cpu_percent", 90));
   thresholds.cpu_temp_mc = cfg.GetInt("thresholds", "cpu_temp_celsius", 85) * 1000;
-  thresholds.memory_percent = static_cast<uint32_t>(
-      cfg.GetInt("thresholds", "memory_percent", 90));
-  thresholds.disk_percent = static_cast<uint32_t>(
-      cfg.GetInt("thresholds", "disk_percent", 90));
+  thresholds.memory_percent = static_cast<uint32_t>(cfg.GetInt("thresholds", "memory_percent", 90));
+  thresholds.disk_percent = static_cast<uint32_t>(cfg.GetInt("thresholds", "disk_percent", 90));
 
   // Read sampling parameters
   int32_t interval_ms = cfg.GetInt("sampling", "interval_ms", 1000);
@@ -73,19 +70,14 @@ int main(int argc, char* argv[]) {
   bool alert_stderr = cfg.GetBool("logging", "alert_to_stderr", true);
 
   std::printf("\nConfiguration:\n");
-  std::printf("  thresholds.cpu_percent:    %" PRIu32 "%%\n",
-              thresholds.cpu_percent);
-  std::printf("  thresholds.cpu_temp:       %d.%d C\n",
-              thresholds.cpu_temp_mc / 1000,
+  std::printf("  thresholds.cpu_percent:    %" PRIu32 "%%\n", thresholds.cpu_percent);
+  std::printf("  thresholds.cpu_temp:       %d.%d C\n", thresholds.cpu_temp_mc / 1000,
               (thresholds.cpu_temp_mc % 1000) / 100);
-  std::printf("  thresholds.memory_percent: %" PRIu32 "%%\n",
-              thresholds.memory_percent);
-  std::printf("  thresholds.disk_percent:   %" PRIu32 "%%\n",
-              thresholds.disk_percent);
+  std::printf("  thresholds.memory_percent: %" PRIu32 "%%\n", thresholds.memory_percent);
+  std::printf("  thresholds.disk_percent:   %" PRIu32 "%%\n", thresholds.disk_percent);
   std::printf("  sampling.interval_ms:      %" PRId32 "\n", interval_ms);
   std::printf("  sampling.count:            %" PRId32 "\n", sample_count);
-  std::printf("  logging.alert_to_stderr:   %s\n",
-              alert_stderr ? "true" : "false");
+  std::printf("  logging.alert_to_stderr:   %s\n", alert_stderr ? "true" : "false");
 
   // ---- 3. Create and configure SystemMonitor ----
   osp::SystemMonitor<4> monitor;
@@ -122,11 +114,11 @@ int main(int argc, char* argv[]) {
   // }, &collector);
 
   // ---- 5. Sampling loop ----
-  std::printf("\n%-6s %6s %6s %6s %6s %8s | %8s %8s %5s | %s\n",
-              "Sample", "CPU%", "User%", "Sys%", "IOW%", "Temp",
+  std::printf("\n%-6s %6s %6s %6s %6s %8s | %8s %8s %5s | %s\n", "Sample", "CPU%", "User%", "Sys%", "IOW%", "Temp",
               "MemTotal", "MemUsed", "Mem%", "Disk");
-  std::printf("------ ------ ------ ------ ------ -------- | "
-              "-------- -------- ----- | ----\n");
+  std::printf(
+      "------ ------ ------ ------ ------ -------- | "
+      "-------- -------- ----- | ----\n");
 
   for (int32_t i = 0; i < sample_count; ++i) {
     auto snap = monitor.Sample();
@@ -134,8 +126,7 @@ int main(int argc, char* argv[]) {
     // Format temperature
     char temp_str[16];
     if (snap.cpu.temperature_mc >= 0) {
-      std::snprintf(temp_str, sizeof(temp_str), "%d.%dC",
-                    snap.cpu.temperature_mc / 1000,
+      std::snprintf(temp_str, sizeof(temp_str), "%d.%dC", snap.cpu.temperature_mc / 1000,
                     (snap.cpu.temperature_mc % 1000) / 100);
     } else {
       std::snprintf(temp_str, sizeof(temp_str), "N/A");
@@ -149,25 +140,18 @@ int main(int argc, char* argv[]) {
       char dkey[16];
       std::snprintf(dkey, sizeof(dkey), "path_%u", d);
       const char* dpath = cfg.GetString("disk_paths", dkey, "?");
-      if (dpath[0] == '\0') dpath = "?";
-      int written = std::snprintf(disk_str + off, sizeof(disk_str) - off,
-                                  "%s:%" PRIu32 "%% ", dpath,
-                                  ds.used_percent);
+      if (dpath[0] == '\0')
+        dpath = "?";
+      int written = std::snprintf(disk_str + off, sizeof(disk_str) - off, "%s:%" PRIu32 "%% ", dpath, ds.used_percent);
       if (written > 0) {
         off += static_cast<uint32_t>(written);
       }
     }
 
-    std::printf("#%-5" PRId32 " %5" PRIu32 "%% %5" PRIu32 "%% %5" PRIu32
-                "%% %5" PRIu32 "%% %8s | %5" PRIu64 "MB %5" PRIu64
-                "MB %4" PRIu32 "%% | %s\n",
-                i + 1,
-                snap.cpu.total_percent, snap.cpu.user_percent,
-                snap.cpu.system_percent, snap.cpu.iowait_percent,
-                temp_str,
-                snap.memory.total_kb / 1024, snap.memory.used_kb / 1024,
-                snap.memory.used_percent,
-                disk_str);
+    std::printf("#%-5" PRId32 " %5" PRIu32 "%% %5" PRIu32 "%% %5" PRIu32 "%% %5" PRIu32 "%% %8s | %5" PRIu64
+                "MB %5" PRIu64 "MB %4" PRIu32 "%% | %s\n",
+                i + 1, snap.cpu.total_percent, snap.cpu.user_percent, snap.cpu.system_percent, snap.cpu.iowait_percent,
+                temp_str, snap.memory.total_kb / 1024, snap.memory.used_kb / 1024, snap.memory.used_percent, disk_str);
 
     if (i < sample_count - 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
@@ -176,10 +160,8 @@ int main(int argc, char* argv[]) {
 
   // ---- 6. Summary ----
   const auto& last = monitor.LastSnapshot();
-  std::printf("\nFinal: CPU %" PRIu32 "%%  Mem %" PRIu32
-              "%%  Disks %" PRIu32 "\n",
-              last.cpu.total_percent, last.memory.used_percent,
-              monitor.DiskPathCount());
+  std::printf("\nFinal: CPU %" PRIu32 "%%  Mem %" PRIu32 "%%  Disks %" PRIu32 "\n", last.cpu.total_percent,
+              last.memory.used_percent, monitor.DiskPathCount());
 
   if (config_loaded) {
     std::printf("Config source: %s\n", config_path);

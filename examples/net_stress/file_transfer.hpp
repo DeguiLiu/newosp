@@ -30,15 +30,17 @@
 #ifndef NET_STRESS_FILE_TRANSFER_HPP_
 #define NET_STRESS_FILE_TRANSFER_HPP_
 
+#include "protocol.hpp"
+
 #include "osp/hsm.hpp"
 #include "osp/log.hpp"
 #include "osp/platform.hpp"
 #include "osp/service.hpp"
 #include "osp/vocabulary.hpp"
-#include "protocol.hpp"
+
+#include <cstring>
 
 #include <atomic>
-#include <cstring>
 #include <random>
 #include <thread>
 
@@ -64,8 +66,8 @@ enum FtEvtId : uint32_t {
 // ============================================================================
 
 static constexpr uint32_t kFtSmMaxStates = 8;
-static constexpr uint32_t kMaxRetries    = 3;
-static constexpr uint32_t kChunkSize     = 2048U;  // bytes per chunk
+static constexpr uint32_t kMaxRetries = 3;
+static constexpr uint32_t kChunkSize = 2048U;  // bytes per chunk
 
 struct FtCtx;
 using FtSm = osp::StateMachine<FtCtx, kFtSmMaxStates>;
@@ -77,7 +79,7 @@ struct FtCtx {
   uint32_t client_id;
   osp::FixedString<63> server_host;
   uint16_t file_port;
-  osp::Client<FileTransferReq, FileTransferResp>* file_cli;
+  osp::Client<FileTransferReq, FileTransferResp> file_cli;
 
   // File data
   const uint8_t* file_data;
@@ -88,7 +90,7 @@ struct FtCtx {
 
   // Retry state
   uint32_t retry_count;
-  float    drop_rate;       // simulated loss probability (0.0 - 1.0)
+  float drop_rate;  // simulated loss probability (0.0 - 1.0)
 
   // Heartbeat (optional, from ThreadWatchdog)
   osp::ThreadHeartbeat* heartbeat;
@@ -96,8 +98,8 @@ struct FtCtx {
   // Statistics
   std::atomic<uint32_t> chunks_ok;
   std::atomic<uint32_t> chunks_retried;
-  std::atomic<bool>     complete;
-  std::atomic<bool>     success;
+  std::atomic<bool> complete;
+  std::atomic<bool> success;
 
   // State indices
   int32_t si_root, si_idle, si_xfer, si_send, si_wait, si_retry;
@@ -109,7 +111,6 @@ inline void InitFtCtx(FtCtx& c) noexcept {
   c.client_id = 0;
   c.server_host.assign(osp::TruncateToCapacity, "127.0.0.1");
   c.file_port = kFilePort;
-  c.file_cli = nullptr;
   c.file_data = nullptr;
   c.file_size = 0;
   c.total_chunks = 0;
@@ -131,10 +132,10 @@ inline void InitFtCtx(FtCtx& c) noexcept {
 // ============================================================================
 
 inline bool SimulateDrop(float rate) noexcept {
-  if (rate <= 0.0f) return false;
+  if (rate <= 0.0f)
+    return false;
   // Thread-safe PRNG (thread_local avoids contention)
-  static thread_local std::mt19937 gen(
-      static_cast<uint32_t>(NowNs() & 0xFFFFFFFFULL));
+  static thread_local std::mt19937 gen(static_cast<uint32_t>(NowNs() & 0xFFFFFFFFULL));
   std::uniform_real_distribution<float> dis(0.0f, 1.0f);
   return dis(gen) < rate;
 }
@@ -170,9 +171,10 @@ inline TR Transferring(FtCtx& ctx, const Ev& evt) {
 }
 
 inline TR Sending(FtCtx& ctx, const Ev& evt) {
-  if (evt.id != kFtChunkSent) return TR::kUnhandled;
+  if (evt.id != kFtChunkSent)
+    return TR::kUnhandled;
 
-  if (ctx.file_cli == nullptr) {
+  if (!ctx.file_cli.IsConnected()) {
     return ctx.sm->RequestTransition(ctx.si_fail);
   }
 
@@ -186,24 +188,23 @@ inline TR Sending(FtCtx& ctx, const Ev& evt) {
   uint32_t offset = ctx.current_chunk * kChunkSize;
   uint32_t remaining = ctx.file_size - offset;
   req.chunk_len = (remaining > kChunkSize) ? kChunkSize : remaining;
-  if (req.chunk_len > kMaxPayloadBytes) req.chunk_len = kMaxPayloadBytes;
+  if (req.chunk_len > kMaxPayloadBytes)
+    req.chunk_len = kMaxPayloadBytes;
 
   // Fill data with pattern (verifiable on server)
   FillPattern(req.data, req.chunk_len, ctx.current_chunk);
 
   // Simulate packet loss: pretend we didn't get the response
   if (SimulateDrop(ctx.drop_rate)) {
-    OSP_LOG_WARN("FILE_TX", "[%u] Simulated drop: chunk %u/%u",
-                 ctx.client_id, ctx.current_chunk, ctx.total_chunks);
+    OSP_LOG_WARN("FILE_TX", "[%u] Simulated drop: chunk %u/%u", ctx.client_id, ctx.current_chunk, ctx.total_chunks);
     ctx.chunks_retried.fetch_add(1, std::memory_order_relaxed);
     return ctx.sm->RequestTransition(ctx.si_retry);
   }
 
   // Actually send
-  auto resp = ctx.file_cli->Call(req, 3000);
+  auto resp = ctx.file_cli.Call(req, 3000);
   if (!resp.has_value() || resp.value().accepted == 0) {
-    OSP_LOG_WARN("FILE_TX", "[%u] Chunk %u failed",
-                 ctx.client_id, ctx.current_chunk);
+    OSP_LOG_WARN("FILE_TX", "[%u] Chunk %u failed", ctx.client_id, ctx.current_chunk);
     return ctx.sm->RequestTransition(ctx.si_retry);
   }
 
@@ -230,12 +231,10 @@ inline TR Retrying(FtCtx& ctx, const Ev& evt) {
   if (evt.id == kFtRetry) {
     ctx.retry_count++;
     if (ctx.retry_count > kMaxRetries) {
-      OSP_LOG_ERROR("FILE_TX", "[%u] Max retries exceeded at chunk %u",
-                    ctx.client_id, ctx.current_chunk);
+      OSP_LOG_ERROR("FILE_TX", "[%u] Max retries exceeded at chunk %u", ctx.client_id, ctx.current_chunk);
       return ctx.sm->RequestTransition(ctx.si_fail);
     }
-    OSP_LOG_INFO("FILE_TX", "[%u] Retry %u/%u for chunk %u",
-                 ctx.client_id, ctx.retry_count, kMaxRetries,
+    OSP_LOG_INFO("FILE_TX", "[%u] Retry %u/%u for chunk %u", ctx.client_id, ctx.retry_count, kMaxRetries,
                  ctx.current_chunk);
     return ctx.sm->RequestTransition(ctx.si_send);
   }
@@ -271,23 +270,14 @@ inline void BuildFtSm(FtSm& sm, FtCtx& ctx) noexcept {
   ctx.sm = &sm;
   using Cfg = osp::StateConfig<FtCtx>;
 
-  ctx.si_root  = sm.AddState(Cfg{"Root",         -1,           ft_hsm::Root,
-                                  nullptr, nullptr});
-  ctx.si_idle  = sm.AddState(Cfg{"Idle",         ctx.si_root,  ft_hsm::Idle,
-                                  nullptr, nullptr});
-  ctx.si_xfer  = sm.AddState(Cfg{"Transferring", ctx.si_root,
-                                  ft_hsm::Transferring, nullptr, nullptr});
-  ctx.si_send  = sm.AddState(Cfg{"Sending",      ctx.si_xfer,  ft_hsm::Sending,
-                                  nullptr, nullptr});
-  ctx.si_wait  = sm.AddState(Cfg{"WaitingAck",   ctx.si_xfer,
-                                  ft_hsm::WaitingAck, nullptr, nullptr});
-  ctx.si_retry = sm.AddState(Cfg{"Retrying",     ctx.si_xfer,
-                                  ft_hsm::Retrying, nullptr, nullptr});
-  ctx.si_done  = sm.AddState(Cfg{"Complete",     ctx.si_root,
-                                  ft_hsm::Complete, ft_hsm::OnEnterComplete,
-                                  nullptr});
-  ctx.si_fail  = sm.AddState(Cfg{"Failed",       ctx.si_root,  ft_hsm::Failed,
-                                  ft_hsm::OnEnterFailed, nullptr});
+  ctx.si_root = sm.AddState(Cfg{"Root", -1, ft_hsm::Root, nullptr, nullptr});
+  ctx.si_idle = sm.AddState(Cfg{"Idle", ctx.si_root, ft_hsm::Idle, nullptr, nullptr});
+  ctx.si_xfer = sm.AddState(Cfg{"Transferring", ctx.si_root, ft_hsm::Transferring, nullptr, nullptr});
+  ctx.si_send = sm.AddState(Cfg{"Sending", ctx.si_xfer, ft_hsm::Sending, nullptr, nullptr});
+  ctx.si_wait = sm.AddState(Cfg{"WaitingAck", ctx.si_xfer, ft_hsm::WaitingAck, nullptr, nullptr});
+  ctx.si_retry = sm.AddState(Cfg{"Retrying", ctx.si_xfer, ft_hsm::Retrying, nullptr, nullptr});
+  ctx.si_done = sm.AddState(Cfg{"Complete", ctx.si_root, ft_hsm::Complete, ft_hsm::OnEnterComplete, nullptr});
+  ctx.si_fail = sm.AddState(Cfg{"Failed", ctx.si_root, ft_hsm::Failed, ft_hsm::OnEnterFailed, nullptr});
 
   sm.SetInitialState(ctx.si_idle);
   sm.Start();
@@ -298,25 +288,31 @@ inline void BuildFtSm(FtSm& sm, FtCtx& ctx) noexcept {
 // ============================================================================
 
 inline bool RunFileTransfer(FtCtx& ctx) noexcept {
+  ctx.file_cli.Close();
+  ctx.complete.store(false, std::memory_order_relaxed);
+  ctx.success.store(false, std::memory_order_relaxed);
+  ctx.current_chunk = 0;
+  ctx.bytes_sent = 0;
+  ctx.retry_count = 0;
+  ctx.total_chunks = 0;
+  ctx.chunks_ok.store(0, std::memory_order_relaxed);
+  ctx.chunks_retried.store(0, std::memory_order_relaxed);
+
   // Connect to file service
-  auto cli_r = osp::Client<FileTransferReq, FileTransferResp>::Connect(
-      ctx.server_host.c_str(), ctx.file_port, 3000);
+  auto cli_r = osp::Client<FileTransferReq, FileTransferResp>::Connect(ctx.server_host.c_str(), ctx.file_port, 3000);
   if (!cli_r.has_value()) {
-    OSP_LOG_ERROR("FILE_TX", "[%u] Connect to file service failed",
-                  ctx.client_id);
+    OSP_LOG_ERROR("FILE_TX", "[%u] Connect to file service failed", ctx.client_id);
     return false;
   }
-  auto cli = new osp::Client<FileTransferReq, FileTransferResp>(
-      std::move(cli_r.value()));
-  ctx.file_cli = cli;
+  ctx.file_cli = std::move(cli_r.value());
 
   // Calculate chunks
   ctx.total_chunks = (ctx.file_size + kChunkSize - 1) / kChunkSize;
 
-  OSP_LOG_INFO("FILE_TX", "[%u] Starting: %u bytes, %u chunks, "
+  OSP_LOG_INFO("FILE_TX",
+               "[%u] Starting: %u bytes, %u chunks, "
                "drop_rate=%.0f%%",
-               ctx.client_id, ctx.file_size, ctx.total_chunks,
-               static_cast<double>(ctx.drop_rate) * 100.0);
+               ctx.client_id, ctx.file_size, ctx.total_chunks, static_cast<double>(ctx.drop_rate) * 100.0);
 
   // Start HSM
   osp::Event start_evt{kFtStart, nullptr};
@@ -345,14 +341,11 @@ inline bool RunFileTransfer(FtCtx& ctx) noexcept {
   }
 
   bool ok = ctx.success.load(std::memory_order_relaxed);
-  OSP_LOG_INFO("FILE_TX", "[%u] %s: sent=%u/%u retries=%u",
-               ctx.client_id, ok ? "Complete" : "Failed",
-               ctx.chunks_ok.load(std::memory_order_relaxed),
-               ctx.total_chunks,
+  OSP_LOG_INFO("FILE_TX", "[%u] %s: sent=%u/%u retries=%u", ctx.client_id, ok ? "Complete" : "Failed",
+               ctx.chunks_ok.load(std::memory_order_relaxed), ctx.total_chunks,
                ctx.chunks_retried.load(std::memory_order_relaxed));
 
-  delete cli;
-  ctx.file_cli = nullptr;
+  ctx.file_cli.Close();
   return ok;
 }
 

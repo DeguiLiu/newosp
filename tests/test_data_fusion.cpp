@@ -3,13 +3,13 @@
  * @brief Tests for data_fusion.hpp (multi-message alignment and time sync)
  */
 
-#include "osp/data_fusion.hpp"
 #include "osp/bus.hpp"
+#include "osp/data_fusion.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 
 #include <atomic>
-#include <cstdint>
+#include <catch2/catch_test_macros.hpp>
 #include <thread>
 #include <variant>
 
@@ -40,8 +40,7 @@ using TestEnvelope = osp::MessageEnvelope<TestPayload>;
 // FusedSubscription Tests
 // ============================================================================
 
-TEST_CASE("data_fusion - callback fires when all types received",
-          "[data_fusion]") {
+TEST_CASE("data_fusion - callback fires when all types received", "[data_fusion]") {
   TestBus::Instance().Reset();
   auto& bus = TestBus::Instance();
 
@@ -75,8 +74,7 @@ TEST_CASE("data_fusion - callback fires when all types received",
   fusion.Deactivate(bus);
 }
 
-TEST_CASE("data_fusion - callback does not fire until all types received",
-          "[data_fusion]") {
+TEST_CASE("data_fusion - callback does not fire until all types received", "[data_fusion]") {
   TestBus::Instance().Reset();
   auto& bus = TestBus::Instance();
 
@@ -84,8 +82,7 @@ TEST_CASE("data_fusion - callback does not fire until all types received",
   fire_count = 0;
 
   osp::FusedSubscription<TestPayload, SensorA, SensorB, SensorC> fusion;
-  fusion.SetCallback(
-      [](const std::tuple<SensorA, SensorB, SensorC>&) { ++fire_count; });
+  fusion.SetCallback([](const std::tuple<SensorA, SensorB, SensorC>&) { ++fire_count; });
 
   REQUIRE(fusion.Activate(bus));
 
@@ -114,8 +111,7 @@ TEST_CASE("data_fusion - auto-reset after firing", "[data_fusion]") {
   fire_count = 0;
 
   osp::FusedSubscription<TestPayload, SensorA, SensorB> fusion;
-  fusion.SetCallback(
-      [](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
+  fusion.SetCallback([](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
 
   REQUIRE(fusion.Activate(bus));
 
@@ -146,8 +142,7 @@ TEST_CASE("data_fusion - activate/deactivate lifecycle", "[data_fusion]") {
   fire_count = 0;
 
   osp::FusedSubscription<TestPayload, SensorA, SensorB> fusion;
-  fusion.SetCallback(
-      [](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
+  fusion.SetCallback([](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
 
   // Can't deactivate before activate
   osp::DataFusionError err;
@@ -189,8 +184,7 @@ TEST_CASE("data_fusion - callback not set returns error", "[data_fusion]") {
 // TimeSynchronizer Tests
 // ============================================================================
 
-TEST_CASE("data_fusion - time sync fires within time window",
-          "[data_fusion]") {
+TEST_CASE("data_fusion - time sync fires within time window", "[data_fusion]") {
   TestBus::Instance().Reset();
   auto& bus = TestBus::Instance();
 
@@ -225,8 +219,7 @@ TEST_CASE("data_fusion - time sync fires within time window",
   sync.Deactivate(bus);
 }
 
-TEST_CASE("data_fusion - time sync does not fire when window expired",
-          "[data_fusion]") {
+TEST_CASE("data_fusion - time sync does not fire when window expired", "[data_fusion]") {
   TestBus::Instance().Reset();
   auto& bus = TestBus::Instance();
 
@@ -234,8 +227,7 @@ TEST_CASE("data_fusion - time sync does not fire when window expired",
   fire_count = 0;
 
   osp::TimeSynchronizer<TestPayload, SensorA, SensorB> sync;
-  sync.SetCallback(
-      [](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
+  sync.SetCallback([](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
   sync.SetTimeWindow(100);  // 100us window
 
   REQUIRE(sync.Activate(bus));
@@ -265,8 +257,7 @@ TEST_CASE("data_fusion - time sync resets after firing", "[data_fusion]") {
   fire_count = 0;
 
   osp::TimeSynchronizer<TestPayload, SensorA, SensorB> sync;
-  sync.SetCallback(
-      [](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
+  sync.SetCallback([](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
   sync.SetTimeWindow(500);
 
   REQUIRE(sync.Activate(bus));
@@ -289,8 +280,7 @@ TEST_CASE("data_fusion - time sync resets after firing", "[data_fusion]") {
   sync.Deactivate(bus);
 }
 
-TEST_CASE("data_fusion - time sync handles rapid sequential messages",
-          "[data_fusion]") {
+TEST_CASE("data_fusion - time sync handles rapid sequential messages", "[data_fusion]") {
   TestBus::Instance().Reset();
   auto& bus = TestBus::Instance();
 
@@ -298,8 +288,7 @@ TEST_CASE("data_fusion - time sync handles rapid sequential messages",
   fire_count = 0;
 
   osp::TimeSynchronizer<TestPayload, SensorA, SensorB> sync;
-  sync.SetCallback(
-      [](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
+  sync.SetCallback([](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
   sync.SetTimeWindow(200);
 
   REQUIRE(sync.Activate(bus));

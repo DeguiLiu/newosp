@@ -233,46 +233,6 @@ inline void FormatEntryTimestamp(const LogEntry& e, char* buf, size_t bufsz) noe
 #endif
 }
 
-// --- AdaptiveBackoff (inline copy to avoid worker_pool.hpp dependency) ------
-
-/// @brief Three-phase backoff: spin -> yield -> sleep.
-/// Copied from worker_pool.hpp to avoid pulling in AsyncBus dependency chain.
-class LogBackoff {
- public:
-  void Reset() noexcept { spin_count_ = 0U; }
-
-  void Wait() noexcept {
-    if (spin_count_ < kSpinLimit) {
-      const uint32_t iters = 1U << spin_count_;
-      for (uint32_t i = 0U; i < iters; ++i) {
-        CpuRelax();
-      }
-      ++spin_count_;
-    } else if (spin_count_ < kSpinLimit + kYieldLimit) {
-      std::this_thread::yield();
-      ++spin_count_;
-    } else {
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
-    }
-  }
-
- private:
-  static constexpr uint32_t kSpinLimit = 6U;
-  static constexpr uint32_t kYieldLimit = 4U;
-
-  static void CpuRelax() noexcept {
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#elif defined(__aarch64__) || defined(__arm__)
-    asm volatile("yield" ::: "memory");
-#else
-    std::this_thread::yield();
-#endif
-  }
-
-  uint32_t spin_count_{0U};
-};
-
 // --- Per-Thread SPSC Buffer -------------------------------------------------
 
 /// @brief Per-thread log buffer wrapping a SPSC ring buffer.
@@ -322,8 +282,8 @@ struct AsyncLogContext {
   std::atomic<bool> shutdown{false};
   std::atomic<bool> atexit_registered{false};
 
-  LogSinkFn sink{nullptr};
-  void* sink_context{nullptr};
+  std::atomic<LogSinkFn> sink{nullptr};
+  std::atomic<void*> sink_context{nullptr};
 
   std::thread writer_thread;
 
@@ -368,11 +328,14 @@ inline LogBuffer* AcquireLogBuffer() noexcept {
 /// @brief Background writer loop. Polls all active SPSC buffers.
 inline void WriterLoop() noexcept {
   auto& ctx = AsyncLogContext::Instance();
-  LogBackoff backoff;
+  osp::AdaptiveBackoff backoff;
 
   // Resolve sink: default to StderrSink.
-  LogSinkFn sink = ctx.sink ? ctx.sink : StderrSink;
-  void* sink_ctx = ctx.sink_context;
+  LogSinkFn sink = ctx.sink.load(std::memory_order_acquire);
+  if (nullptr == sink) {
+    sink = StderrSink;
+  }
+  void* sink_ctx = ctx.sink_context.load(std::memory_order_acquire);
 
   static constexpr uint32_t kBatchSize = 32U;
   LogEntry batch[kBatchSize];
@@ -480,8 +443,8 @@ inline void StartAsync(const AsyncLogConfig& config = {}) noexcept {
     return;  // Already running (another thread won the race).
   }
 
-  ctx.sink = config.sink;
-  ctx.sink_context = config.sink_context;
+  ctx.sink.store(config.sink, std::memory_order_release);
+  ctx.sink_context.store(config.sink_context, std::memory_order_release);
   ctx.shutdown.store(false, std::memory_order_release);
 
   ctx.writer_thread = std::thread(detail::WriterLoop);
@@ -501,15 +464,17 @@ inline void StartAsync(const AsyncLogConfig& config = {}) noexcept {
  */
 inline void StopAsync() noexcept {
   auto& ctx = detail::AsyncLogContext::Instance();
-  if (!ctx.running.load(std::memory_order_acquire)) {
-    return;
+
+  // CAS to ensure only one thread stops the writer.
+  bool expected = true;
+  if (!ctx.running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+    return;  // Already stopped (another thread won the race, or atexit handler).
   }
 
   ctx.shutdown.store(true, std::memory_order_release);
   if (ctx.writer_thread.joinable()) {
     ctx.writer_thread.join();
   }
-  ctx.running.store(false, std::memory_order_release);
 }
 
 /**
@@ -520,12 +485,13 @@ inline bool IsAsyncEnabled() noexcept {
 }
 
 /**
- * @brief Set the output sink. Can be called before StartAsync().
+ * @brief Set the output sink. Must be called before StartAsync().
  */
 inline void SetSink(LogSinkFn fn, void* context = nullptr) noexcept {
   auto& ctx = detail::AsyncLogContext::Instance();
-  ctx.sink = fn;
-  ctx.sink_context = context;
+  OSP_ASSERT(false == ctx.running.load(std::memory_order_acquire));
+  ctx.sink.store(fn, std::memory_order_release);
+  ctx.sink_context.store(context, std::memory_order_release);
 }
 
 /**
@@ -565,7 +531,7 @@ inline void ResetAsyncStats() noexcept {
 inline void AsyncLogWrite(Level level, const char* category, const char* file, int line, const char* fmt,
                           ...) noexcept {
   // --- Runtime level gate ---
-  if (static_cast<uint8_t>(level) < static_cast<uint8_t>(detail::LogLevelRef())) {
+  if (static_cast<uint8_t>(level) < static_cast<uint8_t>(detail::LogLevelRef().load(std::memory_order_relaxed))) {
     return;
   }
 

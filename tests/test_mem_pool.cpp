@@ -5,10 +5,13 @@
 
 #include "osp/mem_pool.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <cstring>
+
+#include <array>
+#include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <string>
+#include <thread>
 
 TEST_CASE("FixedPool basic alloc/free", "[mem_pool]") {
   osp::FixedPool<32, 4> pool;
@@ -137,4 +140,46 @@ TEST_CASE("ObjectPool OwnsPointer", "[mem_pool]") {
   REQUIRE(!pool.OwnsPointer(&stack_var));
 
   pool.Destroy(p);
+}
+
+TEST_CASE("ObjectPool concurrent Create/Destroy", "[mem_pool]") {
+  struct CounterWidget {
+    explicit CounterWidget(std::atomic<uint32_t>* live_counter_in) : live_counter(live_counter_in) {
+      live_counter->fetch_add(1U, std::memory_order_relaxed);
+    }
+
+    ~CounterWidget() { live_counter->fetch_sub(1U, std::memory_order_relaxed); }
+
+    std::atomic<uint32_t>* live_counter;
+  };
+
+  static constexpr uint32_t kPoolCapacity = 16U;
+  static constexpr uint32_t kThreadCount = 4U;
+  static constexpr uint32_t kIterationsPerThread = 2000U;
+
+  osp::ObjectPool<CounterWidget, kPoolCapacity> pool;
+  std::atomic<uint32_t> live_counter(0U);
+  std::atomic<uint32_t> success_count(0U);
+  std::array<std::thread, kThreadCount> workers;
+
+  for (uint32_t i = 0U; i < kThreadCount; ++i) {
+    workers[i] = std::thread([&pool, &live_counter, &success_count]() {
+      for (uint32_t iter = 0U; iter < kIterationsPerThread; ++iter) {
+        CounterWidget* obj = pool.Create(&live_counter);
+        if (obj != nullptr) {
+          success_count.fetch_add(1U, std::memory_order_relaxed);
+          pool.Destroy(obj);
+        }
+      }
+    });
+  }
+
+  for (uint32_t i = 0U; i < kThreadCount; ++i) {
+    workers[i].join();
+  }
+
+  REQUIRE(live_counter.load(std::memory_order_relaxed) == 0U);
+  REQUIRE(pool.UsedCount() == 0U);
+  REQUIRE(pool.FreeCount() == kPoolCapacity);
+  REQUIRE(success_count.load(std::memory_order_relaxed) > 0U);
 }

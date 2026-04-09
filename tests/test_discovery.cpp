@@ -3,13 +3,14 @@
  * @brief Tests for discovery.hpp: StaticDiscovery and MulticastDiscovery.
  */
 
-#include <catch2/catch_test_macros.hpp>
 #include "osp/discovery.hpp"
 #include "osp/node_manager.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstring>
+
+#include <atomic>
+#include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <thread>
 
 // ============================================================================
@@ -631,7 +632,8 @@ TEST_CASE("discovery - MulticastDiscovery scheduler injection start twice fails"
 // Edge Case Tests: Scheduler Injection
 // ============================================================================
 
-TEST_CASE("discovery - MulticastDiscovery scheduler injection Stop before Start", "[discovery][multicast][scheduler][edge]") {
+TEST_CASE("discovery - MulticastDiscovery scheduler injection Stop before Start",
+          "[discovery][multicast][scheduler][edge]") {
   osp::TimerScheduler<> sched;
   sched.Start();
 
@@ -650,7 +652,8 @@ TEST_CASE("discovery - MulticastDiscovery scheduler injection Stop before Start"
   sched.Stop();
 }
 
-TEST_CASE("discovery - MulticastDiscovery scheduler injection restart cycle", "[discovery][multicast][scheduler][edge]") {
+TEST_CASE("discovery - MulticastDiscovery scheduler injection restart cycle",
+          "[discovery][multicast][scheduler][edge]") {
   osp::TimerScheduler<> sched;
   sched.Start();
 
@@ -686,7 +689,8 @@ TEST_CASE("discovery - MulticastDiscovery scheduler injection restart cycle", "[
   sched.Stop();
 }
 
-TEST_CASE("MulticastDiscovery: scheduler injection - timer cleanup on Stop", "[discovery][multicast][scheduler][edge]") {
+TEST_CASE("MulticastDiscovery: scheduler injection - timer cleanup on Stop",
+          "[discovery][multicast][scheduler][edge]") {
   osp::TimerScheduler<> sched;
   sched.Start();
 
@@ -738,7 +742,8 @@ TEST_CASE("MulticastDiscovery: scheduler injection - double Stop safe", "[discov
   sched.Stop();
 }
 
-TEST_CASE("MulticastDiscovery: scheduler injection - shared scheduler with NodeManager", "[discovery][multicast][scheduler][edge]") {
+TEST_CASE("MulticastDiscovery: scheduler injection - shared scheduler with NodeManager",
+          "[discovery][multicast][scheduler][edge]") {
   osp::TimerScheduler<> sched;
   sched.Start();
 

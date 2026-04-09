@@ -9,19 +9,18 @@
  *   - Dispatcher-level: integration (pipeline + backpressure + fault + notify)
  */
 
-#include <catch2/catch_test_macros.hpp>
-
 #include "osp/data_dispatcher.hpp"
 
-#include <atomic>
 #include <cstring>
-#include <thread>
-#include <vector>
 
+#include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
+#include <vector>
 
 using namespace osp;
 
@@ -30,12 +29,10 @@ template <uint32_t BS, uint32_t MB>
 using Disp = InProcDispatcher<BS, MB>;
 
 // Helper: raw alloc + manual refcount (bypass pipeline for pool-level tests).
-static void RawSubmit(DataBlock* blk, uint32_t size, uint32_t refcount,
-                      uint32_t timeout_ms = 0U) {
+static void RawSubmit(DataBlock* blk, uint32_t size, uint32_t refcount, uint32_t timeout_ms = 0U) {
   blk->payload_size = size;
   if (timeout_ms > 0U) {
-    blk->deadline_us = SteadyNowUs() +
-                        static_cast<uint64_t>(timeout_ms) * 1000U;
+    blk->deadline_us = SteadyNowUs() + static_cast<uint64_t>(timeout_ms) * 1000U;
   } else {
     blk->deadline_us = 0U;
   }
@@ -192,7 +189,7 @@ TEST_CASE("Pool: refcount fan-out (3 consumers)", "[job_pool]") {
   REQUIRE_FALSE(d.Release(bid));  // 2->1
   REQUIRE(d.AllocBlocks() == 1U);
 
-  REQUIRE(d.Release(bid));        // 1->0, recycled
+  REQUIRE(d.Release(bid));  // 1->0, recycled
   REQUIRE(d.AllocBlocks() == 0U);
   REQUIRE(d.FreeBlocks() == 4U);
 }
@@ -233,11 +230,8 @@ TEST_CASE("Pool: timeout detection fires", "[job_pool]") {
   std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
   uint32_t timeout_bid = UINT32_MAX;
-  uint32_t count = d.ScanTimeout(
-      [](uint32_t block_id, void* ctx) {
-        *static_cast<uint32_t*>(ctx) = block_id;
-      },
-      &timeout_bid);
+  uint32_t count =
+      d.ScanTimeout([](uint32_t block_id, void* ctx) { *static_cast<uint32_t*>(ctx) = block_id; }, &timeout_bid);
 
   REQUIRE(count == 1U);
   REQUIRE(timeout_bid == bid);
@@ -418,8 +412,7 @@ TEST_CASE("Pipeline: stage name query", "[job_pool][pipeline]") {
 TEST_CASE("Pipeline: single stage execution", "[job_pool][pipeline]") {
   std::atomic<uint32_t> call_count{0U};
 
-  auto handler = [](const uint8_t* /*data*/, uint32_t /*len*/,
-                    uint32_t /*block_id*/, void* ctx) {
+  auto handler = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* ctx) {
     static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
   };
 
@@ -447,8 +440,7 @@ TEST_CASE("Pipeline: serial chain A -> B -> C", "[job_pool][pipeline]") {
   uint32_t order[3] = {0U, 0U, 0U};
   std::atomic<uint32_t> seq{1U};
 
-  auto handler = [](const uint8_t* /*data*/, uint32_t /*len*/,
-                    uint32_t /*block_id*/, void* ctx) {
+  auto handler = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* ctx) {
     auto* c = static_cast<Ctx*>(ctx);
     *c->order_slot = c->seq->fetch_add(1U);
   };
@@ -481,16 +473,13 @@ TEST_CASE("Pipeline: fan-out A -> B, A -> C", "[job_pool][pipeline]") {
   std::atomic<uint32_t> b_count{0U};
   std::atomic<uint32_t> c_count{0U};
 
-  auto handler_b = [](const uint8_t* /*data*/, uint32_t /*len*/,
-                      uint32_t /*block_id*/, void* ctx) {
+  auto handler_b = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* ctx) {
     static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
   };
-  auto handler_c = [](const uint8_t* /*data*/, uint32_t /*len*/,
-                      uint32_t /*block_id*/, void* ctx) {
+  auto handler_c = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* ctx) {
     static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
   };
-  auto handler_a = [](const uint8_t* /*data*/, uint32_t /*len*/,
-                      uint32_t /*block_id*/, void* /*ctx*/) {};
+  auto handler_a = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* /*ctx*/) {};
 
   Disp<64, 4> d;
   Disp<64, 4>::Config cfg;
@@ -516,16 +505,14 @@ TEST_CASE("Pipeline: fan-out A -> B, A -> C", "[job_pool][pipeline]") {
 // DataDispatcher -- integration
 // ============================================================================
 
-TEST_CASE("Dispatcher: basic alloc-submit-release",
-          "[job_pool][dispatcher]") {
+TEST_CASE("Dispatcher: basic alloc-submit-release", "[job_pool][dispatcher]") {
   Disp<1024, 8> d;
   Disp<1024, 8>::Config cfg;
   cfg.name = "test";
   d.Init(cfg);
 
   std::atomic<uint32_t> processed{0U};
-  auto handler = [](const uint8_t* /*data*/, uint32_t /*len*/,
-                    uint32_t /*block_id*/, void* ctx) {
+  auto handler = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* ctx) {
     static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
   };
 
@@ -557,9 +544,7 @@ TEST_CASE("Dispatcher: backpressure callback", "[job_pool][dispatcher]") {
 
   std::atomic<uint32_t> bp_triggered{0U};
   d.SetBackpressureCallback(
-      [](uint32_t /*free_count*/, void* ctx) {
-        static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
-      },
+      [](uint32_t /*free_count*/, void* ctx) { static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U); },
       &bp_triggered);
 
   auto r0 = d.Alloc();
@@ -574,8 +559,7 @@ TEST_CASE("Dispatcher: backpressure callback", "[job_pool][dispatcher]") {
   d.Submit(r1.value(), 0U);
 }
 
-TEST_CASE("Dispatcher: timeout scan with fault reporter",
-          "[job_pool][dispatcher]") {
+TEST_CASE("Dispatcher: timeout scan with fault reporter", "[job_pool][dispatcher]") {
   Disp<64, 4> d;
   Disp<64, 4>::Config cfg;
   cfg.name = "timeout_test";
@@ -583,8 +567,7 @@ TEST_CASE("Dispatcher: timeout scan with fault reporter",
 
   std::atomic<uint32_t> fault_count{0U};
   FaultReporter reporter;
-  reporter.fn = [](uint16_t /*idx*/, uint32_t /*detail*/,
-                   FaultPriority /*pri*/, void* ctx) {
+  reporter.fn = [](uint16_t /*idx*/, uint32_t /*detail*/, FaultPriority /*pri*/, void* ctx) {
     static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
   };
   reporter.ctx = &fault_count;
@@ -601,8 +584,7 @@ TEST_CASE("Dispatcher: timeout scan with fault reporter",
   REQUIRE(fault_count.load() == 1U);
 }
 
-TEST_CASE("Dispatcher: capacity and payload queries",
-          "[job_pool][dispatcher]") {
+TEST_CASE("Dispatcher: capacity and payload queries", "[job_pool][dispatcher]") {
   Disp<2048, 16> d;
   REQUIRE(d.Capacity() == 16U);
   REQUIRE(d.PayloadCapacity() == 2048U);
@@ -610,8 +592,7 @@ TEST_CASE("Dispatcher: capacity and payload queries",
   REQUIRE(d.AllocBlocks() == 0U);
 }
 
-TEST_CASE("Dispatcher: pipeline with data verification",
-          "[job_pool][dispatcher]") {
+TEST_CASE("Dispatcher: pipeline with data verification", "[job_pool][dispatcher]") {
   Disp<128, 4> d;
   Disp<128, 4>::Config cfg;
   cfg.name = "data_verify";
@@ -623,8 +604,7 @@ TEST_CASE("Dispatcher: pipeline with data verification",
   };
   Result result{0U, false};
 
-  auto handler = [](const uint8_t* data, uint32_t len,
-                    uint32_t /*block_id*/, void* ctx) {
+  auto handler = [](const uint8_t* data, uint32_t len, uint32_t /*block_id*/, void* ctx) {
     auto* r = static_cast<Result*>(ctx);
     uint32_t sum = 0U;
     for (uint32_t i = 0U; i < len; ++i) {
@@ -652,16 +632,14 @@ TEST_CASE("Dispatcher: pipeline with data verification",
   REQUIRE(d.FreeBlocks() == 4U);
 }
 
-TEST_CASE("Dispatcher: multiple blocks through pipeline",
-          "[job_pool][dispatcher]") {
+TEST_CASE("Dispatcher: multiple blocks through pipeline", "[job_pool][dispatcher]") {
   Disp<64, 8> d;
   Disp<64, 8>::Config cfg;
   cfg.name = "multi";
   d.Init(cfg);
 
   std::atomic<uint32_t> count{0U};
-  auto handler = [](const uint8_t* /*data*/, uint32_t /*len*/,
-                    uint32_t /*block_id*/, void* ctx) {
+  auto handler = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* ctx) {
     static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
   };
 
@@ -715,26 +693,18 @@ TEST_CASE("BlockState: invalid transitions rejected", "[job_pool][state]") {
   using osp::detail::IsValidBlockTransition;
 
   // Cannot go backwards
-  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kReady,
-                                        BlockState::kAllocated));
-  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kProcessing,
-                                        BlockState::kReady));
-  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kProcessing,
-                                        BlockState::kAllocated));
+  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kReady, BlockState::kAllocated));
+  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kProcessing, BlockState::kReady));
+  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kProcessing, BlockState::kAllocated));
 
   // Cannot skip states forward
-  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kFree,
-                                        BlockState::kReady));
-  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kFree,
-                                        BlockState::kProcessing));
-  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kAllocated,
-                                        BlockState::kProcessing));
+  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kFree, BlockState::kReady));
+  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kFree, BlockState::kProcessing));
+  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kAllocated, BlockState::kProcessing));
 
   // Self-transitions are invalid
-  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kFree,
-                                        BlockState::kFree));
-  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kAllocated,
-                                        BlockState::kAllocated));
+  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kFree, BlockState::kFree));
+  REQUIRE_FALSE(IsValidBlockTransition(BlockState::kAllocated, BlockState::kAllocated));
 
   // Out-of-range (cast to invalid enum value)
   auto invalid = static_cast<BlockState>(7U);
@@ -742,8 +712,7 @@ TEST_CASE("BlockState: invalid transitions rejected", "[job_pool][state]") {
   REQUIRE_FALSE(IsValidBlockTransition(invalid, BlockState::kFree));
 }
 
-TEST_CASE("BlockState: constexpr table is compile-time evaluable",
-          "[job_pool][state]") {
+TEST_CASE("BlockState: constexpr table is compile-time evaluable", "[job_pool][state]") {
   using osp::kBlockStateCount;
   using osp::detail::kBlockStateTransition;
 
@@ -751,12 +720,9 @@ TEST_CASE("BlockState: constexpr table is compile-time evaluable",
   static_assert(kBlockStateCount == 7U, "Expected 7 block states");
 
   // Verify a known transition at compile time
-  static_assert(kBlockStateTransition[0][1] == true,
-                "Free->Alloc must be valid");
-  static_assert(kBlockStateTransition[0][0] == false,
-                "Free->Free must be invalid");
-  static_assert(kBlockStateTransition[2][3] == true,
-                "Ready->Processing must be valid");
+  static_assert(kBlockStateTransition[0][1] == true, "Free->Alloc must be valid");
+  static_assert(kBlockStateTransition[0][0] == false, "Free->Free must be invalid");
+  static_assert(kBlockStateTransition[2][3] == true, "Ready->Processing must be valid");
 
   REQUIRE(true);  // If we reach here, static_asserts passed
 }
@@ -769,7 +735,8 @@ TEST_CASE("BlockState: constexpr table is compile-time evaluable",
 static void* CreateTestShm(const char* name, uint32_t size) {
   shm_unlink(name);  // Cleanup any leftover
   int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
-  if (fd < 0) return nullptr;
+  if (fd < 0)
+    return nullptr;
   if (ftruncate(fd, size) < 0) {
     close(fd);
     shm_unlink(name);
@@ -861,13 +828,9 @@ TEST_CASE("ShmStore: alloc-submit-release lifecycle", "[job_pool][ShmStore]") {
   CleanupTestShm(shm_name, ptr, size);
 }
 
-TEST_CASE("ShmStore: RequiredShmSize includes consumer slots",
-          "[job_pool][ShmStore]") {
-  uint32_t base = TestShmStore::kShmHeaderSize +
-                  TestShmStore::kBlockStride * 8U;
-  uint32_t with_slots = base +
-      static_cast<uint32_t>(sizeof(osp::detail::ConsumerSlot)) *
-      OSP_JOB_MAX_CONSUMERS;
+TEST_CASE("ShmStore: RequiredShmSize includes consumer slots", "[job_pool][ShmStore]") {
+  uint32_t base = TestShmStore::kShmHeaderSize + TestShmStore::kBlockStride * 8U;
+  uint32_t with_slots = base + static_cast<uint32_t>(sizeof(osp::detail::ConsumerSlot)) * OSP_JOB_MAX_CONSUMERS;
 
   REQUIRE(TestShmStore::RequiredShmSize() == with_slots);
   REQUIRE(TestShmStore::RequiredShmSize() > base);
@@ -980,8 +943,7 @@ TEST_CASE("ConsumerSlot: holding_mask tracking", "[job_pool][ShmStore]") {
   CleanupTestShm(shm_name, ptr, size);
 }
 
-TEST_CASE("ConsumerSlot: cleanup dead consumer reclaims blocks",
-          "[job_pool][ShmStore]") {
+TEST_CASE("ConsumerSlot: cleanup dead consumer reclaims blocks", "[job_pool][ShmStore]") {
   const char* shm_name = "/osp_test_dd_cleanup";
   uint32_t size = TestShmStore::RequiredShmSize();
   void* ptr = CreateTestShm(shm_name, size);
@@ -1042,8 +1004,7 @@ TEST_CASE("ConsumerSlot: cleanup dead consumer reclaims blocks",
   CleanupTestShm(shm_name, ptr, size);
 }
 
-TEST_CASE("ConsumerSlot: cleanup dead consumer as sole holder recycles block",
-          "[job_pool][ShmStore]") {
+TEST_CASE("ConsumerSlot: cleanup dead consumer as sole holder recycles block", "[job_pool][ShmStore]") {
   const char* shm_name = "/osp_test_dd_sole";
   uint32_t size = TestShmStore::RequiredShmSize();
   void* ptr = CreateTestShm(shm_name, size);
@@ -1065,8 +1026,7 @@ TEST_CASE("ConsumerSlot: cleanup dead consumer as sole holder recycles block",
   d.TrackBlockHold(cid, bid);
 
   // Simulate crash
-  d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cid))
-      ->active.store(0U, std::memory_order_release);
+  d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cid))->active.store(0U, std::memory_order_release);
 
   REQUIRE(d.FreeBlocks() == 7U);
 
@@ -1083,8 +1043,7 @@ TEST_CASE("ConsumerSlot: cleanup dead consumer as sole holder recycles block",
 // Phase 4: Cross-process fork tests (ShmStore)
 // ============================================================================
 
-TEST_CASE("ShmStore cross-process: producer alloc, consumer release",
-          "[job_pool][ShmStore][fork]") {
+TEST_CASE("ShmStore cross-process: producer alloc, consumer release", "[job_pool][ShmStore][fork]") {
 #if defined(__SANITIZE_THREAD__)
   SKIP("Skipped under ThreadSanitizer (fork + shm unreliable)");
 #elif defined(__has_feature)
@@ -1124,15 +1083,19 @@ TEST_CASE("ShmStore cross-process: producer alloc, consumer release",
 
     const uint8_t* data = child_d.GetReadable(bid);
     for (uint32_t i = 0; i < 64U; ++i) {
-      if (data[i] != static_cast<uint8_t>(i * 3 + 7)) _exit(1);
+      if (data[i] != static_cast<uint8_t>(i * 3 + 7))
+        _exit(1);
     }
-    if (child_d.GetPayloadSize(bid) != 64U) _exit(2);
+    if (child_d.GetPayloadSize(bid) != 64U)
+      _exit(2);
 
     bool last = child_d.Release(bid);
-    if (!last) _exit(3);
+    if (!last)
+      _exit(3);
 
     // Verify free count updated
-    if (child_d.FreeBlocks() != 8U) _exit(4);
+    if (child_d.FreeBlocks() != 8U)
+      _exit(4);
     _exit(0);
   }
 
@@ -1148,8 +1111,7 @@ TEST_CASE("ShmStore cross-process: producer alloc, consumer release",
   CleanupTestShm(shm_name, ptr, size);
 }
 
-TEST_CASE("ShmStore cross-process: consumer crash recovery",
-          "[job_pool][ShmStore][fork]") {
+TEST_CASE("ShmStore cross-process: consumer crash recovery", "[job_pool][ShmStore][fork]") {
 #if defined(__SANITIZE_THREAD__)
   SKIP("Skipped under ThreadSanitizer (fork + shm unreliable)");
 #elif defined(__has_feature)
@@ -1188,14 +1150,14 @@ TEST_CASE("ShmStore cross-process: consumer crash recovery",
     child_d.Attach(ptr);
 
     int32_t cid = child_d.RegisterConsumer(static_cast<uint32_t>(getpid()));
-    if (cid < 0) _exit(1);
+    if (cid < 0)
+      _exit(1);
 
     child_d.TrackBlockHold(cid, r0.value());
     child_d.TrackBlockHold(cid, r1.value());
 
     // Simulate crash: mark inactive and exit
-    child_d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cid))
-        ->active.store(0U, std::memory_order_release);
+    child_d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cid))->active.store(0U, std::memory_order_release);
     _exit(0);
   }
 
@@ -1216,8 +1178,7 @@ TEST_CASE("ShmStore cross-process: consumer crash recovery",
   CleanupTestShm(shm_name, ptr, size);
 }
 
-TEST_CASE("ShmStore cross-process: concurrent alloc and release",
-          "[job_pool][ShmStore][fork]") {
+TEST_CASE("ShmStore cross-process: concurrent alloc and release", "[job_pool][ShmStore][fork]") {
 #if defined(__SANITIZE_THREAD__)
   SKIP("Skipped under ThreadSanitizer (fork + shm unreliable)");
 #elif defined(__has_feature)
@@ -1247,7 +1208,8 @@ TEST_CASE("ShmStore cross-process: concurrent alloc and release",
     uint32_t bids[4];
     for (int i = 0; i < 4; ++i) {
       auto r = child_d.Alloc();
-      if (!r.has_value()) _exit(1);
+      if (!r.has_value())
+        _exit(1);
       bids[i] = r.value();
       child_d.Submit(bids[i], 8U, 1U);
     }

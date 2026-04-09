@@ -533,7 +533,14 @@ class NodeManager {
   // Utilities
   // ==========================================================================
 
-  uint16_t AllocNodeId() noexcept { return next_node_id_++; }
+  uint16_t AllocNodeId() noexcept {
+    uint16_t id = next_node_id_++;
+    // Wrap around: skip 0 (invalid sentinel)
+    if (0U == next_node_id_) {
+      next_node_id_ = 1U;
+    }
+    return id;
+  }
 
   NodeEntry* FindSlot() noexcept {
     for (uint32_t i = 0; i < MaxNodes; ++i) {

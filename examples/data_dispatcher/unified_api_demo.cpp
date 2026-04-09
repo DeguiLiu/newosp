@@ -10,16 +10,16 @@
 //
 // Usage: ./osp_dd_unified [num_frames]
 
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include "common.hpp"
 
 #include "osp/data_dispatcher.hpp"
 #include "osp/log.hpp"
 #include "osp/platform.hpp"
 
-#include "common.hpp"
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 // ---------------------------------------------------------------------------
 // Store-agnostic business logic (template-parameterized)
@@ -32,10 +32,10 @@ struct LogConsumer {
   uint32_t seq_gaps = 0;
 };
 
-static void LogHandler(const uint8_t* data, uint32_t len,
-                       uint32_t /*block_id*/, void* ctx) {
+static void LogHandler(const uint8_t* data, uint32_t len, uint32_t /*block_id*/, void* ctx) {
   auto* log = static_cast<LogConsumer*>(ctx);
-  if (!ValidateLidarFrame(data, len)) return;
+  if (!ValidateLidarFrame(data, len))
+    return;
   auto* hdr = reinterpret_cast<const LidarFrame*>(data);
   ++log->frames_received;
   if (log->last_seq != UINT32_MAX && hdr->seq_num != log->last_seq + 1) {
@@ -57,8 +57,7 @@ uint32_t RunProduction(DispatcherType& disp, uint32_t num_frames) {
       break;
     }
     uint8_t* payload = disp.GetWritable(bid.value());
-    uint32_t ts_ms = static_cast<uint32_t>(
-        (osp::SteadyNowUs() - t0) / 1000);
+    uint32_t ts_ms = static_cast<uint32_t>((osp::SteadyNowUs() - t0) / 1000);
     FillLidarFrame(payload, i, ts_ms);
 
     disp.Submit(bid.value(), kFrameDataSize);
@@ -72,7 +71,8 @@ uint32_t RunProduction(DispatcherType& disp, uint32_t num_frames) {
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
   uint32_t num_frames = 100;
-  if (argc > 1) num_frames = static_cast<uint32_t>(std::atoi(argv[1]));
+  if (argc > 1)
+    num_frames = static_cast<uint32_t>(std::atoi(argv[1]));
 
   OSP_LOG_INFO("Unified", "=== Store-Agnostic API Demo ===");
   OSP_LOG_INFO("Unified", "Proving identical API for InProcStore (and ShmStore)");
@@ -94,14 +94,12 @@ int main(int argc, char* argv[]) {
     uint64_t t0 = osp::SteadyNowUs();
     uint32_t produced = RunProduction(disp, num_frames);
     uint64_t elapsed_us = osp::SteadyNowUs() - t0;
-    float fps = (elapsed_us > 0)
-        ? static_cast<float>(produced) * 1e6f
-          / static_cast<float>(elapsed_us) : 0.0f;
+    float fps = (elapsed_us > 0) ? static_cast<float>(produced) * 1e6f / static_cast<float>(elapsed_us) : 0.0f;
 
-    OSP_LOG_INFO("Unified", "InProc: produced=%u received=%u gaps=%u "
+    OSP_LOG_INFO("Unified",
+                 "InProc: produced=%u received=%u gaps=%u "
                  "pool(free=%u alloc=%u) fps=%.0f",
-                 produced, consumer.frames_received, consumer.seq_gaps,
-                 disp.FreeBlocks(), disp.AllocBlocks(),
+                 produced, consumer.frames_received, consumer.seq_gaps, disp.FreeBlocks(), disp.AllocBlocks(),
                  static_cast<double>(fps));
   }
 

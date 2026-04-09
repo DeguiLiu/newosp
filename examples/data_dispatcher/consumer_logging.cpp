@@ -15,12 +15,7 @@
 //
 // Usage: ./osp_dd_consumer_logging [--channel name]
 
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <chrono>
-#include <thread>
+#include "common.hpp"
 
 #include "osp/data_dispatcher.hpp"
 #include "osp/hsm.hpp"
@@ -30,7 +25,13 @@
 #include "osp/shutdown.hpp"
 #include "osp/timer.hpp"
 
-#include "common.hpp"
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include <chrono>
+#include <thread>
 
 // ---------------------------------------------------------------------------
 // Type aliases
@@ -44,8 +45,11 @@ using Disp = osp::DataDispatcher<Store>;
 // ---------------------------------------------------------------------------
 
 enum LogEvt : uint32_t {
-  kEvtConnected = 1, kEvtConnectFail, kEvtStall,
-  kEvtDataResumed, kEvtShutdown,
+  kEvtConnected = 1,
+  kEvtConnectFail,
+  kEvtStall,
+  kEvtDataResumed,
+  kEvtShutdown,
 };
 
 // ---------------------------------------------------------------------------
@@ -89,15 +93,17 @@ struct LogCtx {
 // ---------------------------------------------------------------------------
 
 static void OnEnterConnecting(LogCtx& ctx) {
-  OSP_LOG_INFO("Logging", "connecting to pool '%s' + notify '%s'...",
-               ctx.pool_name, ctx.notify_name);
+  OSP_LOG_INFO("Logging", "connecting to pool '%s' + notify '%s'...", ctx.pool_name, ctx.notify_name);
   ctx.connect_retries = 0;
 }
 
 static osp::TransitionResult OnConnecting(LogCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtConnected) return ctx.sm->RequestTransition(ctx.s_receiving);
-  if (ev.id == kEvtConnectFail) return ctx.sm->RequestTransition(ctx.s_done);
-  if (ev.id == kEvtShutdown) return ctx.sm->RequestTransition(ctx.s_done);
+  if (ev.id == kEvtConnected)
+    return ctx.sm->RequestTransition(ctx.s_receiving);
+  if (ev.id == kEvtConnectFail)
+    return ctx.sm->RequestTransition(ctx.s_done);
+  if (ev.id == kEvtShutdown)
+    return ctx.sm->RequestTransition(ctx.s_done);
   return osp::TransitionResult::kUnhandled;
 }
 
@@ -106,8 +112,10 @@ static void OnEnterReceiving(LogCtx&) {
 }
 
 static osp::TransitionResult OnReceiving(LogCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtStall) return ctx.sm->RequestTransition(ctx.s_stalled);
-  if (ev.id == kEvtShutdown) return ctx.sm->RequestTransition(ctx.s_done);
+  if (ev.id == kEvtStall)
+    return ctx.sm->RequestTransition(ctx.s_stalled);
+  if (ev.id == kEvtShutdown)
+    return ctx.sm->RequestTransition(ctx.s_done);
   return osp::TransitionResult::kUnhandled;
 }
 
@@ -116,23 +124,22 @@ static void OnEnterStalled(LogCtx&) {
 }
 
 static osp::TransitionResult OnStalled(LogCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtDataResumed) return ctx.sm->RequestTransition(ctx.s_receiving);
-  if (ev.id == kEvtShutdown) return ctx.sm->RequestTransition(ctx.s_done);
+  if (ev.id == kEvtDataResumed)
+    return ctx.sm->RequestTransition(ctx.s_receiving);
+  if (ev.id == kEvtShutdown)
+    return ctx.sm->RequestTransition(ctx.s_done);
   return osp::TransitionResult::kUnhandled;
 }
 
 static void OnEnterDone(LogCtx& ctx) {
   uint64_t dt = osp::SteadyNowUs() - ctx.t0_us;
-  float fps = (dt > 0) ? static_cast<float>(ctx.frames_received) * 1e6f
-                         / static_cast<float>(dt) : 0.0f;
-  uint32_t avg_int = (ctx.intensity_count > 0)
-      ? static_cast<uint32_t>(ctx.intensity_sum / ctx.intensity_count) : 0;
+  float fps = (dt > 0) ? static_cast<float>(ctx.frames_received) * 1e6f / static_cast<float>(dt) : 0.0f;
+  uint32_t avg_int = (ctx.intensity_count > 0) ? static_cast<uint32_t>(ctx.intensity_sum / ctx.intensity_count) : 0;
   OSP_LOG_INFO("Logging",
                "done: frames=%u invalid=%u gaps=%u fps=%.1f "
                "intensity(min=%u max=%u avg=%u)",
-               ctx.frames_received, ctx.frames_invalid, ctx.seq_gaps,
-               static_cast<double>(fps),
-               ctx.intensity_min, ctx.intensity_max, avg_int);
+               ctx.frames_received, ctx.frames_invalid, ctx.seq_gaps, static_cast<double>(fps), ctx.intensity_min,
+               ctx.intensity_max, avg_int);
   if (ctx.pool_shm != nullptr) {
     ClosePoolShm(ctx.pool_shm, ctx.pool_size);
     ctx.pool_shm = nullptr;
@@ -166,8 +173,7 @@ static void ProcessBlock(LogCtx& ctx, uint32_t block_id) {
   if (!ctx.first_frame && hdr->seq_num != ctx.last_seq + 1) {
     uint32_t gap = hdr->seq_num - ctx.last_seq - 1;
     ctx.seq_gaps += gap;
-    OSP_LOG_WARN("Logging", "seq gap: expected=%u got=%u (gap=%u)",
-                 ctx.last_seq + 1, hdr->seq_num, gap);
+    OSP_LOG_WARN("Logging", "seq gap: expected=%u got=%u (gap=%u)", ctx.last_seq + 1, hdr->seq_num, gap);
   }
   ctx.first_frame = false;
   ctx.last_seq = hdr->seq_num;
@@ -178,17 +184,16 @@ static void ProcessBlock(LogCtx& ctx, uint32_t block_id) {
     uint8_t v = pts[i].intensity;
     ctx.intensity_sum += v;
     ++ctx.intensity_count;
-    if (v < ctx.intensity_min) ctx.intensity_min = v;
-    if (v > ctx.intensity_max) ctx.intensity_max = v;
+    if (v < ctx.intensity_min)
+      ctx.intensity_min = v;
+    if (v > ctx.intensity_max)
+      ctx.intensity_max = v;
   }
 
   if (ctx.frames_received % 10 == 0) {
-    uint32_t avg = (ctx.intensity_count > 0)
-        ? static_cast<uint32_t>(ctx.intensity_sum / ctx.intensity_count) : 0;
-    OSP_LOG_INFO("Logging",
-                 "frame #%u: seq=%u pts=%u intensity(min=%u max=%u avg=%u)",
-                 ctx.frames_received, hdr->seq_num, hdr->point_count,
-                 ctx.intensity_min, ctx.intensity_max, avg);
+    uint32_t avg = (ctx.intensity_count > 0) ? static_cast<uint32_t>(ctx.intensity_sum / ctx.intensity_count) : 0;
+    OSP_LOG_INFO("Logging", "frame #%u: seq=%u pts=%u intensity(min=%u max=%u avg=%u)", ctx.frames_received,
+                 hdr->seq_num, hdr->point_count, ctx.intensity_min, ctx.intensity_max, avg);
   }
 
   // Release refcount (zero-copy: no buffer copy needed)
@@ -216,15 +221,16 @@ int main(int argc, char* argv[]) {
 
   // Stats timer
   ctx.timer.Start();
-  ctx.timer.Add(3000, [](void* arg) {
-    auto* c = static_cast<LogCtx*>(arg);
-    uint64_t dt = osp::SteadyNowUs() - c->t0_us;
-    float fps = (dt > 0) ? static_cast<float>(c->frames_received) * 1e6f
-                           / static_cast<float>(dt) : 0.0f;
-    OSP_LOG_INFO("Logging", "stats: frames=%u invalid=%u gaps=%u fps=%.1f",
-                 c->frames_received, c->frames_invalid, c->seq_gaps,
-                 static_cast<double>(fps));
-  }, &ctx);
+  ctx.timer.Add(
+      3000,
+      [](void* arg) {
+        auto* c = static_cast<LogCtx*>(arg);
+        uint64_t dt = osp::SteadyNowUs() - c->t0_us;
+        float fps = (dt > 0) ? static_cast<float>(c->frames_received) * 1e6f / static_cast<float>(dt) : 0.0f;
+        OSP_LOG_INFO("Logging", "stats: frames=%u invalid=%u gaps=%u fps=%.1f", c->frames_received, c->frames_invalid,
+                     c->seq_gaps, static_cast<double>(fps));
+      },
+      &ctx);
 
   // Build HSM
   osp::StateMachine<LogCtx, 6> sm(ctx);
@@ -252,8 +258,7 @@ int main(int argc, char* argv[]) {
       if (ctx.pool_shm == nullptr) {
         ++ctx.connect_retries;
         if (ctx.connect_retries >= 50) {
-          OSP_LOG_ERROR("Logging", "pool connect failed after %u retries",
-                        ctx.connect_retries);
+          OSP_LOG_ERROR("Logging", "pool connect failed after %u retries", ctx.connect_retries);
           sm.Dispatch({kEvtConnectFail});
         } else {
           std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -283,8 +288,7 @@ int main(int argc, char* argv[]) {
       auto wait = ctx.notify_channel.WaitReadable(500);
       if (wait.has_value()) {
         NotifyMsg msg;
-        uint32_t len = ctx.notify_channel.Read(
-            reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+        uint32_t len = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
         if (len == sizeof(msg)) {
           ProcessBlock(ctx, msg.block_id);
         }
@@ -297,8 +301,7 @@ int main(int argc, char* argv[]) {
       auto wait = ctx.notify_channel.WaitReadable(1000);
       if (wait.has_value()) {
         NotifyMsg msg;
-        uint32_t len = ctx.notify_channel.Read(
-            reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+        uint32_t len = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
         if (len == sizeof(msg)) {
           ProcessBlock(ctx, msg.block_id);
           sm.Dispatch({kEvtDataResumed});
@@ -313,7 +316,6 @@ int main(int argc, char* argv[]) {
   }
 
   ctx.timer.Stop();
-  OSP_LOG_INFO("Logging", "exiting: frames=%u gaps=%u",
-               ctx.frames_received, ctx.seq_gaps);
+  OSP_LOG_INFO("Logging", "exiting: frames=%u gaps=%u", ctx.frames_received, ctx.seq_gaps);
   return 0;
 }

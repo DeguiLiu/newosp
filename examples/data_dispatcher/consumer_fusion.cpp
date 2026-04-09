@@ -12,13 +12,7 @@
 //
 // Usage: ./osp_dd_consumer_fusion [--channel name]
 
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <cfloat>
-#include <chrono>
-#include <thread>
+#include "common.hpp"
 
 #include "osp/data_dispatcher.hpp"
 #include "osp/hsm.hpp"
@@ -28,7 +22,14 @@
 #include "osp/shutdown.hpp"
 #include "osp/timer.hpp"
 
-#include "common.hpp"
+#include <cfloat>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include <chrono>
+#include <thread>
 
 using Store = osp::ShmStore<kFrameDataSize, kPoolMaxBlocks>;
 using Disp = osp::DataDispatcher<Store>;
@@ -48,8 +49,11 @@ struct BBox {
 // ---------------------------------------------------------------------------
 
 enum FusEvt : uint32_t {
-  kEvtConnected = 1, kEvtConnectFail, kEvtOverloaded,
-  kEvtCaughtUp, kEvtShutdown,
+  kEvtConnected = 1,
+  kEvtConnectFail,
+  kEvtOverloaded,
+  kEvtCaughtUp,
+  kEvtShutdown,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,9 +97,12 @@ static void OnEnterConnecting(FusCtx& ctx) {
 }
 
 static osp::TransitionResult OnConnecting(FusCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtConnected) return ctx.sm->RequestTransition(ctx.s_processing);
-  if (ev.id == kEvtConnectFail) return ctx.sm->RequestTransition(ctx.s_done);
-  if (ev.id == kEvtShutdown) return ctx.sm->RequestTransition(ctx.s_done);
+  if (ev.id == kEvtConnected)
+    return ctx.sm->RequestTransition(ctx.s_processing);
+  if (ev.id == kEvtConnectFail)
+    return ctx.sm->RequestTransition(ctx.s_done);
+  if (ev.id == kEvtShutdown)
+    return ctx.sm->RequestTransition(ctx.s_done);
   return osp::TransitionResult::kUnhandled;
 }
 
@@ -104,36 +111,34 @@ static void OnEnterProcessing(FusCtx&) {
 }
 
 static osp::TransitionResult OnProcessing(FusCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtOverloaded) return ctx.sm->RequestTransition(ctx.s_overloaded);
-  if (ev.id == kEvtShutdown) return ctx.sm->RequestTransition(ctx.s_done);
+  if (ev.id == kEvtOverloaded)
+    return ctx.sm->RequestTransition(ctx.s_overloaded);
+  if (ev.id == kEvtShutdown)
+    return ctx.sm->RequestTransition(ctx.s_done);
   return osp::TransitionResult::kUnhandled;
 }
 
 static void OnEnterOverloaded(FusCtx& ctx) {
-  OSP_LOG_WARN("Fusion", "overloaded: notify readable=%u bytes",
-               ctx.notify_channel.ReadableBytes());
+  OSP_LOG_WARN("Fusion", "overloaded: notify readable=%u bytes", ctx.notify_channel.ReadableBytes());
 }
 
 static osp::TransitionResult OnOverloaded(FusCtx& ctx, const osp::Event& ev) {
-  if (ev.id == kEvtCaughtUp) return ctx.sm->RequestTransition(ctx.s_processing);
-  if (ev.id == kEvtShutdown) return ctx.sm->RequestTransition(ctx.s_done);
+  if (ev.id == kEvtCaughtUp)
+    return ctx.sm->RequestTransition(ctx.s_processing);
+  if (ev.id == kEvtShutdown)
+    return ctx.sm->RequestTransition(ctx.s_done);
   return osp::TransitionResult::kUnhandled;
 }
 
 static void OnEnterDone(FusCtx& ctx) {
   uint64_t dt = osp::SteadyNowUs() - ctx.t0_us;
-  float fps = (dt > 0) ? static_cast<float>(ctx.frames_processed) * 1e6f
-                         / static_cast<float>(dt) : 0.0f;
-  uint64_t avg_lat = (ctx.frames_processed > 0)
-      ? ctx.total_latency_us / ctx.frames_processed : 0;
+  float fps = (dt > 0) ? static_cast<float>(ctx.frames_processed) * 1e6f / static_cast<float>(dt) : 0.0f;
+  uint64_t avg_lat = (ctx.frames_processed > 0) ? ctx.total_latency_us / ctx.frames_processed : 0;
   OSP_LOG_INFO("Fusion",
                "done: processed=%u skipped=%u fps=%.1f "
                "lat(avg=%lu min=%lu max=%lu us)",
-               ctx.frames_processed, ctx.frames_skipped,
-               static_cast<double>(fps),
-               static_cast<unsigned long>(avg_lat),
-               static_cast<unsigned long>(
-                   ctx.min_latency_us == UINT64_MAX ? 0 : ctx.min_latency_us),
+               ctx.frames_processed, ctx.frames_skipped, static_cast<double>(fps), static_cast<unsigned long>(avg_lat),
+               static_cast<unsigned long>(ctx.min_latency_us == UINT64_MAX ? 0 : ctx.min_latency_us),
                static_cast<unsigned long>(ctx.max_latency_us));
   if (ctx.pool_shm != nullptr) {
     ClosePoolShm(ctx.pool_shm, ctx.pool_size);
@@ -167,12 +172,18 @@ static void ProcessBlock(FusCtx& ctx, uint32_t block_id) {
   BBox bb;
   uint32_t count = hdr->point_count;
   for (uint32_t i = 0; i < count; ++i) {
-    if (pts[i].x < bb.min_x) bb.min_x = pts[i].x;
-    if (pts[i].x > bb.max_x) bb.max_x = pts[i].x;
-    if (pts[i].y < bb.min_y) bb.min_y = pts[i].y;
-    if (pts[i].y > bb.max_y) bb.max_y = pts[i].y;
-    if (pts[i].z < bb.min_z) bb.min_z = pts[i].z;
-    if (pts[i].z > bb.max_z) bb.max_z = pts[i].z;
+    if (pts[i].x < bb.min_x)
+      bb.min_x = pts[i].x;
+    if (pts[i].x > bb.max_x)
+      bb.max_x = pts[i].x;
+    if (pts[i].y < bb.min_y)
+      bb.min_y = pts[i].y;
+    if (pts[i].y > bb.max_y)
+      bb.max_y = pts[i].y;
+    if (pts[i].z < bb.min_z)
+      bb.min_z = pts[i].z;
+    if (pts[i].z > bb.max_z)
+      bb.max_z = pts[i].z;
   }
 
   // Simulate variable processing time
@@ -184,17 +195,16 @@ static void ProcessBlock(FusCtx& ctx, uint32_t block_id) {
 
   uint64_t lat = osp::SteadyNowUs() - start_us;
   ctx.total_latency_us += lat;
-  if (lat > ctx.max_latency_us) ctx.max_latency_us = lat;
-  if (lat < ctx.min_latency_us) ctx.min_latency_us = lat;
+  if (lat > ctx.max_latency_us)
+    ctx.max_latency_us = lat;
+  if (lat < ctx.min_latency_us)
+    ctx.min_latency_us = lat;
   ++ctx.frames_processed;
 
   if (ctx.frames_processed % 10 == 0) {
-    OSP_LOG_INFO("Fusion",
-                 "frame #%u: seq=%u bbox(x=[%.1f,%.1f] y=[%.1f,%.1f]) lat=%lu us",
-                 ctx.frames_processed, hdr->seq_num,
-                 static_cast<double>(bb.min_x), static_cast<double>(bb.max_x),
-                 static_cast<double>(bb.min_y), static_cast<double>(bb.max_y),
-                 static_cast<unsigned long>(lat));
+    OSP_LOG_INFO("Fusion", "frame #%u: seq=%u bbox(x=[%.1f,%.1f] y=[%.1f,%.1f]) lat=%lu us", ctx.frames_processed,
+                 hdr->seq_num, static_cast<double>(bb.min_x), static_cast<double>(bb.max_x),
+                 static_cast<double>(bb.min_y), static_cast<double>(bb.max_y), static_cast<unsigned long>(lat));
   }
 }
 
@@ -217,17 +227,17 @@ int main(int argc, char* argv[]) {
   ctx.pool_size = Store::RequiredShmSize();
 
   ctx.timer.Start();
-  ctx.timer.Add(3000, [](void* arg) {
-    auto* c = static_cast<FusCtx*>(arg);
-    uint64_t dt = osp::SteadyNowUs() - c->t0_us;
-    float fps = (dt > 0) ? static_cast<float>(c->frames_processed) * 1e6f
-                           / static_cast<float>(dt) : 0.0f;
-    uint64_t avg = (c->frames_processed > 0)
-        ? c->total_latency_us / c->frames_processed : 0;
-    OSP_LOG_INFO("Fusion", "stats: processed=%u skipped=%u fps=%.1f avg_lat=%lu us",
-                 c->frames_processed, c->frames_skipped,
-                 static_cast<double>(fps), static_cast<unsigned long>(avg));
-  }, &ctx);
+  ctx.timer.Add(
+      3000,
+      [](void* arg) {
+        auto* c = static_cast<FusCtx*>(arg);
+        uint64_t dt = osp::SteadyNowUs() - c->t0_us;
+        float fps = (dt > 0) ? static_cast<float>(c->frames_processed) * 1e6f / static_cast<float>(dt) : 0.0f;
+        uint64_t avg = (c->frames_processed > 0) ? c->total_latency_us / c->frames_processed : 0;
+        OSP_LOG_INFO("Fusion", "stats: processed=%u skipped=%u fps=%.1f avg_lat=%lu us", c->frames_processed,
+                     c->frames_skipped, static_cast<double>(fps), static_cast<unsigned long>(avg));
+      },
+      &ctx);
 
   osp::StateMachine<FusCtx, 6> sm(ctx);
   ctx.sm = &sm;
@@ -279,8 +289,7 @@ int main(int argc, char* argv[]) {
       auto wait = ctx.notify_channel.WaitReadable(500);
       if (wait.has_value()) {
         NotifyMsg msg;
-        uint32_t len = ctx.notify_channel.Read(
-            reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+        uint32_t len = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
         if (len == sizeof(msg)) {
           ProcessBlock(ctx, msg.block_id);
         }
@@ -295,8 +304,7 @@ int main(int argc, char* argv[]) {
       uint32_t skipped = 0;
       while (ctx.notify_channel.ReadableBytes() > sizeof(NotifyMsg)) {
         NotifyMsg msg;
-        uint32_t len = ctx.notify_channel.Read(
-            reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+        uint32_t len = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
         if (len == sizeof(msg)) {
           // Release without processing (skip)
           ctx.disp.Release(msg.block_id);
@@ -318,7 +326,6 @@ int main(int argc, char* argv[]) {
   }
 
   ctx.timer.Stop();
-  OSP_LOG_INFO("Fusion", "exiting: processed=%u skipped=%u",
-               ctx.frames_processed, ctx.frames_skipped);
+  OSP_LOG_INFO("Fusion", "exiting: processed=%u skipped=%u", ctx.frames_processed, ctx.frames_skipped);
   return 0;
 }

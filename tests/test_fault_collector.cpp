@@ -3,14 +3,14 @@
  * @brief Catch2 tests for osp::FaultCollector.
  */
 
-#include <catch2/catch_test_macros.hpp>
-
 #include "osp/fault_collector.hpp"
 #include "osp/watchdog.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstdint>
+
+#include <atomic>
+#include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -64,27 +64,21 @@ TEST_CASE("RegisterHook valid", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
 
-  auto result = fc.RegisterHook(0U, [](const FaultEvent&) {
-    return HookAction::kHandled;
-  });
+  auto result = fc.RegisterHook(0U, [](const FaultEvent&) { return HookAction::kHandled; });
   REQUIRE(result.has_value());
 }
 
 TEST_CASE("RegisterHook unregistered fault", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   // Fault 5 not registered
-  auto result = fc.RegisterHook(5U, [](const FaultEvent&) {
-    return HookAction::kHandled;
-  });
+  auto result = fc.RegisterHook(5U, [](const FaultEvent&) { return HookAction::kHandled; });
   REQUIRE_FALSE(result.has_value());
   REQUIRE(result.get_error() == FaultCollectorError::kInvalidIndex);
 }
 
 TEST_CASE("RegisterHook invalid index", "[fault_collector]") {
   FaultCollector<16, 64> fc;
-  auto result = fc.RegisterHook(16U, [](const FaultEvent&) {
-    return HookAction::kHandled;
-  });
+  auto result = fc.RegisterHook(16U, [](const FaultEvent&) { return HookAction::kHandled; });
   REQUIRE_FALSE(result.has_value());
   REQUIRE(result.get_error() == FaultCollectorError::kInvalidIndex);
 }
@@ -231,12 +225,8 @@ TEST_CASE("Hook receives correct FaultEvent fields", "[fault_collector]") {
 
   std::atomic<bool> verified{false};
   fc.RegisterHook(3U, [&verified](const FaultEvent& evt) {
-    if (evt.fault_index == 3U &&
-        evt.fault_code == 0xAABBCCDDU &&
-        evt.detail == 0x12345678U &&
-        evt.priority == FaultPriority::kHigh &&
-        evt.is_first &&
-        evt.occurrence_count == 1U) {
+    if (evt.fault_index == 3U && evt.fault_code == 0xAABBCCDDU && evt.detail == 0x12345678U &&
+        evt.priority == FaultPriority::kHigh && evt.is_first && evt.occurrence_count == 1U) {
       verified.store(true, std::memory_order_relaxed);
     }
     return HookAction::kHandled;
@@ -253,9 +243,7 @@ TEST_CASE("Hook receives correct FaultEvent fields", "[fault_collector]") {
 TEST_CASE("Hook kHandled clears active bit", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.RegisterHook(0U, [](const FaultEvent&) {
-    return HookAction::kHandled;
-  });
+  fc.RegisterHook(0U, [](const FaultEvent&) { return HookAction::kHandled; });
 
   fc.Start();
   fc.ReportFault(0U, 0x1111U);
@@ -268,9 +256,7 @@ TEST_CASE("Hook kHandled clears active bit", "[fault_collector]") {
 TEST_CASE("Hook kDefer keeps active bit", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.RegisterHook(0U, [](const FaultEvent&) {
-    return HookAction::kDefer;
-  });
+  fc.RegisterHook(0U, [](const FaultEvent&) { return HookAction::kDefer; });
 
   fc.Start();
   fc.ReportFault(0U, 0x1111U);
@@ -289,8 +275,7 @@ TEST_CASE("Hook kEscalate re-enqueues at higher priority", "[fault_collector]") 
 
   fc.RegisterHook(0U, [&call_count, &last_priority](const FaultEvent& evt) {
     uint32_t cnt = call_count.fetch_add(1U, std::memory_order_relaxed);
-    last_priority.store(static_cast<uint8_t>(evt.priority),
-                        std::memory_order_relaxed);
+    last_priority.store(static_cast<uint8_t>(evt.priority), std::memory_order_relaxed);
     // First call: escalate. Second call: handle.
     if (cnt == 0U) {
       return HookAction::kEscalate;
@@ -305,8 +290,7 @@ TEST_CASE("Hook kEscalate re-enqueues at higher priority", "[fault_collector]") 
 
   REQUIRE(call_count.load() >= 2U);
   // Last call should be at kHigh (escalated from kMedium)
-  REQUIRE(last_priority.load() ==
-          static_cast<uint8_t>(FaultPriority::kHigh));
+  REQUIRE(last_priority.load() == static_cast<uint8_t>(FaultPriority::kHigh));
 }
 
 // ============================================================================
@@ -387,9 +371,7 @@ TEST_CASE("Statistics initial state", "[fault_collector]") {
 TEST_CASE("Statistics after reporting", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.RegisterHook(0U, [](const FaultEvent&) {
-    return HookAction::kHandled;
-  });
+  fc.RegisterHook(0U, [](const FaultEvent&) { return HookAction::kHandled; });
 
   fc.Start();
   fc.ReportFault(0U, 0x1111U, FaultPriority::kMedium);
@@ -432,9 +414,7 @@ TEST_CASE("Overflow callback on queue full", "[fault_collector]") {
 
   std::atomic<uint32_t> overflow_count{0U};
   fc.SetOverflowCallback(
-      [&overflow_count](uint16_t, FaultPriority) {
-        overflow_count.fetch_add(1U, std::memory_order_relaxed);
-      });
+      [&overflow_count](uint16_t, FaultPriority) { overflow_count.fetch_add(1U, std::memory_order_relaxed); });
 
   // Fill the kLow queue (threshold = 4*60/100 = 2, so 3rd kLow should drop)
   for (uint32_t i = 0U; i < 8U; ++i) {
@@ -450,8 +430,7 @@ TEST_CASE("Overflow callback on queue full", "[fault_collector]") {
 // Priority admission control
 // ============================================================================
 
-TEST_CASE("kCritical never dropped when queue has space",
-          "[fault_collector]") {
+TEST_CASE("kCritical never dropped when queue has space", "[fault_collector]") {
   FaultCollector<4, 8> fc;
   fc.RegisterFault(0U, 0x01010001U);
 
@@ -566,8 +545,7 @@ TEST_CASE("MPSC stress: 4 producers x 1000 faults", "[fault_collector]") {
     producers.emplace_back([&fc, &total_attempts, t] {
       for (uint32_t i = 0U; i < kPerThread; ++i) {
         // Retry on queue full (backpressure)
-        while (!fc.ReportFault(static_cast<uint16_t>(t), i,
-                               FaultPriority::kMedium).has_value()) {
+        while (!fc.ReportFault(static_cast<uint16_t>(t), i, FaultPriority::kMedium).has_value()) {
           std::this_thread::yield();
         }
         total_attempts.fetch_add(1U, std::memory_order_relaxed);
@@ -590,8 +568,7 @@ TEST_CASE("MPSC stress: 4 producers x 1000 faults", "[fault_collector]") {
   REQUIRE(processed.load() == 4U * kPerThread);
 }
 
-TEST_CASE("Priority flood: kLow flood + kCritical penetration",
-          "[fault_collector]") {
+TEST_CASE("Priority flood: kLow flood + kCritical penetration", "[fault_collector]") {
   FaultCollector<4, 32> fc;
   fc.RegisterFault(0U, 0x01U);  // kLow flood target
   fc.RegisterFault(1U, 0x02U);  // kCritical target
@@ -601,9 +578,7 @@ TEST_CASE("Priority flood: kLow flood + kCritical penetration",
     critical_processed.fetch_add(1U, std::memory_order_relaxed);
     return HookAction::kHandled;
   });
-  fc.SetDefaultHook([](const FaultEvent&) {
-    return HookAction::kHandled;
-  });
+  fc.SetDefaultHook([](const FaultEvent&) { return HookAction::kHandled; });
 
   fc.Start();
 
@@ -673,9 +648,7 @@ TEST_CASE("Concurrent report and clear", "[fault_collector]") {
 TEST_CASE("Hook kShutdown sets shutdown flag", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.RegisterHook(0U, [](const FaultEvent&) {
-    return HookAction::kShutdown;
-  });
+  fc.RegisterHook(0U, [](const FaultEvent&) { return HookAction::kShutdown; });
 
   fc.Start();
   fc.ReportFault(0U, 0xDEADU, FaultPriority::kCritical);
@@ -697,13 +670,10 @@ TEST_CASE("IsShutdownRequested initially false", "[fault_collector]") {
   REQUIRE_FALSE(fc.IsShutdownRequested());
 }
 
-TEST_CASE("IsShutdownRequested true after kShutdown hook",
-          "[fault_collector]") {
+TEST_CASE("IsShutdownRequested true after kShutdown hook", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.RegisterHook(0U, [](const FaultEvent&) {
-    return HookAction::kShutdown;
-  });
+  fc.RegisterHook(0U, [](const FaultEvent&) { return HookAction::kShutdown; });
 
   fc.Start();
   fc.ReportFault(0U, 0xDEADU, FaultPriority::kCritical);
@@ -716,9 +686,7 @@ TEST_CASE("IsShutdownRequested true after kShutdown hook",
 TEST_CASE("kShutdown stops consumer loop", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.RegisterHook(0U, [](const FaultEvent&) {
-    return HookAction::kShutdown;
-  });
+  fc.RegisterHook(0U, [](const FaultEvent&) { return HookAction::kShutdown; });
 
   fc.Start();
   fc.ReportFault(0U, 0xDEADU, FaultPriority::kCritical);
@@ -738,16 +706,11 @@ TEST_CASE("kShutdown stops consumer loop", "[fault_collector]") {
 TEST_CASE("Shutdown callback invoked on kShutdown", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.RegisterHook(0U, [](const FaultEvent&) {
-    return HookAction::kShutdown;
-  });
+  fc.RegisterHook(0U, [](const FaultEvent&) { return HookAction::kShutdown; });
 
   std::atomic<uint32_t> cb_called{0U};
   fc.SetShutdownCallback(
-      [](void* ctx) {
-        static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(
-            1U, std::memory_order_relaxed);
-      },
+      [](void* ctx) { static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U, std::memory_order_relaxed); },
       &cb_called);
 
   fc.Start();
@@ -762,9 +725,7 @@ TEST_CASE("Shutdown callback invoked on kShutdown", "[fault_collector]") {
 TEST_CASE("No shutdown callback when not set", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.RegisterHook(0U, [](const FaultEvent&) {
-    return HookAction::kShutdown;
-  });
+  fc.RegisterHook(0U, [](const FaultEvent&) { return HookAction::kShutdown; });
 
   // No SetShutdownCallback — should not crash
   fc.Start();
@@ -779,8 +740,7 @@ TEST_CASE("No shutdown callback when not set", "[fault_collector]") {
 // Consumer heartbeat integration
 // ============================================================================
 
-TEST_CASE("SetConsumerHeartbeat updates heartbeat in consumer loop",
-          "[fault_collector]") {
+TEST_CASE("SetConsumerHeartbeat updates heartbeat in consumer loop", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
 
@@ -803,13 +763,10 @@ TEST_CASE("SetConsumerHeartbeat updates heartbeat in consumer loop",
   fc.Stop();
 }
 
-TEST_CASE("Consumer heartbeat updated during fault processing",
-          "[fault_collector]") {
+TEST_CASE("Consumer heartbeat updated during fault processing", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.SetDefaultHook([](const FaultEvent&) {
-    return HookAction::kHandled;
-  });
+  fc.SetDefaultHook([](const FaultEvent&) { return HookAction::kHandled; });
 
   ThreadHeartbeat hb;
   fc.SetConsumerHeartbeat(&hb);
@@ -848,8 +805,7 @@ TEST_CASE("Null heartbeat is safe (no-op)", "[fault_collector]") {
 // Watchdog + FaultCollector integration (application-level wiring)
 // ============================================================================
 
-TEST_CASE("Watchdog monitors FaultCollector consumer thread",
-          "[fault_collector][watchdog][integration]") {
+TEST_CASE("Watchdog monitors FaultCollector consumer thread", "[fault_collector][watchdog][integration]") {
   // This test demonstrates the application-level integration pattern
   ThreadWatchdog<8> wd;
   FaultCollector<16, 64> fc;
@@ -862,9 +818,7 @@ TEST_CASE("Watchdog monitors FaultCollector consumer thread",
   fc.SetConsumerHeartbeat(reg.value().heartbeat);
 
   fc.RegisterFault(0U, 0x01010001U);
-  fc.SetDefaultHook([](const FaultEvent&) {
-    return HookAction::kHandled;
-  });
+  fc.SetDefaultHook([](const FaultEvent&) { return HookAction::kHandled; });
 
   fc.Start();
 
@@ -915,9 +869,7 @@ TEST_CASE("QueueUsage returns correct size and capacity", "[fault_collector]") {
 TEST_CASE("QueueUsage after processing", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
-  fc.SetDefaultHook([](const FaultEvent&) {
-    return HookAction::kHandled;
-  });
+  fc.SetDefaultHook([](const FaultEvent&) { return HookAction::kHandled; });
 
   fc.ReportFault(0U, 0x1111U, FaultPriority::kCritical);
   fc.ReportFault(0U, 0x2222U, FaultPriority::kCritical);
@@ -980,8 +932,7 @@ TEST_CASE("ForEachRecent on empty collector", "[fault_collector]") {
   REQUIRE(count == 0U);
 }
 
-TEST_CASE("ForEachRecent returns faults in reverse chronological order",
-          "[fault_collector]") {
+TEST_CASE("ForEachRecent returns faults in reverse chronological order", "[fault_collector]") {
   FaultCollector<16, 64> fc;
   fc.RegisterFault(0U, 0x01010001U);
   fc.RegisterFault(1U, 0x01010002U);
@@ -1019,11 +970,13 @@ TEST_CASE("ForEachRecent with max_count limit", "[fault_collector]") {
   // Request only 5 most recent
   uint32_t count = 0U;
   std::vector<uint32_t> details;
-  fc.ForEachRecent([&count, &details](const RecentFaultInfo& info) {
-    ++count;
-    details.push_back(info.detail);
-    return true;
-  }, 5U);
+  fc.ForEachRecent(
+      [&count, &details](const RecentFaultInfo& info) {
+        ++count;
+        details.push_back(info.detail);
+        return true;
+      },
+      5U);
 
   REQUIRE(count == 5U);
   REQUIRE(details.size() == 5U);
@@ -1084,9 +1037,7 @@ TEST_CASE("ForEachRecent captures all fault fields", "[fault_collector]") {
 
   bool verified = false;
   fc.ForEachRecent([&verified](const RecentFaultInfo& info) {
-    if (info.fault_index == 5U &&
-        info.detail == 0x12345678U &&
-        info.priority == FaultPriority::kHigh &&
+    if (info.fault_index == 5U && info.detail == 0x12345678U && info.priority == FaultPriority::kHigh &&
         info.timestamp_us > 0U) {
       verified = true;
     }
@@ -1096,8 +1047,7 @@ TEST_CASE("ForEachRecent captures all fault fields", "[fault_collector]") {
   REQUIRE(verified);
 }
 
-TEST_CASE("ForEachRecent thread-safe with concurrent reports",
-          "[fault_collector]") {
+TEST_CASE("ForEachRecent thread-safe with concurrent reports", "[fault_collector]") {
   FaultCollector<16, 256> fc;
   fc.RegisterFault(0U, 0x01010001U);
 

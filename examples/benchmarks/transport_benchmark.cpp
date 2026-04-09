@@ -4,15 +4,16 @@
 // TCP: loopback, v0 frame (14B header), max frame 2048B
 // SHM: ShmRingBuffer SPSC, SlotSize=8192, SlotCount=1024
 
-#include "osp/transport.hpp"
-#include "osp/shm_transport.hpp"
 #include "osp/platform.hpp"
+#include "osp/shm_transport.hpp"
+#include "osp/transport.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#include <atomic>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -69,13 +70,9 @@ static ShmBenchResult RunShmBench(uint32_t payload_size, uint32_t count) {
   result.pushed = push_ok;
   result.popped = pop_ok;
   result.elapsed_ms = elapsed_ms;
-  result.throughput_mops =
-      (elapsed_ms > 0) ? (pop_ok / (elapsed_ms / 1000.0) / 1e6) : 0;
+  result.throughput_mops = (elapsed_ms > 0) ? (pop_ok / (elapsed_ms / 1000.0) / 1e6) : 0;
   result.throughput_mbps =
-      (elapsed_ms > 0)
-          ? (static_cast<double>(pop_ok) * payload_size / 1048576.0 /
-             (elapsed_ms / 1000.0))
-          : 0;
+      (elapsed_ms > 0) ? (static_cast<double>(pop_ok) * payload_size / 1048576.0 / (elapsed_ms / 1000.0)) : 0;
 
   return result;
 }
@@ -135,7 +132,8 @@ static TcpBenchResult RunTcpBench(uint32_t payload_size, uint32_t count) {
 
   std::thread rx_thread([&]() {
     auto accept_r = listener.Accept();
-    if (!accept_r.has_value()) return;
+    if (!accept_r.has_value())
+      return;
 
     osp::TcpTransport rx_transport;
     rx_transport.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
@@ -186,7 +184,8 @@ static TcpBenchResult RunTcpBench(uint32_t payload_size, uint32_t count) {
 
   // Wait for receiver
   for (int drain = 0; drain < 5000; ++drain) {
-    if (rx_count.load(std::memory_order_relaxed) >= tx_ok) break;
+    if (rx_count.load(std::memory_order_relaxed) >= tx_ok)
+      break;
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
 
@@ -197,13 +196,9 @@ static TcpBenchResult RunTcpBench(uint32_t payload_size, uint32_t count) {
   result.sent = tx_ok;
   result.received = rx;
   result.elapsed_ms = elapsed_ms;
-  result.throughput_fps =
-      (elapsed_ms > 0) ? (rx / (elapsed_ms / 1000.0)) : 0;
+  result.throughput_fps = (elapsed_ms > 0) ? (rx / (elapsed_ms / 1000.0)) : 0;
   result.throughput_mbps =
-      (elapsed_ms > 0)
-          ? (static_cast<double>(rx) * payload_size / 1048576.0 /
-             (elapsed_ms / 1000.0))
-          : 0;
+      (elapsed_ms > 0) ? (static_cast<double>(rx) * payload_size / 1048576.0 / (elapsed_ms / 1000.0)) : 0;
 
   rx_thread.join();
   return result;
@@ -221,16 +216,13 @@ int main() {
   static constexpr uint32_t kShmPayloads[] = {64, 256, 512, 1024, 4096};
   static constexpr uint32_t kShmCount = 1000000;
 
-  printf("=== ShmRingBuffer SPSC (%u ops, SlotSize=8192, SlotCount=1024) ===\n",
-         kShmCount);
-  printf("  %-10s  %10s  %10s  %10s  %10s  %10s\n",
-         "Payload", "Pushed", "Popped", "Time(ms)", "M ops/s", "MB/s");
+  printf("=== ShmRingBuffer SPSC (%u ops, SlotSize=8192, SlotCount=1024) ===\n", kShmCount);
+  printf("  %-10s  %10s  %10s  %10s  %10s  %10s\n", "Payload", "Pushed", "Popped", "Time(ms)", "M ops/s", "MB/s");
   printf("  -------------------------------------------------------------------\n");
 
   for (uint32_t sz : kShmPayloads) {
     auto r = RunShmBench<8192, 1024>(sz, kShmCount);
-    printf("  %-10u  %10u  %10u  %10.1f  %10.2f  %10.1f\n",
-           r.payload_size, r.pushed, r.popped, r.elapsed_ms,
+    printf("  %-10u  %10u  %10u  %10.1f  %10.2f  %10.1f\n", r.payload_size, r.pushed, r.popped, r.elapsed_ms,
            r.throughput_mops, r.throughput_mbps);
   }
 
@@ -239,16 +231,14 @@ int main() {
   static constexpr uint32_t kTcpPayloads[] = {64, 256, 512, 1024};
   static constexpr uint32_t kTcpCount = 100000;
 
-  printf("\n=== TCP Loopback (%u frames, v0 header %uB, max frame %uB) ===\n",
-         kTcpCount, osp::FrameCodec::kHeaderSize, OSP_TRANSPORT_MAX_FRAME_SIZE);
-  printf("  %-10s  %10s  %10s  %10s  %10s  %10s\n",
-         "Payload", "Sent", "Recv", "Time(ms)", "FPS", "MB/s");
+  printf("\n=== TCP Loopback (%u frames, v0 header %uB, max frame %uB) ===\n", kTcpCount, osp::FrameCodec::kHeaderSize,
+         OSP_TRANSPORT_MAX_FRAME_SIZE);
+  printf("  %-10s  %10s  %10s  %10s  %10s  %10s\n", "Payload", "Sent", "Recv", "Time(ms)", "FPS", "MB/s");
   printf("  -------------------------------------------------------------------\n");
 
   for (uint32_t sz : kTcpPayloads) {
     auto r = RunTcpBench(sz, kTcpCount);
-    printf("  %-10u  %10u  %10u  %10.1f  %10.0f  %10.1f\n",
-           r.payload_size, r.sent, r.received, r.elapsed_ms,
+    printf("  %-10u  %10u  %10u  %10.1f  %10.0f  %10.1f\n", r.payload_size, r.sent, r.received, r.elapsed_ms,
            r.throughput_fps, r.throughput_mbps);
   }
 #endif

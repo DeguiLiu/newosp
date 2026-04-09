@@ -29,16 +29,18 @@
 //   - osp::log                  -- structured logging
 //   - osp::ShutdownManager      -- graceful SIGINT handling
 
+#include "protocol.hpp"
+
 #include "osp/log.hpp"
 #include "osp/process.hpp"
 #include "osp/shutdown.hpp"
-#include "protocol.hpp"
 
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <chrono>
 #include <thread>
 
 using namespace net_stress;
@@ -67,7 +69,8 @@ static ChildSlot g_children[kMaxChildren];
 static uint32_t g_num_children = 0;
 
 static uint32_t AddChild(const char* label, const char* const* argv) {
-  if (g_num_children >= kMaxChildren) return UINT32_MAX;
+  if (g_num_children >= kMaxChildren)
+    return UINT32_MAX;
   uint32_t idx = g_num_children++;
   g_children[idx].label = label;
   g_children[idx].argv = argv;
@@ -84,8 +87,7 @@ static osp::ProcessResult StartChild(uint32_t idx) {
 
   auto r = g_children[idx].proc.Start(cfg);
   if (r == osp::ProcessResult::kSuccess) {
-    OSP_LOG_INFO("LAUNCHER", "[%s] started, pid=%d",
-                 g_children[idx].label, g_children[idx].proc.GetPid());
+    OSP_LOG_INFO("LAUNCHER", "[%s] started, pid=%d", g_children[idx].label, g_children[idx].proc.GetPid());
   } else {
     OSP_LOG_ERROR("LAUNCHER", "[%s] failed to start", g_children[idx].label);
   }
@@ -101,7 +103,8 @@ static void DrainOutput(uint32_t idx) {
   int n = g_children[idx].proc.ReadStdout(buf, sizeof(buf) - 1);
   while (n > 0) {
     buf[n] = '\0';
-    if (n > 0 && buf[n - 1] == '\n') buf[n - 1] = '\0';
+    if (n > 0 && buf[n - 1] == '\n')
+      buf[n - 1] = '\0';
     if (buf[0] != '\0') {
       OSP_LOG_INFO(g_children[idx].label, "%s", buf);
     }
@@ -119,28 +122,26 @@ static void PrintSystemInfo() {
   const char* uname_argv[] = {"uname", "-srm", nullptr};
   std::string output;
   int code;
-  if (osp::RunCommand(uname_argv, output, code) == osp::ProcessResult::kSuccess
-      && code == 0) {
-    if (!output.empty() && output.back() == '\n') output.pop_back();
+  if (osp::RunCommand(uname_argv, output, code) == osp::ProcessResult::kSuccess && code == 0) {
+    if (!output.empty() && output.back() == '\n')
+      output.pop_back();
     OSP_LOG_INFO("LAUNCHER", "Kernel: %s", output.c_str());
   }
 
   const char* nproc_argv[] = {"nproc", nullptr};
-  if (osp::RunCommand(nproc_argv, output, code) == osp::ProcessResult::kSuccess
-      && code == 0) {
-    if (!output.empty() && output.back() == '\n') output.pop_back();
+  if (osp::RunCommand(nproc_argv, output, code) == osp::ProcessResult::kSuccess && code == 0) {
+    if (!output.empty() && output.back() == '\n')
+      output.pop_back();
     OSP_LOG_INFO("LAUNCHER", "CPUs: %s", output.c_str());
   }
 
   const char* free_argv[] = {"free", "-h", "--si", nullptr};
-  if (osp::RunCommand(free_argv, output, code) == osp::ProcessResult::kSuccess
-      && code == 0) {
+  if (osp::RunCommand(free_argv, output, code) == osp::ProcessResult::kSuccess && code == 0) {
     size_t pos = output.find('\n');
     if (pos != std::string::npos) {
       size_t pos2 = output.find('\n', pos + 1);
       if (pos2 != std::string::npos) {
-        OSP_LOG_INFO("LAUNCHER", "Memory: %s",
-                     output.substr(pos + 1, pos2 - pos - 1).c_str());
+        OSP_LOG_INFO("LAUNCHER", "Memory: %s", output.substr(pos + 1, pos2 - pos - 1).c_str());
       }
     }
   }
@@ -154,10 +155,11 @@ static void PrintSystemInfo() {
 
 static void ThrottleDemo(uint32_t client_idx) {
   pid_t pid = g_children[client_idx].proc.GetPid();
-  if (pid <= 0 || !g_children[client_idx].proc.IsRunning()) return;
+  if (pid <= 0 || !g_children[client_idx].proc.IsRunning())
+    return;
 
-  OSP_LOG_INFO("LAUNCHER", "[%s] throttle: freezing pid=%d for %us",
-               g_children[client_idx].label, pid, kThrottleDemoSec);
+  OSP_LOG_INFO("LAUNCHER", "[%s] throttle: freezing pid=%d for %us", g_children[client_idx].label, pid,
+               kThrottleDemoSec);
 
   auto r = osp::FreezeProcess(pid);
   if (r != osp::ProcessResult::kSuccess) {
@@ -166,15 +168,13 @@ static void ThrottleDemo(uint32_t client_idx) {
   }
 
   char state = osp::ReadProcessState(pid);
-  OSP_LOG_INFO("LAUNCHER", "[%s] state after freeze: '%c'",
-               g_children[client_idx].label, state);
+  OSP_LOG_INFO("LAUNCHER", "[%s] state after freeze: '%c'", g_children[client_idx].label, state);
 
   std::this_thread::sleep_for(std::chrono::seconds(kThrottleDemoSec));
 
   r = osp::ResumeProcess(pid);
   state = osp::ReadProcessState(pid);
-  OSP_LOG_INFO("LAUNCHER", "[%s] resumed, state: '%c'",
-               g_children[client_idx].label, state);
+  OSP_LOG_INFO("LAUNCHER", "[%s] resumed, state: '%c'", g_children[client_idx].label, state);
 }
 
 // ============================================================================
@@ -198,8 +198,7 @@ static void PrintConfig(const NetStressConfig& c, bool auto_restart) {
 // Supervisor loop
 // ============================================================================
 
-static void SupervisorLoop(bool auto_restart,
-                           osp::ShutdownManager& shutdown) {
+static void SupervisorLoop(bool auto_restart, osp::ShutdownManager& shutdown) {
   uint32_t tick = 0;
   bool throttle_done = false;
 
@@ -214,22 +213,20 @@ static void SupervisorLoop(bool auto_restart,
 
     // Health check + auto-restart
     for (uint32_t i = 0; i < g_num_children; ++i) {
-      if (!g_children[i].should_run) continue;
+      if (!g_children[i].should_run)
+        continue;
 
       if (!g_children[i].proc.IsRunning()) {
         auto wr = g_children[i].proc.Wait(100);
         if (wr.exited) {
-          OSP_LOG_WARN("LAUNCHER", "[%s] exited with code %d",
-                       g_children[i].label, wr.exit_code);
+          OSP_LOG_WARN("LAUNCHER", "[%s] exited with code %d", g_children[i].label, wr.exit_code);
         } else if (wr.signaled) {
-          OSP_LOG_WARN("LAUNCHER", "[%s] killed by signal %d",
-                       g_children[i].label, wr.term_signal);
+          OSP_LOG_WARN("LAUNCHER", "[%s] killed by signal %d", g_children[i].label, wr.term_signal);
         }
 
         if (auto_restart) {
           g_children[i].restart_count++;
-          OSP_LOG_INFO("LAUNCHER", "[%s] restarting (#%u)",
-                       g_children[i].label, g_children[i].restart_count);
+          OSP_LOG_INFO("LAUNCHER", "[%s] restarting (#%u)", g_children[i].label, g_children[i].restart_count);
           StartChild(i);
         } else {
           g_children[i].should_run = false;
@@ -255,9 +252,8 @@ static void SupervisorLoop(bool auto_restart,
         pid_t pid = g_children[i].proc.GetPid();
         bool alive = g_children[i].proc.IsRunning();
         char state = alive ? osp::ReadProcessState(pid) : '-';
-        OSP_LOG_INFO("LAUNCHER", "  [%s] pid=%d alive=%d state='%c' restarts=%u",
-                     g_children[i].label, pid, alive, state,
-                     g_children[i].restart_count);
+        OSP_LOG_INFO("LAUNCHER", "  [%s] pid=%d alive=%d state='%c' restarts=%u", g_children[i].label, pid, alive,
+                     state, g_children[i].restart_count);
       }
     }
   }
@@ -273,8 +269,7 @@ static void StopAllChildren() {
   for (uint32_t i = 0; i < g_num_children; ++i) {
     g_children[i].should_run = false;
     if (g_children[i].proc.IsRunning()) {
-      OSP_LOG_INFO("LAUNCHER", "[%s] killing pid=%d",
-                   g_children[i].label, g_children[i].proc.GetPid());
+      OSP_LOG_INFO("LAUNCHER", "[%s] killing pid=%d", g_children[i].label, g_children[i].proc.GetPid());
       g_children[i].proc.Signal(SIGKILL);
     }
   }
@@ -283,8 +278,7 @@ static void StopAllChildren() {
     if (g_children[i].proc.GetPid() > 0) {
       auto wr = g_children[i].proc.Wait(2000);
       if (wr.timed_out) {
-        OSP_LOG_WARN("LAUNCHER", "[%s] did not exit in time",
-                     g_children[i].label);
+        OSP_LOG_WARN("LAUNCHER", "[%s] did not exit in time", g_children[i].label);
       } else {
         OSP_LOG_INFO("LAUNCHER", "[%s] stopped", g_children[i].label);
       }

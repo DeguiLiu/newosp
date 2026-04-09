@@ -92,71 +92,6 @@
 namespace osp {
 
 // ============================================================================
-// AdaptiveBackoff - Three-phase backoff: spin -> yield -> sleep
-// ============================================================================
-
-namespace detail {
-
-/**
- * @brief Adaptive backoff strategy for busy-wait loops.
- *
- * Three phases:
- *   1. Spin with CPU relax hint (exponential: 1..64 iterations)
- *   2. Thread yield (kYieldLimit times)
- *   3. Sleep (50us, coarse wait)
- *
- * Stack-only, no heap allocation. -fno-exceptions -fno-rtti safe.
- */
-class AdaptiveBackoff {
- public:
-  void Reset() noexcept { spin_count_ = 0U; }
-
-  void Wait() noexcept {
-    if (spin_count_ < kSpinLimit) {
-      // Phase 1: Spin with CPU relax hint (exponential backoff)
-      const uint32_t iters = 1U << spin_count_;
-      for (uint32_t i = 0U; i < iters; ++i) {
-        CpuRelax();
-      }
-      ++spin_count_;
-    } else if (spin_count_ < kSpinLimit + kYieldLimit) {
-      // Phase 2: Thread yield
-      std::this_thread::yield();
-      ++spin_count_;
-    } else {
-      // Phase 3: Sleep (coarse wait)
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
-    }
-  }
-
-  /**
-   * @brief Check if still in the spin phase (before yield/sleep).
-   *
-   * Useful for worker loops that want to spin briefly before falling
-   * through to a condition_variable wait.
-   */
-  bool InSpinPhase() const noexcept { return spin_count_ < kSpinLimit; }
-
- private:
-  static constexpr uint32_t kSpinLimit = 6U;   ///< ~1-64 spins
-  static constexpr uint32_t kYieldLimit = 4U;  ///< 4 yields before sleep
-
-  static void CpuRelax() noexcept {
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#elif defined(__aarch64__) || defined(__arm__)
-    asm volatile("yield" ::: "memory");
-#else
-    std::this_thread::yield();
-#endif
-  }
-
-  uint32_t spin_count_{0U};
-};
-
-}  // namespace detail
-
-// ============================================================================
 // Configuration
 // ============================================================================
 
@@ -317,7 +252,13 @@ class WorkerPool {
     if (!running_.load(std::memory_order_acquire)) {
       return;
     }
+
     shutdown_.store(true, std::memory_order_release);
+
+    for (auto& handle : subscription_handles_) {
+      BusType::Instance().Unsubscribe(handle);
+    }
+    subscription_handles_.clear();
 
     // Join dispatcher thread if still alive
     if (dispatcher_thread_.joinable()) {
@@ -338,11 +279,6 @@ class WorkerPool {
         t.join();
       }
     }
-
-    for (auto& handle : subscription_handles_) {
-      BusType::Instance().Unsubscribe(handle);
-    }
-    subscription_handles_.clear();
 
     workers_.clear();
     worker_threads_.clear();
@@ -540,7 +476,7 @@ class WorkerPool {
 
   void DispatcherLoop() noexcept {
     SetThreadPriority(priority_);
-    detail::AdaptiveBackoff backoff;
+    osp::AdaptiveBackoff backoff;
 
     while (!shutdown_.load(std::memory_order_acquire)) {
       if (heartbeat_ != nullptr) {
@@ -574,7 +510,7 @@ class WorkerPool {
 
     WorkerContext& ctx = *workers_[worker_id];
     EnvelopeType env;
-    detail::AdaptiveBackoff backoff;
+    osp::AdaptiveBackoff backoff;
 
     while (!shutdown_.load(std::memory_order_acquire)) {
       if (ctx.queue.Pop(env)) {

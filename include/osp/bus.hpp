@@ -249,7 +249,7 @@ class SpinLock {
     uint32_t backoff = 1;
     while (flag_.test_and_set(std::memory_order_acquire)) {
       for (uint32_t i = 0; i < backoff; ++i) {
-        CpuRelax();
+        osp::CpuRelax();
       }
       if (backoff < kMaxBackoff) {
         backoff <<= 1;
@@ -264,16 +264,6 @@ class SpinLock {
  private:
   static constexpr uint32_t kMaxBackoff = 1024;
 
-  static void CpuRelax() noexcept {
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#elif defined(__aarch64__) || defined(__arm__)
-    asm volatile("yield" ::: "memory");
-#else
-    std::this_thread::yield();
-#endif
-  }
-
   std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
 };
 
@@ -287,6 +277,10 @@ class SpinLock {
  * State encoding:
  *   state_ >= 0  : number of active readers (0 = unlocked)
  *   state_ == -1 : writer holds exclusive lock
+ *
+ * Known limitation: under continuous reader load, writers may starve because
+ * new readers can acquire while a writer is waiting for state == 0. This is
+ * acceptable for the bus use case where writes (subscribe/unsubscribe) are rare.
  */
 class SharedSpinLock {
  public:
@@ -307,7 +301,10 @@ class SharedSpinLock {
   }
 
   /** @brief Release shared (reader) lock. */
-  void unlock_shared() noexcept { state_.fetch_sub(1, std::memory_order_release); }
+  void unlock_shared() noexcept {
+    OSP_ASSERT(0 < state_.load(std::memory_order_relaxed));
+    state_.fetch_sub(1, std::memory_order_release);
+  }
 
   /** @brief Acquire exclusive (writer) lock. */
   void lock() noexcept {
@@ -329,19 +326,9 @@ class SharedSpinLock {
   static constexpr int32_t kWriterActive = -1;
   static constexpr uint32_t kMaxBackoff = 1024;
 
-  static void CpuRelax() noexcept {
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#elif defined(__aarch64__) || defined(__arm__)
-    asm volatile("yield" ::: "memory");
-#else
-    std::this_thread::yield();
-#endif
-  }
-
   static void Backoff(uint32_t& backoff) noexcept {
     for (uint32_t i = 0; i < backoff; ++i) {
-      CpuRelax();
+      osp::CpuRelax();
     }
     if (backoff < kMaxBackoff) {
       backoff <<= 1;
@@ -671,6 +658,7 @@ class AsyncBus {
         }
         slot.count = 0;
       }
+      next_callback_id_ = 1;
       callback_spin_lock_.unlock();
     }
 
@@ -682,7 +670,6 @@ class AsyncBus {
     cached_consumer_pos_.store(0, std::memory_order_relaxed);
     consumer_pos_.store(0, std::memory_order_relaxed);
     next_msg_id_.store(1, std::memory_order_relaxed);
-    next_callback_id_ = 1;
     stats_.Reset();
     error_callback_.store(nullptr, std::memory_order_relaxed);
   }
@@ -775,9 +762,15 @@ class AsyncBus {
 
       uint32_t seq = target->sequence.load(std::memory_order_acquire);
       if (seq != prod_pos) {
-        stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
-        ReportError(BusError::kQueueFull, current_id);
-        return false;
+        // Sequence mismatch: verify the queue is truly full (not just a CAS race)
+        uint32_t cons = consumer_pos_.load(std::memory_order_acquire);
+        if (kQueueDepth <= prod_pos - cons) {
+          stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
+          ReportError(BusError::kQueueFull, current_id);
+          return false;
+        }
+        // Another producer won the CAS race; retry
+        continue;
       }
     } while (!producer_pos_.compare_exchange_weak(prod_pos, prod_pos + 1, std::memory_order_acq_rel,
                                                   std::memory_order_relaxed));
@@ -807,9 +800,10 @@ class AsyncBus {
       return;
     }
 
-    for (uint32_t i = 0; i < OSP_BUS_MAX_CALLBACKS_PER_TYPE; ++i) {
+    for (uint32_t i = 0, found = 0; i < OSP_BUS_MAX_CALLBACKS_PER_TYPE && found < slot.count; ++i) {
       if (slot.entries[i].active) {
         slot.entries[i].callback(envelope);
+        ++found;
       }
     }
 

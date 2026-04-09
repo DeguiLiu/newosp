@@ -38,3 +38,56 @@ TEST_CASE("OSP_LIKELY and OSP_UNLIKELY compile", "[platform]") {
     REQUIRE(false);
   }
 }
+
+// ============================================================================
+// CpuRelax Tests
+// ============================================================================
+
+TEST_CASE("CpuRelax does not crash", "[platform]") {
+  // CpuRelax is a no-op hint; just verify it compiles and runs
+  for (int i = 0; i < 100; ++i) {
+    osp::CpuRelax();
+  }
+  REQUIRE(true);
+}
+
+// ============================================================================
+// AdaptiveBackoff Tests
+// ============================================================================
+
+TEST_CASE("AdaptiveBackoff starts in spin phase", "[platform]") {
+  osp::AdaptiveBackoff backoff;
+  REQUIRE(backoff.InSpinPhase());
+}
+
+TEST_CASE("AdaptiveBackoff transitions out of spin phase", "[platform]") {
+  osp::AdaptiveBackoff backoff;
+  // Spin phase is 6 iterations (kSpinLimit)
+  for (int i = 0; i < 6; ++i) {
+    REQUIRE(backoff.InSpinPhase());
+    backoff.Wait();
+  }
+  // After 6 waits, should be in yield phase
+  REQUIRE_FALSE(backoff.InSpinPhase());
+}
+
+TEST_CASE("AdaptiveBackoff Reset returns to spin phase", "[platform]") {
+  osp::AdaptiveBackoff backoff;
+  // Exhaust spin phase
+  for (int i = 0; i < 10; ++i) {
+    backoff.Wait();
+  }
+  REQUIRE_FALSE(backoff.InSpinPhase());
+
+  backoff.Reset();
+  REQUIRE(backoff.InSpinPhase());
+}
+
+TEST_CASE("AdaptiveBackoff full cycle does not crash", "[platform]") {
+  osp::AdaptiveBackoff backoff;
+  // Run through all three phases: spin (6) + yield (4) + sleep (a few)
+  for (int i = 0; i < 15; ++i) {
+    backoff.Wait();
+  }
+  REQUIRE(true);
+}

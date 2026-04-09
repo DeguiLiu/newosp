@@ -6,16 +6,14 @@
 #include "osp/node_manager.hpp"
 #include "osp/platform.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <arpa/inet.h>
+#include <atomic>
+#include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <unistd.h>
-
-#include <atomic>
-#include <chrono>
 #include <thread>
+#include <unistd.h>
 
 // ============================================================================
 // Test Helpers
@@ -109,8 +107,8 @@ TEST_CASE("NodeManager - DisconnectCallback", "[NodeManager]") {
       [](uint16_t node_id, void* ctx) {
         auto* fired = static_cast<std::atomic<bool>*>(ctx);
         fired->store(true);
-        auto* id_ptr = reinterpret_cast<std::atomic<uint16_t>*>(
-            reinterpret_cast<char*>(ctx) + sizeof(std::atomic<bool>));
+        auto* id_ptr =
+            reinterpret_cast<std::atomic<uint16_t>*>(reinterpret_cast<char*>(ctx) + sizeof(std::atomic<bool>));
         id_ptr->store(node_id);
       },
       &callback_fired);
@@ -673,7 +671,8 @@ TEST_CASE("NodeManager: scheduler injection - Start after scheduler Stop", "[nod
   CHECK_FALSE(mgr.IsRunning());
 }
 
-TEST_CASE("NodeManager: scheduler injection - shared scheduler multiple NodeManagers", "[node_manager][scheduler][edge]") {
+TEST_CASE("NodeManager: scheduler injection - shared scheduler multiple NodeManagers",
+          "[node_manager][scheduler][edge]") {
   osp::TimerScheduler<> sched;
   sched.Start();
 
@@ -709,7 +708,8 @@ TEST_CASE("NodeManager: scheduler injection - shared scheduler multiple NodeMana
   sched.Stop();
 }
 
-TEST_CASE("NodeManager: scheduler injection - heartbeat fires with injected scheduler", "[node_manager][scheduler][edge]") {
+TEST_CASE("NodeManager: scheduler injection - heartbeat fires with injected scheduler",
+          "[node_manager][scheduler][edge]") {
   osp::TimerScheduler<> sched;
   sched.Start();
 

@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include <memory>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -330,18 +331,24 @@ class FixedFunction<Ret(Args...), BufferSize> final {
     static_assert(sizeof(Decay) <= BufferSize, "Callable too large for FixedFunction buffer");
     static_assert(alignof(Decay) <= alignof(Storage), "Callable alignment exceeds buffer alignment");
     ::new (&storage_) Decay(static_cast<F&&>(f));
-    invoker_ = [](const Storage& s, Args... args) -> Ret {  // NOLINT(cppcoreguidelines-prefer-member-initializer)
-      return (*reinterpret_cast<const Decay*>(&s))(static_cast<Args&&>(args)...);
+    invoker_ = [](Storage& s, Args... args) -> Ret {  // NOLINT(cppcoreguidelines-prefer-member-initializer)
+      return (*reinterpret_cast<Decay*>(&s))(static_cast<Args&&>(args)...);
+    };
+    mover_ = [](Storage& dst, Storage& src) {  // NOLINT(cppcoreguidelines-prefer-member-initializer)
+      ::new (&dst) Decay(static_cast<Decay&&>(*reinterpret_cast<Decay*>(&src)));
+      reinterpret_cast<Decay*>(&src)->~Decay();
     };
     destroyer_ = [](Storage& s) {  // NOLINT(cppcoreguidelines-prefer-member-initializer)
       reinterpret_cast<Decay*>(&s)->~Decay();
     };
   }
 
-  FixedFunction(FixedFunction&& other) noexcept : invoker_(other.invoker_), destroyer_(other.destroyer_) {
-    if (other.invoker_) {
-      std::memcpy(&storage_, &other.storage_, BufferSize);
+  FixedFunction(FixedFunction&& other) noexcept
+      : invoker_(other.invoker_), mover_(other.mover_), destroyer_(other.destroyer_) {
+    if (other.mover_) {
+      other.mover_(storage_, other.storage_);
       other.invoker_ = nullptr;
+      other.mover_ = nullptr;
       other.destroyer_ = nullptr;
     }
   }
@@ -352,10 +359,12 @@ class FixedFunction<Ret(Args...), BufferSize> final {
         destroyer_(storage_);
       }
       invoker_ = other.invoker_;
+      mover_ = other.mover_;
       destroyer_ = other.destroyer_;
-      if (other.invoker_) {
-        std::memcpy(&storage_, &other.storage_, BufferSize);
+      if (other.mover_) {
+        other.mover_(storage_, other.storage_);
         other.invoker_ = nullptr;
+        other.mover_ = nullptr;
         other.destroyer_ = nullptr;
       }
     }
@@ -367,6 +376,7 @@ class FixedFunction<Ret(Args...), BufferSize> final {
       destroyer_(storage_);
     }
     invoker_ = nullptr;
+    mover_ = nullptr;
     destroyer_ = nullptr;
     return *this;
   }
@@ -389,11 +399,13 @@ class FixedFunction<Ret(Args...), BufferSize> final {
 
  private:
   using Storage = typename std::aligned_storage<BufferSize, alignof(void*)>::type;
-  using Invoker = Ret (*)(const Storage&, Args...);
+  using Invoker = Ret (*)(Storage&, Args...);
+  using Mover = void (*)(Storage& dst, Storage& src);
   using Destroyer = void (*)(Storage&);
 
-  Storage storage_{};
+  mutable Storage storage_{};
   Invoker invoker_ = nullptr;
+  Mover mover_ = nullptr;
   Destroyer destroyer_ = nullptr;
 };
 
@@ -415,20 +427,29 @@ class function_ref<Ret(Args...)> final {
   template <typename F,
             typename = typename std::enable_if<!std::is_same<typename std::decay<F>::type, function_ref>::value>::type>
   function_ref(F&& f) noexcept  // NOLINT
-      : obj_(const_cast<void*>(static_cast<const void*>(&f))), invoker_([](void* o, Args... args) -> Ret {
-          return (*static_cast<typename std::remove_reference<F>::type*>(o))(static_cast<Args&&>(args)...);
-        }) {}
+      : callable_{}, invoker_(nullptr) {
+    callable_.obj = static_cast<const void*>(std::addressof(f));
+    invoker_ = [](CallablePtr c, Args... args) -> Ret {
+      return (*static_cast<const typename std::remove_reference<F>::type*>(c.obj))(static_cast<Args&&>(args)...);
+    };
+  }
 
   function_ref(Ret (*fn)(Args...)) noexcept  // NOLINT
-      : obj_(reinterpret_cast<void*>(fn)), invoker_([](void* o, Args... args) -> Ret {
-          return reinterpret_cast<Ret (*)(Args...)>(o)(static_cast<Args&&>(args)...);
-        }) {}
+      : callable_{}, invoker_(nullptr) {
+    callable_.fn = fn;
+    invoker_ = [](CallablePtr c, Args... args) -> Ret { return c.fn(static_cast<Args&&>(args)...); };
+  }
 
-  Ret operator()(Args... args) const { return invoker_(obj_, static_cast<Args&&>(args)...); }
+  Ret operator()(Args... args) const { return invoker_(callable_, static_cast<Args&&>(args)...); }
 
  private:
-  void* obj_;
-  Ret (*invoker_)(void*, Args...);
+  union CallablePtr {
+    const void* obj;
+    Ret (*fn)(Args...);
+  };
+
+  CallablePtr callable_;
+  Ret (*invoker_)(CallablePtr, Args...);
 };
 
 // ============================================================================

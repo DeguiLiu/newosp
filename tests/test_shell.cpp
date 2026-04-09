@@ -6,10 +6,10 @@
 
 #include "osp/shell.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <cstring>
 
 #include <atomic>
-#include <cstring>
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
 
@@ -18,8 +18,12 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-static int test_cmd_a(int /*argc*/, char* /*argv*/[]) { return 0; }
-static int test_cmd_b(int /*argc*/, char* /*argv*/[]) { return 1; }
+static int test_cmd_a(int /*argc*/, char* /*argv*/[]) {
+  return 0;
+}
+static int test_cmd_b(int /*argc*/, char* /*argv*/[]) {
+  return 1;
+}
 
 // ============================================================================
 // Original registry and parsing tests (preserved, nodiscard warnings fixed)
@@ -193,7 +197,9 @@ TEST_CASE("shell - GlobalCmdRegistry help command lists all", "[shell]") {
   auto r1 = reg.Register("list_test_1", test_cmd_a, "first test command");
   auto r2 = reg.Register("list_test_2", test_cmd_b, "second test command");
   auto r3 = reg.Register("list_test_3", test_cmd_a, "third test command");
-  (void)r1; (void)r2; (void)r3;
+  (void)r1;
+  (void)r2;
+  (void)r3;
 
   // Verify all can be found
   const osp::ShellCmd* cmd1 = reg.Find("list_test_1");
@@ -364,8 +370,10 @@ struct MockSession {
   }
 
   ~MockSession() {
-    if (capture_read_fd >= 0) ::close(capture_read_fd);
-    if (capture_write_fd >= 0) ::close(capture_write_fd);
+    if (capture_read_fd >= 0)
+      ::close(capture_read_fd);
+    if (capture_write_fd >= 0)
+      ::close(capture_write_fd);
   }
 
   /// Drain all output written by the session.
@@ -374,7 +382,8 @@ struct MockSession {
     char buf[512];
     for (;;) {
       ssize_t n = ::read(capture_read_fd, buf, sizeof(buf));
-      if (n <= 0) break;
+      if (n <= 0)
+        break;
       result.append(buf, static_cast<size_t>(n));
     }
     return result;
@@ -470,8 +479,7 @@ TEST_CASE("FilterIac: IAC IAC produces literal 0xFF", "[shell][iac]") {
   REQUIRE(s.iac_state == osp::detail::ShellSession::IacState::kNormal);
 }
 
-TEST_CASE("FilterIac: no effect when telnet_mode is false in ProcessByte",
-          "[shell][iac]") {
+TEST_CASE("FilterIac: no effect when telnet_mode is false in ProcessByte", "[shell][iac]") {
   MockSession mock;
   mock.session.telnet_mode = false;
 
@@ -481,8 +489,7 @@ TEST_CASE("FilterIac: no effect when telnet_mode is false in ProcessByte",
   // in ProcessByte will still pass since 0xFF cast to char is negative.
   // The key test: IAC state should remain kNormal.
   (void)osp::detail::ProcessByte(mock.session, 0xFF, "test> ");
-  REQUIRE(mock.session.iac_state ==
-          osp::detail::ShellSession::IacState::kNormal);
+  REQUIRE(mock.session.iac_state == osp::detail::ShellSession::IacState::kNormal);
 }
 
 // ============================================================================
@@ -772,8 +779,7 @@ TEST_CASE("ProcessByte: Ctrl+C cancels line", "[shell][process]") {
   REQUIRE(output.find("t> ") != std::string::npos);
 }
 
-TEST_CASE("ProcessByte: Ctrl+D on empty line sets active=false",
-          "[shell][process]") {
+TEST_CASE("ProcessByte: Ctrl+D on empty line sets active=false", "[shell][process]") {
   MockSession mock;
   auto& s = mock.session;
 
@@ -805,8 +811,7 @@ TEST_CASE("ProcessByte: Tab triggers completion", "[shell][process]") {
 TEST_CASE("ShellSplit: single-quoted string", "[shell][split]") {
   char cmd[] = "echo 'hello world' done";
   char* argv[osp::detail::kMaxArgs] = {};
-  int argc = osp::detail::ShellSplit(
-      cmd, static_cast<uint32_t>(std::strlen(cmd)), argv);
+  int argc = osp::detail::ShellSplit(cmd, static_cast<uint32_t>(std::strlen(cmd)), argv);
 
   REQUIRE(argc == 3);
   REQUIRE(std::strcmp(argv[0], "echo") == 0);
@@ -817,8 +822,7 @@ TEST_CASE("ShellSplit: single-quoted string", "[shell][split]") {
 TEST_CASE("ShellSplit: tab separator", "[shell][split]") {
   char cmd[] = "a\tb\tc";
   char* argv[osp::detail::kMaxArgs] = {};
-  int argc = osp::detail::ShellSplit(
-      cmd, static_cast<uint32_t>(std::strlen(cmd)), argv);
+  int argc = osp::detail::ShellSplit(cmd, static_cast<uint32_t>(std::strlen(cmd)), argv);
 
   REQUIRE(argc == 3);
   REQUIRE(std::strcmp(argv[0], "a") == 0);
@@ -831,7 +835,8 @@ TEST_CASE("ShellSplit: max args boundary", "[shell][split]") {
   constexpr uint32_t kOver = osp::detail::kMaxArgs + 4;
   std::string line;
   for (uint32_t i = 0; i < kOver; ++i) {
-    if (i > 0) line += ' ';
+    if (i > 0)
+      line += ' ';
     line += "arg";
     line += std::to_string(i);
   }
@@ -840,8 +845,7 @@ TEST_CASE("ShellSplit: max args boundary", "[shell][split]") {
   buf.push_back('\0');
 
   char* argv[osp::detail::kMaxArgs] = {};
-  int argc = osp::detail::ShellSplit(
-      buf.data(), static_cast<uint32_t>(line.size()), argv);
+  int argc = osp::detail::ShellSplit(buf.data(), static_cast<uint32_t>(line.size()), argv);
 
   REQUIRE(argc == static_cast<int>(osp::detail::kMaxArgs));
 }
@@ -857,9 +861,7 @@ TEST_CASE("SessionInit: initializes all fields correctly", "[shell][init]") {
   s.hist_browsing = true;
   s.esc_state = osp::detail::ShellSession::EscState::kBracket;
 
-  osp::detail::ShellSessionInit(s, 7, 8,
-                             osp::detail::ShellPosixWrite,
-                             osp::detail::ShellPosixRead, false);
+  osp::detail::ShellSessionInit(s, 7, 8, osp::detail::ShellPosixWrite, osp::detail::ShellPosixRead, false);
 
   REQUIRE(s.read_fd == 7);
   REQUIRE(s.write_fd == 8);
@@ -916,8 +918,7 @@ TEST_CASE("DebugShell: no auth when username=nullptr", "[shell][tcp]") {
   addr.sin_port = htons(15092);
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-  int rc = ::connect(sock, reinterpret_cast<struct sockaddr*>(&addr),
-                      sizeof(addr));
+  int rc = ::connect(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
   if (rc == 0) {
     // Read all initial data (IAC negotiation bytes + prompt).
     std::string response;
@@ -926,12 +927,15 @@ TEST_CASE("DebugShell: no auth when username=nullptr", "[shell][tcp]") {
       pfd.fd = sock;
       pfd.events = POLLIN;
       int pr = ::poll(&pfd, 1, 200);
-      if (pr <= 0) break;
+      if (pr <= 0)
+        break;
       char buf[512] = {};
       ssize_t n = ::recv(sock, buf, sizeof(buf) - 1, 0);
-      if (n <= 0) break;
+      if (n <= 0)
+        break;
       response.append(buf, static_cast<size_t>(n));
-      if (response.find("osp> ") != std::string::npos) break;
+      if (response.find("osp> ") != std::string::npos)
+        break;
     }
     // Should contain the prompt without auth prompts.
     REQUIRE(response.find("osp> ") != std::string::npos);
@@ -997,8 +1001,10 @@ TEST_CASE("ConsoleShell: start and stop via pipes", "[shell][console]") {
   console.Stop();
   REQUIRE(!console.IsRunning());
 
-  if (in_pipe[0] >= 0) ::close(in_pipe[0]);
-  if (in_pipe[1] >= 0) ::close(in_pipe[1]);
+  if (in_pipe[0] >= 0)
+    ::close(in_pipe[0]);
+  if (in_pipe[1] >= 0)
+    ::close(in_pipe[1]);
   ::close(out_pipe[0]);
   ::close(out_pipe[1]);
 }
@@ -1016,8 +1022,7 @@ TEST_CASE("ConsoleShell: command execution via pipe", "[shell][console]") {
     console_cmd_executed.store(true, std::memory_order_release);
     return 0;
   };
-  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
-      "console_exec_test", console_cmd, "console test");
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("console_exec_test", console_cmd, "console test");
 
   osp::ConsoleShell::Config cfg;
   cfg.prompt = "p> ";
@@ -1097,8 +1102,7 @@ TEST_CASE("UartShell: invalid device returns error", "[shell][uart]") {
 // ExecuteLine and SessionWrite tests
 // ============================================================================
 
-TEST_CASE("ExecuteLine: unknown command produces error message",
-          "[shell][exec]") {
+TEST_CASE("ExecuteLine: unknown command produces error message", "[shell][exec]") {
   MockSession mock;
   auto& s = mock.session;
 
@@ -1122,12 +1126,10 @@ TEST_CASE("ExecuteLine: dispatches registered command", "[shell][exec]") {
     exec_test_ret = argc;
     return 0;
   };
-  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
-      "exec_line_test", exec_cmd, "exec test");
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("exec_line_test", exec_cmd, "exec test");
 
   std::strcpy(s.line_buf, "exec_line_test arg1 arg2");
-  s.line_pos = static_cast<uint32_t>(
-      std::strlen("exec_line_test arg1 arg2"));
+  s.line_pos = static_cast<uint32_t>(std::strlen("exec_line_test arg1 arg2"));
 
   osp::detail::ShellExecuteLine(s);
 

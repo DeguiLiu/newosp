@@ -5,9 +5,8 @@
 
 #include "osp/watchdog.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <thread>
 #include <vector>
@@ -179,12 +178,14 @@ TEST_CASE("ThreadWatchdog: timeout callback fires", "[watchdog]") {
 
   CallbackData data{&callback_fired, &callback_slot_id, &callback_name};
 
-  wd.SetOnTimeout([](uint32_t id, const char* name, void* ctx) {
-    auto* d = static_cast<CallbackData*>(ctx);
-    d->fired->store(true, std::memory_order_release);
-    d->slot_id->store(id, std::memory_order_release);
-    *d->name = name;
-  }, &data);
+  wd.SetOnTimeout(
+      [](uint32_t id, const char* name, void* ctx) {
+        auto* d = static_cast<CallbackData*>(ctx);
+        d->fired->store(true, std::memory_order_release);
+        d->slot_id->store(id, std::memory_order_release);
+        *d->name = name;
+      },
+      &data);
 
   auto id = wd.Register("TimeoutThread", 50);
   REQUIRE(id.has_value());
@@ -205,13 +206,13 @@ TEST_CASE("ThreadWatchdog: recovery callback fires", "[watchdog]") {
   std::atomic<bool> timeout_fired{false};
   std::atomic<bool> recovery_fired{false};
 
-  wd.SetOnTimeout([](uint32_t, const char*, void* ctx) {
-    static_cast<std::atomic<bool>*>(ctx)->store(true, std::memory_order_release);
-  }, &timeout_fired);
+  wd.SetOnTimeout([](uint32_t, const char*,
+                     void* ctx) { static_cast<std::atomic<bool>*>(ctx)->store(true, std::memory_order_release); },
+                  &timeout_fired);
 
-  wd.SetOnRecovered([](uint32_t, const char*, void* ctx) {
-    static_cast<std::atomic<bool>*>(ctx)->store(true, std::memory_order_release);
-  }, &recovery_fired);
+  wd.SetOnRecovered([](uint32_t, const char*,
+                       void* ctx) { static_cast<std::atomic<bool>*>(ctx)->store(true, std::memory_order_release); },
+                    &recovery_fired);
 
   auto id = wd.Register("RecoverThread", 50);
   REQUIRE(id.has_value());
@@ -540,14 +541,12 @@ TEST_CASE("ThreadWatchdog: Feed after Unregister is safe", "[watchdog]") {
 // AutoCheck Tests
 // ============================================================================
 
-TEST_CASE("ThreadWatchdog: StartAutoCheck detects timeout without manual Check",
-          "[watchdog]") {
+TEST_CASE("ThreadWatchdog: StartAutoCheck detects timeout without manual Check", "[watchdog]") {
   osp::ThreadWatchdog<8> wd;
 
   std::atomic<uint32_t> timeout_count{0};
-  wd.SetOnTimeout([](uint32_t, const char*, void* ctx) {
-    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
-  }, &timeout_count);
+  wd.SetOnTimeout([](uint32_t, const char*, void* ctx) { static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U); },
+                  &timeout_count);
 
   auto reg = wd.Register("test_thread", 50);  // 50ms timeout
   REQUIRE(reg.has_value());
@@ -575,8 +574,7 @@ TEST_CASE("ThreadWatchdog: StartAutoCheck is idempotent", "[watchdog]") {
   wd.StopAutoCheck();  // second call is no-op
 }
 
-TEST_CASE("ThreadWatchdog: StopAutoCheck without StartAutoCheck is safe",
-          "[watchdog]") {
+TEST_CASE("ThreadWatchdog: StopAutoCheck without StartAutoCheck is safe", "[watchdog]") {
   osp::ThreadWatchdog<8> wd;
   wd.StopAutoCheck();  // no-op, should not crash
 }
@@ -586,12 +584,10 @@ TEST_CASE("ThreadWatchdog: AutoCheck recovery detection", "[watchdog]") {
 
   std::atomic<uint32_t> timeout_count{0};
   std::atomic<uint32_t> recover_count{0};
-  wd.SetOnTimeout([](uint32_t, const char*, void* ctx) {
-    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
-  }, &timeout_count);
-  wd.SetOnRecovered([](uint32_t, const char*, void* ctx) {
-    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
-  }, &recover_count);
+  wd.SetOnTimeout([](uint32_t, const char*, void* ctx) { static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U); },
+                  &timeout_count);
+  wd.SetOnRecovered([](uint32_t, const char*, void* ctx) { static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U); },
+                    &recover_count);
 
   auto reg = wd.Register("recoverable", 50);
   REQUIRE(reg.has_value());

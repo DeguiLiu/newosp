@@ -11,13 +11,14 @@
  */
 
 #include "osp/bus.hpp"
+#include "osp/log.hpp"
 #include "osp/node.hpp"
 #include "osp/static_node.hpp"
-#include "osp/log.hpp"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
 #include <variant>
 
 // -- Message types ----------------------------------------------------------
@@ -51,21 +52,16 @@ int main() {
   osp::Node<Payload> logger("logger", /*id=*/2);
 
   // Subscribe sensor node to SensorData
-  sensor.Subscribe<SensorData>(
-      [](const SensorData& d, const osp::MessageHeader& h) {
-        OSP_LOG_INFO("sensor", "recv temp=%.1f humidity=%.1f (msg #%lu)",
-                     static_cast<double>(d.temp),
-                     static_cast<double>(d.humidity),
-                     static_cast<unsigned long>(h.msg_id));
-      });
+  sensor.Subscribe<SensorData>([](const SensorData& d, const osp::MessageHeader& h) {
+    OSP_LOG_INFO("sensor", "recv temp=%.1f humidity=%.1f (msg #%lu)", static_cast<double>(d.temp),
+                 static_cast<double>(d.humidity), static_cast<unsigned long>(h.msg_id));
+  });
 
   // Subscribe logger node to SystemLog
-  logger.Subscribe<SystemLog>(
-      [](const SystemLog& l, const osp::MessageHeader& h) {
-        OSP_LOG_INFO("logger", "recv [L%u] %s (msg #%lu)",
-                     static_cast<unsigned>(l.level), l.message,
-                     static_cast<unsigned long>(h.msg_id));
-      });
+  logger.Subscribe<SystemLog>([](const SystemLog& l, const osp::MessageHeader& h) {
+    OSP_LOG_INFO("logger", "recv [L%u] %s (msg #%lu)", static_cast<unsigned>(l.level), l.message,
+                 static_cast<unsigned long>(h.msg_id));
+  });
 
   // Publish messages
   sensor.Publish(SensorData{23.5f, 61.2f});
@@ -82,13 +78,13 @@ int main() {
 
   // Show bus statistics
   auto stats = Bus::Instance().GetStatistics();
-  std::printf("\n--- Bus Statistics ---\n"
-              "  published : %lu\n"
-              "  processed : %lu\n"
-              "  dropped   : %lu\n",
-              static_cast<unsigned long>(stats.messages_published),
-              static_cast<unsigned long>(stats.messages_processed),
-              static_cast<unsigned long>(stats.messages_dropped));
+  std::printf(
+      "\n--- Bus Statistics ---\n"
+      "  published : %lu\n"
+      "  processed : %lu\n"
+      "  dropped   : %lu\n",
+      static_cast<unsigned long>(stats.messages_published), static_cast<unsigned long>(stats.messages_processed),
+      static_cast<unsigned long>(stats.messages_dropped));
 
   // Clean shutdown
   sensor.Stop();
@@ -109,14 +105,12 @@ int main() {
 
     void operator()(const SensorData& d, const osp::MessageHeader& /*h*/) {
       ++sensor_count;
-      OSP_LOG_INFO("static", "sensor temp=%.1f humidity=%.1f",
-                   static_cast<double>(d.temp),
+      OSP_LOG_INFO("static", "sensor temp=%.1f humidity=%.1f", static_cast<double>(d.temp),
                    static_cast<double>(d.humidity));
     }
     void operator()(const SystemLog& l, const osp::MessageHeader& /*h*/) {
       ++log_count;
-      OSP_LOG_INFO("static", "log [L%u] %s",
-                   static_cast<unsigned>(l.level), l.message);
+      OSP_LOG_INFO("static", "log [L%u] %s", static_cast<unsigned>(l.level), l.message);
     }
   };
 
