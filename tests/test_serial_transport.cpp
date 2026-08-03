@@ -864,3 +864,62 @@ TEST_CASE("serial - Zero-payload frame", "[serial]") {
   receiver.Close();
   ::close(pty.master);
 }
+
+// ============================================================================
+// ACK frame followed by data frame must keep sync (regression for ACK gating)
+// ============================================================================
+
+TEST_CASE("serial - ACK frame followed by data frame keeps sync", "[serial]") {
+  auto pty = CreatePtyPair();
+  if (!pty.valid)
+    SKIP("PTY not available");
+
+  osp::SerialConfig rx_cfg;
+  rx_cfg.port_name.assign(osp::TruncateToCapacity, pty.slave_name);
+  rx_cfg.reliability.enable_ack = true;
+  ::close(pty.slave);
+  pty.slave = -1;
+
+  osp::SerialTransport receiver(rx_cfg);
+  REQUIRE(receiver.Open().has_value());
+
+  RxRecord rec;
+  receiver.SetRxCallback(TestRxCallback, &rec);
+
+  // Build an ACK frame: sync(2) + ack_magic(2) + ack_seq(2) + crc16(2) = 8 bytes
+  auto WriteLE16 = [](uint8_t* p, uint16_t v) {
+    p[0] = static_cast<uint8_t>(v & 0xFF);
+    p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+  };
+  uint8_t ack[osp::kSerialAckFrameSize];
+  ack[0] = 0xAA;
+  ack[1] = 0x55;
+  WriteLE16(ack + 2, osp::kSerialAckMagic);
+  WriteLE16(ack + 4, 7);  // ack_seq
+  WriteLE16(ack + 6, osp::Crc16Ccitt::Calculate(ack, 6));
+
+  // Build a data frame immediately following the ACK
+  uint8_t frame[256];
+  uint8_t payload[] = {0x11, 0x22, 0x33, 0x44};
+  uint32_t frame_len = BuildFrame(frame, sizeof(frame), 10, 3, payload, sizeof(payload));
+  REQUIRE(frame_len > 0);
+
+  // Feed ACK + data frame as one contiguous byte stream (as on a real link)
+  uint8_t stream[osp::kSerialAckFrameSize + 256];
+  std::memcpy(stream, ack, osp::kSerialAckFrameSize);
+  std::memcpy(stream + osp::kSerialAckFrameSize, frame, frame_len);
+
+  ::write(pty.master, stream, osp::kSerialAckFrameSize + frame_len);
+  ::usleep(10000);
+
+  receiver.Poll();
+  // The data frame must be delivered intact; the ACK must not swallow its sync
+  // bytes (which would cause the next frame to lose sync).
+  REQUIRE(rec.count == 1);
+  REQUIRE(rec.type_index == 10);
+  REQUIRE(rec.size == 4);
+  REQUIRE(std::memcmp(rec.data, payload, 4) == 0);
+
+  receiver.Close();
+  ::close(pty.master);
+}

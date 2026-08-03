@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake -B build*)",
+      "Bash(cmake --build build*)",
+      "Bash(ctest*)",
+      "Bash(./build/tests/osp_tests*)",
+      "Bash(g++ -std=c++17*)",
+      "Bash(rm -rf build*)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(ls *)",
+      "Bash(wc *)",
+      "Bash(tail *)",
+      "Bash(head *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/tdd-reminder.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -604,3 +604,103 @@ TEST_CASE("Bus Reset clears subscriptions and allows re-subscribe", "[bus]") {
   REQUIRE(count1.load() == 1);
   REQUIRE(count2.load() == 1);
 }
+
+TEST_CASE("AsyncBus unsubscribe from within callback does not deadlock", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::atomic<int> received{0};
+  std::atomic<bool> done{false};
+
+  // Subscribe then immediately unsubscribe from within the callback. The
+  // dispatch path holds the reader lock; Unsubscribe needs the exclusive lock,
+  // so a re-entrant unsubscribe used to self-deadlock on the same thread.
+  // handle_ptr indirection resolves the chicken-and-egg: the callback needs
+  // the handle value, which only exists after Subscribe returns.
+  osp::SubscriptionHandle h;
+  osp::SubscriptionHandle* handle_ptr = &h;
+  auto cb = [&bus, handle_ptr, &received](const TestEnvelope& env) mutable {
+    const SensorData* data = std::get_if<SensorData>(&env.payload);
+    if (data) {
+      received.fetch_add(1);
+      bus.Unsubscribe(*handle_ptr);
+    }
+  };
+  h = bus.Subscribe<SensorData>(std::move(cb));
+
+  REQUIRE(h.IsValid());
+  REQUIRE(bus.Publish(SensorData{1.0f, 1}, 42));
+
+  std::thread consumer([&bus, &done]() {
+    bus.ProcessBatch();
+    done.store(true, std::memory_order_release);
+  });
+
+  // The consumer thread must finish within 2s. If the re-entrant unsubscribe
+  // deadlocks the spin lock, this times out and we abandon the process (the
+  // lock can never be recovered).
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+
+  if (!done.load(std::memory_order_acquire)) {
+    std::_Exit(1);  // Deadlock: unrecoverable, terminate the test binary.
+  }
+  if (consumer.joinable()) {
+    consumer.join();
+  }
+
+  REQUIRE(done.load());
+  REQUIRE(received.load() == 1);
+}
+
+// ============================================================================
+// AsyncBus multi-instance: the constructor must be public so the bus can be
+// instantiated more than once per PayloadVariant (architectural fix -- the
+// previous private ctor forced a single global singleton per variant).
+// ============================================================================
+
+TEST_CASE("AsyncBus can be instantiated as a local object", "[bus][multi-instance]") {
+  // Previously AsyncBus() was private and only Instance() (Meyer's singleton)
+  // was available, so this line failed to compile.
+  osp::AsyncBus<TestPayload> bus_a;
+  osp::AsyncBus<TestPayload> bus_b;
+
+  std::atomic<int> received_a{0};
+  std::atomic<int> received_b{0};
+
+  bus_a.Subscribe<SensorData>([&received_a](const TestEnvelope&) { received_a.fetch_add(1); });
+  bus_b.Subscribe<SensorData>([&received_b](const TestEnvelope&) { received_b.fetch_add(1); });
+
+  // Publish only on bus_a: only bus_a's subscriber must see it.
+  bus_a.Publish(SensorData{1.0f, 1}, 1);
+  REQUIRE(bus_a.ProcessBatch() == 1);
+  REQUIRE(bus_b.ProcessBatch() == 0);
+
+  REQUIRE(received_a.load() == 1);
+  REQUIRE(received_b.load() == 0);
+}
+
+TEST_CASE("AsyncBus two local buses are fully isolated", "[bus][multi-instance]") {
+  osp::AsyncBus<TestPayload> bus_x;
+  osp::AsyncBus<TestPayload> bus_y;
+
+  std::atomic<int> count_x{0};
+  std::atomic<int> count_y{0};
+
+  bus_x.Subscribe<MotorCmd>([&count_x](const TestEnvelope&) { count_x.fetch_add(1); });
+  bus_y.Subscribe<MotorCmd>([&count_y](const TestEnvelope&) { count_y.fetch_add(1); });
+
+  // Message on bus_x reaches only x's consumer.
+  bus_x.Publish(MotorCmd{10}, 1);
+  REQUIRE(bus_x.ProcessBatch() == 1);
+  REQUIRE(count_x.load() == 1);
+  REQUIRE(count_y.load() == 0);
+
+  // Message on bus_y reaches only y's consumer.
+  bus_y.Publish(MotorCmd{20}, 2);
+  REQUIRE(bus_y.ProcessBatch() == 1);
+  REQUIRE(count_y.load() == 1);
+  REQUIRE(count_x.load() == 1);  // unchanged by y's message
+}

@@ -194,8 +194,12 @@ class ThreadWatchdog final {
         slots_[i].timeout_us = static_cast<uint64_t>(timeout_ms) * 1000ULL;
         slots_[i].heartbeat.Beat();  // Initialize with current time
         slots_[i].timed_out = false;
+        // Bump generation BEFORE activating, so a stale Feed carrying the old
+        // generation is refused once this slot is owned by a new registration.
+        const uint32_t generation = slots_[i].generation.fetch_add(1, std::memory_order_relaxed) + 1U;
         slots_[i].active.store(true, std::memory_order_release);
-        return expected<RegResult, WatchdogError>::success(RegResult{WatchdogSlotId(i), &slots_[i].heartbeat});
+        const uint32_t encoded_id = (generation << kSlotBits) | i;
+        return expected<RegResult, WatchdogError>::success(RegResult{WatchdogSlotId(encoded_id), &slots_[i].heartbeat});
       }
     }
 
@@ -211,14 +215,17 @@ class ThreadWatchdog final {
    * @return Success, or WatchdogError::kNotRegistered if invalid.
    */
   expected<void, WatchdogError> Unregister(WatchdogSlotId id) noexcept {
-    const uint32_t idx = id.value();
+    const uint32_t raw = id.value();
+    const uint32_t idx = raw & kSlotMask;
+    const uint32_t gen = raw >> kSlotBits;
     if (idx >= MaxThreads) {
       return expected<void, WatchdogError>::error(WatchdogError::kNotRegistered);
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (!slots_[idx].active.load(std::memory_order_relaxed)) {
+    if (!slots_[idx].active.load(std::memory_order_relaxed) ||
+        slots_[idx].generation.load(std::memory_order_relaxed) != gen) {
       return expected<void, WatchdogError>::error(WatchdogError::kNotRegistered);
     }
 
@@ -230,11 +237,16 @@ class ThreadWatchdog final {
    * @brief Feed a slot by ID (convenience, for callers that have the ID).
    *
    * Equivalent to calling Beat() on the slot's ThreadHeartbeat.
-   * Lock-free hot path.
+   * Lock-free hot path. A stale id (slot since unregistered and reused) is
+   * refused, so it cannot feed the new owner of the slot.
    */
   void Feed(WatchdogSlotId id) noexcept {
-    const uint32_t idx = id.value();
-    if (OSP_LIKELY(idx < MaxThreads)) {
+    const uint32_t raw = id.value();
+    const uint32_t idx = raw & kSlotMask;
+    const uint32_t gen = raw >> kSlotBits;
+    if (OSP_LIKELY(idx < MaxThreads) &&
+        slots_[idx].active.load(std::memory_order_acquire) &&
+        gen == slots_[idx].generation.load(std::memory_order_relaxed)) {
       slots_[idx].heartbeat.Beat();
     }
   }
@@ -282,7 +294,7 @@ class ThreadWatchdog final {
           slots_[i].timed_out = true;
           if (on_timeout_ != nullptr) {
             timeout_pending[timeout_count].fn = on_timeout_;
-            timeout_pending[timeout_count].slot_id = i;
+            timeout_pending[timeout_count].slot_id = EncodedId(i);
             timeout_pending[timeout_count].name = slots_[i].name;
             timeout_pending[timeout_count].ctx = timeout_ctx_;
             ++timeout_count;
@@ -291,7 +303,7 @@ class ThreadWatchdog final {
           slots_[i].timed_out = false;
           if (on_recovered_ != nullptr) {
             recover_pending[recover_count].fn = on_recovered_;
-            recover_pending[recover_count].slot_id = i;
+            recover_pending[recover_count].slot_id = EncodedId(i);
             recover_pending[recover_count].name = slots_[i].name;
             recover_pending[recover_count].ctx = recover_ctx_;
             ++recover_count;
@@ -338,12 +350,15 @@ class ThreadWatchdog final {
   // --------------------------------------------------------------------------
 
   bool IsTimedOut(WatchdogSlotId id) const noexcept {
-    const uint32_t idx = id.value();
+    const uint32_t raw = id.value();
+    const uint32_t idx = raw & kSlotMask;
+    const uint32_t gen = raw >> kSlotBits;
     if (idx >= MaxThreads) {
       return false;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!slots_[idx].active.load(std::memory_order_acquire)) {
+    if (!slots_[idx].active.load(std::memory_order_acquire) ||
+        slots_[idx].generation.load(std::memory_order_relaxed) != gen) {
       return false;
     }
     return slots_[idx].timed_out;
@@ -457,8 +472,31 @@ class ThreadWatchdog final {
   }
 
  private:
+  // Slot id encoding: low kSlotBits hold the slot index, the high bits hold a
+  // per-slot generation counter. A stale id (from a slot that was unregistered
+  // and reused) carries an old generation, so Feed/Unregister/IsTimedOut
+  // reject it instead of acting on the new owner.
+  static constexpr uint32_t kSlotBits = (MaxThreads <= 2U)   ? 1U
+                                        : (MaxThreads <= 4U) ? 2U
+                                        : (MaxThreads <= 8U) ? 3U
+                                        : (MaxThreads <= 16U) ? 4U
+                                        : (MaxThreads <= 32U) ? 5U
+                                        : (MaxThreads <= 64U) ? 6U
+                                        : (MaxThreads <= 128U) ? 7U
+                                                              : 8U;
+  static_assert((1U << kSlotBits) >= MaxThreads, "MaxThreads too large for slot id encoding");
+  static constexpr uint32_t kSlotMask = (1U << kSlotBits) - 1U;
+
+  /** @brief Encode a slot index with its current generation into a slot id. */
+  uint32_t EncodedId(uint32_t slot_idx) const noexcept {
+    return (slots_[slot_idx].generation.load(std::memory_order_relaxed) << kSlotBits) | slot_idx;
+  }
+
   struct Slot {
     std::atomic<bool> active{false};
+    // Bumped on every reuse; encoded into the slot id so a stale id from a
+    // previous registration can never feed/unregister a reused slot (ABA).
+    std::atomic<uint32_t> generation{0};
     ThreadHeartbeat heartbeat;  ///< Heartbeat signal (in platform.hpp).
     uint64_t timeout_us{0};
     bool timed_out{false};  ///< Protected by mutex_.

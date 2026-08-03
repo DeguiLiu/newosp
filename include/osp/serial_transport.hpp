@@ -666,21 +666,22 @@ class SerialTransport {
       case RxState::kWaitHeader:
         rx_buf_[rx_pos_] = byte;
         ++rx_pos_;
-        // We need full header (10 bytes)
-        if (rx_pos_ >= kSerialHeaderSize) {
+        // ACK frame (8 bytes) is shorter than a data header (10 bytes).
+        // Handle it as soon as it is complete so it never collects the sync
+        // bytes of the next frame into rx_buf_ (which would drop that frame).
+        if (rx_pos_ >= kSerialAckFrameSize) {
           // Validate magic
           const uint16_t magic = ReadLE16(rx_buf_ + 2U);
           if (magic == kSerialAckMagic) {
-            // ACK frame path: need 8 bytes total
-            if (rx_pos_ >= kSerialAckFrameSize) {
-              HandleAckFrame();
-              ResetRxState();
-            } else {
-              // Continue collecting ACK bytes
-              rx_state_ = RxState::kWaitHeader;
-            }
+            HandleAckFrame();
+            ResetRxState();
             return false;
           }
+        }
+        // Data frame: need full header (10 bytes)
+        if (rx_pos_ >= kSerialHeaderSize) {
+          // Validate magic
+          const uint16_t magic = ReadLE16(rx_buf_ + 2U);
           if (magic != kSerialMagic) {
             ++stats_.sync_errors;
             IncrementErrorCount();

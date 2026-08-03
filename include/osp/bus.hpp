@@ -278,6 +278,16 @@ class SpinLock {
  *   state_ >= 0  : number of active readers (0 = unlocked)
  *   state_ == -1 : writer holds exclusive lock
  *
+ * Re-entrancy:
+ *   - lock_shared() is recursive on the same thread (tracked via thread_local
+ *     depth). This lets a dispatched callback nest reads without deadlock.
+ *   - lock() from a thread that already holds the reader lock upgrades: the
+ *     reader holds are dropped, the writer lock is acquired, and on unlock()
+ *     the reader holds are restored so the enclosing lock_shared()/
+ *     unlock_shared() pair stays balanced. This makes Subscribe/Unsubscribe
+ *     safe to call from inside a dispatched callback (previously the same
+ *     thread would self-deadlock trying to upgrade shared -> exclusive).
+ *
  * Known limitation: under continuous reader load, writers may starve because
  * new readers can acquire while a writer is waiting for state == 0. This is
  * acceptable for the bus use case where writes (subscribe/unsubscribe) are rare.
@@ -286,14 +296,19 @@ class SharedSpinLock {
  public:
   SharedSpinLock() noexcept = default;
 
-  /** @brief Acquire shared (reader) lock. */
+  /** @brief Acquire shared (reader) lock. Recursive on the same thread. */
   void lock_shared() noexcept {
+    if (tl_reader_depth_ > 0) {
+      ++tl_reader_depth_;
+      return;
+    }
     uint32_t backoff = 1;
     for (;;) {
       int32_t state = state_.load(std::memory_order_relaxed);
       // Only acquire if no writer is active (state >= 0)
       if (state >= 0 &&
           state_.compare_exchange_weak(state, state + 1, std::memory_order_acquire, std::memory_order_relaxed)) {
+        tl_reader_depth_ = 1;
         return;
       }
       Backoff(backoff);
@@ -302,14 +317,31 @@ class SharedSpinLock {
 
   /** @brief Release shared (reader) lock. */
   void unlock_shared() noexcept {
+    if (tl_reader_depth_ > 1) {
+      --tl_reader_depth_;
+      return;
+    }
+    tl_reader_depth_ = 0;
     OSP_ASSERT(0 < state_.load(std::memory_order_relaxed));
     state_.fetch_sub(1, std::memory_order_release);
   }
 
-  /** @brief Acquire exclusive (writer) lock. */
+  /** @brief Acquire exclusive (writer) lock. Upgrades from reader if needed. */
   void lock() noexcept {
+    if (tl_reader_depth_ > 0) {
+      // This thread holds the reader lock and now needs exclusive access
+      // (e.g. a re-entrant Subscribe/Unsubscribe from inside a dispatched
+      // callback). Drop the reader holds, acquire the writer lock, and
+      // remember to restore the reader holds on unlock() so the enclosing
+      // lock_shared()/unlock_shared() pair stays balanced. Other threads may
+      // briefly slip in as readers during this window; acceptable for the
+      // rare writer path.
+      tl_upgrade_depth_ = tl_reader_depth_;
+      state_.fetch_sub(tl_reader_depth_, std::memory_order_release);
+      tl_reader_depth_ = 0;
+      tl_upgrade_writer_ = true;
+    }
     uint32_t backoff = 1;
-    // Step 1: Acquire writer flag (transition 0 -> -1)
     for (;;) {
       int32_t expected = 0;
       if (state_.compare_exchange_weak(expected, kWriterActive, std::memory_order_acquire, std::memory_order_relaxed)) {
@@ -320,7 +352,16 @@ class SharedSpinLock {
   }
 
   /** @brief Release exclusive (writer) lock. */
-  void unlock() noexcept { state_.store(0, std::memory_order_release); }
+  void unlock() noexcept {
+    if (tl_upgrade_writer_) {
+      // Restore the reader holds this thread had before upgrading.
+      tl_upgrade_writer_ = false;
+      tl_reader_depth_ = tl_upgrade_depth_;
+      state_.store(tl_upgrade_depth_, std::memory_order_release);
+      return;
+    }
+    state_.store(0, std::memory_order_release);
+  }
 
  private:
   static constexpr int32_t kWriterActive = -1;
@@ -336,6 +377,13 @@ class SharedSpinLock {
   }
 
   std::atomic<int32_t> state_{0};
+
+  // thread_local so a writer thread never needs to know about reader depth on
+  // other threads, and a reader thread can upgrade to writer without taking
+  // the shared lock on its own stack.
+  static inline thread_local uint32_t tl_reader_depth_ = 0;
+  static inline thread_local bool tl_upgrade_writer_ = false;
+  static inline thread_local uint32_t tl_upgrade_depth_ = 0;
 };
 
 }  // namespace detail
@@ -382,11 +430,33 @@ class AsyncBus {
 
   static_assert((kQueueDepth & (kQueueDepth - 1)) == 0, "Queue depth must be power of 2");
 
-  /** @brief Meyer's singleton - one bus per PayloadVariant type */
+  /** @brief Meyer's singleton - one bus per PayloadVariant type. */
   static AsyncBus& Instance() noexcept {
     static AsyncBus instance;
     return instance;
   }
+
+  // ======================== Constructor ========================
+
+  /**
+   * @brief Construct a standalone bus instance.
+   *
+   * The bus may be instantiated directly for multi-bus setups (each instance
+   * is fully isolated). Nodes may bind to a specific instance via the
+   * Node(bus) constructor; otherwise they default to Instance() (the
+   * per-PayloadVariant singleton), preserving the zero-configuration path.
+   */
+  AsyncBus() noexcept : producer_pos_(0), cached_consumer_pos_(0), consumer_pos_(0), next_msg_id_(1) {
+    for (uint32_t i = 0; i < kQueueDepth; ++i) {
+      ring_buffer_[i].sequence.store(i, std::memory_order_relaxed);
+    }
+  }
+
+  ~AsyncBus() = default;
+  AsyncBus(const AsyncBus&) = delete;             // NOLINT(modernize-use-equals-delete)
+  AsyncBus& operator=(const AsyncBus&) = delete;  // NOLINT(modernize-use-equals-delete)
+  AsyncBus(AsyncBus&&) = delete;                  // NOLINT(modernize-use-equals-delete)
+  AsyncBus& operator=(AsyncBus&&) = delete;       // NOLINT(modernize-use-equals-delete)
 
   // ======================== Error Callback ========================
 
@@ -694,20 +764,6 @@ class AsyncBus {
     std::array<CallbackEntry, OSP_BUS_MAX_CALLBACKS_PER_TYPE> entries{};
     uint32_t count{0};
   };
-
-  // ======================== Constructor ========================
-
-  AsyncBus() noexcept : producer_pos_(0), cached_consumer_pos_(0), consumer_pos_(0), next_msg_id_(1) {
-    for (uint32_t i = 0; i < kQueueDepth; ++i) {
-      ring_buffer_[i].sequence.store(i, std::memory_order_relaxed);
-    }
-  }
-
-  ~AsyncBus() = default;
-  AsyncBus(const AsyncBus&) = delete;             // NOLINT(modernize-use-equals-delete)
-  AsyncBus& operator=(const AsyncBus&) = delete;  // NOLINT(modernize-use-equals-delete)
-  AsyncBus(AsyncBus&&) = delete;                  // NOLINT(modernize-use-equals-delete)
-  AsyncBus& operator=(AsyncBus&&) = delete;       // NOLINT(modernize-use-equals-delete)
 
   // ======================== Internal Helpers ========================
 

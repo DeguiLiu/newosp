@@ -462,3 +462,52 @@ TEST_CASE("SpscRingbuffer basic operations", "[worker_pool][spsc]") {
     REQUIRE_FALSE(q.Push(3));  // full
   }
 }
+
+// ============================================================================
+// WorkerPool overflow reporting (regression: tasks were silently dropped when
+// all worker queues were full; now an overflow callback is invoked).
+// ============================================================================
+
+static std::atomic<bool> g_block_release{false};
+static std::atomic<int> g_overflow_count{0};
+
+static void BlockingHandler(const TaskA&, const osp::MessageHeader&) {
+  // Simulate a slow worker: never pop from the queue until released.
+  while (!g_block_release.load(std::memory_order_acquire)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+static void OverflowCb(void* ctx) {
+  auto* cnt = static_cast<std::atomic<int>*>(ctx);
+  cnt->fetch_add(1, std::memory_order_relaxed);
+}
+
+TEST_CASE("WorkerPool reports overflow when all worker queues are full", "[worker_pool]") {
+  ResetBus();
+  ResetCounters();
+  g_block_release.store(false, std::memory_order_relaxed);
+  g_overflow_count.store(0, std::memory_order_relaxed);
+
+  osp::WorkerPoolConfig cfg;
+  cfg.worker_num = 1U;
+  osp::WorkerPool<TestPayload> pool(cfg);
+  pool.RegisterHandler<TaskA>(&BlockingHandler);
+  pool.SetOnOverflow(&OverflowCb, &g_overflow_count);
+  pool.Start();
+
+  // Publish far more than the worker's SPSC queue depth (OSP_WORKER_QUEUE_DEPTH
+  // = 1024). The blocked worker fills its queue, so the dispatcher must report
+  // the overflow instead of silently dropping the tasks.
+  for (int i = 0; i < 2000; ++i) {
+    pool.Submit(TaskA{i, 0});
+  }
+
+  // Give the dispatcher time to drain the bus into the (full) worker queue.
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+  g_block_release.store(true, std::memory_order_release);
+  pool.Shutdown();
+
+  REQUIRE(g_overflow_count.load() > 0);
+}

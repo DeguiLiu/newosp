@@ -274,6 +274,12 @@ class StateMachine final {
    * @return TransitionResult::kTransition (return this from your handler).
    */
   TransitionResult RequestTransition(int32_t target) noexcept {
+    if (target < 0 || static_cast<uint32_t>(target) >= state_count_) {
+      // Refuse an out-of-range target: leave the machine untouched and let
+      // the event bubble up. Returning kUnhandled here (instead of asserting)
+      // keeps the machine safe under NDEBUG builds.
+      return TransitionResult::kUnhandled;
+    }
     pending_target_ = target;
     return TransitionResult::kTransition;
   }

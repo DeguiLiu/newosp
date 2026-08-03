@@ -106,8 +106,23 @@ struct ResponseChannel {
   uint8_t data[OSP_RESPONSE_DATA_SIZE] = {};
   uint32_t data_len = 0;
   bool replied = false;
+  // Reference count: the caller (OspSendAndWait) owns one reference, and the
+  // message queue owns another while a message carrying this channel is
+  // pending. The last Release() frees the heap allocation. This lets the
+  // channel outlive the caller's stack frame, so a reply that arrives after
+  // the caller already timed out still writes into valid memory (instead of a
+  // destroyed stack object). OspSendAndWait allocates on the heap; see post.hpp.
+  std::atomic<int32_t> ref_count{1};
 
   ResponseChannel() noexcept = default;
+
+  void Acquire() noexcept { ref_count.fetch_add(1, std::memory_order_relaxed); }
+
+  void Release() noexcept {
+    if (ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      delete this;
+    }
+  }
 
   void Reply(const void* buf, uint32_t len) noexcept {
     std::lock_guard<std::mutex> lock(mtx);
@@ -669,6 +684,12 @@ class Application {
         inst->EndMessage();
         inst->SetResponseChannel(nullptr);
       }
+    }
+    // The message queue held one reference to the response channel; drop it
+    // now that the message has been fully processed. The caller (or, after a
+    // timeout, the late consumer) must not touch the channel past this point.
+    if (msg.response_channel != nullptr) {
+      msg.response_channel->Release();
     }
     queue_head_.store(next_head, std::memory_order_release);
     return true;

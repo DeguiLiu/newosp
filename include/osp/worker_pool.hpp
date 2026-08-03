@@ -147,6 +147,9 @@ class WorkerPool {
 
   static constexpr uint32_t kMaxTypes = std::variant_size_v<PayloadVariant>;
 
+  /** @brief Callback invoked when a job is dropped because all worker queues are full. */
+  using OverflowCallback = void (*)(void* ctx);
+
   explicit WorkerPool(const WorkerPoolConfig& cfg) noexcept
       : name_(cfg.name),
         worker_num_(cfg.worker_num > 0U ? cfg.worker_num : 1U),
@@ -422,6 +425,21 @@ class WorkerPool {
    */
   void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
 
+  /**
+   * @brief Set a callback invoked when a job cannot be dispatched because all
+   *        worker queues are full.
+   *
+   * The callback runs on the dispatcher thread. This lets callers observe
+   * (and recover from) dropped jobs instead of silently losing them.
+   *
+   * @param cb  Callback: void(void* ctx). nullptr clears the callback.
+   * @param ctx User context passed to the callback.
+   */
+  void SetOnOverflow(OverflowCallback cb, void* ctx = nullptr) noexcept {
+    overflow_cb_.store(cb, std::memory_order_release);
+    overflow_ctx_.store(ctx, std::memory_order_release);
+  }
+
  private:
   /// SBO buffer for handler callable (fits lambda with 1-2 captures).
   static constexpr size_t kHandlerBufSize = 4 * sizeof(void*);
@@ -470,6 +488,12 @@ class WorkerPool {
       }
     }
     worker_queue_full_.fetch_add(1U, std::memory_order_relaxed);
+    // The task could not be delivered to any worker: report the overflow so
+    // callers can observe dropped jobs instead of silently losing them.
+    OverflowCallback cb = overflow_cb_.load(std::memory_order_acquire);
+    if (cb != nullptr) {
+      cb(overflow_ctx_.load(std::memory_order_acquire));
+    }
   }
 
   // ======================== Dispatcher thread ========================
@@ -598,6 +622,8 @@ class WorkerPool {
   std::thread dispatcher_thread_;
   std::vector<osp::SubscriptionHandle> subscription_handles_;
   ThreadHeartbeat* heartbeat_{nullptr};  ///< Dispatcher thread heartbeat.
+  std::atomic<OverflowCallback> overflow_cb_{nullptr};
+  std::atomic<void*> overflow_ctx_{nullptr};
 };
 
 }  // namespace osp

@@ -340,3 +340,26 @@ TEST_CASE("data_fusion - multiple fire cycles", "[data_fusion]") {
 
   fusion.Deactivate(bus);
 }
+
+TEST_CASE("data_fusion - destroying active FusedSubscription unsubscribes from bus", "[data_fusion]") {
+  TestBus::Instance().Reset();
+  auto& bus = TestBus::Instance();
+
+  static int fire_count = 0;
+  fire_count = 0;
+
+  {
+    osp::FusedSubscription<TestPayload, SensorA, SensorB> fusion;
+    fusion.SetCallback([](const std::tuple<SensorA, SensorB>&) { ++fire_count; });
+    REQUIRE(fusion.Activate(bus));
+    // Scope ends WITHOUT Deactivate(): the destructor must unsubscribe, or a
+    // late message would dereference the destroyed object (use-after-free).
+  }
+
+  bus.Publish(SensorA{7}, 1);
+  bus.ProcessBatch();
+  bus.Publish(SensorB{2.5f}, 2);
+  bus.ProcessBatch();
+
+  REQUIRE(fire_count == 0);
+}

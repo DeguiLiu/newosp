@@ -59,6 +59,41 @@ TEST_CASE("TimerScheduler Start/Stop", "[timer]") {
   REQUIRE(!sched.IsRunning());
 }
 
+TEST_CASE("TimerScheduler concurrent Start starts exactly one thread", "[timer]") {
+  osp::TimerScheduler<4> sched;
+
+  std::atomic<int> success{0};
+  std::atomic<int> already{0};
+  std::atomic<int> ready{0};
+
+  auto run = [&]() {
+    ready.fetch_add(1, std::memory_order_release);
+    while (ready.load(std::memory_order_acquire) < 2) {
+      std::this_thread::yield();
+    }
+    auto r = sched.Start();
+    if (r.has_value()) {
+      success.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      already.fetch_add(1, std::memory_order_relaxed);
+    }
+  };
+
+  std::thread t1(run);
+  std::thread t2(run);
+  t1.join();
+  t2.join();
+
+  // Exactly one caller must win; the loser gets kAlreadyRunning. With a
+  // non-atomic check-then-act Start(), both could pass the check and the
+  // second std::thread assignment would terminate the process.
+  REQUIRE(success.load() == 1);
+  REQUIRE(already.load() == 1);
+
+  sched.Stop();
+  REQUIRE(!sched.IsRunning());
+}
+
 TEST_CASE("TimerScheduler fires callback", "[timer]") {
   std::atomic<int> counter{0};
   osp::TimerScheduler<4> sched;

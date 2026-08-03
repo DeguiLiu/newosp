@@ -52,7 +52,15 @@ namespace osp {
 // Post Error
 // ============================================================================
 
-enum class PostError : uint8_t { kAppNotFound, kInstanceNotFound, kQueueFull, kTimeout, kNotRegistered, kSendFailed };
+enum class PostError : uint8_t {
+  kAppNotFound,
+  kInstanceNotFound,
+  kQueueFull,
+  kTimeout,
+  kNotRegistered,
+  kSendFailed,
+  kAllocFailed
+};
 
 // ============================================================================
 // Application Registry
@@ -192,36 +200,57 @@ inline expected<uint32_t, PostError> OspSendAndWait(uint32_t dst_iid, uint16_t e
     return expected<uint32_t, PostError>::error(PostError::kSendFailed);
   }
 
-  // Create a response channel on the stack
-  ResponseChannel channel;
-
-  // Post the message with the response channel attached
-  if (!AppRegistry::Instance().PostLocal(dst_iid, event, data, len, &channel)) {
-    return expected<uint32_t, PostError>::error(PostError::kAppNotFound);
+  // Heap-allocated channel owned by reference count. The message queue holds
+  // one reference; the caller holds another. This lets the channel outlive the
+  // caller's stack frame, so a reply delivered after the caller timed out
+  // still writes into valid memory (no stack-use-after-return).
+  ResponseChannel* channel = new (std::nothrow) ResponseChannel();
+  if (nullptr == channel) {
+    return expected<uint32_t, PostError>::error(PostError::kAllocFailed);
   }
 
-  // Wait for the reply with timeout
+  // Post the message with the response channel attached
+  if (!AppRegistry::Instance().PostLocal(dst_iid, event, data, len, channel)) {
+    channel->Release();  // refs 1 -> 0, freed
+    return expected<uint32_t, PostError>::error(PostError::kAppNotFound);
+  }
+  // The queue now holds a reference to the channel; the caller keeps its own.
+  channel->Acquire();
+
+  // Wait for the reply with timeout. All channel access happens inside the
+  // mutex (synchronized with Reply()), and Release() is the last operation so
+  // the channel can never be touched after it is freed.
+  uint32_t copy_len = 0;
+  bool was_replied = false;
   {
-    std::unique_lock<std::mutex> lock(channel.mtx);
-    if (!channel.replied) {
+    std::unique_lock<std::mutex> lock(channel->mtx);
+    if (!channel->replied) {
       auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-      channel.cv.wait_until(lock, deadline, [&channel]() { return channel.replied; });
+      channel->cv.wait_until(lock, deadline, [&channel]() { return channel->replied; });
+    }
+    was_replied = channel->replied;
+    if (was_replied) {
+      // Copy response to caller's buffer
+      copy_len = channel->data_len;
+      if (copy_len > ack_buf_size) {
+        copy_len = ack_buf_size;
+      }
+      if (ack_buf != nullptr && copy_len > 0) {
+        std::memcpy(ack_buf, channel->data, copy_len);
+      }
     }
   }
 
-  if (!channel.replied) {
+  // Release the caller's reference. If the reply already arrived and the queue
+  // processed the message, the queue already dropped its reference and this is
+  // the last one -- the channel is freed now, and nothing may touch it after
+  // this point. If we timed out, the queue still holds a reference and will
+  // free the channel once the late message is processed.
+  channel->Release();
+
+  if (!was_replied) {
     return expected<uint32_t, PostError>::error(PostError::kTimeout);
   }
-
-  // Copy response to caller's buffer
-  uint32_t copy_len = channel.data_len;
-  if (copy_len > ack_buf_size) {
-    copy_len = ack_buf_size;
-  }
-  if (ack_buf != nullptr && copy_len > 0) {
-    std::memcpy(ack_buf, channel.data, copy_len);
-  }
-
   return expected<uint32_t, PostError>::success(copy_len);
 }
 

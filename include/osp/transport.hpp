@@ -220,18 +220,25 @@ class SequenceTracker {
   bool Track(uint32_t seq_num) noexcept {
     ++total_received_;
 
-    if (seq_num == expected_seq_) {
+    // Mod-2^32 wraparound-aware comparison (TCP-style): `diff` is the signed
+    // distance from the expected sequence. A small positive diff means the
+    // packet is ahead (possibly with loss in the gap); a large diff (>= 2^31)
+    // means the packet is behind (reorder/duplicate). This keeps the tracker
+    // correct across the UINT32_MAX -> 0 boundary instead of misclassifying a
+    // legitimately wrapped stream as a permanent duplicate.
+    const uint32_t diff = static_cast<uint32_t>(seq_num - expected_seq_);
+    if (diff == 0) {
       // In-order
       ++expected_seq_;
       return true;
-    } else if (seq_num > expected_seq_) {
-      // Gap detected (packet loss)
-      lost_count_ += (seq_num - expected_seq_);
+    } else if (diff < (1U << 31)) {
+      // Gap detected (packet loss): seq_num is ahead of expected.
+      lost_count_ += diff;
       expected_seq_ = seq_num + 1;
       return true;
     } else {
-      // seq_num < expected_seq_: reorder or duplicate
-      uint32_t gap = expected_seq_ - seq_num;
+      // seq_num is behind expected: reorder or duplicate.
+      const uint32_t gap = static_cast<uint32_t>(expected_seq_ - seq_num);
       if (gap <= 1000) {
         // Within reorder window
         ++reordered_count_;
@@ -253,6 +260,14 @@ class SequenceTracker {
     reordered_count_ = 0;
     duplicate_count_ = 0;
   }
+
+  /**
+   * @brief Set the expected sequence number.
+   *
+   * Useful for diagnostics and for recovering the tracker to a known point
+   * after a peer re-synchronizes (and for test scaffolding).
+   */
+  void SetExpected(uint32_t seq) noexcept { expected_seq_ = seq; }
 
   /** @brief Get total number of packets received. */
   uint64_t TotalReceived() const noexcept { return total_received_; }

@@ -327,11 +327,17 @@ class TimerScheduler final {
    * @return Success, or TimerError::kAlreadyRunning if already started.
    */
   expected<void, TimerError> Start() {
-    if (running_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> start_lock(start_stop_mutex_);
+    // Atomic check-then-act: only one caller may win and spawn the thread.
+    // A non-atomic read + store here would let two concurrent Start() calls
+    // both pass the check and both assign to the joinable worker_ (std::thread
+    // assignment to a joinable thread calls std::terminate).
+    bool expected_flag = false;
+    if (!running_.compare_exchange_strong(expected_flag, true, std::memory_order_acq_rel,
+                                          std::memory_order_relaxed)) {
       return expected<void, TimerError>::error(TimerError::kAlreadyRunning);
     }
 
-    running_.store(true, std::memory_order_release);
     worker_ = std::thread(&TimerScheduler::ScheduleLoop, this);
 
     return expected<void, TimerError>::success();
@@ -340,9 +346,12 @@ class TimerScheduler final {
   /**
    * @brief Stop the scheduler thread (blocks until the thread exits).
    *
-   * Safe to call even if the scheduler is not running.
+   * Safe to call even if the scheduler is not running. Concurrent Stop() calls
+   * and a concurrent Stop()/Start() pair are serialized so join() is never
+   * invoked concurrently on the same std::thread (which is undefined).
    */
   void Stop() {
+    std::lock_guard<std::mutex> start_lock(start_stop_mutex_);
     running_.store(false, std::memory_order_release);
     if (worker_.joinable()) {
       worker_.join();
@@ -455,6 +464,7 @@ class TimerScheduler final {
   std::atomic<bool> running_{false};     ///< Scheduler thread active flag.
   std::thread worker_;                   ///< Background scheduler thread.
   mutable std::mutex mutex_;             ///< Guards slots_ and next_id_.
+  mutable std::mutex start_stop_mutex_;  ///< Serializes Start()/Stop() (thread create/join).
   ThreadHeartbeat* heartbeat_{nullptr};  ///< External watchdog heartbeat.
 
   // --------------------------------------------------------------------------

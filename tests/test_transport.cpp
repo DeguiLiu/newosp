@@ -554,6 +554,27 @@ TEST_CASE("transport - SequenceTracker reset", "[transport][sequence][v1]") {
   REQUIRE(tracker.DuplicateCount() == 0);
 }
 
+TEST_CASE("transport - SequenceTracker 32-bit wraparound at UINT32_MAX", "[transport][sequence][v1]") {
+  osp::SequenceTracker tracker;
+
+  // Simulate a stream that has already reached the top of the 32-bit space:
+  // expected_seq_ is UINT32_MAX and the next frame legitimately wraps to 0.
+  tracker.SetExpected(UINT32_MAX);
+
+  // seq 0 = UINT32_MAX + 1 (mod 2^32): one packet lost (UINT32_MAX), the
+  // stream resumes at 0. Must NOT be classified as a duplicate.
+  REQUIRE(tracker.Track(0) == true);
+  REQUIRE(tracker.LostCount() == 1);  // the UINT32_MAX packet was lost
+  REQUIRE(tracker.ReorderedCount() == 0);
+  REQUIRE(tracker.DuplicateCount() == 0);
+
+  // Stream continues normally after the wrap.
+  REQUIRE(tracker.Track(1) == true);
+  REQUIRE(tracker.Track(2) == true);
+  REQUIRE(tracker.Track(3) == true);
+  REQUIRE(tracker.DuplicateCount() == 0);
+}
+
 TEST_CASE("transport - SteadyClockNs returns nonzero", "[transport][timestamp][v1]") {
   uint64_t ts1 = osp::SteadyNowNs();
   REQUIRE(ts1 > 0);

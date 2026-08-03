@@ -620,3 +620,27 @@ TEST_CASE("ThreadWatchdog: Destructor stops auto-check thread", "[watchdog]") {
   // If we get here, destructor didn't hang
   REQUIRE(true);
 }
+
+TEST_CASE("ThreadWatchdog: stale slot id cannot feed a reused slot", "[watchdog]") {
+  osp::ThreadWatchdog<8> wd;
+
+  // Register thread A, then unregister it while it is conceptually still
+  // running and could still call Feed() with its (now stale) id.
+  auto reg_a = wd.Register("threadA", 20);
+  REQUIRE(reg_a.has_value());
+  REQUIRE(wd.Unregister(reg_a.value().id).has_value());
+
+  // Thread B reuses the same slot.
+  auto reg_b = wd.Register("threadB", 20);
+  REQUIRE(reg_b.has_value());
+
+  // A stale Feed() from A's id must NOT touch B's heartbeat (ABA prevention).
+  osp::ThreadHeartbeat* hb_b = reg_b.value().heartbeat;
+  const uint64_t before = hb_b->LastBeatUs();
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  wd.Feed(reg_a.value().id);
+  const uint64_t after = hb_b->LastBeatUs();
+
+  // If the stale Feed had hit B's slot, after would be > before.
+  REQUIRE(after == before);
+}

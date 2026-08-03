@@ -353,3 +353,37 @@ TEST_CASE("post - Multiple apps routing", "[post]") {
   osp::UnregisterApp(app1);
   osp::UnregisterApp(app2);
 }
+
+TEST_CASE("post - OspSendAndWait timeout with late reply does not use-after-free", "[post]") {
+  auto& reg = osp::AppRegistry::Instance();
+  reg.Reset();
+
+  osp::Application<ReplyTestInstance, 8> app(34, "saw_late_reply");
+  osp::RegisterApp(app);
+
+  auto r = app.CreateInstance();
+  REQUIRE(r.has_value());
+
+  uint32_t dst = osp::MakeIID(34, r.value());
+  uint32_t ack_val = 0;
+  uint32_t req_val = 100;
+
+  // The processor consumes the message only AFTER the caller has timed out.
+  // The handler then calls Reply() on a response channel whose lifetime has
+  // ended on the caller side -- the channel must still be safe to touch.
+  std::thread processor([&app]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    app.ProcessOne();  // handler replies into the channel after timeout
+  });
+
+  auto result = osp::OspSendAndWait(dst, 50, &req_val, sizeof(req_val), &ack_val, sizeof(ack_val), 0,
+                                    /*timeout_ms=*/1);
+
+  processor.join();
+
+  // The caller must have timed out (the reply only arrives afterwards).
+  REQUIRE(!result.has_value());
+  REQUIRE(result.get_error() == osp::PostError::kTimeout);
+  // Reaching this point without ASan reporting stack/heap-use-after-free
+  // proves the channel lifetime survived the late reply.
+}

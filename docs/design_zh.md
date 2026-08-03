@@ -232,7 +232,7 @@ vocabulary.hpp  ────────────────  (依赖 platfo
     └────────────┘  └────────────┘
 ```
 
-### 3.4 模块总览 (41 个头文件)
+### 3.4 模块总览 (45 个头文件)
 
 > 网络依赖标记: 无标记 = 始终可用; `[N]` = 需要 `OSP_HAS_NETWORK`; `[L]` = 仅 Linux
 
@@ -662,6 +662,8 @@ using CallbackType = FixedFunction<void(const EnvelopeType&), kCallbackBufSize>;
 
 **单消费者设计取舍**: 消费侧无锁、无竞争，延迟确定性好。消息处理回调应轻量 (<10us)，重计算应转发到 WorkerPool。如需多消费者，可按消息类型分片到多个 AsyncBus 实例。
 
+**多实例支持 (v0.5.4)**: `AsyncBus` 构造函数为公有，可实例化为独立隔离的总线实例。`Node` 默认绑定每 PayloadVariant 类型的单例 (`Instance()`)，也可通过 `Node(name, id, bus)` 显式绑定独立实例。多实例适用于子系统隔离；默认单例保留零配置路径。
+
 ---
 
 ### 5.2 node.hpp -- 轻量 Pub/Sub 节点
@@ -840,10 +842,12 @@ class SpscRingbuffer;
 
 | 模式 | 说明 |
 |------|------|
-| `SingleThreadExecutor` | 单线程轮询所有节点 |
-| `StaticExecutor<PV, Sleep>` | 固定节点-线程映射 (确定性调度) |
-| `PinnedExecutor<PV, Sleep>` | 每节点绑定 CPU 核心 + 实时优先级 |
+| `SingleThreadExecutor` | 单线程驱动共享 AsyncBus 的 ProcessBatch |
+| `StaticExecutor<PV, Sleep>` | 固定线程 + 可配置 SleepStrategy |
+| `PinnedExecutor<PV, Sleep>` | 线程绑定 CPU 核心 + 实时优先级 |
 | `RealtimeExecutor<PV, Sleep>` | SCHED_FIFO + mlockall + 优先级队列 |
+
+> 执行模型 (v0.5.4 澄清): 所有 executor 通过驱动共享 `AsyncBus::Instance().ProcessBatch()` 消费消息，总线将消息广播给所有已订阅该 PayloadVariant 的节点回调。`AddNode`/`RemoveNode`/`NodeCount` 为兼容保留 API，维护节点集合但不改变执行路径（bus 广播语义决定消息分发）。
 
 **SleepStrategy 策略** (编译期模板参数，默认 `YieldSleepStrategy` 保持向后兼容):
 
@@ -2121,7 +2125,7 @@ expected<V, E> 返回
 
 基于 Google C++ Style Guide，使用 `.clang-format` 和 `CPPLINT.cfg`:
 
-- 缩进 2 空格，行宽 120，Attach 花括号
+- 缩进 4 空格，行宽 120，Attach 花括号
 - 指针左对齐 (`int* ptr`)，命名空间不缩进
 - Include 排序: 主头文件 > 项目头文件 > C 封装 > C++ 标准库
 

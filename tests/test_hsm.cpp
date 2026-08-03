@@ -796,3 +796,39 @@ TEST_CASE("hsm - ForceTransition self-transition", "[hsm]") {
   REQUIRE(found_a_exit);
   REQUIRE(found_a_entry);
 }
+
+// ============================================================================
+// Test: RequestTransition with an out-of-range target must be refused, not
+// trigger an out-of-bounds read (regression for missing bounds check).
+// ============================================================================
+
+TEST_CASE("hsm - RequestTransition invalid target is refused", "[hsm]") {
+  TestContext ctx;
+  SM sm(ctx);
+  ctx.sm = &sm;
+
+  s_root = sm.AddState({"root", -1, nullptr, nullptr, nullptr, nullptr});
+
+  s_a = sm.AddState({"A", s_root,
+                     [](TestContext& ctx, const osp::Event& ev) -> osp::TransitionResult {
+                       ctx.log.push_back("A:handler");
+                       if (ev.id == kEvGo) {
+                         return ctx.sm->RequestTransition(99);  // out of range
+                       }
+                       return osp::TransitionResult::kUnhandled;
+                     },
+                     nullptr, nullptr, nullptr});
+
+  s_b = sm.AddState({"B", s_root, nullptr, nullptr, nullptr, nullptr});
+
+  sm.SetInitialState(s_a);
+  sm.Start();
+  ctx.log.clear();
+
+  sm.Dispatch({kEvGo, nullptr});
+
+  // The invalid target must be refused: the machine stays in A (no OOB read
+  // into states_[99]).
+  REQUIRE(sm.CurrentState() == s_a);
+  REQUIRE(ctx.log[0] == "A:handler");
+}

@@ -134,7 +134,19 @@ class FusedSubscription {
   using Callback = void (*)(const FusedTuple&);
 
   FusedSubscription() noexcept = default;
-  ~FusedSubscription() = default;
+  ~FusedSubscription() noexcept {
+    // Unsubscribe all bus callbacks that capture `this`. Otherwise a message
+    // arriving after this object is destroyed would dereference the dangling
+    // `this` inside the bus callback table (use-after-free).
+    if (bus_ != nullptr) {
+      for (uint32_t i = 0; i < kNumTypes; ++i) {
+        if (handles_[i].IsValid()) {
+          bus_->Unsubscribe(handles_[i]);
+          handles_[i] = SubscriptionHandle::Invalid();
+        }
+      }
+    }
+  }
 
   // Non-copyable, non-movable (holds subscription state)
   FusedSubscription(const FusedSubscription&) = delete;
@@ -166,6 +178,7 @@ class FusedSubscription {
 
     SubscribeAll(bus, std::index_sequence_for<MsgTypes...>{});
 
+    bus_ = &bus;
     active_.store(true, std::memory_order_release);
     return true;
   }
@@ -259,6 +272,8 @@ class FusedSubscription {
   std::atomic<bool> active_{false};
   std::atomic<uint32_t> fire_count_{0};
   std::mutex mutex_;
+  // Set by Activate(); used by the destructor to unsubscribe from the bus.
+  AsyncBus<PayloadVariant>* bus_{nullptr};
 
   FusedTuple data_{};
   std::array<bool, kNumTypes> received_{};
@@ -304,7 +319,18 @@ class TimeSynchronizer {
     }
   }
 
-  ~TimeSynchronizer() = default;
+  ~TimeSynchronizer() noexcept {
+    // Unsubscribe all bus callbacks that capture `this` (see FusedSubscription
+    // destructor comment -- same use-after-free hazard).
+    if (bus_ != nullptr) {
+      for (uint32_t i = 0; i < kNumTypes; ++i) {
+        if (handles_[i].IsValid()) {
+          bus_->Unsubscribe(handles_[i]);
+          handles_[i] = SubscriptionHandle::Invalid();
+        }
+      }
+    }
+  }
 
   TimeSynchronizer(const TimeSynchronizer&) = delete;
   TimeSynchronizer& operator=(const TimeSynchronizer&) = delete;
@@ -336,6 +362,7 @@ class TimeSynchronizer {
     }
 
     SubscribeAll(bus, std::index_sequence_for<MsgTypes...>{});
+    bus_ = &bus;
     active_.store(true, std::memory_order_release);
     return true;
   }
@@ -465,6 +492,8 @@ class TimeSynchronizer {
   std::atomic<uint32_t> fire_count_{0};
   std::atomic<uint32_t> timeout_count_{0};
   std::mutex mutex_;
+  // Set by Activate(); used by the destructor to unsubscribe from the bus.
+  AsyncBus<PayloadVariant>* bus_{nullptr};
 
   FusedTuple data_{};
   std::array<bool, kNumTypes> received_{};

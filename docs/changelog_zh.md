@@ -6,7 +6,50 @@
 
 ## 最新变更
 
-### 2026-02-17: v0.4.3 发布
+### 2026-08-04: v0.5.4 稳定性与架构改进 (TDD)
+
+**变更内容** (8 项 P0/P1 缺陷修复 + 1 项架构改进，全部 RED->GREEN->REFACTOR 流程):
+
+1. **P0: serial_transport ACK 帧门控丢帧**
+   - ACK 帧(8B)被 `kSerialHeaderSize`(10B) 门控，导致 ACK+下一帧 sync 被吞
+   - 修复: ACK 判定提前到 `kSerialAckFrameSize`，数据帧走完整 header 校验
+
+2. **P0: bus 回调内退订自死锁**
+   - `DispatchMessage` 持读锁执行用户回调，回调内 `Subscribe/Unsubscribe` 需排他锁 -> 自死锁
+   - 修复: `SharedSpinLock` 支持递归读锁 + 写锁升级 (thread_local 深度追踪)
+
+3. **P0: OspSendAndWait 超时后 use-after-return**
+   - 栈上 `ResponseChannel`，超时后消息仍被消费 -> 悬垂指针写已回收栈
+   - 修复: 堆分配 channel + 引用计数 (`Acquire`/`Release`)，队列持有一引用，消费端释放
+
+4. **P1: hsm RequestTransition 越界**
+   - `RequestTransition` 不校验 `target < state_count_`，NDEBUG 下 OOB 读
+   - 修复: 非法 target 返回 `kUnhandled`，机器状态不受影响
+
+5. **P1: data_fusion 析构 UAF**
+   - `FusedSubscription`/`TimeSynchronizer` 析构不退订，回调捕获 `this` -> UAF
+   - 修复: 析构自动退订 (`bus_` 指针 + 遍历 handle)
+
+6. **P1: SequenceTracker 32 位回绕误判**
+   - `expected==UINT32_MAX` 时收到合法 `seq=0` 被误判 duplicate，且永不前进
+   - 修复: TCP 风格 mod-2^32 回绕感知比较 (`diff < 2^31` 判 ahead)
+
+7. **P1: watchdog 槽位复用 ABA**
+   - 旧 `ThreadHeartbeat*` 喂活新注册槽位 -> 假阴性
+   - 修复: 槽位 id 编码代际 (generation)，`Feed/Unregister/IsTimedOut` 校验代际
+
+8. **P1: timer Start 并发非原子**
+   - `Start()` check-then-act，并发调用双 `std::thread` 赋值 -> `terminate`
+   - 修复: `compare_exchange` + `start_stop_mutex_` 串行化 Start/Stop
+
+9. **架构改进: AsyncBus 可多实例化**
+   - 构造函数从 private 移到 public，每 PayloadVariant 可选多实例（隔离）
+   - `Node` 默认仍走 `Instance()` 单例（零配置兼容），支持 `Node(bus)` 绑定独立实例
+   - 新增多实例隔离测试
+
+**统计**: 1243 tests (正常模式), 修复全部通过 ASan/TSan 验证
+
+---
 
 **变更内容** (从 15 笔 commit 合并为 4 笔):
 
