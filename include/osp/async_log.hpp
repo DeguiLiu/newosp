@@ -402,8 +402,10 @@ inline void WriterLoop() noexcept {
     }
   }
 
-  // Final drain: multiple rounds until all buffers empty.
-  for (uint32_t round = 0; round < 10; ++round) {
+  // Final drain: loop until all buffers empty.
+  // Rounds needed = ceil(QUEUE_DEPTH / kBatchSize); add 1 as safety margin.
+  static constexpr uint32_t kDrainRounds = OSP_ASYNC_LOG_QUEUE_DEPTH / kBatchSize + 1U;
+  for (uint32_t round = 0; round < kDrainRounds; ++round) {
     uint32_t drained = 0;
     for (uint32_t i = 0; i < OSP_ASYNC_LOG_MAX_THREADS; ++i) {
       size_t n = ctx.buffers[i].queue.PopBatch(batch, kBatchSize);
