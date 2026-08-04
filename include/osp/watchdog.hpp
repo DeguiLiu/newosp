@@ -244,8 +244,7 @@ class ThreadWatchdog final {
     const uint32_t raw = id.value();
     const uint32_t idx = raw & kSlotMask;
     const uint32_t gen = raw >> kSlotBits;
-    if (OSP_LIKELY(idx < MaxThreads) &&
-        slots_[idx].active.load(std::memory_order_acquire) &&
+    if (OSP_LIKELY(idx < MaxThreads) && slots_[idx].active.load(std::memory_order_acquire) &&
         gen == slots_[idx].generation.load(std::memory_order_relaxed)) {
       slots_[idx].heartbeat.Beat();
     }
@@ -476,14 +475,14 @@ class ThreadWatchdog final {
   // per-slot generation counter. A stale id (from a slot that was unregistered
   // and reused) carries an old generation, so Feed/Unregister/IsTimedOut
   // reject it instead of acting on the new owner.
-  static constexpr uint32_t kSlotBits = (MaxThreads <= 2U)   ? 1U
-                                        : (MaxThreads <= 4U) ? 2U
-                                        : (MaxThreads <= 8U) ? 3U
-                                        : (MaxThreads <= 16U) ? 4U
-                                        : (MaxThreads <= 32U) ? 5U
-                                        : (MaxThreads <= 64U) ? 6U
+  static constexpr uint32_t kSlotBits = (MaxThreads <= 2U)     ? 1U
+                                        : (MaxThreads <= 4U)   ? 2U
+                                        : (MaxThreads <= 8U)   ? 3U
+                                        : (MaxThreads <= 16U)  ? 4U
+                                        : (MaxThreads <= 32U)  ? 5U
+                                        : (MaxThreads <= 64U)  ? 6U
                                         : (MaxThreads <= 128U) ? 7U
-                                                              : 8U;
+                                                               : 8U;
   static_assert((1U << kSlotBits) >= MaxThreads, "MaxThreads too large for slot id encoding");
   static constexpr uint32_t kSlotMask = (1U << kSlotBits) - 1U;
 

@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 
 #include <atomic>
 #include <chrono>
@@ -148,11 +149,46 @@ inline uint64_t SteadyNowNs() noexcept {
 }
 
 /**
+ * @brief Return coarse monotonic time in nanoseconds.
+ *
+ * Uses CLOCK_MONOTONIC_COARSE (~4ms resolution) which on Linux is
+ * vDSO-backed and avoids syscall even when the kernel disables vDSO
+ * for CLOCK_MONOTONIC. Falls back to SteadyNowNs() on non-Linux.
+ */
+inline uint64_t CoarseNowNs() noexcept {
+#if defined(CLOCK_MONOTONIC_COARSE)
+  struct timespec ts;
+  (void)clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+  return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec);
+#else
+  return SteadyNowNs();
+#endif
+}
+
+/**
  * @brief Return current monotonic time in microseconds (steady_clock).
  */
 inline uint64_t SteadyNowUs() noexcept {
   const auto dur = std::chrono::steady_clock::now().time_since_epoch();
   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(dur).count());
+}
+
+/**
+ * @brief Return coarse monotonic time in microseconds.
+ *
+ * Uses CLOCK_MONOTONIC_COARSE (typically ~4ms resolution, vDSO-backed,
+ * no syscall even when the kernel disables vDSO for MONOTONIC).
+ * Suitable for message timestamps and heartbeat where microsecond precision
+ * is unnecessary but overhead matters on low-end CPUs (100 MHz).
+ */
+inline uint64_t CoarseNowUs() noexcept {
+#if defined(CLOCK_MONOTONIC_COARSE)
+  struct timespec ts;
+  (void)clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+  return static_cast<uint64_t>(ts.tv_sec) * 1000000ULL + static_cast<uint64_t>(ts.tv_nsec) / 1000ULL;
+#else
+  return SteadyNowUs();
+#endif
 }
 
 // ============================================================================

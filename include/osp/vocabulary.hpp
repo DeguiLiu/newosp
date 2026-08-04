@@ -597,16 +597,28 @@ class FixedVector final {
   ~FixedVector() noexcept { clear(); }
 
   FixedVector(const FixedVector& other) noexcept {  // NOLINT(cppcoreguidelines-pro-type-member-init)
-    for (uint32_t i = 0U; i < other.size_; ++i) {
-      (void)push_back(other.at_unchecked(i));
+    if constexpr (std::is_trivially_copyable<T>::value) {
+      // POD fast path: bulk-copy the raw storage. Avoids per-element
+      // placement-new overhead on hot paths (worker_pool, connection, etc.).
+      std::memcpy(storage_, other.storage_, static_cast<size_t>(other.size_) * sizeof(T));
+      size_ = other.size_;
+    } else {
+      for (uint32_t i = 0U; i < other.size_; ++i) {
+        (void)push_back(other.at_unchecked(i));
+      }
     }
   }
 
   FixedVector& operator=(const FixedVector& other) noexcept {
     if (this != &other) {
       clear();
-      for (uint32_t i = 0U; i < other.size_; ++i) {
-        (void)push_back(other.at_unchecked(i));
+      if constexpr (std::is_trivially_copyable<T>::value) {
+        std::memcpy(storage_, other.storage_, static_cast<size_t>(other.size_) * sizeof(T));
+        size_ = other.size_;
+      } else {
+        for (uint32_t i = 0U; i < other.size_; ++i) {
+          (void)push_back(other.at_unchecked(i));
+        }
       }
     }
     return *this;

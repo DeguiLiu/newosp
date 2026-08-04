@@ -88,6 +88,20 @@
 #define OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S 10U
 #endif
 
+/**
+ * @brief Number of entries popped per writer-loop iteration.
+ *
+ * WriterLoop keeps `LogEntry batch[N]` on its thread stack.
+ * LogEntry is 320 bytes, so stack cost = N * 320 bytes.
+ *
+ * Default 8 = 2560 bytes (safe for 4 KB embedded thread stacks).
+ * Raise to 32 on high-throughput Linux targets if needed:
+ *   target_compile_definitions(my_target PRIVATE OSP_ASYNC_LOG_BATCH_SIZE=32)
+ */
+#ifndef OSP_ASYNC_LOG_BATCH_SIZE
+#define OSP_ASYNC_LOG_BATCH_SIZE 8U
+#endif
+
 namespace osp {
 namespace log {
 
@@ -102,7 +116,7 @@ namespace log {
  * memcpy batch path. Size: 320 bytes = 5 cache lines.
  */
 struct LogEntry {
-  uint64_t timestamp_ns;   ///<  8B  Monotonic timestamp (CLOCK_MONOTONIC).
+  uint64_t timestamp_ns;   ///<  8B  Monotonic timestamp (CLOCK_MONOTONIC_COARSE).
   uint32_t wallclock_sec;  ///<  4B  Wall-clock seconds since epoch.
   uint16_t wallclock_ms;   ///<  2B  Wall-clock milliseconds.
   Level level;             ///<  1B  Severity level.
@@ -337,7 +351,7 @@ inline void WriterLoop() noexcept {
   }
   void* sink_ctx = ctx.sink_context.load(std::memory_order_acquire);
 
-  static constexpr uint32_t kBatchSize = 32U;
+  static constexpr uint32_t kBatchSize = OSP_ASYNC_LOG_BATCH_SIZE;
   LogEntry batch[kBatchSize];
 
   // Drop-stats reporting state.
@@ -416,6 +430,22 @@ inline void WriterLoop() noexcept {
                          ctx.sync_fallbacks.load(std::memory_order_relaxed));
     }
   }
+}
+
+// Consolidates LogEntry field population so the async and fallback paths
+// cannot drift apart, and so the (portable, vDSO-backed, syscall-free)
+// CoarseNowNs() -- ~6ns vs ~22ns for SteadyNowNs() -- is stamped once here.
+// Caller must already have filled entry.message via vsnprintf.
+inline void BuildLogEntry(LogEntry& entry, Level level, const char* category, const char* file, int line,
+                          uint32_t thread_id) noexcept {
+  entry.timestamp_ns = CoarseNowNs();
+  CaptureWallclock(entry.wallclock_sec, entry.wallclock_ms);
+  entry.level = level;
+  entry.padding0 = 0;
+  entry.thread_id = thread_id;
+  entry.line = static_cast<uint32_t>(line);
+  SafeStrCopy(entry.category, sizeof(entry.category), category);
+  SafeStrCopy(entry.file, sizeof(entry.file), Basename(file));
 }
 
 }  // namespace detail
@@ -565,20 +595,13 @@ inline void AsyncLogWrite(Level level, const char* category, const char* file, i
 
   // --- Build LogEntry on caller stack ---
   LogEntry entry;
-  entry.timestamp_ns = SteadyNowNs();
-  detail::CaptureWallclock(entry.wallclock_sec, entry.wallclock_ms);
-  entry.level = level;
-  entry.padding0 = 0;
-  entry.thread_id = buf->thread_id;
-  entry.line = static_cast<uint32_t>(line);
-
-  detail::SafeStrCopy(entry.category, sizeof(entry.category), category);
-  detail::SafeStrCopy(entry.file, sizeof(entry.file), detail::Basename(file));
 
   va_list args;
   va_start(args, fmt);
   (void)vsnprintf(entry.message, sizeof(entry.message), fmt, args);
   va_end(args);
+
+  detail::BuildLogEntry(entry, level, category, file, line, buf->thread_id);
 
   // --- Push to per-thread SPSC (wait-free) ---
   if (!buf->queue.Push(entry)) {

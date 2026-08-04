@@ -110,6 +110,29 @@ overloaded(Ts...) -> overloaded<Ts...>;
 #define OSP_BUS_BATCH_SIZE 256U
 #endif
 
+/**
+ * @brief Use CLOCK_MONOTONIC_COARSE for message timestamps (opt-in).
+ *
+ * Rationale: on low-clock targets (e.g. 100 MHz) where the kernel disables
+ * vDSO for CLOCK_MONOTONIC, each SteadyNowUs() becomes a real syscall
+ * (~500 cycles / 5 us) and dominates Publish (~28 cycles of real work).
+ * CoarseNowUs() reads a kernel-maintained snapshot instead (~11 cycles).
+ *
+ * Trade-off: COARSE resolution is one scheduler tick (~4 ms at CONFIG_HZ=250,
+ * ~10 ms at CONFIG_HZ=100). Consumers that compare header timestamps within
+ * sub-millisecond windows -- notably TimeSynchronizer -- will see all
+ * messages published in the same tick collapse onto one timestamp, which
+ * silently defeats window checks. Therefore this is OFF by default; enable
+ * only when no such consumer is in use, or feed those consumers explicit
+ * timestamps via PublishFast().
+ *
+ * Enable project-wide via CMake:
+ *   target_compile_definitions(my_target PRIVATE OSP_BUS_COARSE_TIMESTAMP=1)
+ */
+#ifndef OSP_BUS_COARSE_TIMESTAMP
+#define OSP_BUS_COARSE_TIMESTAMP 0
+#endif
+
 // ============================================================================
 // Message Priority
 // ============================================================================
@@ -251,6 +274,11 @@ class SpinLock {
       for (uint32_t i = 0; i < backoff; ++i) {
         osp::CpuRelax();
       }
+      if (backoff >= kYieldThreshold) {
+        // Long spin: yield the CPU slice so other threads can make progress
+        // instead of burning the core in a tight loop.
+        std::this_thread::yield();
+      }
       if (backoff < kMaxBackoff) {
         backoff <<= 1;
       }
@@ -263,6 +291,7 @@ class SpinLock {
 
  private:
   static constexpr uint32_t kMaxBackoff = 1024;
+  static constexpr uint32_t kYieldThreshold = 64;  // yield after 64 relax iterations
 
   std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
 };
@@ -371,10 +400,17 @@ class SharedSpinLock {
     for (uint32_t i = 0; i < backoff; ++i) {
       osp::CpuRelax();
     }
+    if (backoff >= kYieldThreshold) {
+      // Long spin: yield the CPU slice so the lock holder can make progress
+      // instead of burning the core in a tight loop.
+      std::this_thread::yield();
+    }
     if (backoff < kMaxBackoff) {
       backoff <<= 1;
     }
   }
+
+  static constexpr uint32_t kYieldThreshold = 64;
 
   std::atomic<int32_t> state_{0};
 
@@ -467,20 +503,32 @@ class AsyncBus {
   // ======================== Publish API ========================
 
   /**
+   * @brief Clock source for auto-stamped Publish calls.
+   * @see OSP_BUS_COARSE_TIMESTAMP for the resolution trade-off.
+   */
+  static uint64_t PublishTimestamp() noexcept {
+#if OSP_BUS_COARSE_TIMESTAMP
+    return CoarseNowUs();
+#else
+    return SteadyNowUs();
+#endif
+  }
+
+  /**
    * @brief Publish a message with default (MEDIUM) priority.
    * @param payload The message payload (moved).
    * @param sender_id Sender identifier for tracing.
    * @return true if published, false if dropped.
    */
   bool Publish(PayloadVariant&& payload, uint32_t sender_id) noexcept {
-    return PublishInternal(std::move(payload), sender_id, SteadyNowUs(), MessagePriority::kMedium, 0);
+    return PublishInternal(std::move(payload), sender_id, PublishTimestamp(), MessagePriority::kMedium, 0);
   }
 
   /**
    * @brief Publish a message with specified priority.
    */
   bool PublishWithPriority(PayloadVariant&& payload, uint32_t sender_id, MessagePriority priority) noexcept {
-    return PublishInternal(std::move(payload), sender_id, SteadyNowUs(), priority, 0);
+    return PublishInternal(std::move(payload), sender_id, PublishTimestamp(), priority, 0);
   }
 
   /**
@@ -499,7 +547,7 @@ class AsyncBus {
    */
   bool PublishTopic(PayloadVariant&& payload, uint32_t sender_id, const char* topic) noexcept {
     uint32_t topic_hash = Fnv1a32(topic);
-    return PublishInternal(std::move(payload), sender_id, SteadyNowUs(), MessagePriority::kMedium, topic_hash);
+    return PublishInternal(std::move(payload), sender_id, PublishTimestamp(), MessagePriority::kMedium, topic_hash);
   }
 
   /**
@@ -508,7 +556,7 @@ class AsyncBus {
   bool PublishTopicWithPriority(PayloadVariant&& payload, uint32_t sender_id, const char* topic,
                                 MessagePriority priority) noexcept {
     uint32_t topic_hash = Fnv1a32(topic);
-    return PublishInternal(std::move(payload), sender_id, SteadyNowUs(), priority, topic_hash);
+    return PublishInternal(std::move(payload), sender_id, PublishTimestamp(), priority, topic_hash);
   }
 
   // ======================== Subscribe API ========================

@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <variant>
+#include <vector>
 
 // --- Test message types ---
 // NOTE: structs must be >= 8 bytes to avoid GCC 14 wide-read optimization
@@ -703,4 +704,71 @@ TEST_CASE("AsyncBus two local buses are fully isolated", "[bus][multi-instance]"
   REQUIRE(bus_y.ProcessBatch() == 1);
   REQUIRE(count_y.load() == 1);
   REQUIRE(count_x.load() == 1);  // unchanged by y's message
+}
+
+// ============================================================================
+// Timestamp Source Tests
+// ============================================================================
+
+#if !OSP_BUS_COARSE_TIMESTAMP
+TEST_CASE("AsyncBus default timestamp has sub-millisecond resolution", "[bus]") {
+  // TimeSynchronizer supports windows down to ~100us, so the default clock
+  // must distinguish messages published microseconds apart. A coarse clock
+  // (~4ms tick) would collapse them onto one value and silently defeat
+  // window checks -- guard against OSP_BUS_COARSE_TIMESTAMP becoming the
+  // default. See OSP_BUS_COARSE_TIMESTAMP in bus.hpp.
+  //
+  // Intentionally compiled out when OSP_BUS_COARSE_TIMESTAMP=1: that build has
+  // knowingly traded resolution for speed, so asserting resolution there would
+  // report a failure for a configuration that is behaving as documented.
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::vector<uint64_t> stamps;
+  bus.Subscribe<SensorData>([&stamps](const TestEnvelope& env) { stamps.push_back(env.header.timestamp_us); });
+
+  // Publish in a tight loop, then busy-wait past a microsecond between each
+  // so a microsecond-resolution clock must produce distinct values.
+  for (int i = 0; i < 200; ++i) {
+    bus.Publish(SensorData{static_cast<float>(i), 0}, 0);
+    const uint64_t spin_start = osp::SteadyNowUs();
+    while (osp::SteadyNowUs() - spin_start < 2U) {
+      // busy-wait ~2us
+    }
+  }
+  bus.ProcessBatch();
+
+  REQUIRE(stamps.size() == 200);
+
+  size_t distinct = 1;
+  for (size_t i = 1; i < stamps.size(); ++i) {
+    if (stamps[i] != stamps[i - 1]) {
+      ++distinct;
+    }
+  }
+
+  // With a 4ms-tick coarse clock, 200 samples spanning ~400us would yield 1-2
+  // distinct values. A microsecond clock yields close to 200.
+  REQUIRE(distinct > 100);
+}
+#endif  // !OSP_BUS_COARSE_TIMESTAMP
+
+// Valid under either clock source: coarse is lower-resolution but still
+// monotonic, so this must hold in both configurations.
+TEST_CASE("AsyncBus PublishTimestamp is monotonic non-decreasing", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::vector<uint64_t> stamps;
+  bus.Subscribe<SensorData>([&stamps](const TestEnvelope& env) { stamps.push_back(env.header.timestamp_us); });
+
+  for (int i = 0; i < 50; ++i) {
+    bus.Publish(SensorData{static_cast<float>(i), 0}, 0);
+  }
+  bus.ProcessBatch();
+
+  REQUIRE(stamps.size() == 50);
+  for (size_t i = 1; i < stamps.size(); ++i) {
+    REQUIRE(stamps[i] >= stamps[i - 1]);
+  }
 }

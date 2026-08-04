@@ -333,8 +333,7 @@ class TimerScheduler final {
     // both pass the check and both assign to the joinable worker_ (std::thread
     // assignment to a joinable thread calls std::terminate).
     bool expected_flag = false;
-    if (!running_.compare_exchange_strong(expected_flag, true, std::memory_order_acq_rel,
-                                          std::memory_order_relaxed)) {
+    if (!running_.compare_exchange_strong(expected_flag, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
       return expected<void, TimerError>::error(TimerError::kAlreadyRunning);
     }
 
