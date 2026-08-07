@@ -33,6 +33,7 @@
 #define OSP_IO_POLLER_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/socket.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstdint>
@@ -42,14 +43,37 @@
 
 #if OSP_HAS_NETWORK
 
-#if defined(OSP_PLATFORM_LINUX)
-#include <sys/epoll.h>
+// Under the lwIP backend (OSP_NET_BACKEND == 1) the fds are lwIP socket fds,
+// which are invisible to the host epoll/kqueue. Use the poll-based fallback
+// there, even when the host reports OSP_PLATFORM_LINUX (e.g. lwIP unixsim).
+#if OSP_NET_BACKEND == 1
+#define OSP_IO_POLLER_USE_EPOLL 0
+#define OSP_IO_POLLER_USE_KQUEUE 0
+#elif defined(OSP_PLATFORM_LINUX)
+#define OSP_IO_POLLER_USE_EPOLL 1
+#define OSP_IO_POLLER_USE_KQUEUE 0
 #elif defined(OSP_PLATFORM_MACOS)
+#define OSP_IO_POLLER_USE_EPOLL 0
+#define OSP_IO_POLLER_USE_KQUEUE 1
+#else
+#define OSP_IO_POLLER_USE_EPOLL 0
+#define OSP_IO_POLLER_USE_KQUEUE 0
+#endif
+
+#if OSP_IO_POLLER_USE_EPOLL
+#include <sys/epoll.h>
+#elif OSP_IO_POLLER_USE_KQUEUE
 #include <sys/event.h>
 #include <sys/time.h>
 #else
+// Under the lwIP backend, struct pollfd/POLLIN come from <lwip/sockets.h>
+// (included via socket.hpp); host <poll.h> would redefine them.
+#if OSP_NET_BACKEND == 0
 #include <poll.h>
 #endif
+#endif
+
+// ============================================================================
 
 namespace osp {
 
@@ -127,7 +151,7 @@ class IoPoller {
   std::array<PollResult, OSP_IO_POLLER_MAX_EVENTS> results_;
   uint32_t result_count_;
 
-#if !defined(OSP_PLATFORM_LINUX) && !defined(OSP_PLATFORM_MACOS)
+#if !OSP_IO_POLLER_USE_EPOLL && !OSP_IO_POLLER_USE_KQUEUE
   struct pollfd fds_[OSP_IO_POLLER_MAX_EVENTS];
   uint32_t fd_count_ = 0;
 #endif
@@ -137,7 +161,7 @@ class IoPoller {
 // Inline Implementation
 // ============================================================================
 
-#if defined(OSP_PLATFORM_LINUX)
+#if OSP_IO_POLLER_USE_EPOLL
 
 // ----------------------------------------------------------------------------
 // Linux (epoll) helpers
@@ -256,7 +280,7 @@ inline expected<uint32_t, PollerError> IoPoller::Wait(int timeout_ms) {
   return r;
 }
 
-#elif defined(OSP_PLATFORM_MACOS)
+#elif OSP_IO_POLLER_USE_KQUEUE
 
 // ----------------------------------------------------------------------------
 // macOS (kqueue) helpers
@@ -542,7 +566,7 @@ inline expected<void, PollerError> IoPoller::Remove(int32_t fd) {
 }
 
 inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results, uint32_t max_results, int32_t timeout_ms) {
-  int32_t n = ::poll(fds_, static_cast<nfds_t>(fd_count_), timeout_ms);
+  int32_t n = socket_api::Poll(fds_, static_cast<uint32_t>(fd_count_), timeout_ms);
   if (n < 0) {
     return expected<uint32_t, PollerError>::error(PollerError::kWaitFailed);
   }
