@@ -97,8 +97,42 @@ else()
     endif()
 endif()
 
+# GCC libtsan crashes under high-entropy ASLR (kernel 6.5, mmap_rnd_bits=32).
+# For the gcc+TSan combo, run discovery and test execution via setarch -R
+# (ASLR off). CI uses clang+TSan, which needs no such workaround.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+   AND CMAKE_CXX_FLAGS MATCHES "-fsanitize=thread")
+    set(OSP_TSAN_EMULATOR "setarch;${CMAKE_HOST_SYSTEM_PROCESSOR};-R")
+else()
+    set(OSP_TSAN_EMULATOR "")
+endif()
+
 # Catch2 SKIP() returns exit code 4; tell CTest to treat it as SKIP, not FAIL
+if(OSP_TSAN_EMULATOR)
+    set_property(TARGET osp_tests PROPERTY CROSSCOMPILING_EMULATOR "${OSP_TSAN_EMULATOR}")
+endif()
 catch_discover_tests(osp_tests
+    PROPERTIES SKIP_RETURN_CODE 4
+)
+
+# --- RT-Thread host-stub tests (hermetic runtime check of the RT-Thread branch) ---
+# Compile the same core test sources with OSP_PLATFORM_RTTHREAD=1 so the
+# rt_* code paths in thread.hpp/semaphore.hpp/platform.hpp are exercised on
+# the host against the pthread-backed stub in rtthread_stub/rtthread.h.
+add_executable(osp_rtthread_tests
+    test_thread.cpp
+    test_semaphore.cpp
+)
+target_include_directories(osp_rtthread_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/rtthread_stub)
+target_compile_definitions(osp_rtthread_tests PRIVATE
+    OSP_PLATFORM_RTTHREAD=1
+    OSP_NET_BACKEND=2)
+target_link_libraries(osp_rtthread_tests Catch2::Catch2WithMain osp Threads::Threads)
+if(OSP_TSAN_EMULATOR)
+    set_property(TARGET osp_rtthread_tests PROPERTY CROSSCOMPILING_EMULATOR "${OSP_TSAN_EMULATOR}")
+endif()
+catch_discover_tests(osp_rtthread_tests
     PROPERTIES SKIP_RETURN_CODE 4
 )
 

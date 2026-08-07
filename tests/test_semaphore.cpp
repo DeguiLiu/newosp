@@ -222,3 +222,49 @@ TEST_CASE("semaphore - PosixSemaphore WaitFor succeeds when posted", "[semaphore
 }
 
 #endif  // OSP_PLATFORM_LINUX || OSP_PLATFORM_MACOS
+
+#if defined(OSP_PLATFORM_RTTHREAD)
+// RtSemaphore tests. Active only in the osp_rtthread_tests build (RT-Thread
+// branch); the host osp_tests build compiles this section out.
+TEST_CASE("semaphore - RtSemaphore Post then Wait round-trip", "[semaphore][rtthread]") {
+  osp::RtSemaphore sem(0);
+  REQUIRE(sem.IsValid());
+  sem.Post();
+  sem.Wait();
+  REQUIRE(sem.Count() == 0U);
+}
+
+TEST_CASE("semaphore - RtSemaphore TryWait on empty fails, succeeds after Post", "[semaphore][rtthread]") {
+  osp::RtSemaphore sem(0);
+  REQUIRE_FALSE(sem.TryWait());
+  sem.Post();
+  REQUIRE(sem.TryWait());
+  REQUIRE(sem.Count() == 0U);
+}
+
+TEST_CASE("semaphore - RtSemaphore WaitFor immediate (0 us) on empty fails", "[semaphore][rtthread]") {
+  osp::RtSemaphore sem(0);
+  REQUIRE_FALSE(sem.WaitFor(0));
+}
+
+TEST_CASE("semaphore - RtSemaphore WaitFor times out on empty", "[semaphore][rtthread]") {
+  osp::RtSemaphore sem(0);
+  auto start = std::chrono::steady_clock::now();
+  const bool result = sem.WaitFor(50000);  // 50 ms
+  auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+  REQUIRE_FALSE(result);
+  REQUIRE(elapsed_ms >= 40);
+}
+
+TEST_CASE("semaphore - RtSemaphore WaitFor succeeds when signaled by another thread", "[semaphore][rtthread]") {
+  osp::RtSemaphore sem(0);
+  std::thread poster([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    sem.Post();
+  });
+  const bool result = sem.WaitFor(2000000);  // 2 s
+  REQUIRE(result);
+  poster.join();
+}
+#endif  // OSP_PLATFORM_RTTHREAD

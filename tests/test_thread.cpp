@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 // ============================================================================
@@ -206,7 +207,12 @@ TEST_CASE("FixedVector of Thread runs multiple workers", "[thread]") {
 TEST_CASE("Mutex basic lock/unlock and try_lock", "[thread]") {
   osp::Mutex mtx;
   mtx.lock();
+#if defined(OSP_PLATFORM_RTTHREAD)
+  REQUIRE(mtx.try_lock());  // RT-Thread mutex is reentrant: owner may re-lock.
+  mtx.unlock();             // Balance the recursive hold before the final unlock.
+#else
   REQUIRE_FALSE(mtx.try_lock());
+#endif
   mtx.unlock();
   REQUIRE(mtx.try_lock());
   mtx.unlock();
