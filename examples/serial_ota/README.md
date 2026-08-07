@@ -131,10 +131,10 @@ sequenceDiagram
 | # | 组件 | 头文件 | 在本 Demo 中的用途 |
 |---|------|--------|-------------------|
 | 1 | `StateMachine` | osp/hsm.hpp | Device OTA 状态机 (6 states) + 双端 HSM 帧解析器 (9 states) |
-| 2 | `BehaviorTree` | osp/bt.hpp | Host 升级流程: Sequence(start -> chunks -> end -> verify) |
+| 2 | `BehaviorTree` | osp/bt.hpp | Host 升级流程：Sequence(start -> chunks -> end -> verify) |
 | 3 | `TimerScheduler` | osp/timer.hpp | 进度上报 (250ms) + 超时监控 (500ms, 上限 30s) |
-| 4 | `AsyncBus` | osp/bus.hpp | 无锁 MPSC 总线: OtaProgressMsg / OtaStateChangeMsg / OtaCompleteMsg |
-| 5 | `WorkerPool` | osp/worker_pool.hpp | 后台事件处理: dispatcher + 2 workers, 优先级分发 |
+| 4 | `AsyncBus` | osp/bus.hpp | 无锁 MPSC 总线：OtaProgressMsg / OtaStateChangeMsg / OtaCompleteMsg |
+| 5 | `WorkerPool` | osp/worker_pool.hpp | 后台事件处理：dispatcher + 2 workers, 优先级分发 |
 | 6 | `SpscRingbuffer` | osp/spsc_ringbuffer.hpp | 模拟 UART 双向 FIFO 通道 (host<->device, 各 512B) |
 | 7 | `FixedVector` | osp/vocabulary.hpp | `FixedVector<uint8_t, 4096>` 栈分配固件缓冲区，零堆分配 |
 | 8 | `FixedString` | osp/vocabulary.hpp | `FixedString<32>` 栈分配状态名称，用于 Bus 事件 |
@@ -145,14 +145,14 @@ sequenceDiagram
 
 ## 协议帧格式
 
-兼容 uart_statemachine_ringbuffer_linux 的简单帧格式:
+兼容 uart_statemachine_ringbuffer_linux 的简单帧格式：
 
 ```
 | 0xAA | LEN_LO | LEN_HI | CMD_CLASS | CMD | DATA[LEN-2] | CRC_LO | CRC_HI | 0x55 |
 ```
 
-- 帧头: 0xAA, 帧尾: 0x55
-- 长度: 2 字节小端序 (cmd_class + cmd + data 的总长度)
+- 帧头：0xAA, 帧尾：0x55
+- 长度：2 字节小端序 (cmd_class + cmd + data 的总长度)
 - CRC16-CCITT: constexpr 查表, 对 payload 部分校验
 
 ## OTA 命令定义
@@ -168,7 +168,7 @@ sequenceDiagram
 
 ## 重传机制
 
-基于现有 ACK 协议的隐式重传，无需新增协议字段:
+基于现有 ACK 协议的隐式重传，无需新增协议字段：
 
 ```
 Host                          Channel                       Device
@@ -183,11 +183,11 @@ Host                          Channel                       Device
 
 ### 重传设计要点
 
-1. **信道噪声模拟**: `HostSendToDevice` 以 `kDropRate` (默认 5%) 概率翻转 DATA 帧中随机一个字节，导致设备端 CRC 校验失败并丢帧
-2. **偏移量检测**: 设备端 `HandleOta::kData` 在 HSM 分发前检查 `chunk_offset == received_size`，不匹配时发送 `ACK(kParamErr, received_size)`
-3. **回卷重发**: 主机端 `SendChunks` 检测到失败 ACK 后，将 `current_offset` 回卷到设备的 `received_size`，重发丢失的数据块
-4. **末块保护**: 设备端 `HandleOta::kEnd` 校验 `received_size == total_size`，不匹配时拒绝 END 命令，主机回卷补发
-5. **重试上限**: 每个数据块最多重试 `kMaxChunkRetries` (3) 次，超过后 OTA 失败
+1. **信道噪声模拟**：`HostSendToDevice` 以 `kDropRate` (默认 5%) 概率翻转 DATA 帧中随机一个字节，导致设备端 CRC 校验失败并丢帧
+2. **偏移量检测**：设备端 `HandleOta::kData` 在 HSM 分发前检查 `chunk_offset == received_size`，不匹配时发送 `ACK(kParamErr, received_size)`
+3. **回卷重发**：主机端 `SendChunks` 检测到失败 ACK 后，将 `current_offset` 回卷到设备的 `received_size`，重发丢失的数据块
+4. **末块保护**：设备端 `HandleOta::kEnd` 校验 `received_size == total_size`，不匹配时拒绝 END 命令，主机回卷补发
+5. **重试上限**：每个数据块最多重试 `kMaxChunkRetries` (3) 次，超过后 OTA 失败
 
 ## 数据结构 (packed, 字节对齐)
 
@@ -251,7 +251,7 @@ graph TD
     A --> E[Action: send_verify]
 ```
 
-每个 Action 使用 ActionPhase (kSend/kWait/kDone) 模式处理 BT Sequence 的 re-tick 行为:
+每个 Action 使用 ActionPhase (kSend/kWait/kDone) 模式处理 BT Sequence 的 re-tick 行为：
 - send_start: 发送 OTA_START, 等待 ACK
 - send_chunks: 逐包发送 OTA_DATA (128B/chunk), 返回 kRunning 直到全部发完; 检测到 NAK 时回卷重发
 - send_end: 发送 OTA_END, 等待 ACK; 若设备报告 size mismatch 则回卷补发
@@ -259,7 +259,7 @@ graph TD
 
 ## Shell 调试命令
 
-通过 `telnet localhost 5090` 连接，支持以下命令:
+通过 `telnet localhost 5090` 连接，支持以下命令：
 
 | 命令 | 说明 | 示例 |
 |------|------|------|

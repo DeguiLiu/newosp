@@ -39,11 +39,8 @@
 // ============================================================================
 // RT-Thread Detection
 // ============================================================================
-// Must precede any #include so the conditional include below can pull in
-// <rtthread.h>. Primary signal: <rtthread.h> present on the include path
-// (every RT-Thread build ships it). Fallback: rtconfig.h macros (RT_VERSION /
-// RT_USING_*) that RT-Thread builds define. Users may force it via
-// -DOSP_PLATFORM_RTTHREAD=1.
+// Must precede includes so the conditional include can pull in <rtthread.h>.
+// Detected via rtconfig.h macros; force with -DOSP_PLATFORM_RTTHREAD=1.
 #ifndef OSP_PLATFORM_RTTHREAD
 #if defined(__has_include)
 #if __has_include(<rtthread.h>)
@@ -115,12 +112,8 @@ namespace osp {
 // Network Backend Selection
 // ============================================================================
 
-// OSP_NET_BACKEND: underlying network API used by socket.hpp / io_poller.hpp.
-//   0 = POSIX BSD socket (Linux host / ARM-Linux)
-//   1 = lwIP native socket API (lwip_* direct calls; used for host unixsim
-//       tests and as the adapter target for RT-Thread + lwIP via SAL/netdev)
-//   2 = network disabled
-// Detect RT-Thread via rtconfig macros; users may override via compile defs.
+// OSP_NET_BACKEND: 0 = POSIX BSD socket (Linux), 1 = lwIP native socket API,
+// 2 = network disabled. Selected from platform macros; overridable via defs.
 #ifndef OSP_NET_BACKEND
 #if defined(OSP_PLATFORM_RTTHREAD)
 #define OSP_NET_BACKEND 1
@@ -202,12 +195,9 @@ inline void AssertFail(const char* cond, const char* file, int line) {
 // ============================================================================
 
 /**
- * @brief Return current monotonic time in nanoseconds.
- *
- * On RT-Thread this is tick-based: 1 tick = 1e9 / RT_TICK_PER_SECOND ns.
- * rt_tick_get() is a 32-bit counter, so the returned value wraps (~49.7 days
- * at 1000 Hz) and is only valid for short-window relative comparisons, not as
- * an absolute timestamp.
+ * @brief Monotonic time in nanoseconds.
+ * RT-Thread is tick-based; rt_tick_get() wraps after ~49.7 days at 1000 Hz,
+ * so use only for short-window relative comparisons, not absolute time.
  */
 inline uint64_t SteadyNowNs() noexcept {
 #if defined(OSP_PLATFORM_RTTHREAD)
@@ -279,11 +269,8 @@ inline uint64_t CoarseNowUs() noexcept {
 
 /**
  * @brief Yield the current thread's CPU slice.
- *
- * RT-Thread: rt_thread_yield() (cooperative switch, returns to the scheduler).
- * Host: std::this_thread::yield(). Modules should call this instead of
- * std::this_thread::yield() directly so the RT-Thread port stays linkable
- * without a pthread/SAL layer.
+ * RT-Thread: rt_thread_yield(); host: std::this_thread::yield(). Modules call
+ * this so the RT-Thread port stays linkable without a pthread/SAL layer.
  */
 inline void ThreadYield() noexcept {
 #if defined(OSP_PLATFORM_RTTHREAD)
@@ -295,9 +282,8 @@ inline void ThreadYield() noexcept {
 
 /**
  * @brief Sleep for at least us microseconds.
- *
- * RT-Thread resolves to a millisecond delay (rt_thread_mdelay), so sub-tick
- * sleeps are clamped to 1 ms. Host: std::this_thread::sleep_for.
+ * RT-Thread clamps sub-tick sleeps to 1 ms (rt_thread_mdelay); host uses
+ * std::this_thread::sleep_for.
  */
 inline void ThreadSleepUs(uint64_t us) noexcept {
 #if defined(OSP_PLATFORM_RTTHREAD)

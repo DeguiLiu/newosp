@@ -472,7 +472,7 @@ int main(int argc, char* argv[]) {
   OSP_SCOPE_EXIT(g_host = nullptr);
 
   // --- Start shell (osp::ConsoleShell or osp::DebugShell) --------------------
-  osp::ConsoleShell console_shell({});
+  osp::ConsoleShell console_shell;
   osp::DebugShell::Config tcp_cfg;
   tcp_cfg.port = kShellPort;
   osp::DebugShell tcp_shell(tcp_cfg);

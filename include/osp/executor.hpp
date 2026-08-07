@@ -741,9 +741,27 @@ class RealtimeExecutor {
       return;  // Already running
     }
 
+#if defined(OSP_PLATFORM_LINUX)
+    // A custom stack size is only honored by pthread_create; osp::Thread on
+    // Linux uses std::thread and ignores stack_size. Keep a dedicated pthread
+    // for that case so the realtime contract holds on the target platform.
+    if (config_.stack_size > 0U) {
+      pthread_attr_t attr;
+      pthread_attr_init(&attr);
+      pthread_attr_setstacksize(&attr, config_.stack_size);
+      int32_t rc = pthread_create(&rt_thread_, &attr, &RealtimeExecutor::ThreadEntry, this);
+      pthread_attr_destroy(&attr);
+      if (rc != 0) {
+        (void)std::fprintf(stderr, "RealtimeExecutor: pthread_create failed (errno=%d)\n", rc);
+        running_.store(false, std::memory_order_release);
+        return;
+      }
+      use_pthread_.store(true, std::memory_order_release);
+      return;
+    }
+#endif
     ThreadOptions opts;
     opts.name = "rt-exec";
-    opts.stack_size = config_.stack_size;  // ignored on Linux (default stack), honored on RT-Thread
     if (!dispatch_thread_.Start(opts, [this]() {
           ApplyRealtimeConfig(config_);
           DispatchLoop();
@@ -757,9 +775,21 @@ class RealtimeExecutor {
    */
   void Stop() noexcept {
     running_.store(false, std::memory_order_release);
-    if (dispatch_thread_.joinable()) {
-      dispatch_thread_.join();
+#if defined(OSP_PLATFORM_LINUX)
+    if (use_pthread_.load(std::memory_order_acquire)) {
+      if (rt_thread_ != pthread_t{}) {
+        pthread_join(rt_thread_, nullptr);
+        rt_thread_ = pthread_t{};
+      }
+      use_pthread_.store(false, std::memory_order_release);
+    } else {
+#endif
+      if (dispatch_thread_.joinable()) {
+        dispatch_thread_.join();
+      }
+#if defined(OSP_PLATFORM_LINUX)
     }
+#endif
   }
 
   // ======================== Accessors ========================
@@ -777,6 +807,15 @@ class RealtimeExecutor {
   void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
 
  private:
+#if defined(OSP_PLATFORM_LINUX)
+  static void* ThreadEntry(void* arg) {
+    auto* self = static_cast<RealtimeExecutor*>(arg);
+    self->ApplyRealtimeConfig(self->config_);
+    self->DispatchLoop();
+    return nullptr;
+  }
+#endif
+
   /**
    * @brief Main dispatch loop for the realtime background thread.
    */
@@ -850,6 +889,10 @@ class RealtimeExecutor {
   RealtimeConfig config_;
   ThreadHeartbeat* heartbeat_{nullptr};
   SleepStrategy sleep_;
+#if defined(OSP_PLATFORM_LINUX)
+  pthread_t rt_thread_{};
+  std::atomic<bool> use_pthread_{false};
+#endif
 };
 
 }  // namespace osp

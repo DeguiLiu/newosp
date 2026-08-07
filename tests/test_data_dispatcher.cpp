@@ -238,6 +238,109 @@ TEST_CASE("Pool: timeout detection fires", "[job_pool]") {
   REQUIRE(d.FreeBlocks() == 4U);
 }
 
+// ============================================================================
+// Pool -- generation (代际校验, D2)
+// ============================================================================
+
+TEST_CASE("Pool: generation increments per allocation", "[job_pool]") {
+  Disp<64, 4> d;
+  Disp<64, 4>::Config cfg;
+  d.Init(cfg);
+
+  auto r0 = d.Alloc();
+  REQUIRE(r0.has_value());
+  uint32_t gen0 = d.GetGeneration(r0.value());
+  REQUIRE(gen0 >= 1U);
+
+  // Submit requires a released block; recycle via Release.
+  RawSubmit(d.GetStore().GetBlock(r0.value()), 0U, 1U);
+  REQUIRE(d.Release(r0.value(), gen0));
+
+  // Re-allocating the same block should bump its generation.
+  auto r1 = d.Alloc();
+  REQUIRE(r1.has_value());
+  if (r1.value() == r0.value()) {
+    uint32_t gen1 = d.GetGeneration(r1.value());
+    REQUIRE(gen1 != gen0);
+    REQUIRE(gen1 >= gen0);
+  }
+}
+
+TEST_CASE("Pool: Release with stale generation is rejected", "[job_pool]") {
+  Disp<64, 4> d;
+  Disp<64, 4>::Config cfg;
+  d.Init(cfg);
+
+  auto r = d.Alloc();
+  REQUIRE(r.has_value());
+  uint32_t bid = r.value();
+  uint32_t gen = d.GetGeneration(bid);
+
+  RawSubmit(d.GetStore().GetBlock(bid), 16U, 1U);
+
+  // Wrong generation: must be rejected, block not recycled.
+  REQUIRE_FALSE(d.Release(bid, gen ^ 0xFFFFFFFFU));
+  REQUIRE(d.FreeBlocks() == 3U);  // still allocated
+
+  // Correct generation: recycled.
+  REQUIRE(d.Release(bid, gen));
+  REQUIRE(d.FreeBlocks() == 4U);
+}
+
+TEST_CASE("Pool: GetReadable/GetPayloadSize reject stale generation", "[job_pool]") {
+  Disp<64, 4> d;
+  Disp<64, 4>::Config cfg;
+  d.Init(cfg);
+
+  auto r = d.Alloc();
+  REQUIRE(r.has_value());
+  uint32_t bid = r.value();
+  uint32_t gen = d.GetGeneration(bid);
+
+  RawSubmit(d.GetStore().GetBlock(bid), 32U, 1U);
+
+  REQUIRE(d.GetReadable(bid, gen) != nullptr);
+  REQUIRE(d.GetPayloadSize(bid, gen) == 32U);
+  REQUIRE(d.GetReadable(bid, gen ^ 0xFFFFFFFFU) == nullptr);
+  REQUIRE(d.GetPayloadSize(bid, gen ^ 0xFFFFFFFFU) == 0U);
+
+  d.Release(bid, gen);
+}
+
+TEST_CASE("Pool: stale consumer cannot steal reference after timeout reclaim (D2)", "[job_pool]") {
+  Disp<64, 4> d;
+  Disp<64, 4>::Config cfg;
+  cfg.default_timeout_ms = 1U;
+  d.Init(cfg);
+
+  // Round 1: allocate + submit with refcount=2, capture generation.
+  auto r1 = d.Alloc();
+  REQUIRE(r1.has_value());
+  uint32_t bid = r1.value();
+  uint32_t gen1 = d.GetGeneration(bid);
+  RawSubmit(d.GetStore().GetBlock(bid), 16U, 2U, 1U);  // 1ms timeout
+
+  // Force stale consumer "reclaim" via ScanTimeout (sets refcount 0 + recycle).
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  uint32_t tcount = d.ScanTimeout(nullptr, nullptr);
+  REQUIRE(tcount == 1U);
+  REQUIRE(d.FreeBlocks() == 4U);
+
+  // Round 2: same block re-allocated with a new generation.
+  auto r2 = d.Alloc();
+  REQUIRE(r2.has_value());
+  if (r2.value() == bid) {
+    uint32_t gen2 = d.GetGeneration(bid);
+    REQUIRE(gen2 != gen1);
+    RawSubmit(d.GetStore().GetBlock(bid), 8U, 1U);
+
+    // Stale consumer (holds gen1) tries to release -> rejected, no theft.
+    REQUIRE_FALSE(d.Release(bid, gen1));
+    // New holder (gen2) releases normally.
+    REQUIRE(d.Release(bid, gen2));
+  }
+}
+
 TEST_CASE("Pool: no timeout when deadline is 0", "[job_pool]") {
   Disp<64, 4> d;
   Disp<64, 4>::Config cfg;
@@ -978,9 +1081,10 @@ TEST_CASE("ConsumerSlot: cleanup dead consumer reclaims blocks", "[job_pool][Shm
     d.TrackBlockHold(cB, bids[i]);
   }
 
-  // Consumer B "crashes" -- mark inactive but don't release blocks
+  // Consumer B "crashes" (kill -9 form): slot stays active==1 but its
+  // heartbeat expires without refreshing. holding_mask still has bits set.
   auto* slotB = d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cB));
-  slotB->active.store(0U, std::memory_order_release);
+  slotB->heartbeat_us.store(SteadyNowUs() - OSP_JOB_CONSUMER_TIMEOUT_US - 1000000ULL, std::memory_order_relaxed);
   // Note: holding_mask still has bits set (simulating crash)
 
   // Cleanup dead consumers
@@ -1025,8 +1129,9 @@ TEST_CASE("ConsumerSlot: cleanup dead consumer as sole holder recycles block", "
   REQUIRE(cid >= 0);
   d.TrackBlockHold(cid, bid);
 
-  // Simulate crash
-  d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cid))->active.store(0U, std::memory_order_release);
+  // Simulate crash (kill -9 form): slot active==1 but heartbeat expired.
+  d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cid))
+      ->heartbeat_us.store(SteadyNowUs() - OSP_JOB_CONSUMER_TIMEOUT_US - 1000000ULL, std::memory_order_relaxed);
 
   REQUIRE(d.FreeBlocks() == 7U);
 
@@ -1036,6 +1141,79 @@ TEST_CASE("ConsumerSlot: cleanup dead consumer as sole holder recycles block", "
   REQUIRE(d.FreeBlocks() == 8U);
   REQUIRE(d.AllocBlocks() == 0U);
 
+  CleanupTestShm(shm_name, ptr, size);
+}
+
+// ============================================================================
+// ConsumerSlot -- heartbeat-expiry reaping (D1)
+// ============================================================================
+
+TEST_CASE("ConsumerSlot: active consumer with expired heartbeat is reaped (D1)", "[job_pool][ShmStore]") {
+  const char* shm_name = "/osp_test_dd_hb_1";
+  uint32_t size = TestShmStore::RequiredShmSize();
+  void* ptr = CreateTestShm(shm_name, size);
+  REQUIRE(ptr != nullptr);
+
+  TestShmDisp d;
+  TestShmDisp::Config cfg;
+  d.Init(cfg, ptr, size);
+
+  // Alloc + submit with refcount=1, consumer holds the block.
+  auto r = d.Alloc();
+  REQUIRE(r.has_value());
+  uint32_t bid = r.value();
+  d.Submit(bid, 10U, 1U);
+
+  int32_t cid = d.RegisterConsumer(7000U);
+  REQUIRE(cid >= 0);
+  d.TrackBlockHold(cid, bid);
+
+  // Crash simulation: consumer stays active==1 (kill -9 form) but its
+  // heartbeat is expired (no longer refreshing).
+  auto* slot = d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cid));
+  slot->heartbeat_us.store(SteadyNowUs() - OSP_JOB_CONSUMER_TIMEOUT_US - 1000000ULL, std::memory_order_relaxed);
+
+  // Consumer is active but stale; the reaper must reclaim its block.
+  REQUIRE(slot->active.load() == 1U);
+  uint32_t reclaimed = d.CleanupDeadConsumers();
+  REQUIRE(reclaimed == 1U);
+  REQUIRE(d.FreeBlocks() == 8U);
+  REQUIRE(d.AllocBlocks() == 0U);
+
+  // The stale slot is flipped to inactive so a new consumer may claim it.
+  REQUIRE(slot->active.load() == 0U);
+
+  CleanupTestShm(shm_name, ptr, size);
+}
+
+TEST_CASE("ConsumerSlot: fresh heartbeat keeps consumer alive (D1)", "[job_pool][ShmStore]") {
+  const char* shm_name = "/osp_test_dd_hb_2";
+  uint32_t size = TestShmStore::RequiredShmSize();
+  void* ptr = CreateTestShm(shm_name, size);
+  REQUIRE(ptr != nullptr);
+
+  TestShmDisp d;
+  TestShmDisp::Config cfg;
+  d.Init(cfg, ptr, size);
+
+  auto r = d.Alloc();
+  REQUIRE(r.has_value());
+  uint32_t bid = r.value();
+  d.Submit(bid, 10U, 1U);
+
+  int32_t cid = d.RegisterConsumer(8000U);
+  REQUIRE(cid >= 0);
+  d.TrackBlockHold(cid, bid);
+
+  // Fresh heartbeat (ConsumerHeartbeat refreshes the timestamp).
+  d.ConsumerHeartbeat(cid);
+
+  uint32_t reclaimed = d.CleanupDeadConsumers();
+  REQUIRE(reclaimed == 0U);  // still alive, block not reclaimed
+  REQUIRE(d.FreeBlocks() == 7U);
+
+  d.UnregisterConsumer(cid);
+  d.Release(bid);
   CleanupTestShm(shm_name, ptr, size);
 }
 
@@ -1156,7 +1334,8 @@ TEST_CASE("ShmStore cross-process: consumer crash recovery", "[job_pool][ShmStor
     child_d.TrackBlockHold(cid, r0.value());
     child_d.TrackBlockHold(cid, r1.value());
 
-    // Simulate crash: mark inactive and exit
+    // Simulate crash: mark inactive (active==0 path) and exit without release.
+    // (The heartbeat-expiry path is covered by the non-fork tests above.)
     child_d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cid))->active.store(0U, std::memory_order_release);
     _exit(0);
   }

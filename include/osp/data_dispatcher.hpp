@@ -24,28 +24,9 @@
 
 /**
  * @file data_dispatcher.hpp
- * @brief Industrial-grade shared data block pipeline with StorePolicy.
- *
- * Architecture (design_job_pool_zh.md, Plan A):
- *
- *   DataDispatcher<StorePolicy, NotifyPolicy, MaxStages, MaxEdges>
- *     +-- StorePolicy: detail::InProcStore<BS,MB> or detail::ShmStore<BS,MB>
- *     +-- NotifyPolicy: DirectNotify or ShmNotify
- *     +-- Pipeline<MaxStages, MaxEdges>  (static DAG)
- *     +-- FaultReporter  (optional)
- *     +-- BackpressureFn (optional)
- *
- * CAS lock-free logic is written once in DataDispatcher, shared by all
- * StorePolicy implementations. StorePolicy provides only accessor methods
- * (GetBlock, FreeHead, FreeCount, AllocCount, Capacity).
- *
- * Assert contract: the OSP_ASSERT boundary checks (index < capacity, block
- * size equality, header version) guard shared-memory invariants, not input
- * validation. They are internal invariants -- under NDEBUG they compile out,
- * so corruption of shared state is not recoverable at runtime. A tripped
- * assert in a debug build indicates fatal memory corruption, not a caller bug.
- *
- * Header-only, C++17, compatible with -fno-exceptions -fno-rtti.
+ * @brief Shared data block pipeline with StorePolicy (InProc/Shm).
+ * CAS logic lives once in DataDispatcher; StorePolicy provides accessors only.
+ * OSP_ASSERT guards shared-memory invariants, not caller input validation.
  */
 
 #ifndef OSP_DATA_DISPATCHER_HPP_
@@ -781,6 +762,13 @@ class DataDispatcher {
     while (detail::JobHeadIndex(head) != detail::kJobInvalidIndex) {
       uint32_t idx = detail::JobHeadIndex(head);
       DataBlock* blk = store_.GetBlock(idx);
+      // Generation = incremented free-list tag, strictly increasing per block
+      // and identical across processes. A stale-generation Release (D2) is
+      // rejected instead of stealing a reference from the new holder.
+      uint32_t gen = detail::JobHeadTag(head) + 1U;
+      if (gen == 0U) {
+        gen = 1U;  // skip the 0 sentinel on 32-bit tag wraparound
+      }
       uint32_t next = blk->next_free;
       uint64_t new_head = detail::JobPackHead(next, detail::JobHeadTag(head) + 1U);
       if (store_.FreeHead().compare_exchange_weak(head, new_head, std::memory_order_acq_rel,
@@ -788,6 +776,7 @@ class DataDispatcher {
         store_.FreeCount().fetch_sub(1U, std::memory_order_relaxed);
         store_.AllocCount().fetch_add(1U, std::memory_order_relaxed);
         blk->SetState(BlockState::kAllocated);
+        blk->reserved = gen;
         blk->alloc_time_us = SteadyNowUs();
         blk->payload_size = 0U;
         blk->fault_id = 0U;
@@ -881,6 +870,47 @@ class DataDispatcher {
   void AddRef(uint32_t block_id, uint32_t count) noexcept {
     OSP_ASSERT(block_id < Store::Capacity());
     store_.GetBlock(block_id)->refcount.fetch_add(count, std::memory_order_release);
+  }
+
+  // Generation-aware consumer API (D2): fails closed on a reclaimed-then-
+  // reallocated block. Use these overloads across process/notify boundaries.
+
+  /// @brief Current generation of a block. Valid until the block is reclaimed.
+  uint32_t GetGeneration(uint32_t block_id) const noexcept {
+    OSP_ASSERT(block_id < Store::Capacity());
+    return store_.GetBlock(block_id)->reserved;
+  }
+
+  /// @brief Generation-checked release. Returns false on stale generation.
+  bool Release(uint32_t block_id, uint32_t generation) noexcept {
+    if (generation != GetGeneration(block_id)) {
+      return false;
+    }
+    return Release(block_id);
+  }
+
+  /// @brief Generation-checked readable payload pointer. nullptr on stale gen.
+  const uint8_t* GetReadable(uint32_t block_id, uint32_t generation) const noexcept {
+    if (generation != GetGeneration(block_id)) {
+      return nullptr;
+    }
+    return GetReadable(block_id);
+  }
+
+  /// @brief Generation-checked payload size. 0 on stale generation.
+  uint32_t GetPayloadSize(uint32_t block_id, uint32_t generation) const noexcept {
+    if (generation != GetGeneration(block_id)) {
+      return 0U;
+    }
+    return GetPayloadSize(block_id);
+  }
+
+  /// @brief Generation-checked add-ref. No-op on stale generation.
+  void AddRef(uint32_t block_id, uint32_t count, uint32_t generation) noexcept {
+    if (generation != GetGeneration(block_id)) {
+      return;
+    }
+    AddRef(block_id, count);
   }
 
   // --------------------------------------------------------------------------
@@ -1022,17 +1052,8 @@ class DataDispatcher {
   const PipelineType& GetPipeline() const noexcept { return pipeline_; }
   const Config& GetConfig() const noexcept { return cfg_; }
 
-  // --------------------------------------------------------------------------
-  // Consumer tracking (ShmStore only -- compile-time SFINAE guard)
-  //
-  // These methods manage per-consumer slots in shared memory for:
-  //   - Process registration/unregistration
-  //   - Heartbeat updates
-  //   - Block holding bitmap tracking
-  //   - Crash recovery (cleanup orphaned blocks)
-  //
-  // For InProcStore, these methods are not available (compile error).
-  // --------------------------------------------------------------------------
+  // Consumer tracking is ShmStore-only (SFINAE-guarded). Reap semantics are
+  // described in §9.5 of docs/design_data_dispatcher_zh.md.
 
   /// @brief Register a consumer process. Returns slot index or -1 if full.
   /// @note ShmStore only. Call from consumer process after Attach.
@@ -1103,21 +1124,33 @@ class DataDispatcher {
     slot->holding_mask.fetch_and(~bit, std::memory_order_relaxed);
   }
 
-  /// @brief Cleanup blocks held by dead/inactive consumers.
-  /// For each slot with active==0 but non-zero holding_mask:
-  ///   atomically take the mask, then CAS-release each held block.
-  /// @return Number of blocks reclaimed.
+  /// @brief Reap held blocks of dead/inactive consumers. Returns blocks reclaimed.
   template <typename S = Store>
   auto CleanupDeadConsumers() noexcept -> decltype(std::declval<S>().GetConsumerSlot(0U), uint32_t()) {
     uint32_t reclaimed = 0U;
     uint32_t max_c = store_.MaxConsumers();
     for (uint32_t i = 0U; i < max_c; ++i) {
       detail::ConsumerSlot* slot = store_.GetConsumerSlot(i);
-      // Only cleanup inactive consumers with non-zero holding_mask
-      if (slot->active.load(std::memory_order_acquire) != 0U) {
-        continue;
+      uint32_t active = slot->active.load(std::memory_order_acquire);
+      if (active != 0U && !IsConsumerDead(*slot)) {
+        continue;  // Active with a fresh heartbeat: let it live.
       }
+      // Take the mask BEFORE flipping active 1->0, so a consumer that later
+      // registers into this slot never has its bits stolen by this reaper.
       uint64_t mask = slot->holding_mask.exchange(0U, std::memory_order_acq_rel);
+      if (active == 1U) {
+        uint32_t expected = 1U;
+        if (!slot->active.compare_exchange_strong(expected, 0U, std::memory_order_acq_rel,
+                                                  std::memory_order_acquire)) {
+          // Lost the claim (concurrent reaper). Restore the mask only for an
+          // inactive slot; a reused slot owns its mask again. Orphaned blocks
+          // are reclaimed by ScanTimeout() by deadline.
+          if (slot->active.load(std::memory_order_acquire) == 0U) {
+            slot->holding_mask.fetch_or(mask, std::memory_order_acq_rel);
+          }
+          continue;
+        }
+      }
       if (mask == 0U)
         continue;
 
@@ -1145,6 +1178,18 @@ class DataDispatcher {
   }
 
  private:
+  /// @brief True when a slot's heartbeat is older than OSP_JOB_CONSUMER_TIMEOUT_US.
+  /// A 0 heartbeat is alive-unknown and never reaped, closing the window between
+  /// RegisterConsumer()'s active CAS and its heartbeat timestamp write.
+  bool IsConsumerDead(const detail::ConsumerSlot& slot) const noexcept {
+    const uint64_t hb = slot.heartbeat_us.load(std::memory_order_relaxed);
+    if (hb == 0U) {
+      return false;
+    }
+    const uint64_t now = SteadyNowUs();
+    return (hb + OSP_JOB_CONSUMER_TIMEOUT_US) < now;
+  }
+
   void Recycle(uint32_t block_id) noexcept {
     DataBlock* blk = store_.GetBlock(block_id);
     blk->SetState(BlockState::kFree);

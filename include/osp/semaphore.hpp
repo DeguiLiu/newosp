@@ -453,14 +453,9 @@ class PosixSemaphore final {
 #if defined(OSP_PLATFORM_RTTHREAD)
 
 /**
- * @brief RT-Thread native semaphore wrapper.
- *
- * Maps directly to rt_sem_create/take/release. The wait queue is priority
- * ordered (RT_IPC_FLAG_PRIO, the RT-Thread IPC default), unlike the FIFO
- * wake-up of a condition_variable. Count() returns a relaxed hint value, not
- * an authoritative kernel count.
- *
- * Non-copyable, non-movable (same as LightSemaphore).
+ * @brief RT-Thread native semaphore wrapper (rt_sem_create/take/release).
+ * Wait queue is priority-ordered (RT_IPC_FLAG_PRIO). Non-copyable,
+ * non-movable; Count() is a relaxed hint, not a kernel-authoritative value.
  */
 class RtSemaphore final {
  public:
@@ -516,12 +511,9 @@ class RtSemaphore final {
   }
 
   /**
-   * @brief Timed wait with microsecond timeout.
-   * @param timeout_us Maximum time to wait in microseconds.
-   * @return true if the count was decremented before timeout, false otherwise.
-   *
-   * Converted to ticks (ceil); 0 us maps to RT_WAITING_NO and a timeout longer
-   * than INT32_MAX ticks maps to RT_WAITING_FOREVER.
+   * @brief Timed wait with microsecond timeout (ceil to ticks).
+   * @return true if decremented before timeout, false otherwise. Long waits
+   * become RT_WAITING_FOREVER; 0 us becomes RT_WAITING_NO.
    */
   bool WaitFor(uint64_t timeout_us) noexcept {
     if (sem_ == nullptr) {

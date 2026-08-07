@@ -1,6 +1,6 @@
 # Architecture
 
-newosp is a modern C++17 header-only embedded infrastructure library designed for ARM-Linux industrial systems. This document describes its layered architecture and key design decisions.
+newosp is a modern C++17 header-only embedded infrastructure library designed for ARM-Linux industrial systems.
 
 ## Overview
 
@@ -235,14 +235,12 @@ All metrics provide 100x+ margin over typical industrial embedded requirements.
 | AsyncBus | Lock-free MPSC publish, SharedMutex for subscriptions |
 | Node | Thread-safe publish, single-consumer SpinOnce |
 | SpscRingbuffer | Single-producer single-consumer (SPSC contract) |
-| ShmRingBuffer | Lock-free CAS, single-writer multiple-readers |
+| ShmRingBuffer | Lock-free CAS, MPSC (multiple-producer single-consumer) |
 | WorkerPool | Atomic flags + CV + SPSC per-worker queues |
 | HSM | Single-threaded Dispatch, non-reentrant handlers |
 | BehaviorTree | Single-threaded Tick, non-reentrant callbacks |
 
 ## Design Patterns
-
-newosp leverages modern C++ patterns:
 
 - **Lock-free MPSC**: Inspired by LMAX Disruptor
 - **SPSC ring buffer**: Wait-free single-producer single-consumer

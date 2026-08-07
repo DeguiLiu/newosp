@@ -2,7 +2,7 @@
 
 # newosp 性能与内存基准报告
 
-> 从属于 [design_zh.md](design_zh.md) §12 资源预算
+> 从属于 [design_zh.md](design_zh.md) 第 12 节资源预算
 > 版本: 1.0
 > 日期: 2026-02-14
 > 数据来源: `examples/benchmark.cpp`, `examples/benchmarks/` 实测
@@ -60,9 +60,9 @@
 - 队列深度是吞吐的决定性因素，而非 CAS 竞争
 - 大队列代价: AsyncBus 实例从 518 KB 增至 ~16 MB (131072 x 128B envelope)
 
-### 2.2 ShmRingBuffer SPSC 吞吐
+### 2.2 ShmRingBuffer (MPSC) 单生产者吞吐
 
-单生产者-单消费者同线程 push/pop 循环 (256B slot, 1024 slots):
+单生产者-单消费者（MPSC 环的单生产者退化用法）同线程 push/pop 循环 (256B slot, 1024 slots):
 
 | 指标 | 值 |
 |------|-----|
@@ -201,7 +201,7 @@ Unix Domain Socket 比 TCP loopback 快 2.83x。
 - Unix Domain Socket 适合同机进程间通信，延迟和吞吐均优于 TCP loopback
 - 数据来源: `examples/benchmarks/unix_socket_benchmark.cpp`
 
-### 2.9 ShmRingBuffer SPSC 不同 Payload 吞吐
+### 2.9 ShmRingBuffer (MPSC) 单生产者不同 Payload 吞吐
 
 测试条件: 同线程 push/pop 循环，SlotSize=8192，SlotCount=1024，每种 payload 1,000,000 次操作。
 
@@ -247,7 +247,7 @@ Unix Domain Socket 比 TCP loopback 快 2.83x。
 - Envelope 包含完整 variant (8232B)，无论实际 payload 大小，每次 Publish 都拷贝整个 variant
 - 因此 64B 和 8192B 的 M msgs/s 差异仅 ~10% (0.689 vs 0.628)，瓶颈在 envelope 拷贝而非 payload 大小
 - 字节吞吐随 payload 线性增长: 8192B 达到 4.9 GB/s
-- 与 §2.1 小 payload (5.9M msgs/s) 对比，大 variant 导致吞吐下降约 9x，因 envelope sizeof 从 104B 增至 8232B
+- 与 2.1 节小 payload (5.9M msgs/s) 对比，大 variant 导致吞吐下降约 9x，因 envelope sizeof 从 104B 增至 8232B
 - 数据来源: `examples/benchmarks/bus_payload_benchmark.cpp`
 
 ## 3. 延迟测试
@@ -419,7 +419,7 @@ SmallMsg (24B) 单线程 Publish + ProcessBatch，10,000 样本:
 |------|------|-------------------|------|
 | Bus 吞吐 | 5.9 M msgs/s | ~0.5-1.0 M msgs/s | 受 CAS 性能影响 |
 | Bus 延迟 P99 | 307 ns | ~500-1500 ns | 受缓存层级影响 |
-| SPSC 吞吐 | 34 M cycles/s | ~5-10 M cycles/s | wait-free，缩放线性 |
+| ShmRingBuffer (MPSC, 单生产者) 吞吐 | 34 M cycles/s | ~5-10 M cycles/s | wait-free，缩放线性 |
 | MemPool | 95 M ops/s | ~10-20 M ops/s | 纯内存操作 |
 | Timer 抖动 | ~1 ms | ~1-5 ms | 受 OS 调度影响 |
 | WorkerPool | 3.1 M tasks/s | ~0.3-0.6 M tasks/s | 含线程唤醒开销 |
@@ -602,7 +602,7 @@ ARM 平台的 cache coherency 开销高于 x86。ShmRingBuffer 在 1KB 处出现
 
 - ShmRingBuffer cache line 对齐 (64B padding)
 - explicit acquire/release memory fences (ARM 内存序加固)
-- 点云分包大小建议 ≤ 512B 以获得最佳 SPSC 吞吐
+- 点云分包大小建议 ≤ 512B 以获得最佳单生产者吞吐
 
 ## 5. 资源预算估算
 

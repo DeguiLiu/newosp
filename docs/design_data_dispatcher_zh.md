@@ -18,7 +18,7 @@
 8. [DataDispatcher 完整 API](#8-datadispatcher-完整-api)
 9. [生命周期流程](#9-生命周期流程)
 10. [层次结构](#10-层次结构)
-11. [依赖关系与对比](#11-依赖关系与对比)
+11. [依赖关系](#11-依赖关系)
 
 ---
 
@@ -470,11 +470,9 @@ using ShmDispatcher = DataDispatcher<ShmStore<BS, MB>, ShmNotify, MS, ME>;
 
 ---
 
-
-
 ## 9. 生命周期流程
 
-### 11.1 数据块生命周期
+### 9.1 数据块生命周期
 
 ```
 Alloc()          Submit()         Stage完成          最后一个Release()
@@ -486,7 +484,7 @@ kFree ──→ kAllocated ──→ kReady ──→ kProcessing ──→ kDon
                                        └── 异常 ──→ kError ────┘
 ```
 
-### 11.2 引用计数规则
+### 9.2 引用计数规则
 
 **Submit(block_id)**:
 ```cpp
@@ -516,7 +514,7 @@ if refcount == 0:
 - B 完成: 触发 C, refcount 保持 1
 - C 完成: refcount 1→0 → 回收
 
-### 11.3 背压机制
+### 9.3 背压机制
 
 ```cpp
 AllocBlock():
@@ -528,7 +526,7 @@ AllocBlock():
     return kPoolExhausted  // 生产者决定: 丢帧 or 等待
 ```
 
-### 11.4 超时检测
+### 9.4 超时检测
 
 ```cpp
 ScanTimeout() -- 由 Watchdog 或 Timer 定期调用:
@@ -541,19 +539,20 @@ ScanTimeout() -- 由 Watchdog 或 Timer 定期调用:
       RecycleBlock(block_id)
 ```
 
-### 11.5 崩溃恢复 (ShmStore only)
+### 9.5 崩溃恢复 (ShmStore only)
 
 ```cpp
-CleanupDeadConsumers():
+CleanupDeadConsumers() -- 生产者定时线程周期调用:
   for each ConsumerSlot:
-    if active && (now - heartbeat_us > threshold):
-      // 消费者进程死亡
-      for each bit in holding_mask:
-        block = GetBlock(bit_index)
-        block.refcount.fetch_sub(1)  // 释放持有
-        if block.refcount == 0:
-          RecycleBlock(bit_index)
-      UnregisterConsumer(slot_id)
+    if active == 0:                       // 已注销或已收割
+      mask = holding_mask.exchange(0)     // 认领残留持有位
+    elif 心跳过期 (heartbeat_us + timeout < now):
+      mask = holding_mask.exchange(0)     // 先取位, 后翻转 active, 防新消费者被偷
+      CAS active 1 -> 0; 失败则恢复 mask 并跳过
+    else:
+      continue                            // 心跳新鲜, 存活
+  for each bit in mask:
+    CAS refcount -= 1; refcount == 0 时 Recycle
 ```
 
 ---
@@ -591,7 +590,7 @@ graph TB
     Dispatcher --> ShmStore
     Dispatcher --> DirectNotify
     Dispatcher --> ShmNotify
-    
+
     ShmStore --> ShmChannel
     ShmNotify --> ShmChannel
     ShmChannel --> ShmRing
@@ -600,7 +599,7 @@ graph TB
     ShmStore --> Atomic
 ```
 
-### 11.1 层次说明
+### 10.1 层次说明
 
 | 层次 | 职责 | 编译期/运行期 |
 |------|------|--------------|
@@ -609,7 +608,7 @@ graph TB
 | **策略层** | 存储位置 (InProc/Shm) + 通知方式 (Direct/Shm) | 编译期策略选择 |
 | **基础层** | 共享内存、原子操作、Futex 通知 | 运行期 (零开销抽象) |
 
-### 11.2 编译期分发
+### 10.2 编译期分发
 
 ```cpp
 // 编译期确定部署模式，零运行时开销
@@ -665,14 +664,14 @@ graph LR
     DD --> Direct
     DD --> ShmN
     DD --> Pipe
-    
+
     Shm --> ShmChan
     ShmN --> ShmChan
     ShmChan --> ShmRing
-    
+
     DD --> Expected
     Pipe --> FixedFunc
-    
+
     InProc --> Atomic
     Shm --> Atomic
     InProc --> Array
@@ -709,7 +708,7 @@ graph LR
 
 ---
 
-### 11.4 与 SPMC 的关系
+### 11.5 与 SPMC 的关系
 
 两者定位不同，共存互补:
 

@@ -13,8 +13,6 @@ cmake --build build
 
 Executables will be generated in `build/examples/`.
 
-## Example Overview
-
 ## Recommended Reading Paths
 
 Different examples in this directory serve different goals:

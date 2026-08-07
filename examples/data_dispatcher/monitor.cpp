@@ -202,7 +202,7 @@ int main(int argc, char* argv[]) {
 
   std::thread poll_thread(PollingThread);
 
-  osp::ConsoleShell console_shell({});
+  osp::ConsoleShell console_shell;
   osp::DebugShell::Config tcp_cfg;
   tcp_cfg.port = shell_port;
   tcp_cfg.max_connections = 4;

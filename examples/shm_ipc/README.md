@@ -5,7 +5,7 @@
 本示例演示 newosp 共享内存组件 (`ShmChannel` / `ShmRingBuffer` / `SharedMemorySegment`)
 的跨进程通信能力，模拟工业场景中的视频帧流式传输 (producer-consumer 模式)。
 
-参考项目: [cpp_py_shmbuf_sample](https://gitee.com/liudegui/cpp_py_shmbuf_sample)
+参考项目：[cpp_py_shmbuf_sample](https://gitee.com/liudegui/cpp_py_shmbuf_sample)
 
 ## 组件依赖关系
 
@@ -210,7 +210,7 @@ stateDiagram-v2
 └─────────────────────────────────────────────┘
 ```
 
-帧大小: 76816 bytes, ShmChannel 配置: `<81920, 16>` (slot 80KB x 16)
+帧大小：76816 bytes, ShmChannel 配置：`<81920, 16>` (slot 80KB x 16)
 
 ## 时间戳统一
 
@@ -226,7 +226,7 @@ stateDiagram-v2
 
 ## Shell 调试命令
 
-通过 `telnet localhost 9527` 连接 monitor 进程:
+通过 `telnet localhost 9527` 连接 monitor 进程：
 
 | 命令 | 说明 |
 |------|------|
@@ -283,5 +283,5 @@ telnet localhost 9527
 2. `TimerScheduler<4>` 使用模板参数指定容量，零堆分配
 3. `FixedPool<81920, 4>` 预分配帧缓冲，热路径无 malloc
 4. 时间戳统一使用 `osp::SteadyNowUs()`，不引入 `steady_clock::time_point`
-5. Producer 背压策略: 连续 3 次 ring full 后进入 Throttled 降速状态
-6. Consumer 帧校验: 逐字节验证 `(seq_num + offset) & 0xFF` 模式
+5. Producer 背压策略：连续 3 次 ring full 后进入 Throttled 降速状态
+6. Consumer 帧校验：逐字节验证 `(seq_num + offset) & 0xFF` 模式

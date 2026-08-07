@@ -1,8 +1,7 @@
 /**
  * @file test_lwip_main.cpp
- * @brief Custom Catch2 main that boots lwIP before running backend tests.
- *
- * Built only when OSP_WITH_LWIP is enabled (see tests/CMakeLists.txt).
+ * @brief Custom Catch2 main booting lwIP before backend tests.
+ * Built only when OSP_WITH_LWIP is enabled.
  */
 
 #define CATCH_CONFIG_RUNNER

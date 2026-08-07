@@ -357,7 +357,6 @@ hsm_disc.OnNodeFound();
 hsm_disc.CheckStability();
 ```
 
-
 ---
 
 ## 3. service.hpp - RPC 服务

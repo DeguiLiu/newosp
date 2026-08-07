@@ -66,6 +66,10 @@ struct FusCtx {
   void* pool_shm = nullptr;
   uint32_t pool_size = 0;
 
+  // Consumer registration for crash recovery: the slot is reaped by
+  // CleanupDeadConsumers() on the producer if we stop heartbeating.
+  int32_t consumer_id = -1;
+
   const char* pool_name = kPoolShmName;
   const char* notify_name = kNotifyChannelName;
 
@@ -140,6 +144,11 @@ static void OnEnterDone(FusCtx& ctx) {
                ctx.frames_processed, ctx.frames_skipped, static_cast<double>(fps), static_cast<unsigned long>(avg_lat),
                static_cast<unsigned long>(ctx.min_latency_us == UINT64_MAX ? 0 : ctx.min_latency_us),
                static_cast<unsigned long>(ctx.max_latency_us));
+  // Unregister consumer before unmapping the pool; the slot lives in shm.
+  if (ctx.consumer_id >= 0) {
+    ctx.disp.UnregisterConsumer(ctx.consumer_id);
+    ctx.consumer_id = -1;
+  }
   if (ctx.pool_shm != nullptr) {
     ClosePoolShm(ctx.pool_shm, ctx.pool_size);
     ctx.pool_shm = nullptr;
@@ -156,12 +165,23 @@ static osp::TransitionResult OnDone(FusCtx&, const osp::Event&) {
 // ---------------------------------------------------------------------------
 
 static void ProcessBlock(FusCtx& ctx, uint32_t block_id) {
-  const uint8_t* data = ctx.disp.GetReadable(block_id);
-  uint32_t len = ctx.disp.GetPayloadSize(block_id);
+  // Capture the block generation at the earliest safe point while the block
+  // is still referenced (refcount > 0). Passing it to the generation overloads
+  // fails closed if the block is reclaimed and re-allocated meanwhile (D2).
+  uint32_t gen = ctx.disp.GetGeneration(block_id);
+  if (ctx.consumer_id >= 0) {
+    ctx.disp.TrackBlockHold(ctx.consumer_id, block_id);
+  }
+
+  const uint8_t* data = ctx.disp.GetReadable(block_id, gen);
+  uint32_t len = ctx.disp.GetPayloadSize(block_id, gen);
 
   if (!ValidateLidarFrame(data, len)) {
     ++ctx.frames_invalid;
-    ctx.disp.Release(block_id);
+    ctx.disp.Release(block_id, gen);
+    if (ctx.consumer_id >= 0) {
+      ctx.disp.TrackBlockRelease(ctx.consumer_id, block_id);
+    }
     return;
   }
 
@@ -191,7 +211,10 @@ static void ProcessBlock(FusCtx& ctx, uint32_t block_id) {
   std::this_thread::sleep_for(std::chrono::milliseconds(sim_ms));
 
   // Release refcount AFTER processing (zero-copy: data stays valid until Release)
-  ctx.disp.Release(block_id);
+  ctx.disp.Release(block_id, gen);
+  if (ctx.consumer_id >= 0) {
+    ctx.disp.TrackBlockRelease(ctx.consumer_id, block_id);
+  }
 
   uint64_t lat = osp::SteadyNowUs() - start_us;
   ctx.total_latency_us += lat;
@@ -283,9 +306,17 @@ int main(int argc, char* argv[]) {
       }
       ctx.notify_channel = static_cast<osp::ShmSpmcByteChannel&&>(ch.value());
       ctx.disp.Attach(ctx.pool_shm);
+      // Register this consumer so the producer's CleanupDeadConsumers() can
+      // reclaim our held blocks if we crash without releasing (heartbeat reaps).
+      ctx.consumer_id = ctx.disp.RegisterConsumer(static_cast<uint32_t>(getpid()));
       sm.Dispatch({kEvtConnected});
 
     } else if (cur == ctx.s_processing) {
+      // Refresh heartbeat each loop so CleanupDeadConsumers() (producer, 1s)
+      // never reaps us while processing. Occurs at most every ~500ms here.
+      if (ctx.consumer_id >= 0) {
+        ctx.disp.ConsumerHeartbeat(ctx.consumer_id);
+      }
       auto wait = ctx.notify_channel.WaitReadable(500);
       if (wait.has_value()) {
         NotifyMsg msg;
@@ -307,7 +338,14 @@ int main(int argc, char* argv[]) {
         uint32_t len = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
         if (len == sizeof(msg)) {
           // Release without processing (skip)
-          ctx.disp.Release(msg.block_id);
+          uint32_t gen = ctx.disp.GetGeneration(msg.block_id);
+          if (ctx.consumer_id >= 0) {
+            ctx.disp.TrackBlockHold(ctx.consumer_id, msg.block_id);
+          }
+          ctx.disp.Release(msg.block_id, gen);
+          if (ctx.consumer_id >= 0) {
+            ctx.disp.TrackBlockRelease(ctx.consumer_id, msg.block_id);
+          }
           ++skipped;
         } else {
           break;

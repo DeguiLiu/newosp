@@ -62,7 +62,7 @@ newosp 提供 13 个单文件示例和 5 个多文件应用示例，覆盖从基
 
 **覆盖模块**:
 - AsyncBus: publish/subscribe 性能
-- ShmRingBuffer: 共享内存 SPSC 吞吐量
+- ShmRingBuffer: 共享内存 MPSC 吞吐量
 - Transport: 帧编码/解码开销
 - MemPool: 分配/释放延迟
 - Timer: 调度精度
@@ -268,7 +268,6 @@ graph TB
 - 栈分配统计: atomic 计数器，引用传递
 - FlushAndPause 确保数据完整性
 
-
 ### 4.2 streaming_protocol
 
 **应用场景**: GB28181/RTSP 视频监控协议流水线
@@ -377,7 +376,7 @@ graph TB
 
 **覆盖模块**:
 - ShmChannel: 命名共享内存通道 (CreateWriter / OpenReader)
-- ShmRingBuffer: 无锁 SPSC 环形缓冲区
+- ShmRingBuffer: 无锁 MPSC 环形缓冲区
 - SharedMemorySegment: POSIX shm_open/mmap RAII 封装
 - StateMachine: Producer/Consumer 生命周期 HSM (各 8 states)
 - FixedPool: 帧缓冲区固定块分配 (零堆分配)
@@ -567,7 +566,7 @@ graph TB
 
 #### 共享内存
 
-- benchmark (ShmRingBuffer SPSC)
+- benchmark (ShmRingBuffer MPSC)
 - shm_ipc (跨进程视频帧流)
 
 #### 串口通信

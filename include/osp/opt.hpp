@@ -25,24 +25,8 @@
 /**
  * @file osp/opt.hpp
  * @brief Central compile-time tuning switch table (lwIP opt.h port).
- *
- * All OSP_* tuning macros are defined here with the `#ifndef / #define /
- * #endif` pattern, so a `-DOSP_XXX=value` flag on the command line overrides
- * the default. Included at the top of platform.hpp; every module receives the
- * full set through its include chain.
- *
- * Responsibility split (no overlap):
- *   - Platform config (OSP_PLATFORM_* / OSP_HAS_NETWORK / OSP_NET_BACKEND /
- *     OSP_ARCH_* / io_poller epoll/kqueue selection): stays in platform.hpp
- *     and the platform-detection sections of each module header.
- *   - Compile-time tuning switches: this file.
- *   - Runtime config parsing: config.hpp (Ini/Json/Yaml parser, unrelated to
- *     compile-time switches despite the "config" name).
- *
- * Build switches (defined by CMake via -D; documented here only, no default
- * value, so a `#ifdef` test never fires by accident):
- *   OSP_CONFIG_INI_ENABLED / OSP_CONFIG_JSON_ENABLED / OSP_CONFIG_YAML_ENABLED
- *   OSP_NO_EXCEPTIONS / OSP_WITH_NETWORK / OSP_WITH_LWIP / OSP_LOG_SYNC_ONLY
+ * OSP_* macros default here; -DOSP_XXX=value overrides via #ifndef. Platform
+ * config lives in platform.hpp; runtime parsing lives in config.hpp.
  */
 
 #ifndef OSP_OPT_HPP_
@@ -308,6 +292,20 @@
 /// Data dispatcher block alignment (bytes).
 #ifndef OSP_JOB_BLOCK_ALIGN
 #define OSP_JOB_BLOCK_ALIGN 64U
+#endif
+
+/// Data dispatcher consumer heartbeat interval (microseconds). Consumers call
+/// ConsumerHeartbeat() at least this often while alive.
+#ifndef OSP_JOB_CONSUMER_HEARTBEAT_US
+#define OSP_JOB_CONSUMER_HEARTBEAT_US 1000000U
+#endif
+
+/// Data dispatcher dead-consumer heartbeat timeout (microseconds). A
+/// ShmStore consumer whose heartbeat is older than this threshold is reaped by
+/// CleanupDeadConsumers(). Must be several multiples of
+/// OSP_JOB_CONSUMER_HEARTBEAT_US to tolerate scheduling jitter.
+#ifndef OSP_JOB_CONSUMER_TIMEOUT_US
+#define OSP_JOB_CONSUMER_TIMEOUT_US 3000000U
 #endif
 
 #endif  // OSP_OPT_HPP_

@@ -729,7 +729,7 @@ echo "osp_bus" | ./my_app --console 2>/dev/null
 
 ---
 
-## 11. 未来扩展 (不在本次范围)
+## 12. 未来扩展 (不在本次范围)
 
 - **SHM IPC 后端**: 基于 `shm_transport` 的跨进程 shell, 有实际需求时再实现
 - **多后端并存**: 同时启用 TCP + UART, 两个入口共享同一命令表 (架构天然支持, GlobalCmdRegistry 是全局单例)

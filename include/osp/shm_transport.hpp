@@ -651,13 +651,16 @@ class ShmChannel final {
 // ShmSpscByteRing - SPSC byte-stream ring buffer for large payloads
 // ============================================================================
 
-/// @brief POD header for SPSC byte ring buffer (16 bytes).
-/// Stored at the start of the shared memory region.
+/**
+ * @brief Header for SPSC byte ring buffer (16 bytes).
+ * head/tail are atomic (cross-thread read/write); capacity/reserved are set
+ * once by InitAt, so they stay plain.
+ */
 struct ShmByteRingHeader {
-  uint32_t head;      ///< Producer write position (monotonically increasing)
-  uint32_t tail;      ///< Consumer read position (monotonically increasing)
-  uint32_t capacity;  ///< Data area size (must be power of 2)
-  uint32_t reserved;  ///< Alignment padding
+  std::atomic<uint32_t> head;  ///< Producer write position (monotonically increasing)
+  std::atomic<uint32_t> tail;  ///< Consumer read position (monotonically increasing)
+  uint32_t capacity;           ///< Data area size (must be power of 2)
+  uint32_t reserved;           ///< Alignment padding
 };
 
 static_assert(sizeof(ShmByteRingHeader) == 16, "ShmByteRingHeader must be 16 bytes");
@@ -696,8 +699,8 @@ class ShmSpscByteRing final {
     ring.header_ = static_cast<ShmByteRingHeader*>(shm_base);
     ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
     uint32_t cap = RoundDownPow2(total_size - kHeaderSize);
-    ring.header_->head = 0;
-    ring.header_->tail = 0;
+    ring.header_->head.store(0, std::memory_order_relaxed);
+    ring.header_->tail.store(0, std::memory_order_relaxed);
     ring.header_->capacity = cap;
     ring.header_->reserved = 0;
     std::atomic_thread_fence(std::memory_order_release);
@@ -738,19 +741,17 @@ class ShmSpscByteRing final {
     if (WriteableBytes() < total) {
       return false;
     }
-    const uint32_t head = header_->head;
+    const uint32_t head = header_->head.load(std::memory_order_relaxed);
     WriteRaw(head, &len, 4);
     WriteRaw(head + 4, data, len);
-    std::atomic_thread_fence(std::memory_order_release);
-    header_->head = head + total;
+    header_->head.store(head + total, std::memory_order_release);
     return true;
   }
 
   /// @brief Available bytes for writing.
   uint32_t WriteableBytes() const noexcept {
-    const uint32_t head = header_->head;
-    std::atomic_thread_fence(std::memory_order_acquire);
-    const uint32_t tail = header_->tail;
+    const uint32_t head = header_->head.load(std::memory_order_relaxed);
+    const uint32_t tail = header_->tail.load(std::memory_order_acquire);
     return header_->capacity - (head - tail);
   }
 
@@ -763,9 +764,8 @@ class ShmSpscByteRing final {
    * @return Payload length, or 0 if no data available.
    */
   uint32_t Read(void* out, uint32_t max_len) noexcept {
-    const uint32_t tail = header_->tail;
-    std::atomic_thread_fence(std::memory_order_acquire);
-    const uint32_t head = header_->head;
+    const uint32_t tail = header_->tail.load(std::memory_order_relaxed);
+    const uint32_t head = header_->head.load(std::memory_order_acquire);
     const uint32_t available = head - tail;
     if (available < 4) {
       return 0;
@@ -777,21 +777,18 @@ class ShmSpscByteRing final {
     }
     if (msg_len > max_len) {
       // Message too large for output buffer; skip it
-      std::atomic_thread_fence(std::memory_order_release);
-      header_->tail = tail + msg_len + 4;
+      header_->tail.store(tail + msg_len + 4, std::memory_order_release);
       return 0;
     }
     ReadRaw(tail + 4, out, msg_len);
-    std::atomic_thread_fence(std::memory_order_release);
-    header_->tail = tail + msg_len + 4;
+    header_->tail.store(tail + msg_len + 4, std::memory_order_release);
     return msg_len;
   }
 
   /// @brief Available bytes for reading.
   uint32_t ReadableBytes() const noexcept {
-    const uint32_t tail = header_->tail;
-    std::atomic_thread_fence(std::memory_order_acquire);
-    const uint32_t head = header_->head;
+    const uint32_t tail = header_->tail.load(std::memory_order_relaxed);
+    const uint32_t head = header_->head.load(std::memory_order_acquire);
     return head - tail;
   }
 
@@ -802,7 +799,7 @@ class ShmSpscByteRing final {
   uint32_t Capacity() const noexcept { return header_ ? header_->capacity : 0; }
 
   /// @brief Pointer to the head field (for futex wait/wake).
-  uint32_t* HeadPtr() noexcept { return &header_->head; }
+  std::atomic<uint32_t>* HeadPtr() noexcept { return &header_->head; }
 
  private:
   void WriteRaw(uint32_t pos, const void* src, uint32_t len) noexcept {
@@ -850,23 +847,29 @@ class ShmSpscByteRing final {
 
 namespace detail {
 
-/// @brief Wait on a futex word until it changes from expected_val or timeout.
-/// @return 0 on wake, -1 on timeout/error.
-inline int FutexWait(uint32_t* addr, uint32_t expected_val, uint32_t timeout_ms) noexcept {
+/**
+ * @brief Wait on a futex word until it changes from expected_val or timeout.
+ * @return 0 on wake, -1 on timeout/error.
+ * reinterpret_cast to uint32_t* is safe via the enclosing static_assert.
+ */
+inline int FutexWait(std::atomic<uint32_t>* addr, uint32_t expected_val, uint32_t timeout_ms) noexcept {
   struct timespec ts;
   ts.tv_sec = static_cast<time_t>(timeout_ms / 1000);
   ts.tv_nsec = static_cast<long>((timeout_ms % 1000) * 1000000L);  // NOLINT
-  return static_cast<int>(::syscall(SYS_futex, addr, FUTEX_WAIT, expected_val, &ts, nullptr, 0));
+  uint32_t* raw = reinterpret_cast<uint32_t*>(addr);               // NOLINT
+  return static_cast<int>(::syscall(SYS_futex, raw, FUTEX_WAIT, expected_val, &ts, nullptr, 0));
 }
 
 /// @brief Wake one waiter on a futex word.
-inline void FutexWake(uint32_t* addr) noexcept {
-  (void)::syscall(SYS_futex, addr, FUTEX_WAKE, 1, nullptr, nullptr, 0);
+inline void FutexWake(std::atomic<uint32_t>* addr) noexcept {
+  uint32_t* raw = reinterpret_cast<uint32_t*>(addr);  // NOLINT
+  (void)::syscall(SYS_futex, raw, FUTEX_WAKE, 1, nullptr, nullptr, 0);
 }
 
 /// @brief Wake all waiters on a futex word (for SPMC broadcast).
-inline void FutexWakeAll(uint32_t* addr) noexcept {
-  (void)::syscall(SYS_futex, addr, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+inline void FutexWakeAll(std::atomic<uint32_t>* addr) noexcept {
+  uint32_t* raw = reinterpret_cast<uint32_t*>(addr);  // NOLINT
+  (void)::syscall(SYS_futex, raw, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
 }
 
 }  // namespace detail
@@ -995,7 +998,7 @@ class ShmByteChannel final {
       return expected<void, ShmError>::success();
     }
     // Futex wait: sleep until head changes
-    uint32_t cur_head = *ring_.HeadPtr();
+    uint32_t cur_head = ring_.HeadPtr()->load(std::memory_order_acquire);
     detail::FutexWait(ring_.HeadPtr(), cur_head, timeout_ms);
     // Re-check after wake
     if (ring_.HasData()) {
@@ -1033,43 +1036,31 @@ class ShmByteChannel final {
 // ShmSpmcByteRing - Single-Producer Multi-Consumer byte-stream ring buffer
 // ============================================================================
 
-/// @brief Header for SPMC byte ring buffer (shared memory safe).
-/// Stored at the start of the shared memory region.
-/// Each consumer has an independent tail pointer for independent reading.
-///
-/// Fields that require atomic CAS operations (consumer_count, active[])
-/// are declared as std::atomic<uint32_t>. On platforms where
-/// std::atomic<uint32_t>::is_always_lock_free is true (all ARM/x86),
-/// these are safe to use across processes via shared memory.
+/**
+ * @brief Header for SPMC byte ring buffer (shared memory safe).
+ * One head + per-consumer tails[]; fields written by one side and read by the
+ * other are std::atomic (is_always_lock_free on ARM/x86) for cross-process
+ * safety. Each consumer has an independent tail for independent reading.
+ */
 struct ShmSpmcByteRingHeader {
-  uint32_t head;                                             ///< Producer write position (monotonically increasing)
-  uint32_t capacity;                                         ///< Data area size (must be power of 2)
-  uint32_t max_consumers;                                    ///< Maximum number of consumers
-  std::atomic<uint32_t> consumer_count;                      ///< Active consumer count (atomic CAS)
-  uint32_t tails[OSP_SHM_SPMC_MAX_CONSUMERS];                ///< Per-consumer read positions
-  std::atomic<uint32_t> active[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< 1=active, 0=inactive
+  std::atomic<uint32_t> head;                                       ///< Producer write position (monotonically increasing)
+  uint32_t capacity;                                                ///< Data area size (must be power of 2)
+  uint32_t max_consumers;                                           ///< Maximum number of consumers
+  std::atomic<uint32_t> consumer_count;                             ///< Active consumer count (atomic CAS)
+  std::atomic<uint32_t> tails[OSP_SHM_SPMC_MAX_CONSUMERS];          ///< Per-consumer read positions (atomic: read by producer)
+  std::atomic<uint32_t> active[OSP_SHM_SPMC_MAX_CONSUMERS];         ///< 1=active, 0=inactive
 };
 
 static_assert(std::atomic<uint32_t>::is_always_lock_free,
               "std::atomic<uint32_t> must be lock-free for shared memory use");
+static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t),
+              "std::atomic<uint32_t> must be layout-compatible with uint32_t for futex");
 
 /**
- * @brief SPMC byte-level ring buffer for shared memory IPC.
- *
- * Designed for data distribution: one producer writes, multiple consumers
- * each independently read the same data stream (e.g. LiDAR point clouds
- * distributed to logging, fusion, and visualization subscribers).
- *
- * Memory layout:
- *   [0..H-1]  : ShmSpmcByteRingHeader (head, capacity, tails[], active[])
- *   [H..N]    : Data area (circular buffer)
- *
- * Message format: [4-byte LE length][payload]
- *
- * Memory ordering: acquire/release fences (not seq_cst).
- * Thread/process safety: single producer, multiple consumers.
- * Each consumer must call RegisterConsumer() to get a unique consumer_id.
- * Producer checks the slowest consumer tail to prevent data overwrite.
+ * @brief SPMC byte ring: one producer, many independent consumers.
+ * Message format [4-byte LE length][payload]; memory ordering acquire/release.
+ * The producer side is NOT multi-writer safe: concurrent Write() targets the
+ * same range; for multi-producer use prefer ShmRingBuffer (MPSC).
  */
 class ShmSpmcByteRing final {
  public:
@@ -1094,12 +1085,12 @@ class ShmSpmcByteRing final {
     ring.header_ = static_cast<ShmSpmcByteRingHeader*>(shm_base);
     ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
     uint32_t cap = RoundDownPow2(total_size - kHeaderSize);
-    ring.header_->head = 0;
+    ring.header_->head.store(0, std::memory_order_relaxed);
     ring.header_->capacity = cap;
     ring.header_->max_consumers = max_consumers;
     ring.header_->consumer_count.store(0, std::memory_order_relaxed);
     for (uint32_t i = 0; i < OSP_SHM_SPMC_MAX_CONSUMERS; ++i) {
-      ring.header_->tails[i] = 0;
+      ring.header_->tails[i].store(0, std::memory_order_relaxed);
       ring.header_->active[i].store(0, std::memory_order_relaxed);
     }
     std::atomic_thread_fence(std::memory_order_release);
@@ -1137,8 +1128,7 @@ class ShmSpmcByteRing final {
       if (header_->active[i].compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
                                                      std::memory_order_relaxed)) {
         // Set tail to current head (consumer starts from "now")
-        std::atomic_thread_fence(std::memory_order_acquire);
-        header_->tails[i] = header_->head;
+        header_->tails[i].store(header_->head.load(std::memory_order_acquire), std::memory_order_relaxed);
         header_->consumer_count.fetch_add(1, std::memory_order_relaxed);
         return static_cast<int32_t>(i);
       }
@@ -1171,17 +1161,16 @@ class ShmSpmcByteRing final {
     if (WriteableBytes() < total) {
       return false;
     }
-    const uint32_t head = header_->head;
+    const uint32_t head = header_->head.load(std::memory_order_relaxed);
     WriteRaw(head, &len, 4);
     WriteRaw(head + 4, data, len);
-    std::atomic_thread_fence(std::memory_order_release);
-    header_->head = head + total;
+    header_->head.store(head + total, std::memory_order_release);
     return true;
   }
 
   /// @brief Available bytes for writing (limited by slowest consumer).
   uint32_t WriteableBytes() const noexcept {
-    const uint32_t head = header_->head;
+    const uint32_t head = header_->head.load(std::memory_order_relaxed);
     const uint32_t slowest = SlowestTail();
     return header_->capacity - (head - slowest);
   }
@@ -1200,9 +1189,8 @@ class ShmSpmcByteRing final {
       return 0;
     }
     const uint32_t idx = static_cast<uint32_t>(consumer_id);
-    const uint32_t tail = header_->tails[idx];
-    std::atomic_thread_fence(std::memory_order_acquire);
-    const uint32_t head = header_->head;
+    const uint32_t tail = header_->tails[idx].load(std::memory_order_relaxed);
+    const uint32_t head = header_->head.load(std::memory_order_acquire);
     const uint32_t available = head - tail;
     if (available < 4) {
       return 0;
@@ -1214,13 +1202,11 @@ class ShmSpmcByteRing final {
     }
     if (msg_len > max_len) {
       // Message too large for output buffer; skip it
-      std::atomic_thread_fence(std::memory_order_release);
-      header_->tails[idx] = tail + msg_len + 4;
+      header_->tails[idx].store(tail + msg_len + 4, std::memory_order_release);
       return 0;
     }
     ReadRaw(tail + 4, out, msg_len);
-    std::atomic_thread_fence(std::memory_order_release);
-    header_->tails[idx] = tail + msg_len + 4;
+    header_->tails[idx].store(tail + msg_len + 4, std::memory_order_release);
     return msg_len;
   }
 
@@ -1230,9 +1216,8 @@ class ShmSpmcByteRing final {
       return 0;
     }
     const uint32_t idx = static_cast<uint32_t>(consumer_id);
-    const uint32_t tail = header_->tails[idx];
-    std::atomic_thread_fence(std::memory_order_acquire);
-    const uint32_t head = header_->head;
+    const uint32_t tail = header_->tails[idx].load(std::memory_order_relaxed);
+    const uint32_t head = header_->head.load(std::memory_order_acquire);
     return head - tail;
   }
 
@@ -1243,7 +1228,7 @@ class ShmSpmcByteRing final {
   uint32_t Capacity() const noexcept { return header_ ? header_->capacity : 0; }
 
   /// @brief Pointer to the head field (for futex wait/wake).
-  uint32_t* HeadPtr() noexcept { return &header_->head; }
+  std::atomic<uint32_t>* HeadPtr() noexcept { return &header_->head; }
 
   /// @brief Maximum consumers supported.
   uint32_t MaxConsumers() const noexcept { return header_ ? header_->max_consumers : 0; }
@@ -1251,10 +1236,10 @@ class ShmSpmcByteRing final {
  private:
   /// @brief Find the slowest (minimum) tail among active consumers.
   uint32_t SlowestTail() const noexcept {
-    uint32_t slowest = header_->head;  // If no consumers, full capacity
+    uint32_t slowest = header_->head.load(std::memory_order_relaxed);  // If no consumers, full capacity
     for (uint32_t i = 0; i < header_->max_consumers; ++i) {
       if (header_->active[i].load(std::memory_order_relaxed) != 0) {
-        const uint32_t t = header_->tails[i];
+        const uint32_t t = header_->tails[i].load(std::memory_order_acquire);
         // Use signed comparison for monotonic wrap-around
         if (static_cast<int32_t>(slowest - t) > 0) {
           slowest = t;
@@ -1443,7 +1428,7 @@ class ShmSpmcByteChannel final {
     if (ring_.HasData(consumer_id_)) {
       return expected<void, ShmError>::success();
     }
-    uint32_t cur_head = *ring_.HeadPtr();
+    uint32_t cur_head = ring_.HeadPtr()->load(std::memory_order_acquire);
     detail::FutexWait(ring_.HeadPtr(), cur_head, timeout_ms);
     if (ring_.HasData(consumer_id_)) {
       return expected<void, ShmError>::success();

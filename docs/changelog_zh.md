@@ -585,7 +585,7 @@ class LifecycleNode : public Node<PayloadVariant> {
 > 进程间同机 (shm)、跨机器 (tcp/udp) 三种传输，并自动选择最优路径。
 
 95. **shm_transport.hpp -- SharedMemorySegment**: POSIX shm_open/mmap RAII 封装、命名共享内存段
-96. **shm_transport.hpp -- ShmRingBuffer**: 共享内存中的无锁 SPSC/MPSC 环形缓冲区 (借鉴 cpp-ipc 的 CAS 设计)
+96. **shm_transport.hpp -- ShmRingBuffer**: 共享内存中的无锁 MPSC 环形缓冲区 (借鉴 cpp-ipc 的 CAS 设计)
 97. **shm_transport.hpp -- ShmChannel**: 命名通道抽象、生产者/消费者端点、waiter 通知 (eventfd/futex)
 98. **shm_transport.hpp -- ShmTransport**: 实现 Transport 接口、Bind/Connect/Send/Poll
 99. **shm_transport.hpp -- 零拷贝 LoanedMessage**: 借鉴 ROS2 loaned_messages API，发布者直接写入共享内存 (仅限 POD 类型)
@@ -634,7 +634,7 @@ class LifecycleNode : public Node<PayloadVariant> {
 125. **test_lifecycle_node.cpp**: 状态过渡、非法过渡拒绝、资源分配/释放验证
 126. **test_realtime_executor.cpp**: 优先级调度、周期精度、CPU 亲和性
 127. **test_node_manager.cpp**: 连接建立、心跳超时、断开通知
-128. **性能基准回归**: 全传输路径 (inproc/shm/tcp) ��吐量/延迟基线
+128. **性能基准回归**: 全传输路径 (inproc/shm/tcp) 吞吐量/延迟基线
 
 ### Phase P: P1 功能扩展 -- OSP 兼容 / 串口 / 统一投递 (已实现)
 
@@ -656,7 +656,7 @@ class LifecycleNode : public Node<PayloadVariant> {
 ### Phase Q: P2 高级特性 -- 节点发现 / 服务 (已实现)
 
 > P2 优先级。借鉴 ROS2 的 Service/Client 模式和 CyberRT 的拓扑自动发现。
-> 这些特性对核心功能非必需，但对完整的分布式系统至关重要。
+> 这些特性对核心功能非必需，但对完整的分布式系统是必要的。
 
 140. **discovery.hpp -- MulticastDiscovery**: UDP 多播节点自动发现、心跳保活
 141. **discovery.hpp -- StaticDiscovery**: 配置文件驱动的静态端点表

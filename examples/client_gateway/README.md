@@ -82,10 +82,10 @@ using Payload = std::variant<
 
 ## 设计要点
 
-1. **Variant 类型分发**: 5 种消息类型通过 `std::variant` 统一，Bus 根据类型自动路由到对应订阅者
-2. **WorkerPool + Node 分离**: 数据密集型工作 (ClientData) 走 WorkerPool 并行处理；轻量事件 (connect/disconnect/heartbeat) 走 Node
-3. **栈分配统计**: `GatewayStats` 使用 `std::atomic` 成员，栈上分配，引用传递给 lambda 捕获，无全局单例
-4. **FlushAndPause 模式**: 在断连前排空所有在途工作，确保数据不丢失
+1. **Variant 类型分发**：5 种消息类型通过 `std::variant` 统一，Bus 根据类型自动路由到对应订阅者
+2. **WorkerPool + Node 分离**：数据密集型工作 (ClientData) 走 WorkerPool 并行处理；轻量事件 (connect/disconnect/heartbeat) 走 Node
+3. **栈分配统计**：`GatewayStats` 使用 `std::atomic` 成员，栈上分配，引用传递给 lambda 捕获，无全局单例
+4. **FlushAndPause 模式**：在断连前排空所有在途工作，确保数据不丢失
 
 ## 文件说明
 

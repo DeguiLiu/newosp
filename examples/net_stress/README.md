@@ -227,13 +227,13 @@ FileTransferThread
 
 ## 设计要点
 
-1. **Placement new for non-default-constructible types**: `ClientCtx` 含 atomic 成员，`ClientSm` 构造需要 Context 引用，使用 aligned storage + placement new，`OSP_SCOPE_EXIT` 显式析构
-2. **HSM 驱动连接生命周期**: 每个客户端实例的状态转换由层次状态机管理，自由函数 handler (无虚函数分发)
-3. **双通道并行压测**: Echo RPC (timer 驱动周期性) 和文件传输 (独立线程 + HSM 重传) 同时运行
-4. **模拟丢包**: `thread_local` PRNG 生成 10% 概率丢包，HSM 驱动重传逻辑
-5. **ThreadWatchdog 线程监控**: `osp::ThreadWatchdog<N>` 监控文件传输线程和 FCCU 消费者线程心跳 (10s 超时)，超时/恢复回调自动上报/清除故障
-6. **FaultCollector 结构化故障收集**: 3 种故障码 (线程超时/高错误率/文件失败)，lock-free MPSC 队列，优先级准入控制
-7. **CAS 无锁统计**: Monitor 使用 CAS 循环更新 min/max RTT (无锁读写)
+1. **Placement new for non-default-constructible types**：`ClientCtx` 含 atomic 成员，`ClientSm` 构造需要 Context 引用，使用 aligned storage + placement new，`OSP_SCOPE_EXIT` 显式析构
+2. **HSM 驱动连接生命周期**：每个客户端实例的状态转换由层次状态机管理，自由函数 handler (无虚函数分发)
+3. **双通道并行压测**：Echo RPC (timer 驱动周期性) 和文件传输 (独立线程 + HSM 重传) 同时运行
+4. **模拟丢包**：`thread_local` PRNG 生成 10% 概率丢包，HSM 驱动重传逻辑
+5. **ThreadWatchdog 线程监控**：`osp::ThreadWatchdog<N>` 监控文件传输线程和 FCCU 消费者线程心跳 (10s 超时)，超时/恢复回调自动上报/清除故障
+6. **FaultCollector 结构化故障收集**：3 种故障码 (线程超时/高错误率/文件失败)，lock-free MPSC 队列，优先级准入控制
+7. **CAS 无锁统计**：Monitor 使用 CAS 循环更新 min/max RTT (无锁读写)
 
 ## 编译运行
 
@@ -266,7 +266,7 @@ telnet localhost 9602   # monitor
 ./osp_net_stress_monitor --config /path/to/custom.ini 192.168.1.100
 ```
 
-配置加载优先级: 命令行位置参数 > INI 文件 > 编译期默认值。
+配置加载优先级：命令行位置参数 > INI 文件 > 编译期默认值。
 找不到 INI 文件时输出 WARN 日志并使用默认值，不影响启动。
 
 ## INI 配置文件 (net_stress.ini)
@@ -293,7 +293,7 @@ connect_timeout_ms = 3000
 max_clients        = 64
 ```
 
-配置通过 `osp::Config<osp::IniBackend>` 加载，演示了 newosp 配置模块的完整用法:
+配置通过 `osp::Config<osp::IniBackend>` 加载，演示了 newosp 配置模块的完整用法：
 - `LoadFile()` 加载 INI 文件
 - `GetPort()` 读取端口号 (uint16_t)
 - `GetInt()` 读取整数参数
@@ -318,8 +318,8 @@ max_clients        = 64
 
 | 文件 | 说明 | 代码量 |
 |------|------|--------|
-| `net_stress.ini` | INI 配置文件: 端口、客户端数、间隔、超时等 | ~30 行 |
-| `protocol.hpp` | 协议定义: RPC 消息 + Bus 消息 + 配置加载 + 工具函数 | ~280 行 |
+| `net_stress.ini` | INI 配置文件：端口、客户端数、间隔、超时等 | ~30 行 |
+| `protocol.hpp` | 协议定义：RPC 消息 + Bus 消息 + 配置加载 + 工具函数 | ~280 行 |
 | `client_sm.hpp` | 客户端连接 HSM (7 状态) + Handshake/Echo 辅助函数 | ~325 行 |
 | `file_transfer.hpp` | 文件传输 HSM (8 状态) + 模拟丢包 + 重传逻辑 | ~350 行 |
 | `server.cpp` | RPC 服务端 + Shell + Timer | ~350 行 |

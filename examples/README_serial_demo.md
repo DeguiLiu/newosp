@@ -8,42 +8,42 @@
 
 ### 架构设计
 
-- **节点 A (传感器节点)**: 使用 HSM 管理生命周期
-  - 状态: Unconfigured → Calibrating → Running → Error
+- **节点 A (传感器节点)**：使用 HSM 管理生命周期
+  - 状态：Unconfigured → Calibrating → Running → Error
   - 周期性发送传感器数据（温度、压力）
   - 接收控制命令
 
-- **节点 B (控制器节点)**: 使用 BT 实现决策逻辑
-  - 行为树: Sequence(CheckSensorValid → EvaluateThreshold → SelectAction → SendCommand)
+- **节点 B (控制器节点)**：使用 BT 实现决策逻辑
+  - 行为树：Sequence(CheckSensorValid → EvaluateThreshold → SelectAction → SendCommand)
   - 根据传感器数据做出控制决策
   - 发送控制命令
 
 ### 通信特性
 
-- **可靠传输**: CRC-CCITT 校验 + ACK 确认机制
-- **帧协议**: 同步字 + 魔数 + 长度 + 序列号 + 类型 + 载荷 + CRC + 尾字节
-- **配置**: 115200 波特率, 8N1, 最多 3 次重传
-- **测试方式**: PTY 伪终端对，无需真实硬件
+- **可靠传输**：CRC-CCITT 校验 + ACK 确认机制
+- **帧协议**：同步字 + 魔数 + 长度 + 序列号 + 类型 + 载荷 + CRC + 尾字节
+- **配置**：115200 波特率, 8N1, 最多 3 次重传
+- **测试方式**：PTY 伪终端对，无需真实硬件
 
 ### 核心组件
 
-1. **SerialTransport**: 工业级串口传输层
+1. **SerialTransport**：工业级串口传输层
    - CRC-CCITT 帧校验
    - 序列号跟踪
    - ACK/重传机制
    - 统计信息收集
 
-2. **HSM (Hierarchical State Machine)**: 传感器状态管理
+2. **HSM (Hierarchical State Machine)**：传感器状态管理
    - 配置 → 校准 → 运行 → 错误处理
    - 事件驱动状态转换
    - 层次化状态组织
 
-3. **BT (Behavior Tree)**: 控制器决策逻辑
+3. **BT (Behavior Tree)**：控制器决策逻辑
    - 条件检查（传感器数据有效性）
    - 阈值评估（温度范围判断）
    - 动作选择和执行
 
-4. **Timer**: 周期性任务调度
+4. **Timer**：周期性任务调度
    - 500ms 周期发送传感器数据
    - 非阻塞定时器实现
 
@@ -170,9 +170,9 @@ Sequence
 
 ## 参考
 
-- 原始 OSP 项目: ospdemo (网络通信示例)
-- 本示例: 串口版本，适用于嵌入式和工业场景
-- 相关头文件:
+- 原始 OSP 项目：ospdemo (网络通信示例)
+- 本示例：串口版本，适用于嵌入式和工业场景
+- 相关头文件：
   - `osp/serial_transport.hpp` - 串口传输层
   - `osp/hsm.hpp` - 层次状态机
   - `osp/bt.hpp` - 行为树

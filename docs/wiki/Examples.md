@@ -1,6 +1,6 @@
 # Examples
 
-This page provides an overview of demonstration programs showcasing newosp capabilities for ARM-Linux embedded platforms.
+This page provides an overview of demonstration programs for ARM-Linux embedded platforms.
 
 ## Building Examples
 
@@ -186,7 +186,7 @@ Serial transport throughput testing with PTY pairs, multiple payload sizes, ACK/
 
 ### benchmarks/transport_benchmark
 
-TCP loopback and ShmRingBuffer SPSC throughput testing across payload sizes.
+TCP loopback and ShmRingBuffer MPSC throughput testing across payload sizes.
 
 **Build and Run**:
 ```bash
@@ -214,7 +214,7 @@ Demonstrates the fundamental publish-subscribe pattern using AsyncBus and Node. 
 
 ### benchmark
 
-Comprehensive performance benchmark measuring throughput, latency, and overhead for AsyncBus publish/subscribe, ShmRingBuffer shared memory SPSC, Transport frame encoding/decoding, MemPool allocation, Timer scheduling, and WorkerPool task dispatch.
+Comprehensive performance benchmark measuring throughput, latency, and overhead for AsyncBus publish/subscribe, ShmRingBuffer shared memory MPSC, Transport frame encoding/decoding, MemPool allocation, Timer scheduling, and WorkerPool task dispatch.
 
 **Key Concepts**: Performance profiling, throughput measurement, latency percentiles
 

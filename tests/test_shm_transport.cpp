@@ -1124,13 +1124,6 @@ TEST_CASE("shm_transport - ShmSpscByteRing large payload (simulated LiDAR)", "[s
 }
 
 TEST_CASE("shm_transport - ShmSpscByteRing concurrent SPSC", "[shm_transport]") {
-#if defined(__SANITIZE_THREAD__)
-  SKIP("Skipped under ThreadSanitizer (shm + concurrent threads unreliable)");
-#elif defined(__has_feature)
-#if __has_feature(thread_sanitizer)
-  SKIP("Skipped under ThreadSanitizer (shm + concurrent threads unreliable)");
-#endif
-#endif
   constexpr uint32_t kBufSize = 256 * 1024;
   constexpr uint32_t kMsgCount = 1000;
 
@@ -1766,6 +1759,71 @@ TEST_CASE("ShmSpmcByteRing: wrap-around with multiple consumers", "[shm][spmc]")
 
   ring.UnregisterConsumer(c0);
   ring.UnregisterConsumer(c1);
+}
+
+TEST_CASE("ShmSpmcByteRing: concurrent producer + consumers (TSan)", "[shm][spmc]") {
+  // Small buffer forces backpressure, exercising the SlowestTail path that
+  // reads consumer tails while consumers write them (and Write publishes head
+  // while consumers read it). Under TSan these used to be reported as data
+  // races on the plain head/tails fields; they are now std::atomic.
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
+
+  constexpr int kConsumers = 3;
+  int32_t cids[kConsumers];
+  for (int i = 0; i < kConsumers; ++i) {
+    cids[i] = ring.RegisterConsumer();
+    REQUIRE(cids[i] >= 0);
+  }
+
+  constexpr uint32_t kTotal = 3000;
+  std::atomic<bool> producer_done{false};
+  std::atomic<uint32_t> received[kConsumers] = {};
+
+  std::thread producer([&ring, &producer_done]() {
+    char msg[32];
+    for (uint32_t i = 0; i < kTotal; ++i) {
+      std::snprintf(msg, sizeof(msg), "msg-%u", i);
+      const uint32_t len = static_cast<uint32_t>(std::strlen(msg)) + 1;
+      while (!ring.Write(msg, len)) {
+        std::this_thread::yield();  // backpressure: wait for slowest consumer
+      }
+    }
+    producer_done.store(true, std::memory_order_release);
+  });
+
+  std::vector<std::thread> consumers;
+  for (int i = 0; i < kConsumers; ++i) {
+    consumers.emplace_back([&ring, cid = cids[i], &received, i, &producer_done]() {
+      char recv[64];
+      uint32_t n = 0;
+      while (true) {
+        if (ring.Read(cid, recv, sizeof(recv)) > 0) {
+          ++n;
+          continue;
+        }
+        if (producer_done.load(std::memory_order_acquire) && !ring.HasData(cid)) {
+          break;
+        }
+        std::this_thread::yield();
+      }
+      received[i].store(n, std::memory_order_relaxed);
+    });
+  }
+
+  producer.join();
+  for (auto& t : consumers) {
+    t.join();
+  }
+
+  // Every consumer sees the full broadcast stream (SPMC semantics).
+  for (int i = 0; i < kConsumers; ++i) {
+    REQUIRE(received[i].load(std::memory_order_relaxed) == kTotal);
+  }
+
+  for (int i = 0; i < kConsumers; ++i) {
+    ring.UnregisterConsumer(cids[i]);
+  }
 }
 
 // ============================================================================

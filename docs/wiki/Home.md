@@ -1,8 +1,6 @@
 # newosp
 
-Modern C++17 header-only embedded infrastructure library for ARM-Linux industrial systems. Designed from scratch for LiDAR, robotics, and edge computing platforms. 38 headers, 788 tests, ASan/TSan/UBSan clean.
-
-newosp provides a complete foundation for building high-performance embedded applications with zero global state, stack-first allocation, and lock-free messaging. All modules are header-only with RAII resource management and type-safe error handling.
+Modern C++17 header-only embedded infrastructure library for ARM-Linux industrial systems, designed for LiDAR, robotics, and edge computing platforms. 38 headers, 788 tests, ASan/TSan/UBSan clean. Modules use RAII resource management and type-safe error handling, with zero global state, stack-first allocation, and lock-free messaging.
 
 ## Core Features
 

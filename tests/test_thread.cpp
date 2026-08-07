@@ -1,10 +1,7 @@
 /**
  * @file test_thread.cpp
  * @brief Tests for osp::Thread (cross-platform thread abstraction).
- *
- * The API mirrors std::thread naming (join()/joinable()) so migrations keep
- * call sites almost unchanged. Thread creation is a cold path; the callable is
- * stored via SBO (FixedFunction) so no heap allocation is required.
+ * Mirrors std::thread join()/joinable(); callable stored via SBO, no heap.
  */
 
 #include "osp/thread.hpp"

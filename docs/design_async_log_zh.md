@@ -444,7 +444,7 @@ int main() {
 }
 ```
 
-### 12.3 统计查询
+### 12.4 统计查询
 
 ```cpp
 auto stats = osp::log::GetAsyncStats();

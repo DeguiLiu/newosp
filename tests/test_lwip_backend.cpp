@@ -1,10 +1,7 @@
 /**
  * @file test_lwip_backend.cpp
- * @brief Tests for the osp network layer over a real lwIP protocol stack.
- *
- * Requires lwIP on the lwIP socket API backend (OSP_NET_BACKEND=1) with
- * LWIP_COMPAT_SOCKETS disabled (=0). Built only when OSP_WITH_LWIP is enabled
- * (see tests/CMakeLists.txt).
+ * @brief osp network tests over a real lwIP stack (OSP_NET_BACKEND=1).
+ * Requires LWIP_COMPAT_SOCKETS=0; built only when OSP_WITH_LWIP is enabled.
  */
 
 #include "osp/io_poller.hpp"

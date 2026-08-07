@@ -1,6 +1,6 @@
 # CSerialPort 集成设计: 串口传输层
 
-> 从属于 [design_zh.md](design_zh.md) §7.6 serial_transport.hpp
+> 从属于 [design_zh.md](design_zh.md) 第 7.6 节 serial_transport.hpp
 > 版本: 1.1
 > 日期: 2026-02-14
 > 状态: 已实现 (serial_transport.hpp)
@@ -351,7 +351,7 @@ TransportFactory::Route(sender, receiver)
 
 - 需要多连接并发的场景 (串口是点对点的)
 - 需要高带宽的场景 (视频流、大文件传输)
-- 需要动态发现���场景 (串口无发现机制)
+- 需要动态发现的场景 (串口无发现机制)
 - 需要跨网段路由的场景
 
 ### 6.4 结论

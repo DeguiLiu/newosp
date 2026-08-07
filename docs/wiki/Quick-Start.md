@@ -1,7 +1,5 @@
 # Quick Start
 
-This guide helps you get started with newosp in minutes.
-
 ## System Requirements
 
 - CMake >= 3.14

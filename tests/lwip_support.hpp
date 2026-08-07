@@ -1,12 +1,8 @@
 /**
  * @file lwip_support.hpp
- * @brief lwIP (unixsim) host environment bootstrap for backend tests.
- *
- * Provides one-time lwIP initialization: tcpip_thread plus a minimal loopback
- * netif (127.0.0.1) so osp network tests run over the real lwIP protocol stack
- * without a TAP device or root privileges.
- *
- * Only built when OSP_WITH_LWIP is enabled (see tests/CMakeLists.txt).
+ * @brief One-time lwIP (unixsim) bootstrap: tcpip_thread + loopback netif.
+ * Lets osp network tests run over the real lwIP stack without root. Built only
+ * when OSP_WITH_LWIP is enabled.
  */
 
 #ifndef OSP_TEST_LWIP_SUPPORT_HPP_

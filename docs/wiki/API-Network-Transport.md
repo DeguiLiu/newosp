@@ -333,7 +333,6 @@ for (uint32_t i = 0; i < count; ++i) {
 }
 ```
 
-
 ---
 
 ## 4. net.hpp - sockpp 集成层
@@ -723,7 +722,6 @@ uint32_t size;
 reader.WaitReadable(1000);
 reader.Read(buf, size);
 ```
-
 
 ---
 

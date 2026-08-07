@@ -616,7 +616,7 @@ if (result) {
 | 枚举值 | 说明 |
 |--------|------|
 | `kPoolExhausted` | 内存池已耗尽 |
-| `kInvalidPointer` | 无效指�� |
+| `kInvalidPointer` | 无效指针 |
 
 ### FixedPool<BlockSize, MaxBlocks>
 
@@ -941,7 +941,7 @@ if (rb.Pop(val)) {
 
 | 方法签名 | 说明 | 线程安全性 |
 |---------|------|-----------|
-| `uint32_t PendingCount() const` | 获取待处理消息数 | 线程��全 |
+| `uint32_t PendingCount() const` | 获取待处理消息数 | 线程安全 |
 | `BackpressureLevel GetBackpressureLevel() const` | 获取背压级别 | 线程安全 |
 | `BusStatisticsSnapshot GetStatistics() const` | 获取统计快照 | 线程安全 |
 | `void ResetStatistics()` | 重置统计计数器 | 线程安全 |

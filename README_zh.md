@@ -5,7 +5,7 @@
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-现代 C++17 纯头文件嵌入式基础设施库，面向嵌入式Linux 平台，专为工业嵌入式系统 (传感器、机器人、边缘计算) 设计。
+现代 C++17 纯头文件嵌入式基础设施库，面向嵌入式 Linux 平台，专为工业嵌入式系统 (传感器、机器人、边缘计算) 设计。
 
 ## 特性
 
@@ -399,4 +399,4 @@ int main() {
 
 ## 许可证
 
-MIT — 详见 [LICENSE](LICENSE)
+MIT 许可，详见 [LICENSE](LICENSE)

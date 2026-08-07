@@ -284,11 +284,17 @@ int main(int argc, char* argv[]) {
       },
       &ctx);
 
-  // ScanTimeout timer
+  // ScanTimeout timer + dead-consumer reaping
   ctx.timer.Add(
       1000,
       [](void* arg) {
         auto* c = static_cast<ProdCtx*>(arg);
+        // Reap dead consumers before ScanTimeout: blocks are still referenced
+        // here. Reversed order would let ScanTimeout reclaim and re-allocate a
+        // block before the reaper's refcount decrement sees it.
+        uint32_t reaped = c->disp.CleanupDeadConsumers();
+        if (reaped > 0)
+          OSP_LOG_WARN("Producer", "CleanupDeadConsumers reclaimed %u blocks", reaped);
         uint32_t t = c->disp.ScanTimeout();
         if (t > 0)
           OSP_LOG_WARN("Producer", "ScanTimeout reclaimed %u blocks", t);

@@ -8,7 +8,7 @@
    (entry -> preprocess -> logging + fusion)。引用计数块，自动回收。
 2. **跨进程零拷贝** (`producer.cpp` + `consumer_*.cpp`): `DataDispatcher<ShmStore, ShmNotify>`
    基于 POSIX 共享内存。通过 `GetReadable` 零拷贝访问数据，跨进程管理引用计数。
-3. **统一 API 演示** (`unified_api_demo.cpp`): 模板函数证明 Store 无关代码 --
+3. **统一 API 演示** (`unified_api_demo.cpp`)：模板函数证明 Store 无关代码：
    相同的 `Alloc/GetWritable/Submit` 序列适用于任何 StorePolicy。
 
 所有模式共享相同的激光雷达帧格式 (`common.hpp`)。
@@ -85,7 +85,7 @@ graph TB
     Launcher -.管理.-> Monitor
 ```
 
-数据流:
+数据流：
 1. Producer: `Alloc -> GetWritable -> FillFrame -> Submit(block_id, size, consumer_count)`
 2. Submit 设置 refcount = consumer_count, ShmNotify 推送 `{block_id, payload_size}` 到 SPMC 通道
 3. Consumer: 接收 NotifyMsg -> `GetReadable(block_id)` (零拷贝指针) -> 处理 -> `Release(block_id)`
@@ -146,7 +146,7 @@ PL=Pipeline, U=Unified, P=Producer, CL=Consumer-Logging, CF=Consumer-Fusion, M=M
 +---------------------------------------------+
 ```
 
-帧大小: 16016 字节
+帧大小：16016 字节
 
 ## 构建与运行
 

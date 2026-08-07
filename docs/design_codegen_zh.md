@@ -11,7 +11,7 @@ ospgen 是 newosp 的 YAML 驱动代码生成工具，将消息/事件定义和�
 ### 1.1 为什么需要代码生成
 
 嵌入式消息通信有两个矛盾需求:
-- **正确性**: struct 必须 `trivially_copyable`、字段对齐正确、`sizeof` 精确匹配，才能安全通过 SPSC/ShmRingBuffer 传输
+- **正确性**: struct 必须 `trivially_copyable`、字段对齐正确、`sizeof` 精确匹配，才能安全通过 SPSC/ShmRingBuffer(MPSC) 传输
 - **可维护性**: 手写 20+ 个消息 struct，每个都要默认构造、static_assert、event enum 同步，维护成本高
 
 代码生成将这两个需求统一到 YAML 单一数据源: 定义一次，生成的代码自动满足所有约束。
@@ -575,7 +575,7 @@ SensorNode --[SensorAlarm]--> AlarmHandler
 
 | 约束 | 原因 |
 |------|------|
-| 所有消息必须 `trivially_copyable` | SPSC/ShmRingBuffer `memcpy` 传输 |
+| 所有消息必须 `trivially_copyable` | SPSC/ShmRingBuffer(MPSC) `memcpy` 传输 |
 | 字段仅限 POD 类型 | `-fno-exceptions -fno-rtti` 兼容 |
 | 固定数组替代 `std::string` | 栈分配，零堆开销 |
 | enum class 替代裸 enum | MISRA C++ 类型安全 |

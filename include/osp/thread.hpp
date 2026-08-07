@@ -25,18 +25,8 @@
 /**
  * @file osp/thread.hpp
  * @brief osp::Thread - cross-platform thread abstraction.
- *
- * Wraps std::thread on the Linux host and rt_thread_create on RT-Thread. The
- * API mirrors std::thread naming (join()/joinable()/swap) so existing call
- * sites migrate with a minimal diff. Thread creation is a cold path; the entry
- * callable is stored in an inline SBO buffer (FixedFunction) so no user-side
- * heap allocation is required.
- *
- * RT-Thread specifics: dynamic threads (rt_thread_create) reclaim their TCB and
- * stack in the idle thread once the entry returns, so join() must never call
- * rt_thread_delete on an exited thread. A join semaphore is released at the end
- * of the entry and taken by join(). The RT-Thread callable lives in a small
- * heap block owned by the Thread, which keeps moves safe even while running.
+ * std::thread on Linux, rt_thread_create on RT-Thread. RT-Thread join() uses a
+ * semaphore because the idle thread reclaims exited TCBs (no rt_thread_delete).
  */
 
 #ifndef OSP_THREAD_HPP_
@@ -80,9 +70,7 @@ using ThreadCallable = osp::FixedFunction<void(), kThreadCallableBufSize>;
 
 /**
  * @brief Thread creation parameters.
- *
- * Linux and RT-Thread expose different knobs; fields that a platform does not
- * support are ignored rather than rejected.
+ * Fields a platform does not support are ignored rather than rejected.
  */
 struct ThreadOptions {
   osp::FixedString<16> name{"osp"};  ///< RT-Thread truncates to RT_NAME_MAX (8).
@@ -100,13 +88,9 @@ struct ThreadOptions {
 // ============================================================================
 
 /**
- * @brief Portable thread. Drop-in for std::thread in the common subset
- *        (Start/join/joinable/swap/move), plus options for name, stack size and
- *        priority.
- *
- * Lifetime contract matches std::thread: a joinable Thread must be joined
- * before destruction. In debug builds the destructor asserts this (instead of
- * std::terminate); in release builds it is documented undefined behavior.
+ * @brief Portable thread: std::thread subset plus name/stack/priority options.
+ * Join a joinable Thread before destruction, as with std::thread. Debug builds
+ * assert this in the destructor; release builds leave it undefined behavior.
  */
 class Thread {
  public:
@@ -145,9 +129,8 @@ class Thread {
 
   /**
    * @brief Stable numeric id of the calling thread.
-   *
-   * Linux: kernel tid (SYS_gettid). RT-Thread: the thread handle. Both are
-   * unique per live thread.
+   * Linux: kernel tid (SYS_gettid); RT-Thread: thread handle. Unique per live
+   * thread.
    */
   static uintptr_t CurrentThreadId() noexcept;
 
@@ -183,10 +166,8 @@ class Thread {
 // ============================================================================
 
 /**
- * @brief Portable mutex satisfying BasicLockable, so it works with
- *        std::lock_guard<osp::Mutex> and std::unique_lock<osp::Mutex>.
- *
- * Host: wraps std::mutex. RT-Thread: wraps rt_mutex (priority inheritance).
+ * @brief BasicLockable mutex, usable with std::lock_guard / unique_lock.
+ * Host: std::mutex. RT-Thread: rt_mutex with priority inheritance.
  */
 class Mutex {
  public:
