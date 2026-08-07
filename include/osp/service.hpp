@@ -528,7 +528,7 @@ class Client {
 
       timeval tv;
       tv.tv_sec = static_cast<time_t>(timeout_ms / 1000);
-      tv.tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000);
+      tv.tv_usec = static_cast<decltype(tv.tv_usec)>((timeout_ms % 1000) * 1000);
 
       ret = socket_api::Select(client.sockfd_ + 1, nullptr, &write_fds, nullptr, &tv);
       if (ret <= 0) {
@@ -591,7 +591,7 @@ class Client {
     // Set receive timeout
     timeval tv;
     tv.tv_sec = static_cast<time_t>(timeout_ms / 1000);
-    tv.tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000);
+    tv.tv_usec = static_cast<decltype(tv.tv_usec)>((timeout_ms % 1000) * 1000);
     (void)socket_api::SetSockOpt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &tv, static_cast<socklen_t>(sizeof(tv)));
 
     // Receive response frame

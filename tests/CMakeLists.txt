@@ -152,6 +152,7 @@ if(OSP_WITH_LWIP)
     add_executable(osp_lwip_tests
         test_lwip_main.cpp
         test_lwip_backend.cpp
+        test_lwip_modules.cpp
     )
     target_link_libraries(osp_lwip_tests Catch2::Catch2 osp Threads::Threads)
     target_include_directories(osp_lwip_tests PRIVATE ${OSP_LWIP_INCLUDE_DIR})
