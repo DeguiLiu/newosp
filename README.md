@@ -3,7 +3,7 @@
 # newosp
 
 [![CI](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeguiLiu/newosp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-979%20passed-brightgreen)](https://github.com/DeguiLiu/newosp/actions)
+[![Tests](https://img.shields.io/badge/Tests-1295%20passed-brightgreen)](https://github.com/DeguiLiu/newosp/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Modern C++17 header-only embedded infrastructure library for embedded Linux platforms. Designed for industrial embedded systems such as sensors, robotics, and edge computing.
@@ -24,13 +24,14 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 - **Reliability infrastructure**: Software watchdog, fault collector, lifecycle nodes, QoS configuration
 - **Template-based design patterns**: Tag dispatch, variadic templates, CRTP, compile-time composition over virtual-function OOP
 
-## Modules (43 headers)
+## Modules (47 headers)
 
-### Foundation Layer (10)
+### Foundation Layer (12)
 
 | Module | Description |
 |--------|-------------|
 | `platform.hpp` | Platform/architecture detection, compiler hints, `OSP_ASSERT`, `SteadyNowUs` |
+| `opt.hpp` | Compile-time behavior switches (lwIP-opt-style, OSP_* defaults) |
 | `vocabulary.hpp` | `expected`, `optional`, `FixedVector`, `FixedString`, `FixedFunction`, `function_ref`, `not_null`, `NewType`, `ScopeGuard` |
 | `config.hpp` | Multi-format config parser (INI/JSON/YAML), template-based backend dispatch |
 | `log.hpp` | Logging macros, compile-time level filtering (stderr backend) |
@@ -40,8 +41,9 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 | `inicpp.hpp` | INI file parser (forked from inifile-cpp, `-fno-exceptions` compatible) |
 | `mem_pool.hpp` | Fixed-block memory pool (`FixedPool<BlockSize, MaxBlocks>`), embedded free list |
 | `shutdown.hpp` | Async-signal-safe graceful shutdown, LIFO callbacks, `pipe(2)` wakeup |
+| `thread.hpp` | Cross-platform thread abstraction (std::thread / rt_thread_create), Mutex, CurrentThreadId |
 
-### Core Communication Layer (8)
+### Core Communication Layer (10)
 
 | Module | Description |
 |--------|-------------|
@@ -53,6 +55,8 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 | `executor.hpp` | Scheduler (Single/Static/Pinned + RealtimeExecutor SCHED_FIFO) |
 | `semaphore.hpp` | Lightweight semaphore (futex-based LightSemaphore/PosixSemaphore) |
 | `data_fusion.hpp` | Multi-source data fusion (time alignment, interpolation) |
+| `job_pool.hpp` | Job scheduling pool (dependency-ordered, zero-heap batch execution) |
+| `data_dispatcher.hpp` | Shared data block pipeline (InProc/Shm StorePolicy, CAS, heartbeat reaper) |
 
 ### State Machine & Behavior Tree (2)
 

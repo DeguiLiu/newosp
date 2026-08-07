@@ -25,11 +25,12 @@
 
 ## 模块
 
-### 基础层 (10 个)
+### 基础层 (12 个)
 
 | 模块 | 说明 |
 |------|------|
 | `platform.hpp` | 平台/架构检测、编译器提示、`OSP_ASSERT` 宏、`SteadyNowUs` 时基 |
+| `opt.hpp` | 编译期行为开关 (lwIP-opt 风格, OSP_* 默认值) |
 | `vocabulary.hpp` | `expected`、`optional`、`FixedVector`、`FixedString`、`FixedFunction`、`function_ref`、`not_null`、`NewType`、`ScopeGuard` |
 | `config.hpp` | 多格式配置解析器 (INI/JSON/YAML)，基于模板的后端分发 |
 | `log.hpp` | 日志宏，编译期级别过滤 (stderr 后端) |
@@ -39,8 +40,9 @@
 | `inicpp.hpp` | INI 文件解析器 (fork 自 inifile-cpp，兼容 `-fno-exceptions`) |
 | `mem_pool.hpp` | 固定块内存池 (`FixedPool<BlockSize, MaxBlocks>`)，嵌入式空闲链表 |
 | `shutdown.hpp` | 异步信号安全的优雅关停，LIFO 回调链 + `pipe(2)` 唤醒 |
+| `thread.hpp` | 跨平台线程抽象 (std::thread / rt_thread_create)、Mutex、CurrentThreadId |
 
-### 核心通信层 (8 个)
+### 核心通信层 (10 个)
 
 | 模块 | 说明 |
 |------|------|
@@ -52,6 +54,8 @@
 | `executor.hpp` | 调度器 (Single/Static/Pinned + RealtimeExecutor SCHED_FIFO) |
 | `semaphore.hpp` | 轻量信号量 (futex-based LightSemaphore/PosixSemaphore) |
 | `data_fusion.hpp` | 多源数据融合 (时间对齐、插值) |
+| `job_pool.hpp` | 任务调度池 (依赖有序, 零堆批量执行) |
+| `data_dispatcher.hpp` | 共享数据块流水线 (InProc/Shm StorePolicy, CAS, 心跳收割) |
 
 ### 状态机与行为树 (2 个)
 

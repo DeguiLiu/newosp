@@ -1,57 +1,66 @@
-# lwIP 移植评估
+# lwIP 后端概要设计
 
-> 结论：**可行，非零改动**。lwIP 的 BSD socket 兼容层能覆盖约 80% 的 POSIX 依赖，硬缺口：AF_UNIX、epoll、sockpp。推荐"OSP 网络后端抽象"（方案 B），改动收敛在 socket.hpp / io_poller.hpp。
->
-> 目标环境：**RT-Thread + lwIP**（RT-Thread SAL/netdev 把 lwIP 作后端协议栈，`SAL_USING_POSIX` 时提供标准 POSIX socket 名字）。网络模块以嵌入式友好为默认目标。
+> 本文档描述已实现的 lwIP 网络后端现状。目标平台为 RT-Thread + lwIP（RT-Thread SAL/netdev 以 lwIP 作后端协议栈）。网络模块以嵌入式友好为默认目标，后端差异收敛在 `socket.hpp` / `io_poller.hpp` 两层，业务模块零改动。
 
-## 1. 现状 POSIX 依赖面
+## 1. 现状
 
-| 模块 | 依赖 | 被谁使用 |
+组件以 `OSP_NET_BACKEND`（0=POSIX BSD socket、1=lwIP、2=禁用）分派。后端由编译期宏选择，同一份头文件在两个平台编译不同实现；新增后端只需扩展该宏的取值与 `socket_api` 适配层。
+
+网络依赖面如下：
+
+| 组件 | 后端 0（POSIX） | 后端 1（lwIP） |
 |---|---|---|
-| socket.hpp | ::socket/connect/send/recv/bind/listen/accept/fcntl、AF_INET/AF_UNIX、MSG_NOSIGNAL、TCP_NODELAY、O_NONBLOCK | transport、node_manager |
-| io_poller.hpp | epoll/kqueue/poll | 当前无任何模块使用 |
-| net.hpp | sockpp（第三方，异常型）| 核心路径不编译 |
-| discovery.hpp | 裸 POSIX UDP 组播（IP_ADD_MEMBERSHIP）| 服务发现 |
-| service.hpp | ::socket/accept/recv/send + 独立 accept 线程 | 跨节点服务调用 |
-| shell.hpp | TCP telnet（IAC 协商）| 调试 shell |
+| `socket.hpp` | `::socket/connect/send/recv/...`、`fcntl`、`epoll` | `lwip_socket/` 系列，`LWIP_COMPAT_SOCKETS=0` |
+| `io_poller.hpp` | epoll（Linux）/ kqueue（macOS） | 退化为 poll 后端 |
+| `service.hpp` | 每连接一线程 accept | 同（阻塞式，天然兼容） |
+| `shell.hpp` | TCP telnet | 同 |
+| `discovery.hpp` | UDP 组播（`IP_ADD_MEMBERSHIP`） | UDP 组播（需 `LWIP_IGMP`） |
 
-关键观察：阻塞线程模型（每连接一线程）与 lwIP 多线程 socket 天然兼容，无需改事件驱动；io_poller 无调用方，非阻塞项。
+## 2. 后端抽象
 
-## 2. RT-Thread + lwIP 兼容性对照
+### 2.1 `OSP_NET_BACKEND` 分派
 
-对照面为 RT-Thread SAL + lwIP。
+`platform.hpp` 依平台宏选择默认后端；可用 `-D` 覆盖。
 
-| POSIX | lwIP/SAL 状态 |
-|---|---|
-| socket/bind/listen/accept/connect/send/recv/sendto/recvfrom/close | 直接兼容 |
-| select | 兼容（lwip_select，level-triggered）|
-| setsockopt(SO_REUSEADDR/TCP_NODELAY/IP_ADD_MEMBERSHIP) | 支持（组播需 LWIP_IGMP）|
-| errno、多线程阻塞 | 支持（需 LWIP_TCPIP_CORE_LOCKING）|
-| fcntl(F_SETFL O_NONBLOCK) | lwip_fcntl 仅支持 O_NONBLOCK，需适配 |
-| MSG_NOSIGNAL | 无信号概念，已收拢为 kSendNoSignal |
-| inet_pton | 非 socket API，需 ipaddr_aton |
-| AF_UNIX | 不支持，本地传输改 shm_transport |
-| epoll | 无，改 select/poll |
-| sockpp | 无法迁移，OSP_WITH_SOCKPP=OFF |
+```mermaid
+flowchart LR
+    A[OSP_PLATFORM_RTTHREAD] --> B[OSP_NET_BACKEND=1]
+    C[!OSP_HAS_NETWORK] --> D[OSP_NET_BACKEND=2]
+    E[Linux/macOS] --> F[OSP_NET_BACKEND=0]
+```
 
-## 3. 移植方案对比
+### 2.2 `socket_api` 适配层
 
-- **A lwIP 兼容宏**：LWIP_COMPAT_SOCKETS=1 直接同名，改 4 点。改动小，但条件编译散落、AF_UNIX 需业务侧屏蔽。
-- **B OSP 后端抽象（推荐）**：`OSP_NET_BACKEND`（kLinux/kRtThread/kNone）收拢到 socket.hpp/io_poller.hpp，业务层零改动，加新后端成本低。
-- **C 平台胶水层**：newosp 零改动，但需自研 AF_UNIX/epoll 模拟，成本高且不可复用。
+`socket.hpp` 内的 `socket_api` 命名空间提供后端中立调用。lwIP 后端直接调 `lwip_*`，POSIX 后端调系统函数，不依赖宏，C++ 标准库头保持干净。
 
-推荐 B：AF_UNIX、epoll 两大缺口决定必须有明确后端边界。
+```cpp
+inline int Socket(int domain, int type, int protocol) noexcept {
+#if OSP_NET_BACKEND == 1
+  return lwip_socket(domain, type, protocol);
+#else
+  return ::socket(domain, type, protocol);
+#endif
+}
+```
 
-## 4. 风险与限制
+### 2.3 `io_poller` 后端感知
 
-1. AF_UNIX 不可替代：本地通信依赖 shm_transport（Linux mmap，需移植 RT-Thread）。
-2. lwIP 多线程正确性依赖 tcpip_thread + CORE_LOCKING 配置。
-3. 组播依赖 LWIP_IGMP。
-4. io_poller 换 select 后无 edge-triggered 语义（当前无调用方，风险可控）。
-5. sockpp 后端必须关闭。
-6. host 测试三条路径可验证后端：lwIP unixsim / RT-Thread QEMU（最贴近）/ lwIP 自带单测。
+lwIP fd 对 host epoll/kqueue 不可见，因此后端 1 强制走 poll：
 
-lwIP 后端测试已集成在 `tests/`（TCP/UDP 回环，自写 loopback netif 免 TAP/root），以外部库链接启用：
+```cpp
+#if OSP_NET_BACKEND == 1
+#define OSP_IO_POLLER_USE_EPOLL 0
+#define OSP_IO_POLLER_USE_KQUEUE 0
+#elif defined(OSP_PLATFORM_LINUX)
+// epoll
+#elif defined(OSP_PLATFORM_MACOS)
+// kqueue
+#endif
+```
+
+## 3. 测试验证
+
+lwIP 后端测试在 `tests/`，自写 loopback netif，免 TAP/root，以外部库链接启用：
 
 ```bash
 cmake -B build_lwip -DOSP_WITH_LWIP=ON \
@@ -59,24 +68,34 @@ cmake -B build_lwip -DOSP_WITH_LWIP=ON \
   -DOSP_LWIP_LIBRARY=<liblwip>
 ```
 
-lwIP 源码获取：github（codeload + 代理）2.2.0，或 gitee `mirrors/lwip`（2.1.x）+ `mirrors/lwip-contrib`；库需以 `LWIP_COMPAT_SOCKETS=0`、`LWIP_NETIF_LOOPBACK=1` 编译。后端适配层 `socket_api`（Linux 调系统函数、lwIP 调 `lwip_*`，无宏依赖）。
+- `test_lwip_backend.cpp`：TCP/UDP 回环。
+- `test_lwip_modules.cpp`：业务模块（service/shell/discovery/transport/node_manager）在 `OSP_NET_BACKEND=1` 下的编译 + 链接门禁，属入仓验证。
 
-## 5. 嵌入式友好优化清单
+lwIP 库需以 `LWIP_COMPAT_SOCKETS=0`、`LWIP_NETIF_LOOPBACK=1` 编译。
 
-| # | 优化项 |
-|---|---|
-| 1 | sockpp 默认 OFF |
-| 2 | io_poller 去 EPOLLET（水平触发）|
-| 3 | MSG_NOSIGNAL 收拢 kSendNoSignal |
-| 4 | OSP_NET_BACKEND 后端宏 |
-| 5 | inet_pton 地址解析抽象 |
-| 6 | 连接超时 SetNonBlocking 可移植 |
-| 7 | 单线程 select 事件驱动 |
+## 4. 已知限制
 
-## 6. 待决策点
+| 限制 | 说明 | 现状 |
+|---|---|---|
+| AF_UNIX | lwIP 不支持 | 本地通信改走 `shm_transport` |
+| 组播 | 依赖 `LWIP_IGMP` | 目标配置需开启 |
+| lwIP 多线程 | 依赖 `tcpip_thread` + `CORE_LOCKING` | 目标平台需配置 |
+| `MSG_NOSIGNAL` | lwIP 不实现 | 值透传，被静默忽略 |
+| `suseconds_t` | lwIP 私有 timeval 无此类型 | 已改用 `decltype(tv.tv_usec)` |
+| `epoll` | 无，退化为 poll | 无 edge-triggered 语义 |
 
-1. RT-Thread 版本 + SAL_USING_POSIX 是否开启（决定 rt_* 还是标准 POSIX 名字）。
-2. `<sys/socket.h>` 可用性：OSP_HAS_NETWORK 依赖 `__has_include`，RT-Thread 需确认或按平台强制。
-3. 本地传输策略：shm_transport 在 RT-Thread 的移植。
-4. platform.hpp 加 OSP_PLATFORM_RTTHREAD，确认 std::thread/chrono 在 RT-Thread 工具链可用性（网络层之外的全局问题）。
-5. io_poller 在 RT-Thread 走 poll/select 后端。
+## 5. 设计说明
+
+本节回顾本移植的关键设计决策（对应章节参考 2.2 与 2.3）。
+
+### 5.1 后端抽象而非条件宏散落
+
+采用中央 `socket_api` 适配层而非 `LWIP_COMPAT_SOCKETS=1` 的同名宏方案：同名宏会定义 `read/write/close` 宏，污染 C++ 标准库头。适配层把差异收敛在单点，`MSG_NOSIGNAL`、`AF_UNIX` 等平台差异随分派收拢，业务层零改动，新增后端成本低。
+
+### 5.2 epoll 缺口用 poll 承接
+
+`epoll` 无 edge-triggered 语义，但当前 `io_poller.hpp` 无调用方，风险可控；选择在 lwIP 后端强制 poll 而非模拟 epoll。
+
+### 5.3 阻塞线程模型保留
+
+每连接一线程的阻塞模型与 lwIP 多线程 socket 天然兼容，无需改造为事件驱动；连接超时经 `socket_api::Select` 承载。
