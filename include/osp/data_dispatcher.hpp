@@ -39,6 +39,12 @@
  * StorePolicy implementations. StorePolicy provides only accessor methods
  * (GetBlock, FreeHead, FreeCount, AllocCount, Capacity).
  *
+ * Assert contract: the OSP_ASSERT boundary checks (index < capacity, block
+ * size equality, header version) guard shared-memory invariants, not input
+ * validation. They are internal invariants -- under NDEBUG they compile out,
+ * so corruption of shared state is not recoverable at runtime. A tripped
+ * assert in a debug build indicates fatal memory corruption, not a caller bug.
+ *
  * Header-only, C++17, compatible with -fno-exceptions -fno-rtti.
  */
 
@@ -58,26 +64,6 @@
 // ============================================================================
 // Compile-time configuration
 // ============================================================================
-
-#ifndef OSP_JOB_POOL_MAGIC
-#define OSP_JOB_POOL_MAGIC 0x4A4F4250U
-#endif
-
-#ifndef OSP_JOB_BLOCK_ALIGN
-#define OSP_JOB_BLOCK_ALIGN 64U
-#endif
-
-#ifndef OSP_JOB_MAX_STAGES
-#define OSP_JOB_MAX_STAGES 8U
-#endif
-
-#ifndef OSP_JOB_MAX_EDGES
-#define OSP_JOB_MAX_EDGES 16U
-#endif
-
-#ifndef OSP_JOB_MAX_CONSUMERS
-#define OSP_JOB_MAX_CONSUMERS 8U
-#endif
 
 namespace osp {
 

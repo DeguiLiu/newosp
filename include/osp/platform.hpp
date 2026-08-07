@@ -32,6 +32,10 @@
 #ifndef OSP_PLATFORM_HPP_
 #define OSP_PLATFORM_HPP_
 
+// Compile-time tuning switches (lwIP opt.h style). Must precede platform
+// detection so every module's first macro use sees the full default set.
+#include "osp/opt.hpp"
+
 // ============================================================================
 // RT-Thread Detection
 // ============================================================================

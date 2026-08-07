@@ -446,6 +446,123 @@ class PosixSemaphore final {
 
 #endif  // OSP_PLATFORM_LINUX || OSP_PLATFORM_MACOS
 
+// ============================================================================
+// RtSemaphore (RT-Thread)
+// ============================================================================
+
+#if defined(OSP_PLATFORM_RTTHREAD)
+
+/**
+ * @brief RT-Thread native semaphore wrapper.
+ *
+ * Maps directly to rt_sem_create/take/release. The wait queue is priority
+ * ordered (RT_IPC_FLAG_PRIO, the RT-Thread IPC default), unlike the FIFO
+ * wake-up of a condition_variable. Count() returns a relaxed hint value, not
+ * an authoritative kernel count.
+ *
+ * Non-copyable, non-movable (same as LightSemaphore).
+ */
+class RtSemaphore final {
+ public:
+  /**
+   * @brief Create the kernel semaphore with an initial count.
+   * @param initial_count Starting value of the semaphore counter.
+   */
+  explicit RtSemaphore(uint32_t initial_count = 0) noexcept : count_hint_(initial_count) {
+    sem_ = rt_sem_create("osp", initial_count, RT_IPC_FLAG_PRIO);
+  }
+
+  ~RtSemaphore() {
+    if (sem_ != nullptr) {
+      rt_sem_delete(sem_);
+    }
+  }
+
+  // Non-copyable, non-movable
+  RtSemaphore(const RtSemaphore&) = delete;
+  RtSemaphore& operator=(const RtSemaphore&) = delete;
+  RtSemaphore(RtSemaphore&&) = delete;
+  RtSemaphore& operator=(RtSemaphore&&) = delete;
+
+  /** @brief Increment the count and wake one waiting thread. */
+  void Signal() noexcept {
+    if (sem_ != nullptr) {
+      count_hint_.fetch_add(1U, std::memory_order_relaxed);
+      rt_sem_release(sem_);
+    }
+  }
+
+  /** @brief Alias for Signal(). */
+  void Post() noexcept { Signal(); }
+
+  /** @brief Decrement the count, blocking if it is zero. */
+  void Wait() noexcept {
+    if (sem_ != nullptr) {
+      rt_sem_take(sem_, RT_WAITING_FOREVER);
+      count_hint_.fetch_sub(1U, std::memory_order_relaxed);
+    }
+  }
+
+  /** @brief Non-blocking try-decrement. */
+  bool TryWait() noexcept {
+    if (sem_ == nullptr) {
+      return false;
+    }
+    if (rt_sem_take(sem_, RT_WAITING_NO) == RT_EOK) {
+      count_hint_.fetch_sub(1U, std::memory_order_relaxed);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * @brief Timed wait with microsecond timeout.
+   * @param timeout_us Maximum time to wait in microseconds.
+   * @return true if the count was decremented before timeout, false otherwise.
+   *
+   * Converted to ticks (ceil); 0 us maps to RT_WAITING_NO and a timeout longer
+   * than INT32_MAX ticks maps to RT_WAITING_FOREVER.
+   */
+  bool WaitFor(uint64_t timeout_us) noexcept {
+    if (sem_ == nullptr) {
+      return false;
+    }
+    const uint64_t us_per_tick = 1000000ULL / RT_TICK_PER_SECOND;
+    const uint64_t ticks = (timeout_us + us_per_tick - 1ULL) / us_per_tick;
+    rt_int32_t timeout = static_cast<rt_int32_t>(ticks);
+    if (ticks > static_cast<uint64_t>(0x7FFFFFFFLL)) {
+      timeout = RT_WAITING_FOREVER;
+    }
+    if (rt_sem_take(sem_, timeout) == RT_EOK) {
+      count_hint_.fetch_sub(1U, std::memory_order_relaxed);
+      return true;
+    }
+    return false;
+  }
+
+  /** @brief Relaxed count hint (see class comment). */
+  uint32_t Count() const noexcept { return count_hint_.load(std::memory_order_relaxed); }
+
+  /** @brief True if the kernel object was created successfully. */
+  bool IsValid() const noexcept { return sem_ != nullptr; }
+
+ private:
+  rt_sem_t sem_{nullptr};
+  std::atomic<uint32_t> count_hint_{0U};
+};
+
+#endif  // OSP_PLATFORM_RTTHREAD
+
+// ============================================================================
+// Semaphore - platform alias
+// ============================================================================
+
+#if defined(OSP_PLATFORM_RTTHREAD)
+using Semaphore = RtSemaphore;
+#else
+using Semaphore = LightSemaphore;
+#endif
+
 }  // namespace osp
 
 #endif  // OSP_SEMAPHORE_HPP_

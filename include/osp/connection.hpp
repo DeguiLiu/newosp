@@ -88,10 +88,6 @@ struct ConnectionInfo {
 // ConnectionPool<MaxConnections>
 // ============================================================================
 
-#ifndef OSP_CONNECTION_POOL_MAX
-#define OSP_CONNECTION_POOL_MAX 32U
-#endif
-
 template <uint32_t MaxConnections = OSP_CONNECTION_POOL_MAX>
 class ConnectionPool {
  public:

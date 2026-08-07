@@ -134,10 +134,6 @@ struct YamlBackend {
 // ConfigStore - Flat key-value storage base
 // ============================================================================
 
-#ifndef OSP_CONFIG_MAX_FILE_SIZE
-#define OSP_CONFIG_MAX_FILE_SIZE 8192U
-#endif
-
 class ConfigStore {
  public:
   // --- Typed Getters ---

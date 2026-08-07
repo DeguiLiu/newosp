@@ -73,7 +73,7 @@
  *     auto snap = monitor.Sample();
  *     printf("CPU: %u%%, Mem: %u%%\n", snap.cpu.total_percent,
  *            snap.memory.used_percent);
- *     std::this_thread::sleep_for(std::chrono::seconds(1));
+ *     osp::ThreadSleepUs(1000000);
  *   }
  *
  * Linux-only: All monitoring functions return zeros on non-Linux platforms.

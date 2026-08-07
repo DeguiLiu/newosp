@@ -38,6 +38,7 @@
 
 #include "osp/platform.hpp"
 #include "osp/socket.hpp"
+#include "osp/thread.hpp"
 #include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
 
@@ -46,9 +47,7 @@
 #include <cstring>
 
 #include <atomic>
-#include <chrono>
 #include <mutex>
-#include <thread>
 
 #if OSP_NET_BACKEND == 0
 // POSIX socket headers. On the lwIP backend (OSP_NET_BACKEND == 1) these would
@@ -204,19 +203,6 @@ class StaticDiscovery {
 // MulticastDiscovery - UDP multicast automatic discovery
 // ============================================================================
 
-#ifndef OSP_DISCOVERY_PORT
-#define OSP_DISCOVERY_PORT 9999
-#endif
-#ifndef OSP_DISCOVERY_INTERVAL_MS
-#define OSP_DISCOVERY_INTERVAL_MS 1000
-#endif
-#ifndef OSP_DISCOVERY_TIMEOUT_MS
-#define OSP_DISCOVERY_TIMEOUT_MS 3000
-#endif
-#ifndef OSP_DISCOVERY_MULTICAST_GROUP
-#define OSP_DISCOVERY_MULTICAST_GROUP "239.255.0.1"
-#endif
-
 template <uint32_t MaxNodes = 32>
 class MulticastDiscovery {
  public:
@@ -357,13 +343,20 @@ class MulticastDiscovery {
       if (to_r.has_value()) {
         timeout_task_id_ = to_r.value();
       }
-    } else {
-      // Spawn announce thread (legacy mode)
-      announce_thread_ = std::thread([this]() { AnnounceLoop(); });
+    } else if (!announce_thread_.Start(ThreadOptions{"disc-ann"}, [this]() { AnnounceLoop(); })) {
+      // Spawn announce thread failed (legacy mode)
+      running_.store(false, std::memory_order_release);
+      return expected<void, DiscoveryError>::error(DiscoveryError::kNotRunning);
     }
 
     // Receive thread is always needed (blocking I/O)
-    receive_thread_ = std::thread([this]() { ReceiveLoop(); });
+    if (!receive_thread_.Start(ThreadOptions{"disc-recv"}, [this]() { ReceiveLoop(); })) {
+      running_.store(false, std::memory_order_release);
+      if (announce_thread_.joinable()) {
+        announce_thread_.join();
+      }
+      return expected<void, DiscoveryError>::error(DiscoveryError::kNotRunning);
+    }
 
     return expected<void, DiscoveryError>::success();
   }
@@ -379,7 +372,7 @@ class MulticastDiscovery {
 
     // Close socket first to unblock recvfrom/sendto in threads
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::lock_guard<osp::Mutex> lock(mutex_);
       if (sockfd_ >= 0) {
         socket_api::Close(sockfd_);
         sockfd_ = -1;
@@ -409,7 +402,7 @@ class MulticastDiscovery {
    * @return Pointer to the node if found and alive, nullptr otherwise.
    */
   const DiscoveredNode* FindNode(const char* name) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (nodes_[i].alive && std::strcmp(nodes_[i].name.c_str(), name) == 0) {
         return &nodes_[i];
@@ -420,7 +413,7 @@ class MulticastDiscovery {
 
   /** @brief Get the number of alive nodes. */
   uint32_t NodeCount() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     return node_count_;
   }
 
@@ -430,7 +423,7 @@ class MulticastDiscovery {
    * @param ctx User context pointer.
    */
   void ForEach(NodeCallback cb, void* ctx) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (nodes_[i].alive) {
         cb(nodes_[i], ctx);
@@ -460,7 +453,7 @@ class MulticastDiscovery {
     std::memcpy(packet + 68, &self->local_port_, 2);
 
     {
-      std::lock_guard<std::mutex> lock(self->mutex_);
+      std::lock_guard<osp::Mutex> lock(self->mutex_);
       if (self->sockfd_ >= 0) {
         (void)socket_api::SendTo(self->sockfd_, packet, kAnnounceSize, 0, reinterpret_cast<sockaddr*>(&mcast_addr),
                                  sizeof(mcast_addr));
@@ -492,7 +485,7 @@ class MulticastDiscovery {
       std::memcpy(packet + 68, &local_port_, 2);
 
       {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<osp::Mutex> lock(mutex_);
         if (sockfd_ >= 0) {
           (void)socket_api::SendTo(sockfd_, packet, kAnnounceSize, 0, reinterpret_cast<sockaddr*>(&mcast_addr),
                                    sizeof(mcast_addr));
@@ -500,7 +493,7 @@ class MulticastDiscovery {
       }
 
       // Sleep for announce interval
-      std::this_thread::sleep_for(std::chrono::milliseconds(config_.announce_interval_ms));
+      ThreadSleepUs(static_cast<uint64_t>(config_.announce_interval_ms) * 1000ULL);
     }
   }
 
@@ -517,7 +510,7 @@ class MulticastDiscovery {
 
       ssize_t n = -1;
       {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<osp::Mutex> lock(mutex_);
         if (sockfd_ >= 0) {
           n = socket_api::RecvFrom(sockfd_, packet, sizeof(packet), 0, reinterpret_cast<sockaddr*>(&sender_addr),
                                    &addr_len);
@@ -534,7 +527,7 @@ class MulticastDiscovery {
       }
 
       // Sleep briefly to avoid busy-wait
-      std::this_thread::sleep_for(std::chrono::milliseconds(kSleepIntervalMs));
+      ThreadSleepUs(static_cast<uint64_t>(kSleepIntervalMs) * 1000ULL);
     }
   }
 
@@ -566,7 +559,7 @@ class MulticastDiscovery {
     void* join_cb_ctx = nullptr;
 
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::lock_guard<osp::Mutex> lock(mutex_);
 
       // Find or create node entry
       uint32_t slot = MaxNodes;
@@ -628,7 +621,7 @@ class MulticastDiscovery {
     void* leave_cb_ctx = nullptr;
 
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::lock_guard<osp::Mutex> lock(mutex_);
 
       leave_cb = on_node_leave_;
       leave_cb_ctx = leave_ctx_;
@@ -657,8 +650,8 @@ class MulticastDiscovery {
   Config config_;
   int32_t sockfd_;
   std::atomic<bool> running_;
-  std::thread announce_thread_;
-  std::thread receive_thread_;
+  osp::Thread announce_thread_;
+  osp::Thread receive_thread_;
   ThreadHeartbeat* heartbeat_{nullptr};
 
   FixedString<63> local_name_;
@@ -669,7 +662,7 @@ class MulticastDiscovery {
   void* join_ctx_;
   void* leave_ctx_;
 
-  mutable std::mutex mutex_;
+  mutable osp::Mutex mutex_;
   DiscoveredNode nodes_[MaxNodes];
   uint32_t node_count_;
 
@@ -705,7 +698,7 @@ class TopicAwareDiscovery {
    * @return Success or DiscoveryError.
    */
   expected<void, DiscoveryError> AddLocalTopic(const TopicInfo& topic) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     if (local_topic_count_ >= MaxTopicsPerNode) {
       return expected<void, DiscoveryError>::error(DiscoveryError::kSocketFailed);
     }
@@ -719,7 +712,7 @@ class TopicAwareDiscovery {
    * @return Success or DiscoveryError.
    */
   expected<void, DiscoveryError> AddLocalService(const ServiceInfo& svc) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     if (local_service_count_ >= kMaxServicesPerNode) {
       return expected<void, DiscoveryError>::error(DiscoveryError::kSocketFailed);
     }
@@ -735,7 +728,7 @@ class TopicAwareDiscovery {
    * @return Number of publishers found.
    */
   uint32_t FindPublishers(const char* topic_name, TopicInfo* out, uint32_t max_results) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     uint32_t count = 0;
     for (uint32_t i = 0; i < local_topic_count_ && count < max_results; ++i) {
       if (local_topics_[i].is_publisher && std::strcmp(local_topics_[i].name.c_str(), topic_name) == 0) {
@@ -753,7 +746,7 @@ class TopicAwareDiscovery {
    * @return Number of subscribers found.
    */
   uint32_t FindSubscribers(const char* topic_name, TopicInfo* out, uint32_t max_results) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     uint32_t count = 0;
     for (uint32_t i = 0; i < local_topic_count_ && count < max_results; ++i) {
       if (!local_topics_[i].is_publisher && std::strcmp(local_topics_[i].name.c_str(), topic_name) == 0) {
@@ -769,7 +762,7 @@ class TopicAwareDiscovery {
    * @return Pointer to the service if found, nullptr otherwise.
    */
   const ServiceInfo* FindService(const char* service_name) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     for (uint32_t i = 0; i < local_service_count_; ++i) {
       if (std::strcmp(local_services_[i].name.c_str(), service_name) == 0) {
         return &local_services_[i];
@@ -780,18 +773,18 @@ class TopicAwareDiscovery {
 
   /** @brief Get the number of local topics. */
   uint32_t TopicCount() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     return local_topic_count_;
   }
 
   /** @brief Get the number of local services. */
   uint32_t ServiceCount() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     return local_service_count_;
   }
 
  private:
-  mutable std::mutex mutex_;
+  mutable osp::Mutex mutex_;
   TopicInfo local_topics_[MaxTopicsPerNode];
   uint32_t local_topic_count_;
   ServiceInfo local_services_[kMaxServicesPerNode];

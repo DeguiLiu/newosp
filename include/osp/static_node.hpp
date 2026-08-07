@@ -65,10 +65,6 @@ namespace osp {
 // StaticNode Configuration Constants
 // ============================================================================
 
-#ifndef OSP_MAX_STATIC_NODE_SUBSCRIPTIONS
-#define OSP_MAX_STATIC_NODE_SUBSCRIPTIONS 16U
-#endif
-
 // ============================================================================
 // StaticNode<PayloadVariant, Handler>
 // ============================================================================

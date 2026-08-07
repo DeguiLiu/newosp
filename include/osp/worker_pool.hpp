@@ -65,28 +65,19 @@
 #define OSP_WORKER_POOL_HPP_
 
 #include "osp/bus.hpp"
+#include "osp/semaphore.hpp"
 #include "osp/spsc_ringbuffer.hpp"
+#include "osp/thread.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstdint>
-#include <cstring>
 
+#include <array>
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <memory>
-#include <mutex>
-#include <thread>
 #include <variant>
-#include <vector>
 
 #ifdef __linux__
-#include <pthread.h>
 #include <sched.h>
-#endif
-
-#ifndef OSP_WORKER_QUEUE_DEPTH
-#define OSP_WORKER_QUEUE_DEPTH 1024U
 #endif
 
 namespace osp {
@@ -146,13 +137,14 @@ class WorkerPool {
   using EnvelopeType = osp::MessageEnvelope<PayloadVariant>;
 
   static constexpr uint32_t kMaxTypes = std::variant_size_v<PayloadVariant>;
+  static constexpr uint32_t kMaxWorkers = OSP_WORKER_POOL_MAX_WORKERS;
 
   /** @brief Callback invoked when a job is dropped because all worker queues are full. */
   using OverflowCallback = void (*)(void* ctx);
 
   explicit WorkerPool(const WorkerPoolConfig& cfg) noexcept
       : name_(cfg.name),
-        worker_num_(cfg.worker_num > 0U ? cfg.worker_num : 1U),
+        worker_num_(cfg.worker_num > 0U ? (cfg.worker_num <= kMaxWorkers ? cfg.worker_num : kMaxWorkers) : 1U),
 #ifdef __linux__
         cpu_set_size_(cfg.cpu_set_size),
         cpu_set_(cfg.cpu_set),
@@ -232,17 +224,18 @@ class WorkerPool {
     running_.store(true, std::memory_order_release);
     shutdown_.store(false, std::memory_order_release);
 
-    workers_.reserve(worker_num_);
     for (uint32_t i = 0U; i < worker_num_; ++i) {
-      workers_.push_back(std::make_unique<WorkerContext>());
+      workers_.emplace_back();
     }
 
     SubscribeAll(static_cast<PayloadVariant*>(nullptr));
 
-    dispatcher_thread_ = std::thread(&WorkerPool::DispatcherLoop, this);
-
-    for (uint32_t i = 0U; i < worker_num_; ++i) {
-      worker_threads_.emplace_back(&WorkerPool::WorkerLoop, this, i);
+    if (!StartDispatcher() || !StartWorkers()) {
+      // Thread creation failed (e.g. RT-Thread heap exhausted): stop whatever
+      // started and roll the pool back to the not-running state.
+      shutdown_.store(true, std::memory_order_release);
+      StopAll();
+      running_.store(false, std::memory_order_release);
     }
   }
 
@@ -257,34 +250,7 @@ class WorkerPool {
     }
 
     shutdown_.store(true, std::memory_order_release);
-
-    for (auto& handle : subscription_handles_) {
-      BusType::Instance().Unsubscribe(handle);
-    }
-    subscription_handles_.clear();
-
-    // Join dispatcher thread if still alive
-    if (dispatcher_thread_.joinable()) {
-      dispatcher_thread_.join();
-    }
-
-    // Wake up all workers
-    for (uint32_t i = 0U; i < worker_num_; ++i) {
-      {
-        std::lock_guard<std::mutex> lk(workers_[i]->mtx);
-      }
-      workers_[i]->cv.notify_one();
-    }
-
-    // Join worker threads (skip if already dead)
-    for (auto& t : worker_threads_) {
-      if (t.joinable()) {
-        t.join();
-      }
-    }
-
-    workers_.clear();
-    worker_threads_.clear();
+    StopAll();
     running_.store(false, std::memory_order_release);
   }
 
@@ -299,15 +265,15 @@ class WorkerPool {
   osp::expected<void, WorkerPoolError> FlushAndPause(uint32_t timeout_ms = 5000U) noexcept {
     paused_.store(true, std::memory_order_release);
 
-    const auto start = std::chrono::steady_clock::now();
-    const auto timeout = std::chrono::milliseconds(timeout_ms);
+    const uint64_t start_us = osp::SteadyNowUs();
+    const uint64_t timeout_us = static_cast<uint64_t>(timeout_ms) * 1000ULL;
 
     // Wait until bus is drained, all worker queues empty, and all dispatched jobs processed
     while (true) {
       bool bus_empty = (BusType::Instance().Depth() == 0U);
       bool workers_empty = true;
       for (uint32_t i = 0U; i < worker_num_; ++i) {
-        if (workers_[i] && !workers_[i]->queue.IsEmpty()) {
+        if (!workers_[i].queue.IsEmpty()) {
           workers_empty = false;
           break;
         }
@@ -319,12 +285,11 @@ class WorkerPool {
       }
 
       // Check timeout
-      const auto elapsed = std::chrono::steady_clock::now() - start;
-      if (elapsed >= timeout) {
+      if ((osp::SteadyNowUs() - start_us) >= timeout_us) {
         return osp::expected<void, WorkerPoolError>::error(WorkerPoolError::kFlushTimeout);
       }
 
-      std::this_thread::sleep_for(std::chrono::microseconds(100));
+      osp::ThreadSleepUs(100);
     }
   }
 
@@ -480,10 +445,9 @@ class WorkerPool {
     const uint32_t start = next_worker_.fetch_add(1U, std::memory_order_relaxed) % worker_num_;
     for (uint32_t i = 0U; i < worker_num_; ++i) {
       const uint32_t wid = (start + i) % worker_num_;
-      if (workers_[wid]->queue.Push(env)) {
+      if (workers_[wid].queue.Push(env)) {
         dispatched_.fetch_add(1U, std::memory_order_release);
-        { std::lock_guard<std::mutex> lk(workers_[wid]->mtx); }
-        workers_[wid]->cv.notify_one();
+        workers_[wid].wakeup.Signal();
         return;
       }
     }
@@ -499,7 +463,6 @@ class WorkerPool {
   // ======================== Dispatcher thread ========================
 
   void DispatcherLoop() noexcept {
-    SetThreadPriority(priority_);
     osp::AdaptiveBackoff backoff;
 
     while (!shutdown_.load(std::memory_order_acquire)) {
@@ -525,14 +488,7 @@ class WorkerPool {
   // ======================== Worker thread ========================
 
   void WorkerLoop(uint32_t worker_id) noexcept {
-    SetThreadPriority(priority_);
-#ifdef __linux__
-    if (cpu_set_ != nullptr && cpu_set_size_ > 0U) {
-      pthread_setaffinity_np(pthread_self(), cpu_set_size_, cpu_set_);
-    }
-#endif
-
-    WorkerContext& ctx = *workers_[worker_id];
+    WorkerContext& ctx = workers_[worker_id];
     EnvelopeType env;
     osp::AdaptiveBackoff backoff;
 
@@ -544,16 +500,15 @@ class WorkerPool {
         continue;
       }
 
-      // Adaptive spin before expensive CV wait
+      // Adaptive spin before the timed wait
       if (backoff.InSpinPhase()) {
         backoff.Wait();
         continue;
       }
 
-      // Fall through to CV wait (final backoff phase)
-      std::unique_lock<std::mutex> lk(ctx.mtx);
-      ctx.cv.wait_for(lk, std::chrono::milliseconds(1),
-                      [&] { return !ctx.queue.IsEmpty() || shutdown_.load(std::memory_order_acquire); });
+      // 1ms timed wait; the semaphore is a wake-up hint, the SPSC queue is the
+      // source of truth, so a stale signal only costs one extra empty Pop.
+      ctx.wakeup.WaitFor(1000);
       backoff.Reset();
     }
 
@@ -564,30 +519,70 @@ class WorkerPool {
     }
   }
 
-  // ======================== Platform helpers ========================
+  // ======================== Lifecycle helpers ========================
 
-  static void SetThreadPriority(int32_t prio) noexcept {
+  ThreadOptions MakeThreadOptions(const char* name) const noexcept {
+    ThreadOptions opts;
+    opts.name.assign(osp::TruncateToCapacity, name);
+    opts.priority = priority_;
 #ifdef __linux__
-    if (prio > 0) {
-      struct sched_param param{};
-      param.sched_priority = (prio > 99) ? 99 : prio;
-      pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
-    } else if (prio < 0) {
-      struct sched_param param{};
-      param.sched_priority = 0;
-      pthread_setschedparam(pthread_self(), SCHED_IDLE, &param);
-    }
-#else
-    (void)prio;
+    opts.cpu_set = cpu_set_;
+    opts.cpu_set_size = cpu_set_size_;
 #endif
+    return opts;
+  }
+
+  bool StartDispatcher() noexcept {
+    return dispatcher_thread_.Start(MakeThreadOptions("disp"), [this]() { DispatcherLoop(); });
+  }
+
+  bool StartWorkers() noexcept {
+    for (uint32_t i = 0U; i < worker_num_; ++i) {
+      if (!worker_threads_.emplace_back()) {
+        return false;  // FixedVector full (worker_num_ is clamped to kMaxWorkers)
+      }
+      if (!worker_threads_.back().Start(MakeThreadOptions("wkr"), [this, i]() { WorkerLoop(i); })) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void UnsubscribeAll() noexcept {
+    for (uint32_t i = 0U; i < subscription_handles_.size(); ++i) {
+      BusType::Instance().Unsubscribe(subscription_handles_[i]);
+    }
+    subscription_handles_.clear();
+  }
+
+  void StopAll() noexcept {
+    // Wake up all workers (1ms WaitFor also times out on its own).
+    for (uint32_t i = 0U; i < workers_.size(); ++i) {
+      workers_[i].wakeup.Signal();
+    }
+
+    // Join dispatcher thread if still alive
+    if (dispatcher_thread_.joinable()) {
+      dispatcher_thread_.join();
+    }
+
+    // Join worker threads (skip if already dead)
+    for (uint32_t i = 0U; i < worker_threads_.size(); ++i) {
+      if (worker_threads_[i].joinable()) {
+        worker_threads_[i].join();
+      }
+    }
+
+    UnsubscribeAll();
+    workers_.clear();
+    worker_threads_.clear();
   }
 
   // ======================== Worker context ========================
 
   struct WorkerContext {
     osp::SpscRingbuffer<EnvelopeType, OSP_WORKER_QUEUE_DEPTH> queue;
-    std::mutex mtx;
-    std::condition_variable cv;
+    osp::Semaphore wakeup{0};
 
     WorkerContext() noexcept = default;
     WorkerContext(const WorkerContext&) = delete;
@@ -617,10 +612,10 @@ class WorkerPool {
   alignas(osp::kCacheLineSize) std::atomic<uint64_t> worker_queue_full_{0U};
   alignas(osp::kCacheLineSize) std::atomic<uint32_t> next_worker_{0U};
 
-  std::vector<std::unique_ptr<WorkerContext>> workers_;
-  std::vector<std::thread> worker_threads_;
-  std::thread dispatcher_thread_;
-  std::vector<osp::SubscriptionHandle> subscription_handles_;
+  FixedVector<WorkerContext, kMaxWorkers> workers_;
+  FixedVector<osp::Thread, kMaxWorkers> worker_threads_;
+  osp::Thread dispatcher_thread_;
+  FixedVector<osp::SubscriptionHandle, kMaxTypes> subscription_handles_;
   ThreadHeartbeat* heartbeat_{nullptr};  ///< Dispatcher thread heartbeat.
   std::atomic<OverflowCallback> overflow_cb_{nullptr};
   std::atomic<void*> overflow_ctx_{nullptr};

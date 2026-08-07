@@ -28,7 +28,7 @@
  *
  * Provides FixedPool (raw block allocation) and ObjectPool (typed allocation
  * with placement new). All storage is inline -- zero heap allocation.
- * Thread-safe via std::mutex. Compatible with -fno-exceptions -fno-rtti.
+ * Thread-safe via osp::Mutex. Compatible with -fno-exceptions -fno-rtti.
  *
  * Ported from mp::FixedPool / mp::ObjectPool with the following additions:
  *   - AllocateChecked() returns expected<void*, MemPoolError>
@@ -39,6 +39,7 @@
 #define OSP_MEM_POOL_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/thread.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstddef>
@@ -72,7 +73,7 @@ static constexpr uint32_t kInvalidIndex = UINT32_MAX;
 // Each free block stores the index of the next free block in its first
 // sizeof(uint32_t) bytes, providing O(1) allocation and deallocation.
 //
-// Thread-safe via std::mutex. Zero heap allocation -- all storage is inline.
+// Thread-safe via osp::Mutex. Zero heap allocation -- all storage is inline.
 //
 // @tparam BlockSize  Size of each block in bytes (>= sizeof(uint32_t))
 // @tparam MaxBlocks  Maximum number of blocks in the pool
@@ -112,7 +113,7 @@ class FixedPool {
   /// @brief Allocate a block from the pool.
   /// @return Pointer to the allocated block, or nullptr if the pool is full.
   void* Allocate() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     if (free_head_ == detail::kInvalidIndex) {
       return nullptr;
     }
@@ -127,7 +128,7 @@ class FixedPool {
   /// @return expected containing a pointer on success, or MemPoolError on
   ///         failure.
   expected<void*, MemPoolError> AllocateChecked() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     if (free_head_ == detail::kInvalidIndex) {
       return expected<void*, MemPoolError>::error(MemPoolError::kPoolExhausted);
     }
@@ -147,7 +148,7 @@ class FixedPool {
   /// The caller must ensure @p ptr was returned by Allocate() or
   /// AllocateChecked() on this pool instance.
   void Free(void* ptr) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     OSP_ASSERT(ptr != nullptr);
     OSP_ASSERT(OwnsPointerUnlocked(ptr));
     uint32_t idx = PtrToIndex(ptr);
@@ -169,13 +170,13 @@ class FixedPool {
 
   /// @brief Number of free blocks available.
   uint32_t FreeCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     return MaxBlocks - used_count_;
   }
 
   /// @brief Number of currently allocated blocks.
   uint32_t UsedCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     return used_count_;
   }
 
@@ -199,7 +200,7 @@ class FixedPool {
 
   /// @brief Check if a block index is currently allocated.
   bool IsAllocated(const void* ptr) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     if (!OwnsPointerUnlocked(ptr)) {
       return false;
     }
@@ -213,7 +214,7 @@ class FixedPool {
 
   /// @brief Print pool state to stdout for debugging.
   void DumpState(const char* label = "FixedPool") const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     std::printf("[%s] capacity=%u used=%u free=%u block_size=%u aligned_size=%zu\n", label, MaxBlocks, used_count_,
                 MaxBlocks - used_count_, BlockSize, kAlignedBlockSize);
   }
@@ -226,7 +227,7 @@ class FixedPool {
   // Inline storage -- zero heap allocation.
   alignas(std::max_align_t) uint8_t storage_[kAlignedBlockSize * MaxBlocks];
 
-  mutable std::mutex mutex_;
+  mutable osp::Mutex mutex_;
   uint32_t free_head_;
   uint32_t used_count_;
   bool allocated_[MaxBlocks];

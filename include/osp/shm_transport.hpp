@@ -64,26 +64,6 @@ namespace osp {
 // Compile-time Configuration
 // ============================================================================
 
-#ifndef OSP_SHM_SLOT_SIZE
-#define OSP_SHM_SLOT_SIZE 4096
-#endif
-
-#ifndef OSP_SHM_SLOT_COUNT
-#define OSP_SHM_SLOT_COUNT 256
-#endif
-
-#ifndef OSP_SHM_CHANNEL_NAME_MAX
-#define OSP_SHM_CHANNEL_NAME_MAX 64
-#endif
-
-#ifndef OSP_SHM_BYTE_RING_CAPACITY
-#define OSP_SHM_BYTE_RING_CAPACITY (1024 * 1024)  // 1 MB default
-#endif
-
-#ifndef OSP_SHM_SPMC_MAX_CONSUMERS
-#define OSP_SHM_SPMC_MAX_CONSUMERS 8
-#endif
-
 // ============================================================================
 // ShmError
 // ============================================================================

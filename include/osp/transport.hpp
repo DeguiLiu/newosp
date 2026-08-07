@@ -293,14 +293,7 @@ class SequenceTracker {
 // FrameCodec - Manual Header Serialization
 // ============================================================================
 
-#ifndef OSP_TRANSPORT_MAX_FRAME_SIZE
-#define OSP_TRANSPORT_MAX_FRAME_SIZE 4096U
-#endif
-
 /// Compile-time receive ring depth per remote subscriber (must be power of 2).
-#ifndef OSP_TRANSPORT_RECV_RING_DEPTH
-#define OSP_TRANSPORT_RECV_RING_DEPTH 32U
-#endif
 
 /// @brief Trivially copyable frame slot for SPSC receive ring buffer.
 ///
@@ -770,7 +763,7 @@ class TcpTransport {
             // without tearing down the connection.
             return expected<void, TransportError>::error(TransportError::kWouldBlock);
           }
-          std::this_thread::yield();
+          osp::ThreadYield();
           continue;
         }
         // Fatal socket error (EPIPE, ECONNRESET, etc.)
@@ -808,7 +801,7 @@ class TcpTransport {
           if (++eagain_count > kMaxEagainRetries) {
             return expected<void, TransportError>::error(TransportError::kWouldBlock);
           }
-          std::this_thread::yield();
+          osp::ThreadYield();
           continue;
         }
         connected_ = false;

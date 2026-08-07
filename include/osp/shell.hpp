@@ -45,6 +45,7 @@
 
 #include "osp/platform.hpp"
 #include "osp/socket.hpp"
+#include "osp/thread.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cerrno>
@@ -56,7 +57,6 @@
 
 #include <atomic>
 #include <mutex>
-#include <thread>
 
 #if OSP_NET_BACKEND == 0
 // POSIX host/socket headers. On the lwIP backend (OSP_NET_BACKEND == 1) these
@@ -83,18 +83,6 @@
 // ============================================================================
 // Compile-time configuration
 // ============================================================================
-
-#ifndef OSP_SHELL_LINE_BUF_SIZE
-#define OSP_SHELL_LINE_BUF_SIZE 256
-#endif
-
-#ifndef OSP_SHELL_HISTORY_SIZE
-#define OSP_SHELL_HISTORY_SIZE 16
-#endif
-
-#ifndef OSP_SHELL_MAX_ARGS
-#define OSP_SHELL_MAX_ARGS 16
-#endif
 
 namespace osp {
 
@@ -196,7 +184,7 @@ struct ShellSession {
   uint8_t auth_attempts = 0;
 
   // --- Control ---
-  std::thread thread;
+  osp::Thread thread;
   std::atomic<bool> active{false};
   bool telnet_mode = false;   ///< true = TCP (enable IAC filtering).
   bool skip_next_lf = false;  ///< CRLF dedup (replaces MSG_PEEK).
@@ -429,7 +417,7 @@ class GlobalCmdRegistry final {
   static constexpr uint32_t kMaxCommands = 64;
   ShellCmd cmds_[kMaxCommands] = {};
   uint32_t count_ = 0;
-  mutable std::mutex mtx_;
+  mutable osp::Mutex mtx_;
 };
 
 // ----------------------------------------------------------------------------
@@ -438,7 +426,7 @@ class GlobalCmdRegistry final {
 
 inline expected<void, ShellError> GlobalCmdRegistry::Register(const char* name, ShellCmdFn fn,
                                                               const char* desc) noexcept {
-  std::lock_guard<std::mutex> lock(mtx_);
+  std::lock_guard<osp::Mutex> lock(mtx_);
   // Duplicate check
   for (uint32_t i = 0; i < count_; ++i) {
     if (std::strcmp(cmds_[i].name, name) == 0) {
@@ -1108,7 +1096,7 @@ class DebugShell final {
 
   Config cfg_;
   int listen_fd_ = -1;
-  std::thread accept_thread_;
+  osp::Thread accept_thread_;
   Session* sessions_ = nullptr;
   std::atomic<bool> running_{false};
   ThreadHeartbeat* heartbeat_{nullptr};
@@ -1187,7 +1175,7 @@ inline expected<void, ShellError> DebugShell::Start() {
 
   // MISRA C++ Rule 18-4-1 deviation: dynamic allocation required because
   // max_connections is a runtime config value. ShellSession contains
-  // std::thread (non-trivially-copyable), precluding FixedVector.
+  // osp::Thread (non-trivially-copyable), precluding FixedVector.
   // Allocated once at Start(), freed at Stop() -- cold path only.
   sessions_ = new (std::nothrow) Session[cfg_.max_connections];
   if (nullptr == sessions_) {
@@ -1195,7 +1183,10 @@ inline expected<void, ShellError> DebugShell::Start() {
   }
 
   running_.store(true, std::memory_order_release);
-  accept_thread_ = std::thread([this]() { AcceptLoop(); });
+  if (!accept_thread_.Start(ThreadOptions{"shl-acpt"}, [this]() { AcceptLoop(); })) {
+    running_.store(false, std::memory_order_release);
+    return expected<void, ShellError>::error(ShellError::kNotRunning);
+  }
 
   fd_guard.release();  // Success -- keep the fd open.
   return expected<void, ShellError>::success();
@@ -1302,8 +1293,13 @@ inline void DebugShell::AcceptLoop() {
         sessions_[i].authenticated = (cfg_.username == nullptr);
         sessions_[i].auth_attempts = 0;
         sessions_[i].active.store(true, std::memory_order_release);
-        sessions_[i].thread = std::thread([this, i]() { SessionLoop(sessions_[i]); });
-        placed = true;
+        if (sessions_[i].thread.Start(ThreadOptions{"shl-sess"}, [this, i]() { SessionLoop(sessions_[i]); })) {
+          placed = true;
+        } else {
+          sessions_[i].active.store(false, std::memory_order_release);
+          sessions_[i].read_fd = -1;
+          socket_api::Close(client_fd);
+        }
         break;
       }
     }
@@ -1544,7 +1540,7 @@ class ConsoleShell final {
  private:
   Config cfg_;
   detail::ShellSession session_ = {};
-  std::thread thread_;
+  osp::Thread thread_;
   std::atomic<bool> running_{false};
   struct termios orig_termios_ = {};
   bool termios_saved_ = false;
@@ -1592,7 +1588,7 @@ inline expected<void, ShellError> ConsoleShell::Start() noexcept {
                            false);
 
   running_.store(true, std::memory_order_release);
-  thread_ = std::thread([this]() { RunLoop(); });
+  (void)thread_.Start(ThreadOptions{"shl-con"}, [this]() { RunLoop(); });
 
   return expected<void, ShellError>::success();
 }
@@ -1697,7 +1693,7 @@ class UartShell final {
  private:
   Config cfg_;
   detail::ShellSession session_ = {};
-  std::thread thread_;
+  osp::Thread thread_;
   std::atomic<bool> running_{false};
   int uart_fd_ = -1;
   bool owns_fd_ = false;
@@ -1779,7 +1775,7 @@ inline expected<void, ShellError> UartShell::Start() noexcept {
   detail::ShellSessionInit(session_, uart_fd_, uart_fd_, detail::ShellPosixWrite, detail::ShellPosixRead, false);
 
   running_.store(true, std::memory_order_release);
-  thread_ = std::thread([this]() { RunLoop(); });
+  (void)thread_.Start(ThreadOptions{"shl-uart"}, [this]() { RunLoop(); });
 
   return expected<void, ShellError>::success();
 }

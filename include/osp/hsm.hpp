@@ -47,10 +47,6 @@
 
 #include <array>
 
-#ifndef OSP_HSM_MAX_DEPTH
-#define OSP_HSM_MAX_DEPTH 32
-#endif
-
 namespace osp {
 
 // ============================================================================

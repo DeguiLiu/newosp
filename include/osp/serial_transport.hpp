@@ -109,14 +109,8 @@ inline constexpr uint32_t kSerialAckFrameSize = 8U;
 inline constexpr uint32_t kSerialCrcSize = 2U;
 
 /// Default maximum frame size
-#ifndef OSP_SERIAL_MAX_FRAME_SIZE
-#define OSP_SERIAL_MAX_FRAME_SIZE 1024U
-#endif
 
 /// Default receive ring buffer size for I/O-parser decoupling
-#ifndef OSP_SERIAL_RX_RING_SIZE
-#define OSP_SERIAL_RX_RING_SIZE 4096U
-#endif
 
 // Compile-time validation of frame size constraints (MISRA C++: static_assert)
 static_assert(OSP_SERIAL_MAX_FRAME_SIZE >= kSerialMinFrameSize,

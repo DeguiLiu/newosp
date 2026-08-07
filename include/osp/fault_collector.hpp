@@ -50,16 +50,15 @@
 
 #include "osp/log.hpp"
 #include "osp/platform.hpp"
+#include "osp/semaphore.hpp"
+#include "osp/thread.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstdint>
 
 #include <array>
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <mutex>
-#include <thread>
 #include <type_traits>
 
 namespace osp {
@@ -349,7 +348,10 @@ class FaultCollector {
       return expected<void, FaultCollectorError>::error(FaultCollectorError::kAlreadyStarted);
     }
     running_.store(true, std::memory_order_release);
-    consumer_thread_ = std::thread([this] { ConsumerLoop(); });
+    if (!consumer_thread_.Start([this] { ConsumerLoop(); })) {
+      running_.store(false, std::memory_order_release);
+      return expected<void, FaultCollectorError>::error(FaultCollectorError::kNotStarted);
+    }
     OSP_LOG_INFO("FCCU", "Consumer thread started");
     return expected<void, FaultCollectorError>::success();
   }
@@ -360,7 +362,7 @@ class FaultCollector {
       return;
     }
     running_.store(false, std::memory_order_release);
-    wake_cv_.notify_one();
+    wake_sem_.Signal();
     if (consumer_thread_.joinable()) {
       consumer_thread_.join();
     }
@@ -417,7 +419,7 @@ class FaultCollector {
 
     // Record to recent ring buffer
     {
-      std::lock_guard<std::mutex> lock(recent_mutex_);
+      std::lock_guard<osp::Mutex> lock(recent_mutex_);
       auto& slot = recent_ring_[recent_head_];
       slot.fault_index = fault_index;
       slot.detail = detail;
@@ -430,7 +432,7 @@ class FaultCollector {
     }
 
     // Wake consumer
-    wake_cv_.notify_one();
+    wake_sem_.Signal();
 
     return expected<void, FaultCollectorError>::success();
   }
@@ -545,7 +547,7 @@ class FaultCollector {
   /// @param max_count  Maximum number of entries to visit (default: all).
   template <typename Fn>
   void ForEachRecent(Fn&& fn, uint32_t max_count = kRecentRingSize) const {
-    std::lock_guard<std::mutex> lock(recent_mutex_);
+    std::lock_guard<osp::Mutex> lock(recent_mutex_);
     uint32_t n = (recent_count_ < max_count) ? recent_count_ : max_count;
     for (uint32_t i = 0U; i < n; ++i) {
       // Walk backwards from most recent
@@ -625,11 +627,9 @@ class FaultCollector {
         consumer_heartbeat_->Beat();
       }
       if (processed == 0U) {
-        std::unique_lock<std::mutex> lock(wake_mutex_);
-        wake_cv_.wait_for(lock, std::chrono::milliseconds(10), [this] {
-          return !running_.load(std::memory_order_relaxed) || shutdown_requested_.load(std::memory_order_relaxed) ||
-                 QueueDepthCurrent() > 0U;
-        });
+        // 10ms timed wait; a Push or shutdown signals to wake early. The queue
+        // is the source of truth, so a stale signal only costs an empty batch.
+        wake_sem_.WaitFor(10000);
       }
     }
     // Drain remaining items before exit
@@ -715,7 +715,7 @@ class FaultCollector {
           shutdown_fn_(shutdown_ctx_);
         }
         // Wake consumer loop so it exits promptly on shutdown
-        wake_cv_.notify_one();
+        wake_sem_.Signal();
         break;
     }
 
@@ -780,13 +780,12 @@ class FaultCollector {
   std::atomic<bool> running_{false};
   std::atomic<bool> shutdown_requested_{false};
   ThreadHeartbeat* consumer_heartbeat_{nullptr};
-  std::thread consumer_thread_;
-  std::mutex wake_mutex_;
-  std::condition_variable wake_cv_;
+  osp::Thread consumer_thread_;
+  osp::Semaphore wake_sem_{0};
 
   // Recent fault ring buffer (diagnostic)
   static constexpr uint32_t kRecentRingSize = 16U;
-  mutable std::mutex recent_mutex_;
+  mutable osp::Mutex recent_mutex_;
   std::array<RecentFaultInfo, kRecentRingSize> recent_ring_{};
   uint32_t recent_head_{0U};
   uint32_t recent_count_{0U};

@@ -93,22 +93,6 @@ overloaded(Ts...) -> overloaded<Ts...>;
 // Compile-time Configuration
 // ============================================================================
 
-#ifndef OSP_BUS_QUEUE_DEPTH
-#define OSP_BUS_QUEUE_DEPTH 4096U
-#endif
-
-#ifndef OSP_BUS_MAX_MESSAGE_TYPES
-#define OSP_BUS_MAX_MESSAGE_TYPES 8U
-#endif
-
-#ifndef OSP_BUS_MAX_CALLBACKS_PER_TYPE
-#define OSP_BUS_MAX_CALLBACKS_PER_TYPE 16U
-#endif
-
-#ifndef OSP_BUS_BATCH_SIZE
-#define OSP_BUS_BATCH_SIZE 256U
-#endif
-
 /**
  * @brief Use CLOCK_MONOTONIC_COARSE for message timestamps (opt-in).
  *
@@ -128,9 +112,6 @@ overloaded(Ts...) -> overloaded<Ts...>;
  * Enable project-wide via CMake:
  *   target_compile_definitions(my_target PRIVATE OSP_BUS_COARSE_TIMESTAMP=1)
  */
-#ifndef OSP_BUS_COARSE_TIMESTAMP
-#define OSP_BUS_COARSE_TIMESTAMP 0
-#endif
 
 // ============================================================================
 // Message Priority

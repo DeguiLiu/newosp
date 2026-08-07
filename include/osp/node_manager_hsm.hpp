@@ -37,15 +37,14 @@
 #include "osp/fault_collector.hpp"
 #include "osp/hsm.hpp"
 #include "osp/platform.hpp"
+#include "osp/thread.hpp"
 #include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstring>
 
 #include <atomic>
-#include <chrono>
 #include <mutex>
-#include <thread>
 
 namespace osp {
 
@@ -211,12 +210,12 @@ class HsmNodeManager {
   // ==========================================================================
 
   void SetHeartbeatInterval(uint32_t interval_ms) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     heartbeat_interval_ms_ = interval_ms;
   }
 
   void SetMaxMissedHeartbeats(uint32_t max_missed) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (entries_[i].active) {
         entries_[i].context.max_missed = max_missed;
@@ -229,7 +228,7 @@ class HsmNodeManager {
   // ==========================================================================
 
   bool AddNode(uint16_t node_id, uint32_t max_missed = 3) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     NodeEntry* slot = FindSlot();
     if (slot == nullptr)
@@ -274,7 +273,7 @@ class HsmNodeManager {
   }
 
   bool RemoveNode(uint16_t node_id) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     NodeEntry* node = FindNode(node_id);
     if (node == nullptr)
@@ -295,7 +294,7 @@ class HsmNodeManager {
   // ==========================================================================
 
   void OnHeartbeat(uint16_t node_id) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     NodeEntry* node = FindNode(node_id);
     if (node == nullptr || !node->active)
@@ -307,7 +306,7 @@ class HsmNodeManager {
   }
 
   void CheckTimeouts() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     uint64_t now = SteadyNowUs();
     uint64_t timeout_us = static_cast<uint64_t>(heartbeat_interval_ms_) * 1000;
@@ -325,7 +324,7 @@ class HsmNodeManager {
   }
 
   void RequestDisconnect(uint16_t node_id) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     NodeEntry* node = FindNode(node_id);
     if (node == nullptr || !node->active)
@@ -336,7 +335,7 @@ class HsmNodeManager {
   }
 
   void RequestReconnect(uint16_t node_id) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     NodeEntry* node = FindNode(node_id);
     if (node == nullptr || !node->active)
@@ -351,7 +350,7 @@ class HsmNodeManager {
   // ==========================================================================
 
   void OnDisconnect(NodeDisconnectFn fn, void* ctx = nullptr) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     global_disconnect_fn_ = fn;
     global_disconnect_ctx_ = ctx;
 
@@ -366,7 +365,7 @@ class HsmNodeManager {
   /// @brief Wire fault reporter for automatic heartbeat/disconnect reporting.
   /// @param reporter FaultReporter with fn + ctx (nullptr fn = disabled).
   void SetFaultReporter(FaultReporter reporter) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     global_fault_reporter_ = reporter;
 
     for (uint32_t i = 0; i < MaxNodes; ++i) {
@@ -381,7 +380,7 @@ class HsmNodeManager {
   // ==========================================================================
 
   const char* GetNodeState(uint16_t node_id) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     const NodeEntry* node = const_cast<HsmNodeManager*>(this)->FindNode(node_id);
     if (node == nullptr || !node->active)
       return "";
@@ -389,7 +388,7 @@ class HsmNodeManager {
   }
 
   bool IsConnected(uint16_t node_id) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     const NodeEntry* node = const_cast<HsmNodeManager*>(this)->FindNode(node_id);
     if (node == nullptr || !node->active)
       return false;
@@ -397,12 +396,12 @@ class HsmNodeManager {
   }
 
   uint32_t NodeCount() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     return node_count_;
   }
 
   uint32_t GetMissedHeartbeats(uint16_t node_id) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     const NodeEntry* node = const_cast<HsmNodeManager*>(this)->FindNode(node_id);
     if (node == nullptr || !node->active)
       return 0;
@@ -413,7 +412,7 @@ class HsmNodeManager {
   /// Callback signature: void(const HsmNodeInfo&).
   template <typename Fn>
   void ForEachNode(Fn&& fn) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     for (uint32_t i = 0U; i < MaxNodes; ++i) {
       if (entries_[i].active && entries_[i].hsm_initialized) {
         HsmNodeInfo info{};
@@ -431,7 +430,7 @@ class HsmNodeManager {
   // ==========================================================================
 
   bool Start() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     if (running_.load())
       return false;
     running_.store(true);
@@ -444,8 +443,9 @@ class HsmNodeManager {
         running_.store(false);
         return false;
       }
-    } else {
-      monitor_thread_ = std::thread([this]() { MonitorLoop(); });
+    } else if (!monitor_thread_.Start([this]() { MonitorLoop(); })) {
+      running_.store(false);
+      return false;
     }
 
     return true;
@@ -462,7 +462,7 @@ class HsmNodeManager {
       }
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (entries_[i].active && entries_[i].hsm_initialized) {
         entries_[i].GetHsm()->~StateMachine();
@@ -515,8 +515,8 @@ class HsmNodeManager {
   uint32_t node_count_;
   uint32_t heartbeat_interval_ms_;
   std::atomic<bool> running_;
-  std::thread monitor_thread_;
-  mutable std::mutex mutex_;
+  osp::Thread monitor_thread_;
+  mutable osp::Mutex mutex_;
   ThreadHeartbeat* heartbeat_{nullptr};
 
   NodeDisconnectFn global_disconnect_fn_;
@@ -541,7 +541,7 @@ class HsmNodeManager {
       const uint64_t elapsed_us = SteadyNowUs() - start_us;
       const uint64_t interval_us = static_cast<uint64_t>(heartbeat_interval_ms_) * 1000U;
       if (elapsed_us < interval_us) {
-        std::this_thread::sleep_for(std::chrono::microseconds(interval_us - elapsed_us));
+        osp::ThreadSleepUs(interval_us - elapsed_us);
       }
     }
   }

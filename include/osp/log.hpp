@@ -300,13 +300,6 @@ inline void LogWrite(Level level, const char* category, const char* file, int li
  *   4 = kFatal
  *   5 = kOff   (disables all logging)
  */
-#ifndef OSP_LOG_MIN_LEVEL
-#ifdef NDEBUG
-#define OSP_LOG_MIN_LEVEL 1
-#else
-#define OSP_LOG_MIN_LEVEL 0
-#endif
-#endif
 
 // ============================================================================
 // Logging Macros

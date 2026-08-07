@@ -39,6 +39,7 @@
 
 #include "osp/bus.hpp"
 #include "osp/platform.hpp"
+#include "osp/thread.hpp"
 
 #include <cstdint>
 
@@ -219,7 +220,7 @@ class FusedSubscription {
     constexpr size_t idx = detail::PackIndex<T, MsgTypes...>::value;
     static_assert(idx < kNumTypes, "Type not in MsgTypes pack");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     // Store the latest value
     std::get<idx>(data_) = std::get<T>(env.payload);
@@ -271,7 +272,7 @@ class FusedSubscription {
   Callback callback_{nullptr};
   std::atomic<bool> active_{false};
   std::atomic<uint32_t> fire_count_{0};
-  std::mutex mutex_;
+  osp::Mutex mutex_;
   // Set by Activate(); used by the destructor to unsubscribe from the bus.
   AsyncBus<PayloadVariant>* bus_{nullptr};
 
@@ -405,7 +406,7 @@ class TimeSynchronizer {
     constexpr size_t idx = detail::PackIndex<T, MsgTypes...>::value;
     static_assert(idx < kNumTypes, "Type not in MsgTypes pack");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     // Store the latest value and timestamp
     std::get<idx>(data_) = std::get<T>(env.payload);
@@ -491,7 +492,7 @@ class TimeSynchronizer {
   std::atomic<bool> active_{false};
   std::atomic<uint32_t> fire_count_{0};
   std::atomic<uint32_t> timeout_count_{0};
-  std::mutex mutex_;
+  osp::Mutex mutex_;
   // Set by Activate(); used by the destructor to unsubscribe from the bus.
   AsyncBus<PayloadVariant>* bus_{nullptr};
 

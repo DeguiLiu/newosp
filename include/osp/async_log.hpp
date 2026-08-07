@@ -54,6 +54,7 @@
 #include "osp/log.hpp"
 #include "osp/platform.hpp"
 #include "osp/spsc_ringbuffer.hpp"
+#include "osp/thread.hpp"
 
 #include <cinttypes>
 #include <cstdarg>
@@ -62,8 +63,6 @@
 #include <cstring>
 
 #include <atomic>
-#include <chrono>
-#include <thread>
 
 #if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
 #include <sys/syscall.h>
@@ -75,18 +74,7 @@
 // Compile-Time Configuration
 // ============================================================================
 
-#ifndef OSP_ASYNC_LOG_QUEUE_DEPTH
-#define OSP_ASYNC_LOG_QUEUE_DEPTH 256U
-#endif
-
-#ifndef OSP_ASYNC_LOG_MAX_THREADS
-#define OSP_ASYNC_LOG_MAX_THREADS 8U
-#endif
-
 /// @brief Interval (seconds) between drop-stats reports to stderr (0=disable).
-#ifndef OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S
-#define OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S 10U
-#endif
 
 /**
  * @brief Number of entries popped per writer-loop iteration.
@@ -98,9 +86,6 @@
  * Raise to 32 on high-throughput Linux targets if needed:
  *   target_compile_definitions(my_target PRIVATE OSP_ASYNC_LOG_BATCH_SIZE=32)
  */
-#ifndef OSP_ASYNC_LOG_BATCH_SIZE
-#define OSP_ASYNC_LOG_BATCH_SIZE 8U
-#endif
 
 namespace osp {
 namespace log {
@@ -181,11 +166,7 @@ namespace detail {
 inline uint32_t GetCachedThreadId() noexcept {
   static thread_local uint32_t tl_tid = 0;
   if (tl_tid == 0) {
-#if defined(__linux__)
-    tl_tid = static_cast<uint32_t>(::syscall(SYS_gettid));
-#else
-    tl_tid = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-#endif
+    tl_tid = static_cast<uint32_t>(osp::Thread::CurrentThreadId());
   }
   return tl_tid;
 }
@@ -299,7 +280,7 @@ struct AsyncLogContext {
   std::atomic<LogSinkFn> sink{nullptr};
   std::atomic<void*> sink_context{nullptr};
 
-  std::thread writer_thread;
+  osp::Thread writer_thread;
 
   // Statistics (separate cache lines to avoid false sharing).
   alignas(kCacheLineSize) std::atomic<uint64_t> entries_written{0};
@@ -356,7 +337,8 @@ inline void WriterLoop() noexcept {
 
   // Drop-stats reporting state.
   uint64_t last_reported_drops = 0;
-  auto next_report_time = std::chrono::steady_clock::now() + std::chrono::seconds(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S);
+  uint64_t next_report_time_us =
+      osp::SteadyNowUs() + static_cast<uint64_t>(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S) * 1000000ULL;
 
   while (!ctx.shutdown.load(std::memory_order_acquire)) {
     uint32_t total_popped = 0;
@@ -382,8 +364,8 @@ inline void WriterLoop() noexcept {
 
     // --- Periodic drop-stats report (sync ERROR to stderr) ---
     if (OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S > 0) {
-      auto now = std::chrono::steady_clock::now();
-      if (now >= next_report_time) {
+      const uint64_t now_us = osp::SteadyNowUs();
+      if (now_us >= next_report_time_us) {
         uint64_t cur_drops = ctx.entries_dropped.load(std::memory_order_relaxed);
         uint64_t cur_written = ctx.entries_written.load(std::memory_order_relaxed);
         uint64_t new_drops = cur_drops - last_reported_drops;
@@ -397,7 +379,7 @@ inline void WriterLoop() noexcept {
                              ctx.sync_fallbacks.load(std::memory_order_relaxed));
         }
         last_reported_drops = cur_drops;
-        next_report_time = now + std::chrono::seconds(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S);
+        next_report_time_us = now_us + static_cast<uint64_t>(OSP_ASYNC_LOG_DROP_REPORT_INTERVAL_S) * 1000000ULL;
       }
     }
   }
@@ -479,7 +461,7 @@ inline void StartAsync(const AsyncLogConfig& config = {}) noexcept {
   ctx.sink_context.store(config.sink_context, std::memory_order_release);
   ctx.shutdown.store(false, std::memory_order_release);
 
-  ctx.writer_thread = std::thread(detail::WriterLoop);
+  ctx.writer_thread.Start(detail::WriterLoop);
 
   // Register atexit handler (once) for graceful drain on process exit.
   bool atexit_expected = false;

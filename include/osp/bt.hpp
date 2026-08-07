@@ -56,14 +56,6 @@
 // Configuration
 // ============================================================================
 
-#ifndef OSP_BT_MAX_CHILDREN
-#define OSP_BT_MAX_CHILDREN 8
-#endif
-
-#ifndef OSP_BT_MAX_NODES
-#define OSP_BT_MAX_NODES 32
-#endif
-
 namespace osp {
 
 // ============================================================================

@@ -102,10 +102,6 @@ struct PollResult {
 // IoPoller
 // ============================================================================
 
-#ifndef OSP_IO_POLLER_MAX_EVENTS
-#define OSP_IO_POLLER_MAX_EVENTS 64U
-#endif
-
 class IoPoller {
  public:
   IoPoller() noexcept;

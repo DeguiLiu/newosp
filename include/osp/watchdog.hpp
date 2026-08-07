@@ -33,7 +33,7 @@
  *
  * Design:
  * - Fixed-capacity slot array, no heap allocation in hot path.
- * - StartAutoCheck() allocates via std::thread (cold path only).
+ * - StartAutoCheck() allocates via osp::Thread (cold path only).
  * - Beat() is lock-free (hot path) - just atomic store via ThreadHeartbeat.
  * - Check() uses mutex for slot iteration (cold path, called from timer).
  * - Callbacks executed outside mutex (collect-release-execute pattern).
@@ -73,14 +73,13 @@
 #define OSP_WATCHDOG_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/thread.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstdint>
 
 #include <atomic>
-#include <chrono>
 #include <mutex>
-#include <thread>
 
 namespace osp {
 
@@ -186,7 +185,7 @@ class ThreadWatchdog final {
       return expected<RegResult, WatchdogError>::error(WatchdogError::kInvalidTimeout);
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     for (uint32_t i = 0U; i < MaxThreads; ++i) {
       if (!slots_[i].active.load(std::memory_order_relaxed)) {
@@ -222,7 +221,7 @@ class ThreadWatchdog final {
       return expected<void, WatchdogError>::error(WatchdogError::kNotRegistered);
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     if (!slots_[idx].active.load(std::memory_order_relaxed) ||
         slots_[idx].generation.load(std::memory_order_relaxed) != gen) {
@@ -279,7 +278,7 @@ class ThreadWatchdog final {
 
     // Phase 1: Collect under lock
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::lock_guard<osp::Mutex> lock(mutex_);
 
       for (uint32_t i = 0U; i < MaxThreads; ++i) {
         if (!slots_[i].active.load(std::memory_order_acquire)) {
@@ -332,14 +331,14 @@ class ThreadWatchdog final {
 
   /// @pre Must be called before StartAutoCheck() or any concurrent Check().
   void SetOnTimeout(TimeoutCallback fn, void* ctx = nullptr) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     on_timeout_ = fn;
     timeout_ctx_ = ctx;
   }
 
   /// @pre Must be called before StartAutoCheck() or any concurrent Check().
   void SetOnRecovered(RecoverCallback fn, void* ctx = nullptr) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     on_recovered_ = fn;
     recover_ctx_ = ctx;
   }
@@ -355,7 +354,7 @@ class ThreadWatchdog final {
     if (idx >= MaxThreads) {
       return false;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     if (!slots_[idx].active.load(std::memory_order_acquire) ||
         slots_[idx].generation.load(std::memory_order_relaxed) != gen) {
       return false;
@@ -364,7 +363,7 @@ class ThreadWatchdog final {
   }
 
   uint32_t ActiveCount() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     uint32_t count = 0U;
     for (uint32_t i = 0U; i < MaxThreads; ++i) {
       if (slots_[i].active.load(std::memory_order_acquire)) {
@@ -375,7 +374,7 @@ class ThreadWatchdog final {
   }
 
   uint32_t TimedOutCount() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     uint32_t count = 0U;
     for (uint32_t i = 0U; i < MaxThreads; ++i) {
       if (slots_[i].active.load(std::memory_order_acquire) && slots_[i].timed_out) {
@@ -392,7 +391,7 @@ class ThreadWatchdog final {
   /// Callback signature: void(const WatchdogSlotInfo&).
   template <typename Fn>
   void ForEachSlot(Fn&& fn) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     for (uint32_t i = 0U; i < MaxThreads; ++i) {
       if (slots_[i].active.load(std::memory_order_acquire)) {
         WatchdogSlotInfo info{};
@@ -446,12 +445,14 @@ class ThreadWatchdog final {
     if (!auto_check_running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       return;  // Already running
     }
-    auto_check_thread_ = std::thread([this, interval_ms]() {
-      while (auto_check_running_.load(std::memory_order_acquire)) {
-        Check();
-        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-      }
-    });
+    if (!auto_check_thread_.Start([this, interval_ms]() {
+          while (auto_check_running_.load(std::memory_order_acquire)) {
+            Check();
+            osp::ThreadSleepUs(static_cast<uint64_t>(interval_ms) * 1000ULL);
+          }
+        })) {
+      auto_check_running_.store(false, std::memory_order_release);
+    }
   }
 
   /**
@@ -503,13 +504,13 @@ class ThreadWatchdog final {
   };
 
   Slot slots_[MaxThreads]{};
-  mutable std::mutex mutex_;
+  mutable osp::Mutex mutex_;
   TimeoutCallback on_timeout_{nullptr};
   void* timeout_ctx_{nullptr};
   RecoverCallback on_recovered_{nullptr};
   void* recover_ctx_{nullptr};
   std::atomic<bool> auto_check_running_{false};
-  std::thread auto_check_thread_;
+  osp::Thread auto_check_thread_;
 };
 
 // ============================================================================

@@ -37,6 +37,7 @@
 
 #include "osp/platform.hpp"
 #include "osp/socket.hpp"
+#include "osp/thread.hpp"
 #include "osp/vocabulary.hpp"
 
 #if OSP_HAS_NETWORK
@@ -48,9 +49,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <type_traits>
-#include <vector>
 
 #if OSP_NET_BACKEND == 0
 // POSIX socket headers. On the lwIP backend (OSP_NET_BACKEND == 1) these would
@@ -188,7 +187,12 @@ class Service {
     running_.store(true, std::memory_order_release);
 
     // Spawn accept thread
-    accept_thread_ = std::thread([this]() { AcceptLoop(); });
+    if (!accept_thread_.Start(ThreadOptions{"svc-acpt"}, [this]() { AcceptLoop(); })) {
+      running_.store(false, std::memory_order_release);
+      sockfd_.store(-1, std::memory_order_release);
+      socket_api::Close(fd);
+      return expected<void, ServiceError>::error(ServiceError::kNotRunning);
+    }
 
     return expected<void, ServiceError>::success();
   }
@@ -214,7 +218,7 @@ class Service {
     }
 
     // Wait for worker threads to finish
-    std::lock_guard<std::mutex> lock(threads_mutex_);
+    std::lock_guard<osp::Mutex> lock(threads_mutex_);
     for (auto& entry : worker_entries_) {
       if (entry.thread.joinable()) {
         entry.thread.join();
@@ -231,7 +235,7 @@ class Service {
     if (false == running_.load(std::memory_order_acquire)) {
       return 0;
     }
-    std::lock_guard<std::mutex> lock(threads_mutex_);
+    std::lock_guard<osp::Mutex> lock(threads_mutex_);
     int32_t fd = sockfd_.load(std::memory_order_acquire);
     if (fd < 0) {
       return 0;
@@ -249,7 +253,7 @@ class Service {
 
  private:
   struct WorkerEntry {
-    std::thread thread;
+    osp::Thread thread;
     std::shared_ptr<std::atomic<bool>> finished;
   };
 
@@ -267,7 +271,7 @@ class Service {
   };
 
   void ReapFinishedWorkers() noexcept {
-    std::lock_guard<std::mutex> lock(threads_mutex_);
+    std::lock_guard<osp::Mutex> lock(threads_mutex_);
     for (uint32_t i = 0; i < worker_entries_.size();) {
       if (worker_entries_[i].finished->load(std::memory_order_acquire)) {
         if (worker_entries_[i].thread.joinable()) {
@@ -309,15 +313,34 @@ class Service {
         continue;
       }
 
-      // Spawn worker thread to handle this connection
-      auto finished = std::make_shared<std::atomic<bool>>(false);
-      std::lock_guard<std::mutex> lock(threads_mutex_);
-      worker_entries_.push_back(WorkerEntry{std::thread([this, client_fd, finished]() {
-                                              WorkerScope scope(active_workers_);
-                                              HandleConnection(client_fd);
-                                              finished->store(true, std::memory_order_release);
-                                            }),
-                                            finished});
+      // Spawn worker thread to handle this connection. The finished flag is
+      // heap-owned so the worker can set it without racing the reap; a failed
+      // allocation degrades to rejecting this connection (no abort).
+      std::shared_ptr<std::atomic<bool>> finished(new (std::nothrow) std::atomic<bool>(false));
+      if (!finished) {
+        socket_api::Close(client_fd);
+        continue;
+      }
+      WorkerEntry entry;
+      entry.finished = finished;
+      bool spawned = false;
+      {
+        std::lock_guard<osp::Mutex> lock(threads_mutex_);
+        // Capacity check under the lock: reject instead of spawning an
+        // untracked worker when the fixed-size table is full. Keep
+        // config_.max_concurrent <= OSP_SERVICE_MAX_WORKERS.
+        if (!worker_entries_.full() && entry.thread.Start(ThreadOptions{"svc-wkr"}, [this, client_fd, finished]() {
+              WorkerScope scope(active_workers_);
+              HandleConnection(client_fd);
+              finished->store(true, std::memory_order_release);
+            })) {
+          worker_entries_.push_back(std::move(entry));
+          spawned = true;
+        }
+      }
+      if (!spawned) {
+        socket_api::Close(client_fd);
+      }
     }
   }
 
@@ -408,9 +431,9 @@ class Service {
   Config config_;
   std::atomic<int32_t> sockfd_;
   std::atomic<bool> running_;
-  std::thread accept_thread_;
-  std::vector<WorkerEntry> worker_entries_;
-  mutable std::mutex threads_mutex_;
+  osp::Thread accept_thread_;
+  FixedVector<WorkerEntry, OSP_SERVICE_MAX_WORKERS> worker_entries_;
+  mutable osp::Mutex threads_mutex_;
   std::atomic<uint32_t> active_workers_{0};
   ThreadHeartbeat* heartbeat_{nullptr};
 
@@ -700,7 +723,7 @@ class ServiceRegistry {
    * @return Success or ServiceError.
    */
   expected<void, ServiceError> Register(const char* name, const char* host, uint16_t port) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     // Check for duplicate name
     for (uint32_t i = 0; i < entries_.size(); ++i) {
@@ -727,7 +750,7 @@ class ServiceRegistry {
    * @return true if found and removed, false otherwise.
    */
   bool Unregister(const char* name) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     for (uint32_t i = 0; i < entries_.size(); ++i) {
       if (std::strcmp(entries_[i].name.c_str(), name) == 0) {
@@ -744,7 +767,7 @@ class ServiceRegistry {
    * @return Entry value if found, empty optional otherwise.
    */
   optional<Entry> Lookup(const char* name) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     for (uint32_t i = 0; i < entries_.size(); ++i) {
       if (std::strcmp(entries_[i].name.c_str(), name) == 0) {
@@ -759,7 +782,7 @@ class ServiceRegistry {
    * @return Number of registered services.
    */
   uint32_t Count() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     return entries_.size();
   }
 
@@ -767,13 +790,13 @@ class ServiceRegistry {
    * @brief Reset all entries.
    */
   void Reset() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     entries_.clear();
   }
 
  private:
   FixedVector<Entry, MaxServices> entries_;
-  mutable std::mutex mutex_;
+  mutable osp::Mutex mutex_;
 };
 
 // ============================================================================
@@ -870,24 +893,27 @@ class AsyncClient {
     }
 
     // Spawn worker thread
-    worker_thread_ = std::thread([this, req, timeout_ms]() {
-      auto resp_r = client_.Call(req, timeout_ms);
+    if (!worker_thread_.Start(ThreadOptions{"svc-async"}, [this, req, timeout_ms]() {
+          auto resp_r = client_.Call(req, timeout_ms);
 
-      std::lock_guard<std::mutex> lock(result_mutex_);
-      if (resp_r.has_value()) {
-        result_.response = resp_r.value();
-        result_.error = ServiceError::kNotRunning;  // No error
-        result_.success = true;
-      } else {
-        std::memset(&result_.response, 0, sizeof(Response));
-        result_.error = resp_r.get_error();
-        result_.success = false;
-      }
-      result_.completed = true;
+          std::lock_guard<osp::Mutex> lock(result_mutex_);
+          if (resp_r.has_value()) {
+            result_.response = resp_r.value();
+            result_.error = ServiceError::kNotRunning;  // No error
+            result_.success = true;
+          } else {
+            std::memset(&result_.response, 0, sizeof(Response));
+            result_.error = resp_r.get_error();
+            result_.success = false;
+          }
+          result_.completed = true;
 
-      result_ready_.store(true, std::memory_order_release);
+          result_ready_.store(true, std::memory_order_release);
+          call_in_progress_.store(false, std::memory_order_release);
+        })) {
       call_in_progress_.store(false, std::memory_order_release);
-    });
+      return false;
+    }
 
     return true;
   }
@@ -911,10 +937,10 @@ class AsyncClient {
       if (SteadyNowUs() - start_us >= timeout_us) {
         return expected<Response, ServiceError>::error(ServiceError::kTimeout);
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(kAsyncPollIntervalMs));
+      ThreadSleepUs(static_cast<uint64_t>(kAsyncPollIntervalMs) * 1000ULL);
     }
 
-    std::lock_guard<std::mutex> lock(result_mutex_);
+    std::lock_guard<osp::Mutex> lock(result_mutex_);
     if (result_.success) {
       return expected<Response, ServiceError>::success(result_.response);
     } else {
@@ -945,8 +971,8 @@ class AsyncClient {
   std::atomic<bool> call_in_progress_;
   std::atomic<bool> result_ready_;
   AsyncCallResult<Response> result_;
-  std::mutex result_mutex_;
-  std::thread worker_thread_;
+  osp::Mutex result_mutex_;
+  osp::Thread worker_thread_;
 };
 
 }  // namespace osp

@@ -96,10 +96,6 @@ constexpr uint16_t kInsEach = 0xFFFF;
 // ResponseChannel - for synchronous request-response (OspSendAndWait)
 // ============================================================================
 
-#ifndef OSP_RESPONSE_DATA_SIZE
-#define OSP_RESPONSE_DATA_SIZE 256U
-#endif
-
 struct ResponseChannel {
   std::mutex mtx;
   std::condition_variable cv;
@@ -501,10 +497,6 @@ class Instance {
 // Application message - hybrid inline/pointer storage with bit-field packing
 // ============================================================================
 
-#ifndef OSP_APP_MSG_INLINE_SIZE
-#define OSP_APP_MSG_INLINE_SIZE 48U
-#endif
-
 static_assert((OSP_APP_MSG_INLINE_SIZE % 8) == 0, "OSP_APP_MSG_INLINE_SIZE must be 8-byte aligned");
 
 struct alignas(8) AppMessage {
@@ -551,14 +543,6 @@ struct alignas(8) AppMessage {
 // ============================================================================
 // Application Configuration
 // ============================================================================
-
-#ifndef OSP_APP_MAX_INSTANCES
-#define OSP_APP_MAX_INSTANCES 64U
-#endif
-
-#ifndef OSP_APP_QUEUE_DEPTH
-#define OSP_APP_QUEUE_DEPTH 256U
-#endif
 
 inline constexpr uint32_t kAppNameMaxLen = 31;
 

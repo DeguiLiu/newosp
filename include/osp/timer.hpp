@@ -28,7 +28,7 @@
  *
  * Provides a thread-based scheduler that fires registered callbacks at
  * configurable periodic intervals or after a single delay (one-shot).
- * Uses std::chrono::steady_clock for monotonic timing and std::thread
+ * Uses the platform monotonic clock (SteadyNowNs) and osp::Thread
  * for the scheduler loop.
  *
  * Callbacks are executed outside the internal mutex to prevent deadlocks
@@ -48,14 +48,13 @@
 #define OSP_TIMER_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/thread.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstdint>
 
 #include <atomic>
-#include <chrono>
 #include <mutex>
-#include <thread>
 
 namespace osp {
 
@@ -64,10 +63,10 @@ namespace osp {
 // ============================================================================
 
 /**
- * @brief Default tick source using std::chrono::steady_clock.
+ * @brief Default tick source using the platform monotonic clock.
  *
  * Provides monotonic wall-clock time via SteadyNowNs() from platform.hpp.
- * Suitable for production use on platforms with reliable steady_clock.
+ * Suitable for production use on platforms with a reliable monotonic clock.
  */
 struct SteadyTickSource {
   static uint64_t NowNs() noexcept {
@@ -233,7 +232,7 @@ class TimerScheduler final {
       return expected<TimerTaskId, TimerError>::error(TimerError::kInvalidPeriod);
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     for (uint32_t i = 0U; i < MaxTasks; ++i) {
       if (!slots_[i].active) {
@@ -275,7 +274,7 @@ class TimerScheduler final {
       return expected<TimerTaskId, TimerError>::error(TimerError::kInvalidPeriod);
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     for (uint32_t i = 0U; i < MaxTasks; ++i) {
       if (!slots_[i].active) {
@@ -305,7 +304,7 @@ class TimerScheduler final {
    * @return Success, or TimerError::kNotRunning if the task_id is not found.
    */
   expected<void, TimerError> Remove(TimerTaskId task_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     for (uint32_t i = 0U; i < MaxTasks; ++i) {
       if (slots_[i].active && slots_[i].id == task_id.value()) {
@@ -327,17 +326,20 @@ class TimerScheduler final {
    * @return Success, or TimerError::kAlreadyRunning if already started.
    */
   expected<void, TimerError> Start() {
-    std::lock_guard<std::mutex> start_lock(start_stop_mutex_);
+    std::lock_guard<osp::Mutex> start_lock(start_stop_mutex_);
     // Atomic check-then-act: only one caller may win and spawn the thread.
     // A non-atomic read + store here would let two concurrent Start() calls
-    // both pass the check and both assign to the joinable worker_ (std::thread
-    // assignment to a joinable thread calls std::terminate).
+    // both pass the check and both Start() the joinable worker_ (osp::Thread
+    // rejects a second Start on a joinable thread).
     bool expected_flag = false;
     if (!running_.compare_exchange_strong(expected_flag, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
       return expected<void, TimerError>::error(TimerError::kAlreadyRunning);
     }
 
-    worker_ = std::thread(&TimerScheduler::ScheduleLoop, this);
+    if (!worker_.Start([this]() { ScheduleLoop(); })) {
+      running_.store(false, std::memory_order_release);
+      return expected<void, TimerError>::error(TimerError::kNotRunning);
+    }
 
     return expected<void, TimerError>::success();
   }
@@ -347,10 +349,10 @@ class TimerScheduler final {
    *
    * Safe to call even if the scheduler is not running. Concurrent Stop() calls
    * and a concurrent Stop()/Start() pair are serialized so join() is never
-   * invoked concurrently on the same std::thread (which is undefined).
+   * invoked concurrently on the same osp::Thread (which is undefined).
    */
   void Stop() {
-    std::lock_guard<std::mutex> start_lock(start_stop_mutex_);
+    std::lock_guard<osp::Mutex> start_lock(start_stop_mutex_);
     running_.store(false, std::memory_order_release);
     if (worker_.joinable()) {
       worker_.join();
@@ -368,7 +370,7 @@ class TimerScheduler final {
    * Thread-safe (acquires internal mutex).
    */
   uint32_t TaskCount() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     uint32_t count = 0U;
     for (uint32_t i = 0U; i < MaxTasks; ++i) {
       if (slots_[i].active) {
@@ -404,7 +406,7 @@ class TimerScheduler final {
    * Thread-safe (acquires internal mutex).
    */
   uint64_t NsToNextTask() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     uint64_t min_remaining = UINT64_MAX;
     const uint64_t now = TickSource::NowNs();
     for (uint32_t i = 0U; i < MaxTasks; ++i) {
@@ -461,9 +463,9 @@ class TimerScheduler final {
   TaskSlot slots_[MaxTasks]{};           ///< Embedded task slot array.
   uint32_t next_id_ = 1;                 ///< Monotonically increasing ID.
   std::atomic<bool> running_{false};     ///< Scheduler thread active flag.
-  std::thread worker_;                   ///< Background scheduler thread.
-  mutable std::mutex mutex_;             ///< Guards slots_ and next_id_.
-  mutable std::mutex start_stop_mutex_;  ///< Serializes Start()/Stop() (thread create/join).
+  osp::Thread worker_;                   ///< Background scheduler thread.
+  mutable osp::Mutex mutex_;             ///< Guards slots_ and next_id_.
+  mutable osp::Mutex start_stop_mutex_;  ///< Serializes Start()/Stop() (thread create/join).
   ThreadHeartbeat* heartbeat_{nullptr};  ///< External watchdog heartbeat.
 
   // --------------------------------------------------------------------------
@@ -493,7 +495,7 @@ class TimerScheduler final {
 
       // Phase 1: Collect expired tasks under lock
       {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<osp::Mutex> lock(mutex_);
         const uint64_t now = TickSource::NowNs();
 
         for (uint32_t i = 0U; i < MaxTasks; ++i) {
@@ -549,10 +551,10 @@ class TimerScheduler final {
   }
 
   /**
-   * @brief Precise sleep using clock_nanosleep (Linux) or std::this_thread::sleep_for.
+   * @brief Precise sleep using clock_nanosleep (Linux) or osp::ThreadSleepUs.
    *
    * On Linux, uses CLOCK_MONOTONIC with TIMER_ABSTIME for drift-free sleep.
-   * Falls back to relative sleep on other platforms.
+   * Falls back to ThreadSleepUs (millisecond resolution on RT-Thread) elsewhere.
    */
   static void PreciseSleep(uint64_t ns) noexcept {
 #if defined(OSP_PLATFORM_LINUX)
@@ -567,7 +569,7 @@ class TimerScheduler final {
     }
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
 #else
-    std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
+    osp::ThreadSleepUs((ns + 999ULL) / 1000ULL);
 #endif
   }
 };

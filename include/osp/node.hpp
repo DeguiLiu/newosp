@@ -64,10 +64,6 @@ enum class NodeError : uint8_t { kAlreadyStarted = 0, kNotStarted, kSubscription
 // Node Configuration Constants
 // ============================================================================
 
-#ifndef OSP_MAX_NODE_SUBSCRIPTIONS
-#define OSP_MAX_NODE_SUBSCRIPTIONS 16U
-#endif
-
 static constexpr uint32_t kNodeNameMaxLen = 31;
 
 // ============================================================================

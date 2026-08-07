@@ -36,6 +36,7 @@
 
 #include "osp/platform.hpp"
 #include "osp/socket.hpp"
+#include "osp/thread.hpp"
 #include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
 
@@ -44,19 +45,13 @@
 #include <cstring>
 
 #include <atomic>
-#include <chrono>
 #include <mutex>
-#include <thread>
 
 namespace osp {
 
 // ============================================================================
 // Configuration Constants
 // ============================================================================
-
-#ifndef OSP_NODE_MANAGER_MAX_NODES
-#define OSP_NODE_MANAGER_MAX_NODES 64U
-#endif
 
 // ============================================================================
 // NodeManagerError
@@ -160,7 +155,7 @@ class NodeManager {
    * @return The assigned node_id for the listener, or NodeManagerError.
    */
   expected<uint16_t, NodeManagerError> CreateListener(uint16_t port) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     NodeEntry* slot = FindSlot();
     if (slot == nullptr) {
@@ -212,7 +207,7 @@ class NodeManager {
    * @return The assigned node_id for the connection, or NodeManagerError.
    */
   expected<uint16_t, NodeManagerError> Connect(const char* host, uint16_t port) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     NodeEntry* slot = FindSlot();
     if (slot == nullptr) {
@@ -256,7 +251,7 @@ class NodeManager {
    * @return Success or NodeManagerError::kNotFound.
    */
   expected<void, NodeManagerError> Disconnect(uint16_t node_id) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     NodeEntry* node = FindNode(node_id);
     if (node == nullptr) {
@@ -284,7 +279,7 @@ class NodeManager {
    * @param ctx User context pointer passed to the callback.
    */
   void OnDisconnect(NodeDisconnectFn fn, void* ctx = nullptr) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     disconnect_fn_ = fn;
     disconnect_ctx_ = ctx;
   }
@@ -299,7 +294,7 @@ class NodeManager {
    * @return true if the node is active, false otherwise.
    */
   bool IsConnected(uint16_t node_id) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     const NodeEntry* node = const_cast<NodeManager*>(this)->FindNode(node_id);
     return node != nullptr && node->active;
   }
@@ -309,7 +304,7 @@ class NodeManager {
    * @return The count of active nodes.
    */
   uint32_t NodeCount() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     return node_count_;
   }
 
@@ -322,7 +317,7 @@ class NodeManager {
    * @return Success or NodeManagerError::kAlreadyRunning.
    */
   expected<void, NodeManagerError> Start() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
 
     if (running_.load()) {
       return expected<void, NodeManagerError>::error(NodeManagerError::kAlreadyRunning);
@@ -338,8 +333,9 @@ class NodeManager {
         running_.store(false);
         return expected<void, NodeManagerError>::error(NodeManagerError::kNotRunning);
       }
-    } else {
-      heartbeat_thread_ = std::thread([this]() { HeartbeatLoop(); });
+    } else if (!heartbeat_thread_.Start(ThreadOptions{"nm-hb"}, [this]() { HeartbeatLoop(); })) {
+      running_.store(false);
+      return expected<void, NodeManagerError>::error(NodeManagerError::kNotRunning);
     }
 
     return expected<void, NodeManagerError>::success();
@@ -359,7 +355,7 @@ class NodeManager {
       }
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (nodes_[i].active) {
         if (nodes_[i].is_listener) {
@@ -390,7 +386,7 @@ class NodeManager {
    */
   template <typename Fn>
   void ForEach(Fn&& fn) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<osp::Mutex> lock(mutex_);
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (nodes_[i].active) {
         fn(nodes_[i]);
@@ -407,8 +403,8 @@ class NodeManager {
   uint16_t next_node_id_;
   uint32_t node_count_;
   NodeEntry nodes_[MaxNodes];
-  mutable std::mutex mutex_;
-  std::thread heartbeat_thread_;
+  mutable osp::Mutex mutex_;
+  osp::Thread heartbeat_thread_;
   ThreadHeartbeat* heartbeat_{nullptr};
 
   TimerScheduler<>* scheduler_;
@@ -431,7 +427,7 @@ class NodeManager {
     void* fn_ctx = nullptr;
 
     {
-      std::lock_guard<std::mutex> lock(self->mutex_);
+      std::lock_guard<osp::Mutex> lock(self->mutex_);
       for (uint32_t i = 0; i < MaxNodes; ++i) {
         if (self->nodes_[i].active && !self->nodes_[i].is_listener) {
           self->SendHeartbeat(self->nodes_[i]);
@@ -463,7 +459,7 @@ class NodeManager {
       void* fn_ctx = nullptr;
 
       {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<osp::Mutex> lock(mutex_);
         for (uint32_t i = 0; i < MaxNodes; ++i) {
           if (nodes_[i].active && !nodes_[i].is_listener) {
             SendHeartbeat(nodes_[i]);
@@ -484,7 +480,7 @@ class NodeManager {
       const uint64_t elapsed_us = SteadyNowUs() - start_us;
       const uint64_t interval_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) * 1000U;
       if (elapsed_us < interval_us) {
-        std::this_thread::sleep_for(std::chrono::microseconds(interval_us - elapsed_us));
+        ThreadSleepUs(interval_us - elapsed_us);
       }
     }
   }

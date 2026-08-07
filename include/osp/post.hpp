@@ -66,10 +66,6 @@ enum class PostError : uint8_t {
 // Application Registry
 // ============================================================================
 
-#ifndef OSP_POST_MAX_APPS
-#define OSP_POST_MAX_APPS 64U
-#endif
-
 // Thread-safety contract:
 //   - Register/Unregister: call during init/shutdown phase only
 //   - PostLocal/OspPost:   safe to call from any thread (delegates to

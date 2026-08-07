@@ -51,11 +51,11 @@
 
 #include "osp/node.hpp"
 #include "osp/platform.hpp"
+#include "osp/thread.hpp"
 
 #include <cstdint>
 
 #include <atomic>
-#include <thread>
 
 #if defined(OSP_PLATFORM_LINUX)
 #include <pthread.h>
@@ -70,10 +70,6 @@ namespace osp {
 // Configuration
 // ============================================================================
 
-#ifndef OSP_EXECUTOR_MAX_NODES
-#define OSP_EXECUTOR_MAX_NODES 16U
-#endif
-
 // ============================================================================
 // Sleep Strategies
 // ============================================================================
@@ -81,7 +77,7 @@ namespace osp {
 /**
  * @brief Default sleep strategy: yield on idle (backward compatible).
  *
- * This strategy uses std::this_thread::yield() when no messages are available,
+ * This strategy uses osp::ThreadYield() when no messages are available,
  * which is suitable for general-purpose workloads but may cause CPU spinning
  * on embedded systems.
  */
@@ -167,8 +163,8 @@ struct PreciseSleepStrategy {
     ts.tv_nsec = static_cast<long>(target_ns % 1000000000ULL);
     (void)clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
 #else
-    // Fallback: use std::this_thread::sleep_for
-    std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+    // Fallback: use osp::ThreadSleepUs
+    osp::ThreadSleepUs((sleep_ns + 999U) / 1000U);
 #endif
   }
 
@@ -275,7 +271,7 @@ class SingleThreadExecutor {
     while (running_.load(std::memory_order_relaxed)) {
       uint32_t processed = SpinOnce();
       if (processed == 0) {
-        std::this_thread::yield();
+        osp::ThreadYield();
       }
     }
   }
@@ -408,7 +404,9 @@ class StaticExecutor {
     if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       return;  // Already running
     }
-    dispatch_thread_ = std::thread([this]() { DispatchLoop(); });
+    if (!dispatch_thread_.Start([this]() { DispatchLoop(); })) {
+      running_.store(false, std::memory_order_release);
+    }
   }
 
   /**
@@ -456,7 +454,7 @@ class StaticExecutor {
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
-  std::thread dispatch_thread_;
+  osp::Thread dispatch_thread_;
   ThreadHeartbeat* heartbeat_{nullptr};
   SleepStrategy sleep_;
 };
@@ -547,10 +545,12 @@ class PinnedExecutor {
     if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       return;  // Already running
     }
-    dispatch_thread_ = std::thread([this]() {
-      PinThread(cpu_core_);
-      DispatchLoop();
-    });
+    if (!dispatch_thread_.Start([this]() {
+          PinThread(cpu_core_);
+          DispatchLoop();
+        })) {
+      running_.store(false, std::memory_order_release);
+    }
   }
 
   /**
@@ -628,7 +628,7 @@ class PinnedExecutor {
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
-  std::thread dispatch_thread_;
+  osp::Thread dispatch_thread_;
   int32_t cpu_core_;
   ThreadHeartbeat* heartbeat_{nullptr};
   SleepStrategy sleep_;
@@ -741,36 +741,15 @@ class RealtimeExecutor {
       return;  // Already running
     }
 
-#if defined(OSP_PLATFORM_LINUX)
-    // If custom stack size is requested, use pthread_create directly
-    if (config_.stack_size > 0) {
-      pthread_attr_t attr;
-      pthread_attr_init(&attr);
-      pthread_attr_setstacksize(&attr, config_.stack_size);
-
-      int32_t rc = pthread_create(&rt_thread_, &attr, &RealtimeExecutor::ThreadEntry, this);
-      pthread_attr_destroy(&attr);
-
-      if (rc != 0) {
-        (void)std::fprintf(stderr, "RealtimeExecutor: pthread_create failed (errno=%d)\n", rc);
-        running_.store(false, std::memory_order_release);
-        return;
-      }
-      use_pthread_ = true;
-    } else {
-      dispatch_thread_ = std::thread([this]() {
-        ApplyRealtimeConfig(config_);
-        DispatchLoop();
-      });
-      use_pthread_ = false;
+    ThreadOptions opts;
+    opts.name = "rt-exec";
+    opts.stack_size = config_.stack_size;  // ignored on Linux (default stack), honored on RT-Thread
+    if (!dispatch_thread_.Start(opts, [this]() {
+          ApplyRealtimeConfig(config_);
+          DispatchLoop();
+        })) {
+      running_.store(false, std::memory_order_release);
     }
-#else
-    (void)std::fprintf(stderr,
-                       "RealtimeExecutor: realtime features not supported on "
-                       "this platform, using normal thread\n");
-    dispatch_thread_ = std::thread([this]() { DispatchLoop(); });
-    use_pthread_ = false;
-#endif
   }
 
   /**
@@ -778,23 +757,9 @@ class RealtimeExecutor {
    */
   void Stop() noexcept {
     running_.store(false, std::memory_order_release);
-#if defined(OSP_PLATFORM_LINUX)
-    if (use_pthread_) {
-      if (rt_thread_ != pthread_t{}) {
-        pthread_join(rt_thread_, nullptr);
-        rt_thread_ = pthread_t{};
-      }
-    } else {
-      if (dispatch_thread_.joinable()) {
-        dispatch_thread_.join();
-      }
-    }
-#else
     if (dispatch_thread_.joinable()) {
       dispatch_thread_.join();
     }
-#endif
-    use_pthread_ = false;
   }
 
   // ======================== Accessors ========================
@@ -878,24 +843,13 @@ class RealtimeExecutor {
 #endif
   }
 
-  static void* ThreadEntry(void* arg) {
-    auto* self = static_cast<RealtimeExecutor*>(arg);
-    self->ApplyRealtimeConfig(self->config_);
-    self->DispatchLoop();
-    return nullptr;
-  }
-
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
-  std::thread dispatch_thread_;
+  osp::Thread dispatch_thread_;
   RealtimeConfig config_;
   ThreadHeartbeat* heartbeat_{nullptr};
   SleepStrategy sleep_;
-#if defined(OSP_PLATFORM_LINUX)
-  pthread_t rt_thread_{};
-  bool use_pthread_{false};
-#endif
 };
 
 }  // namespace osp
