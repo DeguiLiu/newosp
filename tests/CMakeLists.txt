@@ -47,6 +47,7 @@ set(OSP_TEST_CORE_SOURCES
     test_system_monitor.cpp
     test_async_log.cpp
     test_data_dispatcher.cpp
+    test_thread.cpp
 )
 
 # Network test sources (require BSD sockets; excluded when OSP_WITH_NETWORK=OFF)

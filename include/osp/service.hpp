@@ -45,18 +45,24 @@
 #include <cstring>
 
 #include <algorithm>
-#include <arpa/inet.h>
 #include <atomic>
-#include <fcntl.h>
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <type_traits>
+#include <vector>
+
+#if OSP_NET_BACKEND == 0
+// POSIX socket headers. On the lwIP backend (OSP_NET_BACKEND == 1) these would
+// collide with <lwip/sockets.h>; socket.hpp already provides the socket types
+// and socket_api wrappers for both backends.
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
-#include <thread>
-#include <type_traits>
 #include <unistd.h>
-#include <vector>
+#endif
 
 namespace osp {
 
@@ -152,29 +158,29 @@ class Service {
     }
 
     // Create TCP socket
-    int32_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    int32_t fd = socket_api::Socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
       return expected<void, ServiceError>::error(ServiceError::kBindFailed);
     }
 
     // Set SO_REUSEADDR
     int32_t opt = kSocketOptEnable;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
+    (void)socket_api::SetSockOpt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
 
     // Bind
     sockaddr_in bind_addr{};
     bind_addr.sin_family = AF_INET;
-    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    bind_addr.sin_port = htons(config_.port);
+    bind_addr.sin_addr.s_addr = socket_api::Htonl(INADDR_ANY);
+    bind_addr.sin_port = socket_api::Htons(config_.port);
 
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
-      ::close(fd);
+    if (socket_api::Bind(fd, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
+      socket_api::Close(fd);
       return expected<void, ServiceError>::error(ServiceError::kBindFailed);
     }
 
     // Listen
-    if (::listen(fd, config_.backlog) < 0) {
-      ::close(fd);
+    if (socket_api::Listen(fd, config_.backlog) < 0) {
+      socket_api::Close(fd);
       return expected<void, ServiceError>::error(ServiceError::kBindFailed);
     }
 
@@ -199,8 +205,8 @@ class Service {
     int32_t fd = sockfd_.load(std::memory_order_acquire);
     if (fd >= 0) {
       sockfd_.store(-1, std::memory_order_release);
-      ::shutdown(fd, SHUT_RDWR);
-      ::close(fd);
+      (void)socket_api::Shutdown(fd, SHUT_RDWR);
+      socket_api::Close(fd);
     }
 
     if (accept_thread_.joinable()) {
@@ -232,10 +238,10 @@ class Service {
     }
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
-    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+    if (socket_api::GetSockName(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
       return 0;
     }
-    return ntohs(addr.sin_port);
+    return socket_api::Ntohs(addr.sin_port);
   }
 
   /** @brief Set heartbeat for external watchdog monitoring (accept thread). */
@@ -290,7 +296,7 @@ class Service {
       if (fd < 0)
         break;
 
-      int32_t client_fd = ::accept(fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+      int32_t client_fd = socket_api::Accept(fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
       if (client_fd < 0) {
         if (!running_.load(std::memory_order_acquire))
           break;
@@ -299,7 +305,7 @@ class Service {
 
       // Check max_concurrent limit
       if (active_workers_.load(std::memory_order_relaxed) >= config_.max_concurrent) {
-        ::close(client_fd);
+        socket_api::Close(client_fd);
         continue;
       }
 
@@ -360,14 +366,14 @@ class Service {
       if (!SendAll(client_fd, &resp, sizeof(Response)))
         break;
     }
-    ::close(client_fd);
+    socket_api::Close(client_fd);
   }
 
   static bool RecvAll(int32_t fd, void* buf, uint64_t len) noexcept {
     uint8_t* ptr = static_cast<uint8_t*>(buf);
     uint64_t remaining = len;
     while (remaining > 0) {
-      int64_t n = ::recv(fd, ptr, remaining, 0);
+      int64_t n = socket_api::Recv(fd, ptr, remaining, 0);
       if (n < 0) {
         if (errno == EINTR)
           continue;
@@ -385,7 +391,7 @@ class Service {
     const uint8_t* ptr = static_cast<const uint8_t*>(buf);
     uint64_t remaining = len;
     while (remaining > 0) {
-      int64_t n = ::send(fd, ptr, remaining, kSendNoSignal);
+      int64_t n = socket_api::Send(fd, ptr, remaining, kSendNoSignal);
       if (n < 0) {
         if (errno == EINTR)
           continue;
@@ -466,7 +472,7 @@ class Client {
     Client client;
 
     // Create socket
-    client.sockfd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    client.sockfd_ = socket_api::Socket(AF_INET, SOCK_STREAM, 0);
     if (client.sockfd_ < 0) {
       return expected<Client, ServiceError>::error(ServiceError::kConnectFailed);
     }
@@ -477,16 +483,16 @@ class Client {
     // Connect
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
+    server_addr.sin_port = socket_api::Htons(port);
     if (ParseIpv4Text(host, &server_addr.sin_addr) != 1) {
-      ::close(client.sockfd_);
+      socket_api::Close(client.sockfd_);
       client.sockfd_ = -1;
       return expected<Client, ServiceError>::error(ServiceError::kConnectFailed);
     }
 
-    int32_t ret = ::connect(client.sockfd_, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr));
+    int32_t ret = socket_api::Connect(client.sockfd_, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr));
     if (ret < 0 && errno != EINPROGRESS) {
-      ::close(client.sockfd_);
+      socket_api::Close(client.sockfd_);
       client.sockfd_ = -1;
       return expected<Client, ServiceError>::error(ServiceError::kConnectFailed);
     }
@@ -501,9 +507,9 @@ class Client {
       tv.tv_sec = static_cast<time_t>(timeout_ms / 1000);
       tv.tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000);
 
-      ret = ::select(client.sockfd_ + 1, nullptr, &write_fds, nullptr, &tv);
+      ret = socket_api::Select(client.sockfd_ + 1, nullptr, &write_fds, nullptr, &tv);
       if (ret <= 0) {
-        ::close(client.sockfd_);
+        socket_api::Close(client.sockfd_);
         client.sockfd_ = -1;
         return expected<Client, ServiceError>::error(ServiceError::kTimeout);
       }
@@ -511,9 +517,9 @@ class Client {
       // Check for connection error
       int32_t error = 0;
       socklen_t len = sizeof(error);
-      ::getsockopt(client.sockfd_, SOL_SOCKET, SO_ERROR, &error, &len);
+      (void)socket_api::GetSockOpt(client.sockfd_, SOL_SOCKET, SO_ERROR, &error, &len);
       if (error != 0) {
-        ::close(client.sockfd_);
+        socket_api::Close(client.sockfd_);
         client.sockfd_ = -1;
         return expected<Client, ServiceError>::error(ServiceError::kConnectFailed);
       }
@@ -524,7 +530,8 @@ class Client {
 
     // Disable Nagle's algorithm
     int32_t nodelay = kSocketOptEnable;
-    ::setsockopt(client.sockfd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, static_cast<socklen_t>(sizeof(nodelay)));
+    (void)socket_api::SetSockOpt(client.sockfd_, IPPROTO_TCP, TCP_NODELAY, &nodelay,
+                                 static_cast<socklen_t>(sizeof(nodelay)));
 
     client.connected_ = true;
     return expected<Client, ServiceError>::success(std::move(client));
@@ -562,7 +569,7 @@ class Client {
     timeval tv;
     tv.tv_sec = static_cast<time_t>(timeout_ms / 1000);
     tv.tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000);
-    ::setsockopt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &tv, static_cast<socklen_t>(sizeof(tv)));
+    (void)socket_api::SetSockOpt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &tv, static_cast<socklen_t>(sizeof(tv)));
 
     // Receive response frame
     uint8_t resp_header[kServiceFrameHeaderSize];
@@ -600,7 +607,7 @@ class Client {
   /** @brief Close the connection. */
   void Close() noexcept {
     if (sockfd_ >= 0) {
-      ::close(sockfd_);
+      socket_api::Close(sockfd_);
       sockfd_ = -1;
     }
     connected_ = false;
@@ -614,7 +621,7 @@ class Client {
     uint8_t* ptr = static_cast<uint8_t*>(buf);
     uint64_t remaining = len;
     while (remaining > 0) {
-      int64_t n = ::recv(fd, ptr, remaining, 0);
+      int64_t n = socket_api::Recv(fd, ptr, remaining, 0);
       if (n < 0) {
         if (errno == EINTR)
           continue;
@@ -632,7 +639,7 @@ class Client {
     const uint8_t* ptr = static_cast<const uint8_t*>(buf);
     uint64_t remaining = len;
     while (remaining > 0) {
-      int64_t n = ::send(fd, ptr, remaining, kSendNoSignal);
+      int64_t n = socket_api::Send(fd, ptr, remaining, kSendNoSignal);
       if (n < 0) {
         if (errno == EINTR)
           continue;

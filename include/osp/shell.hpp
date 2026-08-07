@@ -58,20 +58,27 @@
 #include <mutex>
 #include <thread>
 
-#if OSP_HAS_NETWORK
-#include <arpa/inet.h>
-#endif
+#if OSP_NET_BACKEND == 0
+// POSIX host/socket headers. On the lwIP backend (OSP_NET_BACKEND == 1) these
+// would collide with <lwip/sockets.h>; socket.hpp provides the socket types
+// and socket_api wrappers for both backends. The Console/UART host shells are
+// also host-only and compiled out under the lwIP backend.
 #include <fcntl.h>
-#if OSP_HAS_NETWORK
-#include <netinet/in.h>
-#endif
-#include <new>
-#include <poll.h>
-#if OSP_HAS_NETWORK
-#include <sys/socket.h>
-#endif
 #include <termios.h>
 #include <unistd.h>
+#endif
+
+#if OSP_HAS_NETWORK
+#if OSP_NET_BACKEND == 0
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
+#endif
+#include <new>
+#if OSP_NET_BACKEND == 0
+#include <poll.h>
+#endif
 
 // ============================================================================
 // Compile-time configuration
@@ -112,8 +119,10 @@ struct ShellCmd {
 #if OSP_HAS_NETWORK
 class DebugShell;
 #endif
+#if OSP_NET_BACKEND == 0
 class ConsoleShell;
 class UartShell;
+#endif
 
 namespace detail {
 
@@ -130,15 +139,16 @@ using ShellReadFn = ssize_t (*)(int fd, void* buf, size_t len);
 #if OSP_HAS_NETWORK
 /// @brief TCP write wrapper (send with osp::kSendNoSignal).
 inline ssize_t ShellTcpWrite(int fd, const void* buf, size_t len) {
-  return ::send(fd, buf, len, kSendNoSignal);
+  return static_cast<ssize_t>(socket_api::Send(fd, buf, len, kSendNoSignal));
 }
 
 /// @brief TCP read wrapper (recv).
 inline ssize_t ShellTcpRead(int fd, void* buf, size_t len) {
-  return ::recv(fd, buf, len, 0);
+  return static_cast<ssize_t>(socket_api::Recv(fd, buf, len, 0));
 }
 #endif  // OSP_HAS_NETWORK
 
+#if OSP_NET_BACKEND == 0
 /// @brief POSIX write wrapper (for Console/UART).
 inline ssize_t ShellPosixWrite(int fd, const void* buf, size_t len) {
   return ::write(fd, buf, len);
@@ -148,6 +158,7 @@ inline ssize_t ShellPosixWrite(int fd, const void* buf, size_t len) {
 inline ssize_t ShellPosixRead(int fd, void* buf, size_t len) {
   return ::read(fd, buf, len);
 }
+#endif  // OSP_NET_BACKEND == 0
 
 // ============================================================================
 // ShellSession - per-connection state (shared by all backends)
@@ -1115,7 +1126,7 @@ class DebugShell final {
   /// @brief Send a telnet IAC command.
   static inline void SendIac(int fd, uint8_t cmd, uint8_t option) {
     uint8_t buf[3] = {0xFF, cmd, option};
-    (void)::send(fd, buf, 3, kSendNoSignal);
+    (void)socket_api::Send(fd, buf, 3, kSendNoSignal);
   }
 
   static inline bool ConstantTimeEquals(const char* lhs, const char* rhs) noexcept {
@@ -1145,32 +1156,32 @@ inline expected<void, ShellError> DebugShell::Start() {
   }
 
   // Create TCP socket.
-  listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+  listen_fd_ = socket_api::Socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ < 0) {
     return expected<void, ShellError>::error(ShellError::kPortInUse);
   }
 
   // RAII guard: close listen_fd_ on any error path below.
   ScopeGuard fd_guard(FixedFunction<void()>([this]() {
-    ::close(listen_fd_);
+    socket_api::Close(listen_fd_);
     listen_fd_ = -1;
   }));
 
   // Allow address reuse.
   int opt = 1;
-  (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  (void)socket_api::SetSockOpt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
   struct sockaddr_in addr;
   std::memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  addr.sin_port = htons(cfg_.port);
+  addr.sin_addr.s_addr = socket_api::Htonl(INADDR_ANY);
+  addr.sin_port = socket_api::Htons(cfg_.port);
 
-  if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+  if (socket_api::Bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
     return expected<void, ShellError>::error(ShellError::kPortInUse);
   }
 
-  if (::listen(listen_fd_, static_cast<int>(cfg_.max_connections)) < 0) {
+  if (socket_api::Listen(listen_fd_, static_cast<int>(cfg_.max_connections)) < 0) {
     return expected<void, ShellError>::error(ShellError::kPortInUse);
   }
 
@@ -1201,7 +1212,7 @@ inline void DebugShell::Stop() {
   // Do NOT close() or modify listen_fd_ here -- AcceptLoop reads it concurrently.
   // The actual close happens after accept_thread_.join() below.
   if (listen_fd_ >= 0) {
-    (void)::shutdown(listen_fd_, SHUT_RDWR);
+    (void)socket_api::Shutdown(listen_fd_, SHUT_RDWR);
   }
 
   // Shutdown all active session sockets to unblock their recv().
@@ -1216,7 +1227,7 @@ inline void DebugShell::Stop() {
       int fd = sessions_[i].read_fd;
       sessions_[i].active.store(false, std::memory_order_release);
       if (fd >= 0) {
-        (void)::shutdown(fd, SHUT_RDWR);
+        (void)socket_api::Shutdown(fd, SHUT_RDWR);
       }
     }
   }
@@ -1228,7 +1239,7 @@ inline void DebugShell::Stop() {
 
   // Now safe to close listen_fd_ (accept thread has exited).
   if (listen_fd_ >= 0) {
-    ::close(listen_fd_);
+    socket_api::Close(listen_fd_);
     listen_fd_ = -1;
   }
 
@@ -1255,7 +1266,7 @@ inline void DebugShell::AcceptLoop() {
     struct pollfd pfd;
     pfd.fd = listen_fd_;
     pfd.events = POLLIN;
-    int pr = ::poll(&pfd, 1, 200);
+    int pr = socket_api::Poll(&pfd, 1, 200);
     if (pr == 0)
       continue;  // Timeout -- re-check running_ flag.
     if (pr < 0) {
@@ -1267,14 +1278,14 @@ inline void DebugShell::AcceptLoop() {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
 
-    int client_fd = ::accept(listen_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len);
+    int client_fd = socket_api::Accept(listen_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len);
     if (client_fd < 0) {
       // accept() returns -1 when listen_fd_ is closed during Stop().
       break;
     }
 
     if (!running_.load(std::memory_order_relaxed)) {
-      ::close(client_fd);
+      socket_api::Close(client_fd);
       break;
     }
 
@@ -1300,8 +1311,8 @@ inline void DebugShell::AcceptLoop() {
     if (!placed) {
       // No session slots available -- reject the connection.
       const char* msg = "Too many connections.\r\n";
-      (void)::send(client_fd, msg, std::strlen(msg), kSendNoSignal);
-      ::close(client_fd);
+      (void)socket_api::Send(client_fd, msg, std::strlen(msg), kSendNoSignal);
+      socket_api::Close(client_fd);
     }
   }
 }
@@ -1404,7 +1415,8 @@ inline void DebugShell::SessionLoop(Session& s) {
   // Note: read_fd is NOT set to -1 here to avoid a data race with Stop().
   // Stop() calls shutdown(read_fd) to unblock recv(), then join() ensures
   // the session thread has exited before cleaning up.
-  OSP_SCOPE_EXIT(if (s.read_fd >= 0) { ::close(s.read_fd); } s.active.store(false, std::memory_order_release););
+  OSP_SCOPE_EXIT(
+      if (s.read_fd >= 0) { socket_api::Close(s.read_fd); } s.active.store(false, std::memory_order_release););
 
   // Telnet IAC negotiation: WILL SGA + WILL ECHO.
   SendIac(s.read_fd, 0xFB, 0x03);  // WILL Suppress Go Ahead
@@ -1432,7 +1444,7 @@ inline void DebugShell::SessionLoop(Session& s) {
     struct pollfd pfd;
     pfd.fd = s.read_fd;
     pfd.events = POLLIN;
-    int pr = ::poll(&pfd, 1, 200);
+    int pr = socket_api::Poll(&pfd, 1, 200);
     if (pr == 0)
       continue;  // Timeout -- re-check running_ flag.
     if (pr < 0) {
@@ -1483,6 +1495,12 @@ inline int DebugShell::Printf(const char* fmt, ...) {
   return -1;
 }
 #endif  // OSP_HAS_NETWORK
+
+#if OSP_NET_BACKEND == 0
+// ConsoleShell and UartShell are host-only (stdin/stdout and serial TTY). They
+// use host ::poll/::read/::write/termios, which have no lwIP equivalent and
+// conflict with lwIP's struct pollfd, so they are compiled out under the lwIP
+// backend.
 
 // ============================================================================
 // ConsoleShell - stdin/stdout backend
@@ -1817,6 +1835,8 @@ inline void UartShell::RunLoop() noexcept {
     }
   }
 }
+
+#endif  // OSP_NET_BACKEND == 0 (ConsoleShell/UartShell host-only)
 
 }  // namespace osp
 

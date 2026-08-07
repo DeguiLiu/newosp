@@ -174,7 +174,8 @@ class NodeManager {
 
     // Set SO_REUSEADDR
     int32_t opt = 1;
-    ::setsockopt(listener_r.value().Fd(), SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
+    (void)socket_api::SetSockOpt(listener_r.value().Fd(), SOL_SOCKET, SO_REUSEADDR, &opt,
+                                 static_cast<socklen_t>(sizeof(opt)));
 
     auto addr_r = SocketAddress::FromIpv4("0.0.0.0", port);
     if (!addr_r.has_value()) {

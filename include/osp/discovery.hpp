@@ -37,6 +37,7 @@
 #define OSP_DISCOVERY_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/socket.hpp"
 #include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
 
@@ -44,15 +45,21 @@
 
 #include <cstring>
 
-#include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
-#include <fcntl.h>
 #include <mutex>
+#include <thread>
+
+#if OSP_NET_BACKEND == 0
+// POSIX socket headers. On the lwIP backend (OSP_NET_BACKEND == 1) these would
+// collide with <lwip/sockets.h>; socket.hpp and socket_api provide the socket
+// types and calls for both backends.
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <thread>
 #include <unistd.h>
+#endif
 
 namespace osp {
 
@@ -287,7 +294,7 @@ class MulticastDiscovery {
     }
 
     // Create UDP socket
-    sockfd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    sockfd_ = socket_api::Socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd_ < 0) {
       return expected<void, DiscoveryError>::error(DiscoveryError::kSocketFailed);
     }
@@ -295,40 +302,43 @@ class MulticastDiscovery {
     // Set SO_REUSEADDR
     constexpr int32_t kSoReuseAddrValue = 1;
     int32_t opt = kSoReuseAddrValue;
-    ::setsockopt(sockfd_, SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
+    (void)socket_api::SetSockOpt(sockfd_, SOL_SOCKET, SO_REUSEADDR, &opt, static_cast<socklen_t>(sizeof(opt)));
 
     // Bind to multicast port
     sockaddr_in bind_addr{};
     bind_addr.sin_family = AF_INET;
-    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    bind_addr.sin_port = htons(config_.port);
+    bind_addr.sin_addr.s_addr = socket_api::Htonl(INADDR_ANY);
+    bind_addr.sin_port = socket_api::Htons(config_.port);
 
     // MISRA C++ Rule 5-2-4 deviation: reinterpret_cast required by POSIX
     // socket API (bind/sendto/recvfrom expect sockaddr*).
-    if (::bind(sockfd_, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
-      ::close(sockfd_);
+    if (socket_api::Bind(sockfd_, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
+      socket_api::Close(sockfd_);
       sockfd_ = -1;
       return expected<void, DiscoveryError>::error(DiscoveryError::kBindFailed);
     }
 
     // Join multicast group
     ip_mreq mreq{};
-    if (::inet_pton(AF_INET, config_.multicast_group, &mreq.imr_multiaddr) != 1) {
-      ::close(sockfd_);
+    if (socket_api::ParseIpv4(config_.multicast_group, &mreq.imr_multiaddr) != 1) {
+      socket_api::Close(sockfd_);
       sockfd_ = -1;
       return expected<void, DiscoveryError>::error(DiscoveryError::kMulticastJoinFailed);
     }
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    mreq.imr_interface.s_addr = socket_api::Htonl(INADDR_ANY);
 
-    if (::setsockopt(sockfd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-      ::close(sockfd_);
+    if (socket_api::SetSockOpt(sockfd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+      socket_api::Close(sockfd_);
       sockfd_ = -1;
       return expected<void, DiscoveryError>::error(DiscoveryError::kMulticastJoinFailed);
     }
 
     // Set socket to non-blocking for receive thread
-    int32_t flags = ::fcntl(sockfd_, F_GETFL, 0);
-    ::fcntl(sockfd_, F_SETFL, flags | O_NONBLOCK);
+    if (SetFdNonBlocking(sockfd_, true) < 0) {
+      socket_api::Close(sockfd_);
+      sockfd_ = -1;
+      return expected<void, DiscoveryError>::error(DiscoveryError::kSocketFailed);
+    }
 
     running_.store(true, std::memory_order_release);
 
@@ -371,7 +381,7 @@ class MulticastDiscovery {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (sockfd_ >= 0) {
-        ::close(sockfd_);
+        socket_api::Close(sockfd_);
         sockfd_ = -1;
       }
     }
@@ -440,8 +450,8 @@ class MulticastDiscovery {
 
     sockaddr_in mcast_addr{};
     mcast_addr.sin_family = AF_INET;
-    ::inet_pton(AF_INET, self->config_.multicast_group, &mcast_addr.sin_addr);
-    mcast_addr.sin_port = htons(self->config_.port);
+    (void)socket_api::ParseIpv4(self->config_.multicast_group, &mcast_addr.sin_addr);
+    mcast_addr.sin_port = socket_api::Htons(self->config_.port);
 
     uint8_t packet[kAnnounceSize];
     std::memcpy(packet, &kAnnounceMagic, 4);
@@ -452,7 +462,8 @@ class MulticastDiscovery {
     {
       std::lock_guard<std::mutex> lock(self->mutex_);
       if (self->sockfd_ >= 0) {
-        ::sendto(self->sockfd_, packet, kAnnounceSize, 0, reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
+        (void)socket_api::SendTo(self->sockfd_, packet, kAnnounceSize, 0, reinterpret_cast<sockaddr*>(&mcast_addr),
+                                 sizeof(mcast_addr));
       }
     }
   }
@@ -465,8 +476,8 @@ class MulticastDiscovery {
   void AnnounceLoop() noexcept {
     sockaddr_in mcast_addr{};
     mcast_addr.sin_family = AF_INET;
-    ::inet_pton(AF_INET, config_.multicast_group, &mcast_addr.sin_addr);
-    mcast_addr.sin_port = htons(config_.port);
+    (void)socket_api::ParseIpv4(config_.multicast_group, &mcast_addr.sin_addr);
+    mcast_addr.sin_port = socket_api::Htons(config_.port);
 
     while (running_.load(std::memory_order_acquire)) {
       if (heartbeat_ != nullptr) {
@@ -483,7 +494,8 @@ class MulticastDiscovery {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (sockfd_ >= 0) {
-          ::sendto(sockfd_, packet, kAnnounceSize, 0, reinterpret_cast<sockaddr*>(&mcast_addr), sizeof(mcast_addr));
+          (void)socket_api::SendTo(sockfd_, packet, kAnnounceSize, 0, reinterpret_cast<sockaddr*>(&mcast_addr),
+                                   sizeof(mcast_addr));
         }
       }
 
@@ -507,7 +519,8 @@ class MulticastDiscovery {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (sockfd_ >= 0) {
-          n = ::recvfrom(sockfd_, packet, sizeof(packet), 0, reinterpret_cast<sockaddr*>(&sender_addr), &addr_len);
+          n = socket_api::RecvFrom(sockfd_, packet, sizeof(packet), 0, reinterpret_cast<sockaddr*>(&sender_addr),
+                                   &addr_len);
         }
       }
 
@@ -542,7 +555,7 @@ class MulticastDiscovery {
 
     // Get sender IP
     char address_buf[64];
-    ::inet_ntop(AF_INET, &sender.sin_addr, address_buf, sizeof(address_buf));
+    (void)socket_api::InetNtop(AF_INET, &sender.sin_addr, address_buf, sizeof(address_buf));
 
     uint64_t now = SteadyNowUs();
 
