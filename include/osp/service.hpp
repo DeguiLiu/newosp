@@ -36,6 +36,7 @@
 #define OSP_SERVICE_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/socket.hpp"
 #include "osp/vocabulary.hpp"
 
 #if OSP_HAS_NETWORK
@@ -384,7 +385,7 @@ class Service {
     const uint8_t* ptr = static_cast<const uint8_t*>(buf);
     uint64_t remaining = len;
     while (remaining > 0) {
-      int64_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
+      int64_t n = ::send(fd, ptr, remaining, kSendNoSignal);
       if (n < 0) {
         if (errno == EINTR)
           continue;
@@ -471,14 +472,13 @@ class Client {
     }
 
     // Set socket to non-blocking for timeout support
-    int32_t flags = ::fcntl(client.sockfd_, F_GETFL, 0);
-    ::fcntl(client.sockfd_, F_SETFL, flags | O_NONBLOCK);
+    (void)SetFdNonBlocking(client.sockfd_, true);
 
     // Connect
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
-    if (::inet_pton(AF_INET, host, &server_addr.sin_addr) != 1) {
+    if (ParseIpv4Text(host, &server_addr.sin_addr) != 1) {
       ::close(client.sockfd_);
       client.sockfd_ = -1;
       return expected<Client, ServiceError>::error(ServiceError::kConnectFailed);
@@ -520,7 +520,7 @@ class Client {
     }
 
     // Set socket back to blocking
-    ::fcntl(client.sockfd_, F_SETFL, flags);
+    (void)SetFdNonBlocking(client.sockfd_, false);
 
     // Disable Nagle's algorithm
     int32_t nodelay = kSocketOptEnable;
@@ -632,7 +632,7 @@ class Client {
     const uint8_t* ptr = static_cast<const uint8_t*>(buf);
     uint64_t remaining = len;
     while (remaining > 0) {
-      int64_t n = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
+      int64_t n = ::send(fd, ptr, remaining, kSendNoSignal);
       if (n < 0) {
         if (errno == EINTR)
           continue;

@@ -28,5 +28,5 @@ build_test/
 scripts/
 
 # Executable binaries in root (benchmark/test executables)
-bench_*
-test_*
+/bench_*
+/test_*

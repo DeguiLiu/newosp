@@ -9,6 +9,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -418,8 +419,11 @@ TEST_CASE("Subprocess working_dir", "[process]") {
   auto wr = proc.Wait();
   REQUIRE(wr.exited);
   REQUIRE(wr.exit_code == 0);
-  // Output should contain /tmp
-  REQUIRE(output.find("/tmp") != std::string::npos);
+  // working_dir may be a symlink (e.g. CI runners redirect /tmp); pwd prints
+  // the physical path, so compare against the canonicalized working_dir.
+  char real[PATH_MAX];
+  REQUIRE(realpath(cfg.working_dir, real) != nullptr);
+  REQUIRE(output.find(real) != std::string::npos);
 }
 
 // ============================================================================

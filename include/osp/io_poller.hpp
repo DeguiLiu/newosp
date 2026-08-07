@@ -146,7 +146,9 @@ class IoPoller {
 namespace detail {
 
 inline uint32_t IoEventToEpoll(uint8_t events) {
-  uint32_t ep = EPOLLET;  // edge-triggered by default
+  // Level-triggered by default: matches poll/select/lwip_select semantics used
+  // on embedded targets, so callers must not rely on edge-triggered delivery.
+  uint32_t ep = 0;
   if (events & static_cast<uint8_t>(IoEvent::kReadable)) {
     ep |= EPOLLIN;
   }

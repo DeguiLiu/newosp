@@ -20,7 +20,7 @@ option(OSP_NO_EXCEPTIONS  "Build tests with -fno-exceptions -fno-rtti" OFF)
 option(OSP_CONFIG_INI     "Enable INI config support (inicpp)"         ON)
 option(OSP_CONFIG_JSON    "Enable JSON config support (nlohmann/json)" OFF)
 option(OSP_CONFIG_YAML    "Enable YAML config support (fkYAML)"        OFF)
-option(OSP_WITH_SOCKPP    "Use sockpp for network transport"           ON)
+option(OSP_WITH_SOCKPP    "Use sockpp for network transport"           OFF)
 option(OSP_WITH_NETWORK   "Enable BSD-socket network modules"          ON)
 
 # --- INI Config (using embedded inicpp.hpp) ---

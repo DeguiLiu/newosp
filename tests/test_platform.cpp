@@ -91,3 +91,35 @@ TEST_CASE("AdaptiveBackoff full cycle does not crash", "[platform]") {
   }
   REQUIRE(true);
 }
+
+TEST_CASE("OSP_NET_BACKEND selects the platform backend", "[platform]") {
+  // When a network API is present, the default backend must match the
+  // platform: RT-Thread uses SAL (1), everything else uses POSIX (0).
+#if OSP_HAS_NETWORK
+#if defined(OSP_PLATFORM_RTTHREAD)
+  REQUIRE(OSP_NET_BACKEND == 1);
+#else
+  REQUIRE(OSP_NET_BACKEND == 0);
+#endif
+#endif
+}
+
+// ============================================================================
+// ThreadYield / ThreadSleepUs Tests
+// ============================================================================
+
+TEST_CASE("ThreadYield does not crash", "[platform]") {
+  for (int i = 0; i < 100; ++i) {
+    osp::ThreadYield();
+  }
+  REQUIRE(true);
+}
+
+TEST_CASE("ThreadSleepUs waits approximately the requested duration", "[platform]") {
+  const auto t0 = std::chrono::steady_clock::now();
+  osp::ThreadSleepUs(20000);  // 20 ms
+  const auto elapsed_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+  // Loose lower bound only: ignore scheduler noise, never fail on early wake.
+  REQUIRE(elapsed_us >= 15000);
+}

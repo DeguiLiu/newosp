@@ -192,3 +192,40 @@ TEST_CASE("io_poller - Results accessor with internal buffer", "[io_poller]") {
   ::close(pipefd[0]);
   ::close(pipefd[1]);
 }
+
+// ============================================================================
+// Level-triggered semantics (embedded-friendly; edge-triggered epoll fails)
+// ============================================================================
+
+TEST_CASE("io_poller - level-triggered re-reports readable until drained", "[io_poller]") {
+  osp::IoPoller poller;
+  REQUIRE(poller.IsValid());
+
+  int pipefd[2];
+  REQUIRE(::pipe(pipefd) == 0);
+
+  auto add_r = poller.Add(pipefd[0], static_cast<uint8_t>(osp::IoEvent::kReadable));
+  REQUIRE(add_r.has_value());
+
+  // Write data but do NOT drain it between the two Wait calls.
+  const char msg[] = "x";
+  (void)::write(pipefd[1], msg, sizeof(msg));
+
+  osp::PollResult results[4];
+  auto w1 = poller.Wait(results, 4, 100);
+  REQUIRE(w1.has_value());
+  REQUIRE(w1.value() >= 1);
+
+  // Level-triggered: readable state persists until consumed, so a second Wait
+  // must still report the fd. Edge-triggered epoll would return 0 here.
+  auto w2 = poller.Wait(results, 4, 100);
+  REQUIRE(w2.has_value());
+  REQUIRE(w2.value() >= 1);
+
+  // Drain the pipe
+  char buf[8];
+  (void)::read(pipefd[0], buf, sizeof(buf));
+
+  ::close(pipefd[0]);
+  ::close(pipefd[1]);
+}

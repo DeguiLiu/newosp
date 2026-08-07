@@ -44,6 +44,7 @@
 #define OSP_SHELL_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/socket.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cerrno>
@@ -127,9 +128,9 @@ using ShellWriteFn = ssize_t (*)(int fd, const void* buf, size_t len);
 using ShellReadFn = ssize_t (*)(int fd, void* buf, size_t len);
 
 #if OSP_HAS_NETWORK
-/// @brief TCP write wrapper (send with MSG_NOSIGNAL).
+/// @brief TCP write wrapper (send with osp::kSendNoSignal).
 inline ssize_t ShellTcpWrite(int fd, const void* buf, size_t len) {
-  return ::send(fd, buf, len, MSG_NOSIGNAL);
+  return ::send(fd, buf, len, kSendNoSignal);
 }
 
 /// @brief TCP read wrapper (recv).
@@ -1114,7 +1115,7 @@ class DebugShell final {
   /// @brief Send a telnet IAC command.
   static inline void SendIac(int fd, uint8_t cmd, uint8_t option) {
     uint8_t buf[3] = {0xFF, cmd, option};
-    (void)::send(fd, buf, 3, MSG_NOSIGNAL);
+    (void)::send(fd, buf, 3, kSendNoSignal);
   }
 
   static inline bool ConstantTimeEquals(const char* lhs, const char* rhs) noexcept {
@@ -1299,7 +1300,7 @@ inline void DebugShell::AcceptLoop() {
     if (!placed) {
       // No session slots available -- reject the connection.
       const char* msg = "Too many connections.\r\n";
-      (void)::send(client_fd, msg, std::strlen(msg), MSG_NOSIGNAL);
+      (void)::send(client_fd, msg, std::strlen(msg), kSendNoSignal);
       ::close(client_fd);
     }
   }

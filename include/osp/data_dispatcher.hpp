@@ -193,6 +193,25 @@ namespace detail {
 
 static constexpr uint32_t kJobInvalidIndex = UINT32_MAX;
 
+// Free list head is a tagged 64-bit value: [63:32] = ABA tag, [31:0] = block
+// index. The tag increments on every successful push/pop CAS so that a
+// pop->re-push cycle changes the head even when the index is identical,
+// preventing the classic Treiber-stack ABA stale-pointer pop.
+// Cost: 64-bit atomic, so on 32-bit ARM this falls back to libatomic locks.
+static constexpr uint32_t kJobHeadTagShift = 32U;
+
+static inline uint64_t JobPackHead(uint32_t index, uint32_t tag) noexcept {
+  return (static_cast<uint64_t>(tag) << kJobHeadTagShift) | static_cast<uint64_t>(index);
+}
+
+static inline uint32_t JobHeadIndex(uint64_t head) noexcept {
+  return static_cast<uint32_t>(head & 0xFFFFFFFFULL);
+}
+
+static inline uint32_t JobHeadTag(uint64_t head) noexcept {
+  return static_cast<uint32_t>(head >> kJobHeadTagShift);
+}
+
 /// Aligned header size for DataBlock.
 static constexpr uint32_t kJobHeaderAlignedSize =
     (static_cast<uint32_t>(sizeof(DataBlock)) + OSP_JOB_BLOCK_ALIGN - 1U) & ~(OSP_JOB_BLOCK_ALIGN - 1U);
@@ -235,7 +254,7 @@ struct InProcStore {
       blk->block_id = i;
       blk->next_free = (i + 1U < MaxBlocks) ? (i + 1U) : detail::kJobInvalidIndex;
     }
-    free_head_.store(0U, std::memory_order_relaxed);
+    free_head_.store(detail::JobPackHead(0U, 0U), std::memory_order_relaxed);
     free_count_.store(MaxBlocks, std::memory_order_relaxed);
     alloc_count_.store(0U, std::memory_order_relaxed);
   }
@@ -266,11 +285,11 @@ struct InProcStore {
         &storage_[static_cast<size_t>(id) * kBlockStride]);
   }
 
-  std::atomic<uint32_t>& FreeHead() noexcept { return free_head_; }
+  std::atomic<uint64_t>& FreeHead() noexcept { return free_head_; }
   std::atomic<uint32_t>& FreeCount() noexcept { return free_count_; }
   std::atomic<uint32_t>& AllocCount() noexcept { return alloc_count_; }
 
-  const std::atomic<uint32_t>& FreeHead() const noexcept { return free_head_; }
+  const std::atomic<uint64_t>& FreeHead() const noexcept { return free_head_; }
   const std::atomic<uint32_t>& FreeCount() const noexcept { return free_count_; }
   const std::atomic<uint32_t>& AllocCount() const noexcept { return alloc_count_; }
 
@@ -281,7 +300,7 @@ struct InProcStore {
   static constexpr size_t kStorageSize = static_cast<size_t>(kBlockStride) * MaxBlocks;
   alignas(OSP_JOB_BLOCK_ALIGN) uint8_t storage_[kStorageSize];
 
-  alignas(kCacheLineSize) std::atomic<uint32_t> free_head_{0U};
+  alignas(kCacheLineSize) std::atomic<uint64_t> free_head_{0U};
   alignas(kCacheLineSize) std::atomic<uint32_t> free_count_{MaxBlocks};
   alignas(kCacheLineSize) std::atomic<uint32_t> alloc_count_{0U};
 };
@@ -312,15 +331,15 @@ namespace detail {
 /// @brief Shared memory pool header. Placed at offset 0 of the shm region.
 /// Atomics are cache-line aligned to prevent false sharing across processes.
 struct ShmPoolHeader {
-  uint32_t magic;                 ///< OSP_JOB_POOL_MAGIC
-  uint32_t version;               ///< Header version (1)
-  uint32_t block_size;            ///< Template BlockSize
-  uint32_t max_blocks;            ///< Template MaxBlocks
-  uint32_t block_stride;          ///< Computed block stride
-  uint32_t total_size;            ///< Total shm region size
-  uint32_t max_consumers;         ///< Consumer slot count
-  uint32_t consumer_slot_offset;  ///< ConsumerSlot array offset from shm base
-  alignas(OSP_JOB_BLOCK_ALIGN) std::atomic<uint32_t> free_head;
+  uint32_t magic;                                                ///< OSP_JOB_POOL_MAGIC
+  uint32_t version;                                              ///< Header version (1)
+  uint32_t block_size;                                           ///< Template BlockSize
+  uint32_t max_blocks;                                           ///< Template MaxBlocks
+  uint32_t block_stride;                                         ///< Computed block stride
+  uint32_t total_size;                                           ///< Total shm region size
+  uint32_t max_consumers;                                        ///< Consumer slot count
+  uint32_t consumer_slot_offset;                                 ///< ConsumerSlot array offset from shm base
+  alignas(OSP_JOB_BLOCK_ALIGN) std::atomic<uint64_t> free_head;  ///< Tagged head (see JobPackHead)
   alignas(OSP_JOB_BLOCK_ALIGN) std::atomic<uint32_t> free_count;
   alignas(OSP_JOB_BLOCK_ALIGN) std::atomic<uint32_t> alloc_count;
 };
@@ -370,7 +389,7 @@ struct ShmStore {
     std::memset(base_, 0, shm_size);
 
     header_->magic = OSP_JOB_POOL_MAGIC;
-    header_->version = 1U;
+    header_->version = 2U;  // v2: free_head is a tagged uint64_t
     header_->block_size = BlockSize;
     header_->max_blocks = MaxBlocks;
     header_->block_stride = kBlockStride;
@@ -384,7 +403,7 @@ struct ShmStore {
       blk->block_id = i;
       blk->next_free = (i + 1U < MaxBlocks) ? (i + 1U) : detail::kJobInvalidIndex;
     }
-    header_->free_head.store(0U, std::memory_order_release);
+    header_->free_head.store(detail::JobPackHead(0U, 0U), std::memory_order_release);
     header_->free_count.store(MaxBlocks, std::memory_order_release);
     header_->alloc_count.store(0U, std::memory_order_release);
 
@@ -405,7 +424,7 @@ struct ShmStore {
     base_ = static_cast<uint8_t*>(shm_base);
     header_ = reinterpret_cast<ShmPoolHeader*>(base_);  // NOLINT
     OSP_ASSERT(header_->magic == OSP_JOB_POOL_MAGIC);
-    OSP_ASSERT(header_->version == 1U);
+    OSP_ASSERT(header_->version == 2U);  // tagged free_head
     OSP_ASSERT(header_->block_size == BlockSize);
     OSP_ASSERT(header_->max_blocks == MaxBlocks);
   }
@@ -447,11 +466,11 @@ struct ShmStore {
 
   uint32_t MaxConsumers() const noexcept { return (header_ != nullptr) ? header_->max_consumers : 0U; }
 
-  std::atomic<uint32_t>& FreeHead() noexcept { return header_->free_head; }
+  std::atomic<uint64_t>& FreeHead() noexcept { return header_->free_head; }
   std::atomic<uint32_t>& FreeCount() noexcept { return header_->free_count; }
   std::atomic<uint32_t>& AllocCount() noexcept { return header_->alloc_count; }
 
-  const std::atomic<uint32_t>& FreeHead() const noexcept { return header_->free_head; }
+  const std::atomic<uint64_t>& FreeHead() const noexcept { return header_->free_head; }
   const std::atomic<uint32_t>& FreeCount() const noexcept { return header_->free_count; }
   const std::atomic<uint32_t>& AllocCount() const noexcept { return header_->alloc_count; }
 
@@ -769,12 +788,17 @@ class DataDispatcher {
         fault_reporter_.Report(fault_slot_, free, FaultPriority::kLow);
       }
     }
-    // CAS free list pop (single implementation for all Store types)
-    uint32_t head = store_.FreeHead().load(std::memory_order_acquire);
-    while (head != detail::kJobInvalidIndex) {
-      DataBlock* blk = store_.GetBlock(head);
+    // CAS free list pop (single implementation for all Store types).
+    // Tagged head detects ABA: a stale pop whose index was re-pushed since the
+    // load fails because the tag changed.
+    uint64_t head = store_.FreeHead().load(std::memory_order_acquire);
+    while (detail::JobHeadIndex(head) != detail::kJobInvalidIndex) {
+      uint32_t idx = detail::JobHeadIndex(head);
+      DataBlock* blk = store_.GetBlock(idx);
       uint32_t next = blk->next_free;
-      if (store_.FreeHead().compare_exchange_weak(head, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+      uint64_t new_head = detail::JobPackHead(next, detail::JobHeadTag(head) + 1U);
+      if (store_.FreeHead().compare_exchange_weak(head, new_head, std::memory_order_acq_rel,
+                                                  std::memory_order_acquire)) {
         store_.FreeCount().fetch_sub(1U, std::memory_order_relaxed);
         store_.AllocCount().fetch_add(1U, std::memory_order_relaxed);
         blk->SetState(BlockState::kAllocated);
@@ -783,7 +807,7 @@ class DataDispatcher {
         blk->fault_id = 0U;
         blk->deadline_us = 0U;
         blk->refcount.store(0U, std::memory_order_relaxed);
-        return expected<uint32_t, JobPoolError>::success(head);
+        return expected<uint32_t, JobPoolError>::success(idx);
       }
       // head reloaded by CAS failure
     }
@@ -1139,12 +1163,15 @@ class DataDispatcher {
     DataBlock* blk = store_.GetBlock(block_id);
     blk->SetState(BlockState::kFree);
     store_.AllocCount().fetch_sub(1U, std::memory_order_relaxed);
-    // CAS push to free list head
-    uint32_t head = store_.FreeHead().load(std::memory_order_acquire);
+    // CAS push to free list head; tag increments so a pop/pop-cancel ABA
+    // cannot make a stale head read succeed.
+    uint64_t head = store_.FreeHead().load(std::memory_order_acquire);
+    uint64_t new_head = 0U;
     do {
-      blk->next_free = head;
+      blk->next_free = detail::JobHeadIndex(head);
+      new_head = detail::JobPackHead(block_id, detail::JobHeadTag(head) + 1U);
     } while (
-        !store_.FreeHead().compare_exchange_weak(head, block_id, std::memory_order_acq_rel, std::memory_order_acquire));
+        !store_.FreeHead().compare_exchange_weak(head, new_head, std::memory_order_acq_rel, std::memory_order_acquire));
     store_.FreeCount().fetch_add(1U, std::memory_order_relaxed);
   }
 

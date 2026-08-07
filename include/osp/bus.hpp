@@ -52,7 +52,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <thread>
 #include <type_traits>
 #include <variant>
 
@@ -277,7 +276,7 @@ class SpinLock {
       if (backoff >= kYieldThreshold) {
         // Long spin: yield the CPU slice so other threads can make progress
         // instead of burning the core in a tight loop.
-        std::this_thread::yield();
+        osp::ThreadYield();
       }
       if (backoff < kMaxBackoff) {
         backoff <<= 1;
@@ -403,7 +402,7 @@ class SharedSpinLock {
     if (backoff >= kYieldThreshold) {
       // Long spin: yield the CPU slice so the lock holder can make progress
       // instead of burning the core in a tight loop.
-      std::this_thread::yield();
+      osp::ThreadYield();
     }
     if (backoff < kMaxBackoff) {
       backoff <<= 1;

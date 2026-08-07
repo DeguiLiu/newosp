@@ -100,3 +100,35 @@ endif()
 catch_discover_tests(osp_tests
     PROPERTIES SKIP_RETURN_CODE 4
 )
+
+# --- lwIP backend tests (optional; link an external lwIP library) ---
+# OSP_LWIP_INCLUDE_DIR: semicolon-separated lwIP include dirs, e.g.
+#   lwip/src/include;lwip/contrib/ports/unix/port/include;lwip/contrib/ports/unix/lib;lwip/contrib
+# OSP_LWIP_LIBRARY: path to the compiled lwIP library (e.g. unixsim liblwip).
+# The library must be built with LWIP_COMPAT_SOCKETS=0 and LWIP_NETIF_LOOPBACK=1.
+option(OSP_WITH_LWIP "Build lwIP backend tests against an external lwIP library" OFF)
+set(OSP_LWIP_INCLUDE_DIR "" CACHE PATH "lwIP include directories (semicolon-separated)")
+set(OSP_LWIP_LIBRARY "" CACHE FILEPATH "Path to the lwIP library (e.g. unixsim liblwip)")
+
+if(OSP_WITH_LWIP)
+    if(NOT OSP_LWIP_INCLUDE_DIR OR NOT OSP_LWIP_LIBRARY)
+        message(FATAL_ERROR "OSP_WITH_LWIP requires OSP_LWIP_INCLUDE_DIR and OSP_LWIP_LIBRARY")
+    endif()
+    add_executable(osp_lwip_tests
+        test_lwip_main.cpp
+        test_lwip_backend.cpp
+    )
+    target_link_libraries(osp_lwip_tests Catch2::Catch2 osp Threads::Threads)
+    target_include_directories(osp_lwip_tests PRIVATE ${OSP_LWIP_INCLUDE_DIR})
+    target_compile_definitions(osp_lwip_tests PRIVATE
+        OSP_NET_BACKEND=1
+        LWIP_NETIF_LOOPBACK=1
+        LWIP_COMPAT_SOCKETS=0
+    )
+    get_filename_component(OSP_LWIP_LIB_DIR "${OSP_LWIP_LIBRARY}" DIRECTORY)
+    target_link_options(osp_lwip_tests PRIVATE "-Wl,-rpath,${OSP_LWIP_LIB_DIR}")
+    target_link_libraries(osp_lwip_tests ${OSP_LWIP_LIBRARY})
+    catch_discover_tests(osp_lwip_tests
+        PROPERTIES SKIP_RETURN_CODE 4
+    )
+endif()

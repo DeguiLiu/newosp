@@ -87,7 +87,7 @@ namespace osp {
  */
 struct YieldSleepStrategy {
   /** @brief Called when the executor is idle (no messages processed). */
-  void OnIdle() noexcept { std::this_thread::yield(); }
+  void OnIdle() noexcept { osp::ThreadYield(); }
 
   /** @brief Called when the executor is busy (messages processed). */
   void OnBusy() noexcept {
@@ -154,7 +154,12 @@ struct PreciseSleepStrategy {
       sleep_ns = max_sleep_ns_;
     }
 
-#if defined(OSP_PLATFORM_LINUX)
+#if defined(OSP_PLATFORM_RTTHREAD)
+    // RT-Thread has no nanosleep; round up to a millisecond delay via the
+    // platform abstraction (rt_thread_mdelay). Must precede the Linux branch:
+    // a host build may define __linux__ even when compiling for RT-Thread.
+    osp::ThreadSleepUs(sleep_ns / 1000ULL);
+#elif defined(OSP_PLATFORM_LINUX)
     // Use clock_nanosleep with absolute time for precise wakeup
     struct timespec ts;
     const uint64_t target_ns = now_ns + sleep_ns;
