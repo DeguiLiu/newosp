@@ -1130,7 +1130,8 @@ TEST_CASE("ConsumerSlot: cleanup dead consumer as sole holder recycles block", "
   d.TrackBlockHold(cid, bid);
 
   // Simulate crash (kill -9 form): slot active==1 but heartbeat expired.
-  d.GetStore().GetConsumerSlot(static_cast<uint32_t>(cid))
+  d.GetStore()
+      .GetConsumerSlot(static_cast<uint32_t>(cid))
       ->heartbeat_us.store(SteadyNowUs() - OSP_JOB_CONSUMER_TIMEOUT_US - 1000000ULL, std::memory_order_relaxed);
 
   REQUIRE(d.FreeBlocks() == 7U);

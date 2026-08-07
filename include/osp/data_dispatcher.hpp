@@ -25,8 +25,17 @@
 /**
  * @file data_dispatcher.hpp
  * @brief Shared data block pipeline with StorePolicy (InProc/Shm).
- * CAS logic lives once in DataDispatcher; StorePolicy provides accessors only.
- * OSP_ASSERT guards shared-memory invariants, not caller input validation.
+ *
+ * Architecture:
+ *   DataDispatcher<StorePolicy, NotifyPolicy, MaxStages, MaxEdges>
+ *     +-- StorePolicy: InProcStore<BS,MB> or ShmStore<BS,MB>
+ *     +-- NotifyPolicy: DirectNotify or ShmNotify
+ *     +-- Pipeline<MaxStages, MaxEdges> (static DAG)
+ *     +-- FaultReporter, BackpressureFn (optional)
+ *
+ * CAS lock-free logic is written once in DataDispatcher, shared by all
+ * StorePolicy implementations. OSP_ASSERT guards shared-memory invariants
+ * (not input validation). Header-only, C++17, -fno-exceptions -fno-rtti.
  */
 
 #ifndef OSP_DATA_DISPATCHER_HPP_
@@ -1140,8 +1149,7 @@ class DataDispatcher {
       uint64_t mask = slot->holding_mask.exchange(0U, std::memory_order_acq_rel);
       if (active == 1U) {
         uint32_t expected = 1U;
-        if (!slot->active.compare_exchange_strong(expected, 0U, std::memory_order_acq_rel,
-                                                  std::memory_order_acquire)) {
+        if (!slot->active.compare_exchange_strong(expected, 0U, std::memory_order_acq_rel, std::memory_order_acquire)) {
           // Lost the claim (concurrent reaper). Restore the mask only for an
           // inactive slot; a reused slot owns its mask again. Orphaned blocks
           // are reclaimed by ScanTimeout() by deadline.

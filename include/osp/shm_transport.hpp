@@ -1043,12 +1043,12 @@ class ShmByteChannel final {
  * safety. Each consumer has an independent tail for independent reading.
  */
 struct ShmSpmcByteRingHeader {
-  std::atomic<uint32_t> head;                                       ///< Producer write position (monotonically increasing)
-  uint32_t capacity;                                                ///< Data area size (must be power of 2)
-  uint32_t max_consumers;                                           ///< Maximum number of consumers
-  std::atomic<uint32_t> consumer_count;                             ///< Active consumer count (atomic CAS)
-  std::atomic<uint32_t> tails[OSP_SHM_SPMC_MAX_CONSUMERS];          ///< Per-consumer read positions (atomic: read by producer)
-  std::atomic<uint32_t> active[OSP_SHM_SPMC_MAX_CONSUMERS];         ///< 1=active, 0=inactive
+  std::atomic<uint32_t> head;                                ///< Producer write position (monotonically increasing)
+  uint32_t capacity;                                         ///< Data area size (must be power of 2)
+  uint32_t max_consumers;                                    ///< Maximum number of consumers
+  std::atomic<uint32_t> consumer_count;                      ///< Active consumer count (atomic CAS)
+  std::atomic<uint32_t> tails[OSP_SHM_SPMC_MAX_CONSUMERS];   ///< Per-consumer read positions (atomic: read by producer)
+  std::atomic<uint32_t> active[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< 1=active, 0=inactive
 };
 
 static_assert(std::atomic<uint32_t>::is_always_lock_free,
