@@ -28,7 +28,8 @@
  *
  * Provides FixedPool (raw block allocation) and ObjectPool (typed allocation
  * with placement new). All storage is inline -- zero heap allocation.
- * Thread-safe via osp::Mutex. Compatible with -fno-exceptions -fno-rtti.
+ * Lock-free (32-bit tagged-CAS) -- ISR-safe on single-core.
+ * Compatible with -fno-exceptions -fno-rtti.
  *
  * Ported from mp::FixedPool / mp::ObjectPool with the following additions:
  *   - AllocateChecked() returns expected<void*, MemPoolError>
@@ -53,6 +54,20 @@
 #include <type_traits>
 #include <utility>
 
+// Free-list next-field access is the classic benign Treiber race (stale reads
+// discarded by failed CAS). TSan flags it, so skip instrumentation here.
+#if defined(__SANITIZE_THREAD__)
+#define OSP_TSAN_NO_RACE __attribute__((no_sanitize("thread")))
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define OSP_TSAN_NO_RACE __attribute__((no_sanitize("thread")))
+#else
+#define OSP_TSAN_NO_RACE
+#endif
+#else
+#define OSP_TSAN_NO_RACE
+#endif
+
 namespace osp {
 
 // ============================================================================
@@ -70,14 +85,18 @@ static constexpr uint32_t kInvalidIndex = UINT32_MAX;
 // x86 and ARM Cortex-M (LDREX/STREX) -- no libatomic fallback on 32-bit.
 // ---------------------------------------------------------------------------
 static constexpr uint32_t kFreeIndexShift = 16U;
-static constexpr uint32_t kFreeIndexMask = 0xFFFFU;   // also the empty sentinel
+static constexpr uint32_t kFreeIndexMask = 0xFFFFU;  // also the empty sentinel
 static constexpr uint32_t kFreeIndexEmpty = kFreeIndexMask;
 
 inline uint32_t FreePoolPackHead(uint32_t index, uint32_t tag) noexcept {
   return ((tag & kFreeIndexMask) << kFreeIndexShift) | (index & kFreeIndexMask);
 }
-inline uint32_t FreePoolHeadIndex(uint32_t head) noexcept { return head & kFreeIndexMask; }
-inline uint32_t FreePoolHeadTag(uint32_t head) noexcept { return (head >> kFreeIndexShift) & kFreeIndexMask; }
+inline uint32_t FreePoolHeadIndex(uint32_t head) noexcept {
+  return head & kFreeIndexMask;
+}
+inline uint32_t FreePoolHeadTag(uint32_t head) noexcept {
+  return (head >> kFreeIndexShift) & kFreeIndexMask;
+}
 
 }  // namespace detail
 
@@ -144,10 +163,8 @@ class FixedPool {
     while (detail::FreePoolHeadIndex(head) != detail::kFreeIndexEmpty) {
       const uint32_t idx = detail::FreePoolHeadIndex(head);
       const uint32_t next = LoadIndex(idx);
-      const uint32_t new_head =
-          detail::FreePoolPackHead(next, detail::FreePoolHeadTag(head) + 1U);
-      if (free_head_.compare_exchange_weak(head, new_head, std::memory_order_relaxed,
-                                           std::memory_order_relaxed)) {
+      const uint32_t new_head = detail::FreePoolPackHead(next, detail::FreePoolHeadTag(head) + 1U);
+      if (free_head_.compare_exchange_weak(head, new_head, std::memory_order_acq_rel, std::memory_order_relaxed)) {
         used_count_.fetch_add(1U, std::memory_order_relaxed);
         allocated_[idx].store(true, std::memory_order_relaxed);
         return BlockPtr(idx);
@@ -165,10 +182,8 @@ class FixedPool {
     while (detail::FreePoolHeadIndex(head) != detail::kFreeIndexEmpty) {
       const uint32_t idx = detail::FreePoolHeadIndex(head);
       const uint32_t next = LoadIndex(idx);
-      const uint32_t new_head =
-          detail::FreePoolPackHead(next, detail::FreePoolHeadTag(head) + 1U);
-      if (free_head_.compare_exchange_weak(head, new_head, std::memory_order_relaxed,
-                                           std::memory_order_relaxed)) {
+      const uint32_t new_head = detail::FreePoolPackHead(next, detail::FreePoolHeadTag(head) + 1U);
+      if (free_head_.compare_exchange_weak(head, new_head, std::memory_order_acq_rel, std::memory_order_relaxed)) {
         used_count_.fetch_add(1U, std::memory_order_relaxed);
         allocated_[idx].store(true, std::memory_order_relaxed);
         return expected<void*, MemPoolError>::success(BlockPtr(idx));
@@ -197,10 +212,8 @@ class FixedPool {
     uint32_t head = free_head_.load(std::memory_order_relaxed);
     for (;;) {
       StoreIndex(idx, detail::FreePoolHeadIndex(head));
-      const uint32_t new_head =
-          detail::FreePoolPackHead(idx, detail::FreePoolHeadTag(head) + 1U);
-      if (free_head_.compare_exchange_weak(head, new_head, std::memory_order_relaxed,
-                                           std::memory_order_relaxed)) {
+      const uint32_t new_head = detail::FreePoolPackHead(idx, detail::FreePoolHeadTag(head) + 1U);
+      if (free_head_.compare_exchange_weak(head, new_head, std::memory_order_acq_rel, std::memory_order_relaxed)) {
         break;
       }
       // CAS failed: head refreshed; retry.
@@ -276,17 +289,15 @@ class FixedPool {
   std::atomic<bool> allocated_[MaxBlocks];
 
   /// @brief Check if a block index is currently allocated (diagnostic only).
-  bool IsAllocatedUnlocked(uint32_t idx) const {
-    return allocated_[idx].load(std::memory_order_relaxed);
-  }
+  bool IsAllocatedUnlocked(uint32_t idx) const { return allocated_[idx].load(std::memory_order_relaxed); }
 
   /// @brief Store next-free index into a block (strict aliasing safe).
-  void StoreIndex(uint32_t block_idx, uint32_t next_idx) {
+  OSP_TSAN_NO_RACE void StoreIndex(uint32_t block_idx, uint32_t next_idx) {
     std::memcpy(&storage_[block_idx * kAlignedBlockSize], &next_idx, sizeof(uint32_t));
   }
 
   /// @brief Load next-free index from a block (strict aliasing safe).
-  uint32_t LoadIndex(uint32_t block_idx) const {
+  OSP_TSAN_NO_RACE uint32_t LoadIndex(uint32_t block_idx) const {
     uint32_t idx;
     std::memcpy(&idx, &storage_[block_idx * kAlignedBlockSize], sizeof(uint32_t));
     return idx;
@@ -420,5 +431,7 @@ class ObjectPool {
 };
 
 }  // namespace osp
+
+#undef OSP_TSAN_NO_RACE
 
 #endif  // OSP_MEM_POOL_HPP_
