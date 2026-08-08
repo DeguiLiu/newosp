@@ -81,13 +81,22 @@ enum class SemaphoreError : uint8_t { kTimeout = 0, kInterrupted, kInvalid };
  */
 class LightSemaphore final {
  public:
-  /**
-   * @brief Construct with an initial count.
-   * @param initial_count Starting value of the semaphore counter.
-   */
-  explicit LightSemaphore(uint32_t initial_count = 0) noexcept : count_(initial_count) {}
+  explicit LightSemaphore(uint32_t initial_count = 0) noexcept : count_(initial_count) {
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+    valid_ = (::sem_init(&sem_, 0, initial_count) == 0);
+    if (!valid_) {
+      count_.store(0U, std::memory_order_relaxed);
+    }
+#endif
+  }
 
-  ~LightSemaphore() = default;
+  ~LightSemaphore() {
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+    if (valid_) {
+      ::sem_destroy(&sem_);
+    }
+#endif
+  }
 
   // Non-copyable, non-movable
   LightSemaphore(const LightSemaphore&) = delete;
@@ -99,71 +108,148 @@ class LightSemaphore final {
   // Public API
   // ==========================================================================
 
-  /**
-   * @brief Increment the count and wake one waiting thread.
-   */
   void Signal() noexcept {
-    {
-      std::lock_guard<std::mutex> lk(mtx_);
-      ++count_;
+    count_.fetch_add(1U, std::memory_order_relaxed);
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+    if (valid_) {
+      ::sem_post(&sem_);
     }
+#else
     cv_.notify_one();
+#endif
   }
 
-  /**
-   * @brief Alias for Signal().
-   */
+  // Increment the count by n and wake one waiter. Collapses n consecutive
+  // Signal() calls into a single sem_post / notify (fewer wakeups for a burst
+  // of tokens; the waiter draining it stays woken). n must be > 0.
+  void SignalN(uint32_t n) noexcept {
+    if (n == 0U) {
+      return;
+    }
+    count_.fetch_add(n, std::memory_order_relaxed);
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+    if (valid_) {
+      while (n > 0U) {
+        ::sem_post(&sem_);
+        --n;
+      }
+    }
+#else
+    // n posts collapse to one notify: the predicate (count>0) is monotonic.
+    (void)n;
+    cv_.notify_one();
+#endif
+  }
+
   void Post() noexcept { Signal(); }
 
-  /**
-   * @brief Decrement the count, blocking if it is zero.
-   */
   void Wait() noexcept {
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+    if (!valid_) {
+      return;
+    }
+    int r = ::sem_wait(&sem_);
+    while (r != 0 && errno == EINTR) {
+      r = ::sem_wait(&sem_);
+    }
+    if (r == 0) {
+      count_.fetch_sub(1U, std::memory_order_relaxed);
+    }
+#else
     std::unique_lock<std::mutex> lk(mtx_);
-    cv_.wait(lk, [this] { return count_ > 0U; });
-    --count_;
+    cv_.wait(lk, [this] { return count_.load(std::memory_order_relaxed) > 0U; });
+    count_.fetch_sub(1U, std::memory_order_relaxed);
+#endif
   }
 
-  /**
-   * @brief Non-blocking try-decrement.
-   * @return true if the count was decremented, false if it was zero.
-   */
   bool TryWait() noexcept {
-    std::lock_guard<std::mutex> lk(mtx_);
-    if (count_ > 0U) {
-      --count_;
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+    if (valid_ && ::sem_trywait(&sem_) == 0) {
+      count_.fetch_sub(1U, std::memory_order_relaxed);
       return true;
     }
     return false;
+#else
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (count_.load(std::memory_order_relaxed) > 0U) {
+      count_.fetch_sub(1U, std::memory_order_relaxed);
+      return true;
+    }
+    return false;
+#endif
   }
 
-  /**
-   * @brief Timed wait with microsecond timeout.
-   * @param timeout_us Maximum time to wait in microseconds.
-   * @return true if the count was decremented before timeout, false otherwise.
-   */
   bool WaitFor(uint64_t timeout_us) noexcept {
+#if defined(OSP_PLATFORM_LINUX)
+    return WaitForTimedwait(timeout_us);
+#elif defined(OSP_PLATFORM_MACOS)
+    return WaitForPoll(timeout_us);
+#else
     std::unique_lock<std::mutex> lk(mtx_);
-    bool result = cv_.wait_for(lk, std::chrono::microseconds(timeout_us), [this] { return count_ > 0U; });
+    bool result = cv_.wait_for(lk, std::chrono::microseconds(timeout_us),
+                               [this] { return count_.load(std::memory_order_relaxed) > 0U; });
     if (result) {
-      --count_;
+      count_.fetch_sub(1U, std::memory_order_relaxed);
     }
     return result;
+#endif
   }
 
-  /**
-   * @brief Current count (approximate, relaxed ordering).
-   * @return The current semaphore count.
-   */
-  uint32_t Count() const noexcept {
-    std::lock_guard<std::mutex> lk(mtx_);
-    return count_;
-  }
+  uint32_t Count() const noexcept { return count_.load(std::memory_order_relaxed); }
 
  private:
-  mutable std::mutex mtx_;
+#if defined(OSP_PLATFORM_LINUX)
+  bool WaitForTimedwait(uint64_t timeout_us) noexcept {
+    if (!valid_) {
+      return false;
+    }
+    struct timespec ts;
+    if (::clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+      return false;
+    }
+    uint64_t nsec = static_cast<uint64_t>(ts.tv_nsec) + (timeout_us % 1000000ULL) * 1000ULL;
+    ts.tv_sec += static_cast<time_t>(timeout_us / 1000000ULL + nsec / 1000000000ULL);
+    ts.tv_nsec = static_cast<long>(nsec % 1000000000ULL);
+    for (;;) {
+      if (::sem_timedwait(&sem_, &ts) == 0) {
+        count_.fetch_sub(1U, std::memory_order_relaxed);
+        return true;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;  // ETIMEDOUT
+    }
+  }
+#endif
+
+#if defined(OSP_PLATFORM_MACOS)
+  bool WaitForPoll(uint64_t timeout_us) noexcept {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
+    if (valid_ && ::sem_trywait(&sem_) == 0) {
+      count_.fetch_sub(1U, std::memory_order_relaxed);
+      return true;
+    }
+    constexpr uint64_t kSleepUs = 50;
+    while (std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::microseconds(kSleepUs));
+      if (valid_ && ::sem_trywait(&sem_) == 0) {
+        count_.fetch_sub(1U, std::memory_order_relaxed);
+        return true;
+      }
+    }
+    return valid_ && ::sem_trywait(&sem_) == 0;
+  }
+#endif
+
+  std::atomic<uint32_t> count_;
+#if defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)
+  sem_t sem_;
+  bool valid_{false};
+#else
+  std::mutex mtx_;
   std::condition_variable cv_;
-  uint32_t count_;
+#endif
 };
 
 // ============================================================================
