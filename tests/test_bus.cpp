@@ -424,6 +424,64 @@ TEST_CASE("Bus queue overflow behavior", "[bus]") {
   REQUIRE(stats.messages_dropped > 0);
 }
 
+TEST_CASE("Bus high priority survives low/medium flood via eviction", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::atomic<int> low_recv{0};
+  std::atomic<int> med_recv{0};
+  std::atomic<int> high_recv{0};
+  bus.Subscribe<SensorData>([&low_recv](const TestEnvelope&) { ++low_recv; });
+  bus.Subscribe<MotorCmd>([&med_recv](const TestEnvelope&) { ++med_recv; });
+  bus.Subscribe<AlarmEvent>([&high_recv](const TestEnvelope&) { ++high_recv; });
+
+  // Flood the queue with LOW then MED (no consumer yet), so by the time HIGH
+  // is published the queue is well past every threshold.
+  int low_pub = 0, low_fail = 0, med_pub = 0, med_fail = 0;
+  for (int i = 0; i < 6000; ++i) {
+    if (bus.PublishWithPriority(SensorData{1.0f, static_cast<uint32_t>(i)}, 0, osp::MessagePriority::kLow)) {
+      ++low_pub;
+    } else {
+      ++low_fail;
+    }
+  }
+  for (int i = 0; i < 6000; ++i) {
+    if (bus.PublishWithPriority(MotorCmd{static_cast<int32_t>(i), 0}, 0, osp::MessagePriority::kMedium)) {
+      ++med_pub;
+    } else {
+      ++med_fail;
+    }
+  }
+
+  // Now publish HIGH against the saturated queue: eviction must admit them.
+  int high_pub = 0, high_fail = 0;
+  for (int i = 0; i < 1000; ++i) {
+    if (bus.PublishWithPriority(AlarmEvent{static_cast<uint32_t>(i), 0}, 0, osp::MessagePriority::kHigh)) {
+      ++high_pub;
+    } else {
+      ++high_fail;
+    }
+  }
+
+  // Drain everything.
+  for (int round = 0; round < 200 && bus.Depth() > 0; ++round) {
+    bus.ProcessBatch();
+  }
+
+// The invariant "every Publish that returned true is eventually delivered"
+// still holds for the non-evicted messages in the non-priority overflow test;
+// here, with eviction, HIGH must all be delivered, while the flood guarantees
+// drops elsewhere.
+#if OSP_BUS_EVICTION
+  REQUIRE(high_fail == 0);
+  REQUIRE(high_recv.load() == high_pub);
+#endif
+  // Flood was dropped somewhere (low/medium or the gated HIGH), not all kept.
+  REQUIRE(low_fail + med_fail + high_fail > 0);
+  (void)low_pub;
+  (void)med_pub;
+}
+
 TEST_CASE("Bus concurrent publish from multiple threads", "[bus]") {
   BusFixture fix;
   auto& bus = TestBus::Instance();

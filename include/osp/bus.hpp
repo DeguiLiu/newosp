@@ -438,6 +438,18 @@ class AsyncBus {
   static constexpr uint32_t kBufferMask = kQueueDepth - 1;
   static constexpr uint32_t kBatchSize = static_cast<uint32_t>(OSP_BUS_BATCH_SIZE);
 
+  // Slot sequence-state encodings. A slot currently holding position p has:
+  //   sequence == p        : free/available (producer claims by advancing pos)
+  //   sequence == p+1      : published, pending for the consumer
+  //   sequence == p+1+k    : consumed (released back to producer)
+  //   sequence == p+1+2k   : reserved by an evictor (HARD-HIGH in-place replace)
+  // The k/2k offsets keep these values far outside the active window
+  // [consumer_pos, producer_pos] (which is bounded by kQueueDepth), so the
+  // eviction marker can never alias a real published/free/consumed value
+  // -> ABA-free. k2k below is kQueueDepth<<1 used as the eviction marker.
+  static constexpr uint32_t kConsumedOffset = kQueueDepth;
+  static constexpr uint32_t kEvictOffset = kQueueDepth << 1;
+
   static constexpr uint32_t kLowThreshold = (kQueueDepth * 60) / 100;
   static constexpr uint32_t kMediumThreshold = (kQueueDepth * 80) / 100;
   static constexpr uint32_t kHighThreshold = (kQueueDepth * 99) / 100;
@@ -445,6 +457,7 @@ class AsyncBus {
   static constexpr uint64_t kMsgIdWrapThreshold = UINT64_MAX - 10000;
 
   static_assert((kQueueDepth & (kQueueDepth - 1)) == 0, "Queue depth must be power of 2");
+  static_assert(kQueueDepth <= 0x7FFFFFFFU, "kQueueDepth too large: eviction/consumed markers must not wrap uint32_t");
 
   /** @brief Meyer's singleton - one bus per PayloadVariant type. */
   static AsyncBus& Instance() noexcept {
@@ -625,11 +638,15 @@ class AsyncBus {
     for (uint32_t i = 0; i < kBatchSize; ++i) {
       RingBufferNode& node = ring_buffer_[cons_pos & kBufferMask];
 
+      // Claim the slot by atomically transitioning it from "published"
+      // (p+1) to "consuming" (p+1+k). If an evictor concurrently reserves the
+      // slot (CAS to p+1+2k), the CAS here fails and we stop without reading
+      // a half-overwritten envelope.
       uint32_t expected_seq = cons_pos + 1;
-      uint32_t seq = node.sequence.load(std::memory_order_acquire);
-
-      if (seq != expected_seq)
+      if (!node.sequence.compare_exchange_strong(expected_seq, expected_seq + kConsumedOffset,
+                                                 std::memory_order_acq_rel, std::memory_order_acquire)) {
         break;
+      }
 
       // Prefetch next ring buffer slot for reduced cache miss latency
 #ifdef __GNUC__
@@ -676,11 +693,13 @@ class AsyncBus {
     for (uint32_t i = 0; i < kBatchSize; ++i) {
       RingBufferNode& node = ring_buffer_[cons_pos & kBufferMask];
 
+      // Claim the slot atomically (published p+1 -> consuming p+1+k) so a
+      // concurrent evictor cannot overwrite the envelope mid-read.
       uint32_t expected_seq = cons_pos + 1;
-      uint32_t seq = node.sequence.load(std::memory_order_acquire);
-
-      if (seq != expected_seq)
+      if (!node.sequence.compare_exchange_strong(expected_seq, expected_seq + kConsumedOffset,
+                                                 std::memory_order_acq_rel, std::memory_order_acquire)) {
         break;
+      }
 
 #ifdef __GNUC__
       if (i + 1 < kBatchSize) {
@@ -763,6 +782,7 @@ class AsyncBus {
     // Reset ring buffer sequences
     for (uint32_t i = 0; i < kQueueDepth; ++i) {
       ring_buffer_[i].sequence.store(i, std::memory_order_relaxed);
+      ring_buffer_[i].slot_priority.store(static_cast<uint8_t>(MessagePriority::kMedium), std::memory_order_relaxed);
     }
     producer_pos_.store(0, std::memory_order_relaxed);
     cached_consumer_pos_.store(0, std::memory_order_relaxed);
@@ -777,6 +797,11 @@ class AsyncBus {
 
   struct alignas(osp::kCacheLineSize) RingBufferNode {
     std::atomic<uint32_t> sequence{0};
+    // Atomic priority of the slot's current payload so an evictor can peek
+    // (and re-verify) the target's priority against a racing producer without
+    // touching the non-atomic envelope fields. Written next to the envelope
+    // header by the publisher; read by TryEvict.
+    std::atomic<uint8_t> slot_priority{static_cast<uint8_t>(MessagePriority::kMedium)};
     EnvelopeType envelope;
   };
 
@@ -830,6 +855,16 @@ class AsyncBus {
 
       uint32_t real_depth = prod - real_cons;
       if (real_depth >= threshold) {
+#if OSP_BUS_EVICTION
+        // For the highest-priority class, don't drop immediately -- evict the
+        // oldest pending lower-priority message (if any) to admit the HIGH.
+        if (priority == MessagePriority::kHigh) {
+          if (TryEvictAndPublish(std::move(payload), sender_id, timestamp_us, topic_hash)) {
+            return true;
+          }
+          // No lower-priority slot to evict: fall through and drop.
+        }
+#endif
         stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
         ReportError(BusError::kQueueFull, current_id);
         return false;
@@ -863,6 +898,7 @@ class AsyncBus {
     uint64_t msg_id = next_msg_id_.fetch_add(1, std::memory_order_relaxed);
     target->envelope.header = MessageHeader{msg_id, timestamp_us, sender_id, topic_hash, priority};
     target->envelope.payload = std::move(payload);
+    target->slot_priority.store(static_cast<uint8_t>(priority), std::memory_order_relaxed);
 
     // Publish (make visible to consumer)
     target->sequence.store(prod_pos + 1, std::memory_order_release);
@@ -870,6 +906,85 @@ class AsyncBus {
     stats_.messages_published.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
+
+  // ======================== High-Priority Eviction ========================
+
+#if OSP_BUS_EVICTION
+  /**
+   * @brief Evict the oldest pending lower-priority message in-place and publish
+   *        the given HIGH message to that freed ring slot.
+   *
+   * Called from PublishInternal only for MessagePriority::kHigh when the queue
+   * has reached the kHigh threshold. Scans the active window [consumer_pos+1,
+   * producer_pos] from oldest to newest for a published (p+1), not-yet-consumed
+   * slot whose priority is strictly lower (kLow/kMedium) than the incoming
+   * HIGH, CAS-reserves it (p+1 -> p+1+2k) to arbitrate against a competing
+   * evictor and the consumer, re-verifies the priority under the reserve (so a
+   * just-inserted HIGH is never evicted), then overwrites and re-publishes.
+   *
+   * Best-effort and bounded: each candidate is CAS'd once; on any failure or
+   * when no eligible slot exists it returns false so the caller drops the
+   * incoming message (queue genuinely holds only HIGH, or is fully contested).
+   *
+   * @return true if the HIGH was admitted by evicting a lower-priority slot.
+   */
+  bool TryEvictAndPublish(PayloadVariant&& payload, uint32_t sender_id, uint64_t timestamp_us,
+                          uint32_t topic_hash) noexcept {
+    uint32_t prod = producer_pos_.load(std::memory_order_relaxed);
+    uint32_t cons = consumer_pos_.load(std::memory_order_acquire);
+
+    // Scan the active window [cons+1, prod) with modular advance. The window is
+    // always < kQueueDepth (queue-full invariant), so a bounded modular probe
+    // never truncates a valid scan and stays wrap-safe around uint32_t.
+    for (uint32_t i = 1; i < kQueueDepth; ++i) {
+      uint32_t p = cons + i;
+      if (p == prod)
+        break;
+      RingBufferNode& node = ring_buffer_[p & kBufferMask];
+
+      // Peek at the slot state without claiming: only published slots are
+      // candidate for eviction; consuming (p+1+k) / released (p+k) are not.
+      uint32_t seq = node.sequence.load(std::memory_order_acquire);
+      if (seq != (p + 1))
+        continue;
+
+      // Skip slots already holding HIGH (we never evict a higher/equal prio).
+      if (node.slot_priority.load(std::memory_order_relaxed) >= static_cast<uint8_t>(MessagePriority::kHigh))
+        continue;
+
+      // Reserve the slot so neither the consumer nor another evictor can touch
+      // it while we overwrite the envelope. CAS from published (p+1) to evict
+      // marker (p+1+2k); fails if a consumer/evictor claimed it just now.
+      if (!node.sequence.compare_exchange_strong(seq, p + 1 + kEvictOffset, std::memory_order_acq_rel,
+                                                 std::memory_order_acquire))
+        continue;
+
+      // Re-verify priority under the reserve: a producer could have slipped a
+      // HIGH into this slot between the peek and the reserve. If so, restore
+      // and keep scanning for an actual lower-priority victim.
+      if (node.slot_priority.load(std::memory_order_relaxed) >= static_cast<uint8_t>(MessagePriority::kHigh)) {
+        node.sequence.store(p + 1, std::memory_order_release);
+        continue;
+      }
+
+      // Overwrite the evicted (lower-priority) payload with the HIGH message
+      // and re-publish at the same ring position, so the consumer sees HIGH
+      // here (it was delivered ahead of messages still queued behind it).
+      uint64_t msg_id = next_msg_id_.fetch_add(1, std::memory_order_relaxed);
+      node.envelope.header = MessageHeader{msg_id, timestamp_us, sender_id, topic_hash, MessagePriority::kHigh};
+      node.envelope.payload = std::move(payload);
+      node.slot_priority.store(static_cast<uint8_t>(MessagePriority::kHigh), std::memory_order_relaxed);
+
+      node.sequence.store(p + 1, std::memory_order_release);
+
+      // The evicted LOW/MED is counted as dropped; the HIGH as published.
+      stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
+      stats_.messages_published.fetch_add(1, std::memory_order_relaxed);
+      return true;
+    }
+    return false;
+  }
+#endif  // OSP_BUS_EVICTION
 
   void DispatchMessage(const EnvelopeType& envelope) noexcept {
     uint32_t type_idx = static_cast<uint32_t>(envelope.payload.index());

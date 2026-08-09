@@ -6,6 +6,24 @@
 
 ## 最新变更
 
+### 2026-08-09: v0.6.3 AsyncBus 高优先级驱逐 (TDD)
+
+**变更内容** (1 项 P0 缺陷修复 + 1 项测试增强):
+
+1. **P0: AsyncBus 高优先级（kHigh）在低/中优先级洪泛下被误丢**
+   - `priority_demo` 复现: Phase2 灌 10k LOW + 5k MED + 1k HIGH 进 4096 深 MPSC 队列且零消费时，队列钉死 100%，最后发布的 HIGH 撞 99% 阈值被丢（CriticalAlert drop 20.1%）。
+   - 根因: 单个 FIFO 环的阈值准入按"当前总深度"判断，高优先级与低优先级同样排队、同样被 gate，无优先级保护。
+   - 修复: 新增 `OSP_BUS_EVICTION`（默认开）。HIGH 命中阈值时，从 `[consumer_pos+1, producer_pos]` 扫描最老的未消费低优先级已发布槽，CAS 原位保留（`p+1 → p+1+2k`）后覆写为 HIGH 并重新发布，实现高优先级插队保送；被逐的低/中优先级计为 dropped。消费者改 `load+compare` 为 `sequence CAS(p+1→p+1+k)` 认领槽位，杜绝驱逐者覆写 envelope 时的撕裂读。
+   - 无锁正确性: 消费者 `p+1+k`、驱逐者 `p+1+2k`、已发布 `p+1`、空闲 `p`、释放 `p+k` 值域互斥 → ABA-free；驱逐者不改 `producer_pos_`、扫描有界、失败回退 drop。
+   - 验证: host + RT-Thread 5.2.1 simulator 双平台 `priority_demo` CriticalAlert drop=0.0%（recv=1100 全送达）；全量 1264 用例全绿；GCC TSan 无数据竞争；4 生产者+1 消费者并发驱逐压测 5/5 全送达无卡死。
+
+2. **测试增强: `Bus high priority survives low/medium flood via eviction`**
+   - 洪泛打满后发 HIGH，断言 HIGH 全送达（`high_recv==high_pub`、`high_fail==0`）。
+
+---
+
+## 历史变更
+
 ### 2026-08-04: v0.5.4 稳定性与架构改进 (TDD)
 
 **变更内容** (8 项 P0/P1 缺陷修复 + 1 项架构改进，全部 RED->GREEN->REFACTOR 流程):

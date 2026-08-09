@@ -46,6 +46,16 @@
 #define OSP_BUS_BATCH_SIZE 256U
 #endif
 
+/// AsyncBus high-priority eviction.
+/// When ON, publishing a kHigh message to a queue that has hit the kHigh
+/// threshold will evict the oldest pending lower-priority (kLow/kMedium)
+/// message in-place (replacing its ring slot) so the HIGH gets admitted even
+/// under a low/medium flood. The evicted message is counted as dropped. When
+/// OFF, HIGH is gated exactly like any other priority (full queue drops).
+#ifndef OSP_BUS_EVICTION
+#define OSP_BUS_EVICTION 1U
+#endif
+
 /// WorkerPool per-worker SPSC queue depth.
 #ifndef OSP_WORKER_QUEUE_DEPTH
 #define OSP_WORKER_QUEUE_DEPTH 1024U
