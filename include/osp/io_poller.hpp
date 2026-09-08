@@ -95,7 +95,8 @@ inline constexpr uint8_t operator|(IoEvent a, IoEvent b) {
 
 struct PollResult {
   int32_t fd;
-  uint8_t events;  // bitmask of IoEvent
+  uint8_t events;    // bitmask of IoEvent
+  uintptr_t user_data;  // caller-provided tag added with Add(), returned on readiness
 };
 
 // ============================================================================
@@ -119,7 +120,7 @@ class IoPoller {
   int32_t Fd() const noexcept { return poller_fd_; }
 
   /** @brief Add an fd to monitor with given events (kReadable, kWritable). */
-  expected<void, PollerError> Add(int32_t fd, uint8_t events);
+  expected<void, PollerError> Add(int32_t fd, uint8_t events, uintptr_t user_data = 0U);
 
   /** @brief Modify monitored events for an fd. */
   expected<void, PollerError> Modify(int32_t fd, uint8_t events);
@@ -143,9 +144,55 @@ class IoPoller {
   const PollResult* Results() const noexcept { return results_.data(); }
 
  private:
+  // Store user_data for fd at registration; clear on Remove.
+  void StoreTag(int32_t fd, uintptr_t user_data) noexcept {
+    for (uint32_t i = 0U; i < tag_count_; ++i) {
+      if (tags_[i].fd == fd) {
+        tags_[i].user_data = user_data;
+        return;
+      }
+    }
+    if (tag_count_ < OSP_IO_POLLER_MAX_EVENTS) {
+      tags_[tag_count_].fd = fd;
+      tags_[tag_count_].user_data = user_data;
+      ++tag_count_;
+    }
+  }
+  void ClearTag(int32_t fd) noexcept {
+    for (uint32_t i = 0U; i < tag_count_; ++i) {
+      if (tags_[i].fd == fd) {
+        tags_[i] = tags_[tag_count_ - 1];
+        --tag_count_;
+        return;
+      }
+    }
+  }
+  uintptr_t LookupTag(int32_t fd) const noexcept {
+    for (uint32_t i = 0U; i < tag_count_; ++i) {
+      if (tags_[i].fd == fd) {
+        return tags_[i].user_data;
+      }
+    }
+    return 0U;
+  }
+
+ private:
   int32_t poller_fd_;
   std::array<PollResult, OSP_IO_POLLER_MAX_EVENTS> results_;
   uint32_t result_count_;
+
+  // fd -> user_data registry, bound to the poller's own lifetime: Add stores
+  // the tag at registration, Remove clears it, Wait echoes it back on the
+  // ready PollResult. This moves user_data out of the EventLoop (which used to
+  // re-scan its own fd table on every ready fd — the same fd-reuse window this
+  // closes) and into the poller, where registration and removal are atomic
+  // under the same critical section as the kernel wait.
+  struct FdTag {
+    int32_t fd = -1;
+    uintptr_t user_data = 0U;
+  };
+  std::array<FdTag, OSP_IO_POLLER_MAX_EVENTS> tags_;
+  uint32_t tag_count_ = 0;
 
 #if !OSP_IO_POLLER_USE_EPOLL && !OSP_IO_POLLER_USE_KQUEUE
   struct pollfd fds_[OSP_IO_POLLER_MAX_EVENTS];
@@ -205,9 +252,11 @@ inline IoPoller::~IoPoller() {
   }
 }
 
-inline IoPoller::IoPoller(IoPoller&& other) noexcept : poller_fd_(other.poller_fd_), results_{}, result_count_(0) {
+inline IoPoller::IoPoller(IoPoller&& other) noexcept
+    : poller_fd_(other.poller_fd_), results_{}, result_count_(0), tags_(other.tags_), tag_count_(other.tag_count_) {
   other.poller_fd_ = -1;
   other.result_count_ = 0;
+  other.tag_count_ = 0;
 }
 
 inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
@@ -217,19 +266,23 @@ inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
     }
     poller_fd_ = other.poller_fd_;
     result_count_ = 0;
+    tags_ = other.tags_;
+    tag_count_ = other.tag_count_;
     other.poller_fd_ = -1;
     other.result_count_ = 0;
+    other.tag_count_ = 0;
   }
   return *this;
 }
 
-inline expected<void, PollerError> IoPoller::Add(int fd, uint8_t events) {
+inline expected<void, PollerError> IoPoller::Add(int fd, uint8_t events, uintptr_t user_data) {
   struct epoll_event ev{};
   ev.events = detail::IoEventToEpoll(events);
   ev.data.fd = fd;
   if (::epoll_ctl(poller_fd_, EPOLL_CTL_ADD, fd, &ev) != 0) {
     return expected<void, PollerError>::error(PollerError::kAddFailed);
   }
+  StoreTag(fd, user_data);
   return expected<void, PollerError>::success();
 }
 
@@ -247,6 +300,7 @@ inline expected<void, PollerError> IoPoller::Remove(int32_t fd) {
   if (::epoll_ctl(poller_fd_, EPOLL_CTL_DEL, fd, nullptr) != 0) {
     return expected<void, PollerError>::error(PollerError::kRemoveFailed);
   }
+  ClearTag(fd);
   return expected<void, PollerError>::success();
 }
 
@@ -264,6 +318,7 @@ inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results, uint3
   for (uint32_t i = 0; i < count; ++i) {
     results[i].fd = raw_events[i].data.fd;
     results[i].events = detail::EpollToIoEvent(raw_events[i].events);
+    results[i].user_data = LookupTag(results[i].fd);
   }
   return expected<uint32_t, PollerError>::success(count);
 }
@@ -290,9 +345,11 @@ inline IoPoller::~IoPoller() {
   }
 }
 
-inline IoPoller::IoPoller(IoPoller&& other) noexcept : poller_fd_(other.poller_fd_), results_{}, result_count_(0) {
+inline IoPoller::IoPoller(IoPoller&& other) noexcept
+    : poller_fd_(other.poller_fd_), results_{}, result_count_(0), tags_(other.tags_), tag_count_(other.tag_count_) {
   other.poller_fd_ = -1;
   other.result_count_ = 0;
+  other.tag_count_ = 0;
 }
 
 inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
@@ -302,13 +359,16 @@ inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
     }
     poller_fd_ = other.poller_fd_;
     result_count_ = 0;
+    tags_ = other.tags_;
+    tag_count_ = other.tag_count_;
     other.poller_fd_ = -1;
     other.result_count_ = 0;
+    other.tag_count_ = 0;
   }
   return *this;
 }
 
-inline expected<void, PollerError> IoPoller::Add(int fd, uint8_t events) {
+inline expected<void, PollerError> IoPoller::Add(int fd, uint8_t events, uintptr_t user_data) {
   std::array<struct kevent, 2> changes{};
   int32_t nchanges = 0;
   if (events & static_cast<uint8_t>(IoEvent::kReadable)) {
@@ -326,6 +386,7 @@ inline expected<void, PollerError> IoPoller::Add(int fd, uint8_t events) {
   if (::kevent(poller_fd_, changes, nchanges, nullptr, 0, &ts) < 0) {
     return expected<void, PollerError>::error(PollerError::kAddFailed);
   }
+  StoreTag(fd, user_data);
   return expected<void, PollerError>::success();
 }
 
@@ -361,6 +422,7 @@ inline expected<void, PollerError> IoPoller::Remove(int32_t fd) {
   EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
   struct timespec ts = {0, 0};
   (void)::kevent(poller_fd_, changes, 2, nullptr, 0, &ts);
+  ClearTag(fd);
   return expected<void, PollerError>::success();
 }
 
@@ -412,6 +474,7 @@ inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results, uint3
     if (!merged && count < max_results) {
       results[count].fd = fd;
       results[count].events = ev;
+      results[count].user_data = LookupTag(fd);
       ++count;
     }
   }
@@ -482,7 +545,8 @@ inline IoPoller::~IoPoller() {
 }
 
 inline IoPoller::IoPoller(IoPoller&& other) noexcept
-    : poller_fd_(other.poller_fd_), results_{}, result_count_(0), fd_count_(other.fd_count_) {
+    : poller_fd_(other.poller_fd_), results_{}, result_count_(0), fd_count_(other.fd_count_),
+      tags_(other.tags_), tag_count_(other.tag_count_) {
   for (uint32_t i = 0; i < fd_count_; ++i) {
     fds_[i] = other.fds_[i];
   }
@@ -494,6 +558,7 @@ inline IoPoller::IoPoller(IoPoller&& other) noexcept
   other.poller_fd_ = -1;
   other.fd_count_ = 0;
   other.result_count_ = 0;
+  other.tag_count_ = 0;
 }
 
 inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
@@ -501,6 +566,8 @@ inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
     poller_fd_ = other.poller_fd_;
     fd_count_ = other.fd_count_;
     result_count_ = 0;
+    tags_ = other.tags_;
+    tag_count_ = other.tag_count_;
     for (uint32_t i = 0; i < fd_count_; ++i) {
       fds_[i] = other.fds_[i];
     }
@@ -512,11 +579,12 @@ inline IoPoller& IoPoller::operator=(IoPoller&& other) noexcept {
     other.poller_fd_ = -1;
     other.fd_count_ = 0;
     other.result_count_ = 0;
+    other.tag_count_ = 0;
   }
   return *this;
 }
 
-inline expected<void, PollerError> IoPoller::Add(int32_t fd, uint8_t events) {
+inline expected<void, PollerError> IoPoller::Add(int32_t fd, uint8_t events, uintptr_t user_data) {
   // Check for duplicate fd
   for (uint32_t i = 0; i < fd_count_; ++i) {
     if (fds_[i].fd == fd) {
@@ -530,6 +598,7 @@ inline expected<void, PollerError> IoPoller::Add(int32_t fd, uint8_t events) {
   fds_[fd_count_].events = detail::IoEventToPoll(events);
   fds_[fd_count_].revents = 0;
   ++fd_count_;
+  StoreTag(fd, user_data);
   return expected<void, PollerError>::success();
 }
 
@@ -555,6 +624,7 @@ inline expected<void, PollerError> IoPoller::Remove(int32_t fd) {
       fds_[fd_count_].fd = -1;
       fds_[fd_count_].events = 0;
       fds_[fd_count_].revents = 0;
+      ClearTag(fd);
       return expected<void, PollerError>::success();
     }
   }
@@ -572,6 +642,7 @@ inline expected<uint32_t, PollerError> IoPoller::Wait(PollResult* results, uint3
     if (fds_[i].revents != 0) {
       results[count].fd = fds_[i].fd;
       results[count].events = detail::PollToIoEvent(fds_[i].revents);
+      results[count].user_data = LookupTag(fds_[i].fd);
       ++count;
     }
   }

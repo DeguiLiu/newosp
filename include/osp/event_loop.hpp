@@ -149,7 +149,6 @@ class EventLoop {
 
   struct FdSlot {
     int32_t fd = -1;
-    uintptr_t user_data = 0U;
     bool active = false;
   };
 
@@ -226,12 +225,11 @@ expected<void, LoopError> EventLoop<Derived, MaxFds, MaxTimers>::AddFd(int32_t f
   if (MaxFds == slot) {
     return expected<void, LoopError>::error(LoopError::kNoFreeFdSlot);
   }
-  auto r = poller_.Add(fd, events);
+  auto r = poller_.Add(fd, events, user_data);
   if (!r.has_value()) {
     return expected<void, LoopError>::error(LoopError::kBackendFailed);
   }
   fds_[slot].fd = fd;
-  fds_[slot].user_data = user_data;
   fds_[slot].active = true;
   return expected<void, LoopError>::success();
 }
@@ -343,17 +341,7 @@ void EventLoop<Derived, MaxFds, MaxTimers>::Run() noexcept {
         if (results[i].fd == wake_fds_[0]) {
           continue;
         }
-        uintptr_t user_data = 0U;
-        {
-          std::lock_guard<std::mutex> lock(fd_mutex_);
-          for (uint32_t j = 0U; j < MaxFds; ++j) {
-            if (fds_[j].active && fds_[j].fd == results[i].fd) {
-              user_data = fds_[j].user_data;
-              break;
-            }
-          }
-        }
-        self().OnFd(results[i].fd, results[i].events, user_data);
+        self().OnFd(results[i].fd, results[i].events, results[i].user_data);
       }
     }
     FireExpiredTimers();

@@ -118,6 +118,41 @@ TEST_CASE("io_poller - readable event on pipe", "[io_poller]") {
 }
 
 // ============================================================================
+// user_data round-trip through Add -> Wait
+// ============================================================================
+
+TEST_CASE("io_poller - user_data echoes through Wait", "[io_poller]") {
+  osp::IoPoller poller;
+  REQUIRE(poller.IsValid());
+
+  int pipefd[2];
+  REQUIRE(::pipe(pipefd) == 0);
+
+  const uintptr_t kTag = 0xDEADBEEFULL;
+  auto add_r = poller.Add(pipefd[0], static_cast<uint8_t>(osp::IoEvent::kReadable), kTag);
+  REQUIRE(add_r.has_value());
+
+  const char msg[] = "x";
+  ssize_t written = ::write(pipefd[1], msg, sizeof(msg));
+  REQUIRE(written == static_cast<ssize_t>(sizeof(msg)));
+
+  osp::PollResult results[4];
+  auto wait_r = poller.Wait(results, 4, 100);
+  REQUIRE(wait_r.has_value());
+  REQUIRE(wait_r.value() == 1);
+  REQUIRE(results[0].user_data == kTag);
+
+  // After Remove, the tag is cleared (no dangling fd -> user_data mapping).
+  auto rm_r = poller.Remove(pipefd[0]);
+  REQUIRE(rm_r.has_value());
+
+  char drain;
+  (void)::read(pipefd[0], &drain, sizeof(drain));
+  ::close(pipefd[0]);
+  ::close(pipefd[1]);
+}
+
+// ============================================================================
 // Modify events
 // ============================================================================
 
