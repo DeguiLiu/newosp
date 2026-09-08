@@ -249,7 +249,8 @@ class NodeManager : public EventLoop<NodeManager<MaxNodes>, MaxNodes + 1U, 2U> {
     ++node_count_;
 
     // Register the socket for event-driven disconnect detection (ev_io).
-    static_cast<void>(this->AddFd(slot->socket.Fd(), static_cast<uint8_t>(IoEvent::kReadable)));
+    static_cast<void>(this->AddFd(slot->socket.Fd(), static_cast<uint8_t>(IoEvent::kReadable),
+                                  static_cast<uintptr_t>(slot->node_id)));
 
     return expected<uint16_t, NodeManagerError>::success(slot->node_id);
   }
@@ -442,14 +443,15 @@ class NodeManager : public EventLoop<NodeManager<MaxNodes>, MaxNodes + 1U, 2U> {
   // ==========================================================================
 
  public:
-  // EventLoop hooks (CRTP): OnTimer fires on each heartbeat tick. OnFd is
-  // unused for now (no fd watchers are registered).
+  // EventLoop hooks (CRTP): OnTimer fires on each heartbeat tick; OnFd
+  // handles event-driven disconnect detection on registered node sockets.
   void OnTimer(uint32_t timer_id) noexcept {
     (void)timer_id;
     HeartbeatOnce();
   }
 
-  void OnFd(int32_t fd, uint8_t events) noexcept {
+  void OnFd(int32_t fd, uint8_t events, uintptr_t user_data) noexcept {
+    const uint16_t node_id = static_cast<uint16_t>(user_data);
     if (0 == (events & static_cast<uint8_t>(IoEvent::kReadable))) {
       return;
     }
@@ -459,35 +461,35 @@ class NodeManager : public EventLoop<NodeManager<MaxNodes>, MaxNodes + 1U, 2U> {
     const int32_t n = socket_api::Recv(fd, buf, sizeof(buf), 0);
     if (n > 0) {
       std::lock_guard<osp::Mutex> lock(mutex_);
-      NodeEntry* node = FindNodeByFd(fd);
-      if (node != nullptr && node->active) {
+      // Re-validate the fd so a recycled descriptor cannot touch a new node.
+      NodeEntry* node = FindNode(node_id);
+      if (node != nullptr && node->active && node->socket.Fd() == fd) {
         node->last_heartbeat_us = SteadyNowUs();
       }
       return;
     }
     if (0 == n) {
-      DisconnectByFd(fd);
+      DisconnectByNodeId(node_id, fd);
       return;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       return;  // No data, connection healthy.
     }
-    DisconnectByFd(fd);
+    DisconnectByNodeId(node_id, fd);
   }
 
  private:
-  /// @brief Disconnect a node by socket fd and fire the disconnect callback.
-  void DisconnectByFd(int32_t fd) noexcept {
-    uint16_t node_id = 0U;
+  /// @brief Disconnect a node by stable id, re-validating the fd, then fire
+  ///        the disconnect callback.
+  void DisconnectByNodeId(uint16_t node_id, int32_t fd) noexcept {
     NodeDisconnectFn fn = nullptr;
     void* fn_ctx = nullptr;
     {
       std::lock_guard<osp::Mutex> lock(mutex_);
-      NodeEntry* node = FindNodeByFd(fd);
-      if (node == nullptr || !node->active) {
+      NodeEntry* node = FindNode(node_id);
+      if (node == nullptr || !node->active || node->socket.Fd() != fd) {
         return;
       }
-      node_id = node->node_id;
       static_cast<void>(this->RemoveFd(fd));
       node->socket.Close();
       node->active = false;
@@ -625,14 +627,6 @@ class NodeManager : public EventLoop<NodeManager<MaxNodes>, MaxNodes + 1U, 2U> {
     return nullptr;
   }
 
-  NodeEntry* FindNodeByFd(int32_t fd) noexcept {
-    for (uint32_t i = 0; i < MaxNodes; ++i) {
-      if (nodes_[i].active && !nodes_[i].is_listener && nodes_[i].socket.Fd() == fd) {
-        return &nodes_[i];
-      }
-    }
-    return nullptr;
-  }
 };
 
 }  // namespace osp

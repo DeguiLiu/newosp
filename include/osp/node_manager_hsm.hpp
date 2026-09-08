@@ -193,6 +193,10 @@ struct HsmNodeInfo {
 // HsmNodeManager
 // ============================================================================
 
+// Event methods (OnHeartbeat/RequestDisconnect/RequestReconnect) are
+// asynchronous: they enqueue an event and return immediately; the state
+// transition happens on the internal dispatch thread shortly after. Query
+// immediately after a call may still observe the old state.
 template <uint32_t MaxNodes = 64>
 class HsmNodeManager : public EventLoop<HsmNodeManager<MaxNodes>, 1, 2> {
  public:
@@ -614,9 +618,10 @@ class HsmNodeManager : public EventLoop<HsmNodeManager<MaxNodes>, 1, 2> {
     }
   }
 
-  void OnFd(int32_t fd, uint8_t events) noexcept {
+  void OnFd(int32_t fd, uint8_t events, uintptr_t user_data) noexcept {
     (void)fd;
     (void)events;
+    (void)user_data;
   }
 
  private:

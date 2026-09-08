@@ -37,7 +37,7 @@ enum class LoopError : uint8_t {
  * @brief Unified single-thread event loop, CRTP skeleton + hooks.
  *
  * The Derived type supplies two hooks, both invoked on the Run thread:
- *   void OnFd(int32_t fd, uint8_t events) noexcept;
+ *   void OnFd(int32_t fd, uint8_t events, uintptr_t user_data) noexcept;
  *   void OnTimer(uint32_t timer_id) noexcept;
  * Dispatch is compile-time bound through static_cast<Derived*>(this), so there
  * is no function-pointer erasure and no vtable. Distinguish fds/timers inside
@@ -77,8 +77,8 @@ class EventLoop {
   // fd watchers (Run-thread only, libev ev_io equivalent)
   // -----------------------------------------------------------------------
 
-  /** @brief Monitor fd for readiness; readiness calls OnFd(fd, events). */
-  [[nodiscard]] expected<void, LoopError> AddFd(int32_t fd, uint8_t events) noexcept;
+  /** @brief Monitor fd for readiness; readiness calls OnFd(fd, events, user_data). */
+  [[nodiscard]] expected<void, LoopError> AddFd(int32_t fd, uint8_t events, uintptr_t user_data = 0U) noexcept;
 
   /** @brief Change the monitored event mask of an already-added fd. */
   [[nodiscard]] expected<void, LoopError> ModifyFd(int32_t fd, uint8_t events) noexcept;
@@ -136,7 +136,7 @@ class EventLoop {
    * @brief fd readiness hook (libev ev_io equivalent). The default is a
    *        no-op; Derived overrides it when it registers fd watchers.
    */
-  void OnFd(int32_t /*fd*/, uint8_t /*events*/) noexcept {}
+  void OnFd(int32_t /*fd*/, uint8_t /*events*/, uintptr_t /*user_data*/) noexcept {}
 
   /**
    * @brief timer expiry hook (libev ev_timer equivalent). The default is a
@@ -149,6 +149,7 @@ class EventLoop {
 
   struct FdSlot {
     int32_t fd = -1;
+    uintptr_t user_data = 0U;
     bool active = false;
   };
 
@@ -212,7 +213,8 @@ EventLoop<Derived, MaxFds, MaxTimers>::~EventLoop() {
 }
 
 template <typename Derived, uint32_t MaxFds, uint32_t MaxTimers>
-expected<void, LoopError> EventLoop<Derived, MaxFds, MaxTimers>::AddFd(int32_t fd, uint8_t events) noexcept {
+expected<void, LoopError> EventLoop<Derived, MaxFds, MaxTimers>::AddFd(int32_t fd, uint8_t events,
+                                                                       uintptr_t user_data) noexcept {
   std::lock_guard<std::mutex> lock(fd_mutex_);
   uint32_t slot = MaxFds;
   for (uint32_t i = 0U; i < MaxFds; ++i) {
@@ -229,6 +231,7 @@ expected<void, LoopError> EventLoop<Derived, MaxFds, MaxTimers>::AddFd(int32_t f
     return expected<void, LoopError>::error(LoopError::kBackendFailed);
   }
   fds_[slot].fd = fd;
+  fds_[slot].user_data = user_data;
   fds_[slot].active = true;
   return expected<void, LoopError>::success();
 }
@@ -337,9 +340,20 @@ void EventLoop<Derived, MaxFds, MaxTimers>::Run() noexcept {
     if (wr.has_value()) {
       const PollResult* results = poller_.Results();
       for (uint32_t i = 0U; i < wr.value(); ++i) {
-        if (results[i].fd != wake_fds_[0]) {
-          self().OnFd(results[i].fd, results[i].events);
+        if (results[i].fd == wake_fds_[0]) {
+          continue;
         }
+        uintptr_t user_data = 0U;
+        {
+          std::lock_guard<std::mutex> lock(fd_mutex_);
+          for (uint32_t j = 0U; j < MaxFds; ++j) {
+            if (fds_[j].active && fds_[j].fd == results[i].fd) {
+              user_data = fds_[j].user_data;
+              break;
+            }
+          }
+        }
+        self().OnFd(results[i].fd, results[i].events, user_data);
       }
     }
     FireExpiredTimers();

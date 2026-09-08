@@ -220,11 +220,10 @@ inline void OnEnterShuttingDown(ServiceHsmContext& ctx) {
  * @tparam MaxClients Maximum number of concurrent clients (unused in HSM,
  *                    kept for API compatibility).
  *
- * Thread-safe: public methods are protected by mutex; Start/Stop are
- * mutually exclusive under the same mutex. No background thread.
- *
- * Reentrancy: callbacks (on_error / on_shutdown / fault reporter) run under
- * the mutex and must not call back into public methods of this class.
+ * Event methods (Start/Stop/Recover/OnClientConnect/OnClientDisconnect/
+ * OnError) are asynchronous: they enqueue an event and return immediately;
+ * the state transition happens on the internal dispatch thread shortly
+ * after. Query immediately after a call may still observe the old state.
  */
 template <uint32_t MaxClients = 32>
 class HsmService {

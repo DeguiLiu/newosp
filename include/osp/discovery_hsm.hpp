@@ -228,6 +228,12 @@ inline void OnEnterDiscDegraded(DiscoveryHsmContext& ctx) {
  *
  * @tparam MaxNodes Maximum number of nodes (unused in HSM, for API consistency)
  *
+ * Event methods (Start/Stop/OnNodeFound/OnNodeLost/CheckStability/
+ * TriggerDegraded) are asynchronous: they enqueue an event and return
+ * immediately; the state transition happens on the internal dispatch thread
+ * shortly after. Query immediately after a call may still observe the old
+ * state.
+ *
  * Usage:
  * @code
  *   HsmDiscovery<64> discovery;
