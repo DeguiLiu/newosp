@@ -104,11 +104,16 @@ static constexpr Crc16Table kCrc16Table{};
 
 }  // namespace detail
 
+/// Incremental CRC-CCITT update: fold one byte into the running CRC.
+inline uint16_t Crc16Update(uint16_t crc, uint8_t byte) noexcept {
+  return static_cast<uint16_t>((crc << 8) ^ detail::kCrc16Table.data[static_cast<uint8_t>((crc >> 8) ^ byte)]);
+}
+
 /// Calculate CRC-CCITT over a byte range.
 inline uint16_t CalcCrc16(const uint8_t* data, uint32_t len) noexcept {
   uint16_t crc = 0x0000U;
   for (uint32_t i = 0; i < len; ++i) {
-    crc = static_cast<uint16_t>((crc << 8) ^ detail::kCrc16Table.data[static_cast<uint8_t>((crc >> 8) ^ data[i])]);
+    crc = Crc16Update(crc, data[i]);
   }
   return crc;
 }

@@ -29,11 +29,16 @@
  * Header-only, C++17, compatible with -fno-exceptions -fno-rtti.
  * Each node connection has its own HSM managing lifecycle:
  * Connected -> Suspect -> Disconnected
+ *
+ * Reentrancy constraint: state entry actions and the registered on_disconnect
+ * callback run under the internal mutex and MUST NOT call back into public
+ * methods of this class (deadlock).
  */
 
 #ifndef OSP_NODE_MANAGER_HSM_HPP_
 #define OSP_NODE_MANAGER_HSM_HPP_
 
+#include "osp/event_loop.hpp"
 #include "osp/fault_collector.hpp"
 #include "osp/hsm.hpp"
 #include "osp/platform.hpp"
@@ -189,16 +194,18 @@ struct HsmNodeInfo {
 // ============================================================================
 
 template <uint32_t MaxNodes = 64>
-class HsmNodeManager {
+class HsmNodeManager : public EventLoop<HsmNodeManager<MaxNodes>, 1, 2> {
  public:
   explicit HsmNodeManager(TimerScheduler<>* scheduler = nullptr) noexcept
-      : running_(false),
+      : EventLoop<HsmNodeManager<MaxNodes>, 1, 2>(),
+        running_(false),
         node_count_(0),
         heartbeat_interval_ms_(1000),
         global_disconnect_fn_(nullptr),
         global_disconnect_ctx_(nullptr),
         scheduler_(scheduler),
-        timer_task_id_(0) {}
+        timer_task_id_(0),
+        timer_id_(0) {}
 
   ~HsmNodeManager() { Stop(); }
 
@@ -294,12 +301,23 @@ class HsmNodeManager {
   // ==========================================================================
 
   void OnHeartbeat(uint16_t node_id) noexcept {
-    std::lock_guard<osp::Mutex> lock(mutex_);
-
-    NodeEntry* node = FindNode(node_id);
-    if (node == nullptr || !node->active)
+    if (scheduler_ == nullptr && running_.load(std::memory_order_acquire)) {
+      // EventLoop mode: marshal to the dispatch thread via the queue.
+      NodeEvent ne{static_cast<uint32_t>(NodeConnectionEvent::kEvtHeartbeatReceived), node_id, SteadyNowUs()};
+      if (event_queue_.TryPush(ne)) {
+        this->Wake();
+      } else {
+        dropped_events_.fetch_add(1, std::memory_order_relaxed);
+      }
       return;
-
+    }
+    // Scheduler mode (dispatch happens on the scheduler thread) or not
+    // running: synchronous dispatch keeps HEAD semantics.
+    std::lock_guard<osp::Mutex> lock(mutex_);
+    NodeEntry* node = FindNode(node_id);
+    if (node == nullptr || !node->active) {
+      return;
+    }
     uint64_t timestamp = SteadyNowUs();
     Event evt{static_cast<uint32_t>(NodeConnectionEvent::kEvtHeartbeatReceived), &timestamp};
     node->GetHsm()->Dispatch(evt);
@@ -324,23 +342,39 @@ class HsmNodeManager {
   }
 
   void RequestDisconnect(uint16_t node_id) noexcept {
-    std::lock_guard<osp::Mutex> lock(mutex_);
-
-    NodeEntry* node = FindNode(node_id);
-    if (node == nullptr || !node->active)
+    if (scheduler_ == nullptr && running_.load(std::memory_order_acquire)) {
+      NodeEvent ne{static_cast<uint32_t>(NodeConnectionEvent::kEvtDisconnect), node_id, 0U};
+      if (event_queue_.TryPush(ne)) {
+        this->Wake();
+      } else {
+        dropped_events_.fetch_add(1, std::memory_order_relaxed);
+      }
       return;
-
+    }
+    std::lock_guard<osp::Mutex> lock(mutex_);
+    NodeEntry* node = FindNode(node_id);
+    if (node == nullptr || !node->active) {
+      return;
+    }
     Event evt{static_cast<uint32_t>(NodeConnectionEvent::kEvtDisconnect), nullptr};
     node->GetHsm()->Dispatch(evt);
   }
 
   void RequestReconnect(uint16_t node_id) noexcept {
-    std::lock_guard<osp::Mutex> lock(mutex_);
-
-    NodeEntry* node = FindNode(node_id);
-    if (node == nullptr || !node->active)
+    if (scheduler_ == nullptr && running_.load(std::memory_order_acquire)) {
+      NodeEvent ne{static_cast<uint32_t>(NodeConnectionEvent::kEvtReconnect), node_id, 0U};
+      if (event_queue_.TryPush(ne)) {
+        this->Wake();
+      } else {
+        dropped_events_.fetch_add(1, std::memory_order_relaxed);
+      }
       return;
-
+    }
+    std::lock_guard<osp::Mutex> lock(mutex_);
+    NodeEntry* node = FindNode(node_id);
+    if (node == nullptr || !node->active) {
+      return;
+    }
     Event evt{static_cast<uint32_t>(NodeConnectionEvent::kEvtReconnect), nullptr};
     node->GetHsm()->Dispatch(evt);
   }
@@ -400,6 +434,10 @@ class HsmNodeManager {
     return node_count_;
   }
 
+  /// @brief Events dropped by a full dispatch queue (EventLoop mode only).
+  /// A non-zero value means producers outran the dispatch thread.
+  uint32_t GetDroppedEvents() const noexcept { return dropped_events_.load(std::memory_order_relaxed); }
+
   uint32_t GetMissedHeartbeats(uint16_t node_id) const noexcept {
     std::lock_guard<osp::Mutex> lock(mutex_);
     const NodeEntry* node = const_cast<HsmNodeManager*>(this)->FindNode(node_id);
@@ -430,9 +468,9 @@ class HsmNodeManager {
   // ==========================================================================
 
   bool Start() noexcept {
-    std::lock_guard<osp::Mutex> lock(mutex_);
-    if (running_.load())
+    if (running_.load()) {
       return false;
+    }
     running_.store(true);
 
     if (scheduler_ != nullptr) {
@@ -443,9 +481,18 @@ class HsmNodeManager {
         running_.store(false);
         return false;
       }
-    } else if (!monitor_thread_.Start([this]() { MonitorLoop(); })) {
-      running_.store(false);
-      return false;
+    } else {
+      auto r = this->Schedule(heartbeat_interval_ms_);
+      if (!r.has_value()) {
+        running_.store(false);
+        return false;
+      }
+      timer_id_ = r.value();
+      this->ClearStop();
+      if (!run_thread_.Start(ThreadOptions{"nm-hsm"}, [this]() { this->Run(); })) {
+        running_.store(false);
+        return false;
+      }
     }
 
     return true;
@@ -457,9 +504,11 @@ class HsmNodeManager {
     if (scheduler_ != nullptr) {
       static_cast<void>(scheduler_->Remove(timer_task_id_));
     } else {
-      if (monitor_thread_.joinable()) {
-        monitor_thread_.join();
+      EventLoop<HsmNodeManager<MaxNodes>, 1, 2>::Stop();
+      if (run_thread_.joinable()) {
+        run_thread_.join();
       }
+      static_cast<void>(this->Cancel(timer_id_));
     }
 
     std::lock_guard<osp::Mutex> lock(mutex_);
@@ -511,11 +560,18 @@ class HsmNodeManager {
     }
   };
 
+  /// @brief Value-carrying event for the lock-free dispatch queue.
+  struct NodeEvent {
+    uint32_t id;
+    uint16_t node_id;
+    uint64_t timestamp_us;
+  };
+
   NodeEntry entries_[MaxNodes];
   uint32_t node_count_;
   uint32_t heartbeat_interval_ms_;
   std::atomic<bool> running_;
-  osp::Thread monitor_thread_;
+  osp::Thread run_thread_;
   mutable osp::Mutex mutex_;
   ThreadHeartbeat* heartbeat_{nullptr};
 
@@ -525,27 +581,45 @@ class HsmNodeManager {
 
   TimerScheduler<>* scheduler_;
   TimerTaskId timer_task_id_{0};
+  uint32_t timer_id_{0};
+  detail::EventQueue<NodeEvent, 16> event_queue_;
+  std::atomic<uint32_t> dropped_events_{0};
 
   static void MonitorTick(void* ctx) noexcept {
     auto* self = static_cast<HsmNodeManager*>(ctx);
     self->CheckTimeouts();
   }
 
-  void MonitorLoop() noexcept {
-    while (running_.load()) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
+ public:
+  // EventLoop hooks (CRTP): OnTimer runs the periodic timeout scan on the
+  // dispatch thread; OnWake drains queued node events; OnFd is unused.
+  void OnTimer(uint32_t timer_id) noexcept {
+    (void)timer_id;
+    if (heartbeat_ != nullptr) {
+      heartbeat_->Beat();
+    }
+    CheckTimeouts();
+  }
+
+  void OnWake() noexcept {
+    NodeEvent ne;
+    while (event_queue_.TryPop(ne)) {
+      std::lock_guard<osp::Mutex> lock(mutex_);
+      NodeEntry* node = FindNode(ne.node_id);
+      if (node == nullptr || !node->active) {
+        continue;
       }
-      const uint64_t start_us = SteadyNowUs();
-      CheckTimeouts();
-      const uint64_t elapsed_us = SteadyNowUs() - start_us;
-      const uint64_t interval_us = static_cast<uint64_t>(heartbeat_interval_ms_) * 1000U;
-      if (elapsed_us < interval_us) {
-        osp::ThreadSleepUs(interval_us - elapsed_us);
-      }
+      Event evt{ne.id, &ne.timestamp_us};
+      node->GetHsm()->Dispatch(evt);
     }
   }
 
+  void OnFd(int32_t fd, uint8_t events) noexcept {
+    (void)fd;
+    (void)events;
+  }
+
+ private:
   NodeEntry* FindSlot() noexcept {
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (!entries_[i].active)

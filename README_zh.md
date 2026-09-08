@@ -57,19 +57,21 @@
 | `job_pool.hpp` | 任务调度池 (依赖有序, 零堆批量执行) |
 | `data_dispatcher.hpp` | 共享数据块流水线 (InProc/Shm StorePolicy, CAS, 心跳收割) |
 
-### 状态机与行为树 (2 个)
+### 状态机与行为树 (3 个)
 
 | 模块 | 说明 |
 |------|------|
 | `hsm.hpp` | 层次状态机 (LCA 转换、guard 条件、ForceTransition 外部恢复、零堆分配) |
+| `hsm_table.hpp` | 表驱动层次状态机 (StateDef[]/TransitionDef[] 静态转移表 + guard 谓词) |
 | `bt.hpp` | 行为树 (Sequence/Fallback/Parallel，扁平数组存储，缓存友好) |
 
-### 网络与传输层 (8 个)
+### 网络与传输层 (9 个)
 
 | 模块 | 说明 |
 |------|------|
 | `socket.hpp` | TCP/UDP/Unix Domain Socket RAII 封装 (基于 sockpp) |
 | `io_poller.hpp` | epoll 事件循环 (边缘触发 + 超时) |
+| `event_loop.hpp` | 统一事件循环 (fd 就绪 + 定时器 + 跨线程唤醒, CRTP 钩子) |
 | `connection.hpp` | 连接池管理 (自动重连、心跳) |
 | `transport.hpp` | 网络传输 (v0/v1 帧协议, SequenceTracker) |
 | `shm_transport.hpp` | 共享内存 IPC (无锁 SPSC, ARM 内存序, CreateOrReplace 崩溃恢复) |
@@ -97,12 +99,13 @@
 | `qos.hpp` | QoS 服务质量配置 (Reliability/History/Deadline/Lifespan) |
 | `lifecycle_node.hpp` | 生命周期节点 (Unconfigured/Inactive/Active/Finalized, HSM 驱动) |
 
-### 可靠性与系统层 (5 个)
+### 可靠性与系统层 (6 个)
 
 | 模块 | 说明 |
 |------|------|
 | `watchdog.hpp` | 软件看门狗 (截止时间监控、超时回调) |
 | `fault_collector.hpp` | 故障收集与上报 (FaultReporter POD 注入, 环形缓冲) |
+| `breaker.hpp` | 背压熔断器 (5 状态, 单 32 位原子 CAS) |
 | `shell_commands.hpp` | 内置诊断 Shell 命令桥接 (零侵入, 15 个 Register 函数) |
 | `process.hpp` | 进程管理 (Subprocess spawn/pipe/wait, FindPidByName, Freeze/Resume/Kill) |
 | `system_monitor.hpp` | Linux 系统健康监控 (CPU、内存、磁盘、温度) |

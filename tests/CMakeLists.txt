@@ -26,6 +26,11 @@ set(OSP_TEST_CORE_SOURCES
     test_worker_pool.cpp
     test_executor.cpp
     test_hsm.cpp
+    test_hsm_table.cpp
+    test_serial_ota_parser.cpp
+    test_uart_isr.cpp
+    test_net_stress_client_sm.cpp
+    test_net_stress_ft_sm.cpp
     test_bt.cpp
     test_semaphore.cpp
     test_data_fusion.cpp
@@ -49,6 +54,9 @@ set(OSP_TEST_CORE_SOURCES
     test_data_dispatcher.cpp
     test_thread.cpp
 )
+
+# example headers under test (serial_ota parser)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../examples)
 
 # Network test sources (require BSD sockets; excluded when OSP_WITH_NETWORK=OFF)
 set(OSP_TEST_NETWORK_SOURCES

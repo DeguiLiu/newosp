@@ -46,6 +46,7 @@
 #include "osp/platform.hpp"
 
 #include <array>
+#include <atomic>
 
 namespace osp {
 
@@ -63,6 +64,77 @@ struct Event {
   uint32_t id;
   const void* data;  ///< Optional payload, nullptr if unused.
 };
+
+namespace detail {
+
+/**
+ * @brief Fixed-capacity lock-free MPSC event queue.
+ *
+ * Multi-producer push, single-consumer pop, using the sequence-number
+ * discipline of FaultRingBuffer. Used to marshal HSM events from arbitrary
+ * producer threads to the single dispatch thread, so the HSM itself needs no
+ * mutex.
+ */
+template <typename T, uint32_t Depth>
+class EventQueue {
+  static_assert((Depth & (Depth - 1U)) == 0U, "Depth must be power of 2");
+
+ public:
+  EventQueue() noexcept {
+    for (uint32_t i = 0U; i < Depth; ++i) {
+      slots_[i].sequence.store(i, std::memory_order_relaxed);
+    }
+  }
+
+  /// Try to enqueue (multi-producer safe). Returns false when full.
+  bool TryPush(const T& event) noexcept {
+    uint32_t pos = producer_pos_.load(std::memory_order_relaxed);
+    for (;;) {
+      auto& slot = slots_[pos & (Depth - 1U)];
+      const uint32_t seq = slot.sequence.load(std::memory_order_acquire);
+      const int32_t diff = static_cast<int32_t>(seq) - static_cast<int32_t>(pos);
+      if (diff == 0) {
+        // Slot available: claim it with CAS.
+        if (producer_pos_.compare_exchange_weak(pos, pos + 1U, std::memory_order_relaxed)) {
+          slot.event = event;
+          slot.sequence.store(pos + 1U, std::memory_order_release);
+          return true;
+        }
+      } else if (diff < 0) {
+        return false;  // Full.
+      } else {
+        pos = producer_pos_.load(std::memory_order_relaxed);
+      }
+    }
+  }
+
+  /// Try to dequeue (single-consumer only). Returns false when empty.
+  bool TryPop(T& out) noexcept {
+    const uint32_t pos = consumer_pos_.load(std::memory_order_relaxed);
+    auto& slot = slots_[pos & (Depth - 1U)];
+    const uint32_t seq = slot.sequence.load(std::memory_order_acquire);
+    const int32_t diff = static_cast<int32_t>(seq) - static_cast<int32_t>(pos + 1U);
+    if (diff < 0) {
+      return false;  // Empty.
+    }
+    out = slot.event;
+    slot.sequence.store(pos + Depth, std::memory_order_release);
+    consumer_pos_.store(pos + 1U, std::memory_order_relaxed);
+    return true;
+  }
+
+ private:
+  struct Slot {
+    std::atomic<uint32_t> sequence{0U};
+    T event;
+  };
+
+  std::array<Slot, Depth> slots_{};
+  std::atomic<uint32_t> producer_pos_{0U};
+  std::atomic<uint32_t> consumer_pos_{0U};
+};
+
+}  // namespace detail
 
 // ============================================================================
 // TransitionResult

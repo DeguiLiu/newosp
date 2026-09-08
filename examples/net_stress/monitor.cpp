@@ -20,11 +20,11 @@
 #include "protocol.hpp"
 
 #include "osp/bus.hpp"
+#include "osp/event_loop.hpp"
 #include "osp/log.hpp"
 #include "osp/node.hpp"
 #include "osp/service.hpp"
 #include "osp/shell.hpp"
-#include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstdio>
@@ -70,12 +70,29 @@ using MonBusPayload = std::variant<ProbeResult, StatsSnapshot>;
 using MonBus = osp::AsyncBus<MonBusPayload>;
 using MonNode = osp::Node<MonBusPayload>;
 
+static constexpr uint32_t kProbeTimerId = 1U;
+
+static void ProbeCallback(void* ctx);
+
+/// @brief Probe timer run on the EventLoop thread.
+class MonitorLoop final : public osp::EventLoop<MonitorLoop> {
+ public:
+  void OnTimer(uint32_t timer_id) noexcept {
+    if (timer_id == kProbeTimerId) {
+      ProbeCallback(nullptr);
+    }
+  }
+};
+
+static MonitorLoop* g_loop = nullptr;
+static MonNode* g_node = nullptr;
+
 // ============================================================================
 // Probe Timer Callback
 // ============================================================================
 
-static void ProbeCallback(void* ctx) {
-  auto* node = static_cast<MonNode*>(ctx);
+static void ProbeCallback(void* /*ctx*/) {
+  auto* node = g_node;
 
   auto cli_r = osp::Client<EchoReq, EchoResp>::Connect(g_server_host.c_str(), g_echo_port, 2000);
 
@@ -187,6 +204,9 @@ OSP_SHELL_CMD(cmd_bus_stats, "Show monitor bus statistics");
 static int cmd_quit(int /*argc*/, char* /*argv*/[]) {
   osp::DebugShell::Printf("Shutting down...\r\n");
   g_running.store(false, std::memory_order_relaxed);
+  if (g_loop != nullptr) {
+    g_loop->Stop();
+  }
   return 0;
 }
 OSP_SHELL_CMD(cmd_quit, "Quit monitor");
@@ -237,6 +257,8 @@ int main(int argc, char* argv[]) {
   MonBus::Instance().Reset();
   MonNode node("monitor", 1);
   node.Start();
+  g_node = &node;
+  OSP_SCOPE_EXIT(g_node = nullptr);
 
   // Subscribe to probe results
   node.Subscribe<ProbeResult>([](const ProbeResult& pr, const osp::MessageHeader& /*hdr*/) {
@@ -260,23 +282,16 @@ int main(int argc, char* argv[]) {
   }
   OSP_SCOPE_EXIT(shell.Stop());
 
-  // --- Timer: periodic probe ---
-  osp::TimerScheduler<2> timer;
-  auto probe_r = timer.Add(probe_interval, ProbeCallback, &node);
-  if (!probe_r) {
-    OSP_LOG_ERROR("MONITOR", "Failed to add probe timer");
-    return 1;
-  }
-  timer.Start();
-  OSP_SCOPE_EXIT(timer.Stop());
+  // --- EventLoop: periodic probe ---
+  MonitorLoop loop;
+  g_loop = &loop;
+  static_cast<void>(loop.Schedule(probe_interval));
+  OSP_SCOPE_EXIT(g_loop = nullptr);
 
   OSP_LOG_INFO("MONITOR", "Monitoring. Press 'q' + Enter to quit.");
 
-  while (g_running.load(std::memory_order_relaxed)) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }
-
-  timer.Stop();
+  // --- Main loop (EventLoop blocks on poll; timer fires OnTimer) ---
+  loop.Run();
 
   // Final report
   uint32_t ok = g_probe.probe_ok.load(std::memory_order_relaxed);

@@ -1,294 +1,204 @@
 /**
  * @file node_manager_hsm_demo.cpp
- * @brief Demonstrates NodeManager with HSM-driven heartbeat state machine.
+ * @brief Four heartbeat-driven node HSMs under one EventLoop timer.
  *
- * Shows:
- *   - HSM states for node connection: Connected -> Suspect -> Disconnected
- *   - Heartbeat events driving state transitions
- *   - Disconnect callback notification
- *   - Reconnection handling
- *   - Multiple nodes with independent state machines
+ * Mirrors the libev C++17 node_manager example, rebuilt on newosp primitives:
+ * each node runs an independent three-state static-table HSM (Connected ->
+ * Suspect -> Disconnected) driven by a heartbeat signal; a single periodic
+ * EventLoop timer steps a scripted per-node heartbeat/miss sequence, one tick
+ * at a time. The final states are self-checked against expected counters and
+ * the process returns 0 on PASS, 1 on FAIL.
  */
 
-#include "osp/hsm.hpp"
-#include "osp/log.hpp"
-#include "osp/node_manager.hpp"
+#include "osp/event_loop.hpp"
+#include "osp/hsm_table.hpp"
 
+#include <cstdint>
 #include <cstdio>
-#include <cstring>
 
-#include <unordered_map>
+namespace {
 
-// ============================================================================
-// HSM Events
-// ============================================================================
-
-enum EventId : uint32_t {
-  kHeartbeatOk = 1,
-  kHeartbeatMiss = 2,
-  kDisconnect = 3,
-  kReconnect = 4,
+enum Signal : uint32_t {
+  kHeartbeatOk = 1U,
+  kHeartbeatMiss = 2U,
+  kDisconnect = 3U,
+  kReconnect = 4U,
 };
 
-// ============================================================================
-// Node Context - Per-node state machine context
-// ============================================================================
-
-struct NodeContext {
-  uint16_t node_id;
-  uint32_t missed_heartbeats;
-  uint32_t total_heartbeats;
-  bool connected;
-  osp::StateMachine<NodeContext, 8>* sm;
-
-  NodeContext() noexcept : node_id(0), missed_heartbeats(0), total_heartbeats(0), connected(false), sm(nullptr) {}
+enum State : int32_t {
+  kConnected = 0,
+  kSuspect = 1,
+  kDisconnected = 2,
+  kStateCount = 3,
 };
 
-// ============================================================================
-// State Handlers
-// ============================================================================
+struct NodeCtx {
+  uint16_t node_id = 0U;
+  uint32_t missed_heartbeats = 0U;    // consecutive misses in the current run
+  uint32_t total_heartbeats = 0U;     // heartbeats received
+  bool connected = false;
+};
 
-// Forward declarations for state indices and SM pointer
-static int32_t g_state_connected = -1;
-static int32_t g_state_suspect = -1;
-static int32_t g_state_disconnected = -1;
+static constexpr uint32_t kMissToSuspect = 2U;       // Connected -> Suspect threshold
+static constexpr uint32_t kMissToDisconnect = 5U;    // Suspect -> Disconnected threshold
 
-// --- Connected State ---
+// --- Row actions / guards (free functions; decisions live in the table) -----
 
-static void OnEnterConnected(NodeContext& ctx) {
-  std::printf("[Node %u] -> Connected\n", ctx.node_id);
+void ActHbOk(NodeCtx& ctx, const void* /*data*/) noexcept {
+  ++ctx.total_heartbeats;
+  ctx.missed_heartbeats = 0U;
   ctx.connected = true;
-  ctx.missed_heartbeats = 0;
 }
 
-static void OnExitConnected(NodeContext& ctx) {
-  std::printf("[Node %u] <- Connected\n", ctx.node_id);
+void ActMiss(NodeCtx& ctx, const void* /*data*/) noexcept {
+  ++ctx.missed_heartbeats;
 }
 
-static osp::TransitionResult HandleConnected(NodeContext& ctx, const osp::Event& event) {
-  switch (event.id) {
-    case kHeartbeatOk:
-      ctx.total_heartbeats++;
-      std::printf("[Node %u] Connected: heartbeat OK (total=%u)\n", ctx.node_id, ctx.total_heartbeats);
-      return osp::TransitionResult::kHandled;
-
-    case kHeartbeatMiss:
-      ctx.missed_heartbeats++;
-      std::printf("[Node %u] Connected: heartbeat MISS (count=%u)\n", ctx.node_id, ctx.missed_heartbeats);
-      if (ctx.missed_heartbeats >= 2) {
-        std::printf("[Node %u] Connected: too many misses, transitioning to Suspect\n", ctx.node_id);
-        return ctx.sm->RequestTransition(g_state_suspect);
-      }
-      return osp::TransitionResult::kHandled;
-
-    case kDisconnect:
-      std::printf("[Node %u] Connected: disconnect event\n", ctx.node_id);
-      return ctx.sm->RequestTransition(g_state_disconnected);
-
-    default:
-      return osp::TransitionResult::kUnhandled;
-  }
+void ActReconnect(NodeCtx& ctx, const void* /*data*/) noexcept {
+  ctx.missed_heartbeats = 0U;
+  ctx.connected = true;
 }
 
-// --- Suspect State ---
-
-static void OnEnterSuspect(NodeContext& ctx) {
-  std::printf("[Node %u] -> Suspect (missed=%u)\n", ctx.node_id, ctx.missed_heartbeats);
+bool GuardMissToSuspect(NodeCtx& ctx, const void* /*data*/) noexcept {
+  return (ctx.missed_heartbeats + 1U) >= kMissToSuspect;
 }
 
-static void OnExitSuspect(NodeContext& ctx) {
-  std::printf("[Node %u] <- Suspect\n", ctx.node_id);
+bool GuardMissToDisconnect(NodeCtx& ctx, const void* /*data*/) noexcept {
+  return (ctx.missed_heartbeats + 1U) >= kMissToDisconnect;
 }
 
-static osp::TransitionResult HandleSuspect(NodeContext& ctx, const osp::Event& event) {
-  switch (event.id) {
-    case kHeartbeatOk:
-      ctx.total_heartbeats++;
-      ctx.missed_heartbeats = 0;
-      std::printf("[Node %u] Suspect: heartbeat OK, recovering to Connected\n", ctx.node_id);
-      return ctx.sm->RequestTransition(g_state_connected);
-
-    case kHeartbeatMiss:
-      ctx.missed_heartbeats++;
-      std::printf("[Node %u] Suspect: heartbeat MISS (count=%u)\n", ctx.node_id, ctx.missed_heartbeats);
-      if (ctx.missed_heartbeats >= 5) {
-        std::printf("[Node %u] Suspect: timeout, transitioning to Disconnected\n", ctx.node_id);
-        return ctx.sm->RequestTransition(g_state_disconnected);
-      }
-      return osp::TransitionResult::kHandled;
-
-    case kDisconnect:
-      std::printf("[Node %u] Suspect: disconnect event\n", ctx.node_id);
-      return ctx.sm->RequestTransition(g_state_disconnected);
-
-    default:
-      return osp::TransitionResult::kUnhandled;
-  }
+void OnEnterConnected(NodeCtx& ctx) noexcept {
+  ctx.connected = true;
+  std::printf("  [Node %u] -> Connected\n", ctx.node_id);
 }
 
-// --- Disconnected State ---
-
-static void OnEnterDisconnected(NodeContext& ctx) {
-  std::printf("[Node %u] -> Disconnected\n", ctx.node_id);
+void OnEnterDisconnected(NodeCtx& ctx) noexcept {
   ctx.connected = false;
+  std::printf("  [Node %u] -> Disconnected\n", ctx.node_id);
 }
 
-static void OnExitDisconnected(NodeContext& ctx) {
-  std::printf("[Node %u] <- Disconnected\n", ctx.node_id);
-}
+inline constexpr osp::StateDef<NodeCtx> kStates[kStateCount] = {
+    {"Connected", -1, OnEnterConnected, nullptr},
+    {"Suspect", -1, nullptr, nullptr},
+    {"Disconnected", -1, OnEnterDisconnected, nullptr},
+};
 
-static osp::TransitionResult HandleDisconnected(NodeContext& ctx, const osp::Event& event) {
-  switch (event.id) {
-    case kReconnect:
-      std::printf("[Node %u] Disconnected: reconnect event\n", ctx.node_id);
-      ctx.missed_heartbeats = 0;
-      return ctx.sm->RequestTransition(g_state_connected);
+inline constexpr osp::TransitionDef<NodeCtx> kTransitions[] = {
+    // Connected: heartbeat counts; a miss advances the suspected counter and,
+    // once the threshold is crossed (guard reads the pre-store value), moves to
+    // Suspect.
+    {kConnected, kHeartbeatOk, kConnected, osp::TransitionKind::kInternal, ActHbOk, nullptr},
+    {kConnected, kHeartbeatMiss, kSuspect, osp::TransitionKind::kExternal, ActMiss, GuardMissToSuspect},
+    {kConnected, kHeartbeatMiss, kConnected, osp::TransitionKind::kInternal, ActMiss, nullptr},
+    {kConnected, kDisconnect, kDisconnected, osp::TransitionKind::kExternal, nullptr, nullptr},
 
-    case kHeartbeatOk:
-    case kHeartbeatMiss:
-      std::printf("[Node %u] Disconnected: ignoring heartbeat event\n", ctx.node_id);
-      return osp::TransitionResult::kHandled;
+    // Suspect: an OK recovers; a miss consumes the disconnect budget.
+    {kSuspect, kHeartbeatOk, kConnected, osp::TransitionKind::kExternal, ActHbOk, nullptr},
+    {kSuspect, kHeartbeatMiss, kDisconnected, osp::TransitionKind::kExternal, ActMiss, GuardMissToDisconnect},
+    {kSuspect, kHeartbeatMiss, kSuspect, osp::TransitionKind::kInternal, ActMiss, nullptr},
+    {kSuspect, kDisconnect, kDisconnected, osp::TransitionKind::kExternal, nullptr, nullptr},
 
-    default:
-      return osp::TransitionResult::kUnhandled;
+    // Disconnected: heartbeat events ignored; reconnect restores the link.
+    {kDisconnected, kReconnect, kConnected, osp::TransitionKind::kExternal, ActReconnect, nullptr},
+    {kDisconnected, kHeartbeatOk, kDisconnected, osp::TransitionKind::kInternal, nullptr, nullptr},
+    {kDisconnected, kHeartbeatMiss, kDisconnected, osp::TransitionKind::kInternal, nullptr, nullptr},
+};
+
+inline constexpr uint32_t kTransCount = sizeof(kTransitions) / sizeof(kTransitions[0]);
+
+static constexpr uint32_t kNumNodes = 4U;
+static constexpr uint32_t kMaxTicks = 9U;   // length of the longest script
+static constexpr uint32_t kTimerId = 1U;
+
+// Per-node heartbeat script, one signal per tick (0 = node exhausted).
+// node 0: steady heartbeats            -> stays Connected
+// node 1: two misses, then recover     -> Suspect -> Connected
+// node 2: five misses, then reconnect  -> Suspect -> Disconnected -> Connected
+// node 3: immediate disconnect         -> Disconnected -> Connected
+static constexpr uint32_t kScript[kNumNodes][kMaxTicks] = {
+    {kHeartbeatOk, kHeartbeatOk, kHeartbeatOk, kHeartbeatOk, 0U, 0U, 0U, 0U, 0U},
+    {kHeartbeatOk, kHeartbeatMiss, kHeartbeatMiss, kHeartbeatMiss, kHeartbeatOk, kHeartbeatOk, 0U, 0U, 0U},
+    {kHeartbeatOk, kHeartbeatMiss, kHeartbeatMiss, kHeartbeatMiss, kHeartbeatMiss, kHeartbeatMiss, kHeartbeatMiss,
+     kReconnect, kHeartbeatOk},
+    {kHeartbeatOk, kHeartbeatOk, kDisconnect, kReconnect, kHeartbeatOk, 0U, 0U, 0U, 0U},
+};
+
+class NodeLoop : public osp::EventLoop<NodeLoop> {
+ public:
+  NodeLoop() noexcept
+      : nodes_{
+            NodeCtx{101U, 0U, 0U, false}, NodeCtx{102U, 0U, 0U, false},
+            NodeCtx{103U, 0U, 0U, false}, NodeCtx{104U, 0U, 0U, false},
+        },
+        hsms_{
+            osp::TableHsm<NodeCtx, kStateCount, kTransCount>(nodes_[0], kStates, kStateCount, kTransitions,
+                                                             kTransCount),
+            osp::TableHsm<NodeCtx, kStateCount, kTransCount>(nodes_[1], kStates, kStateCount, kTransitions,
+                                                             kTransCount),
+            osp::TableHsm<NodeCtx, kStateCount, kTransCount>(nodes_[2], kStates, kStateCount, kTransitions,
+                                                             kTransCount),
+            osp::TableHsm<NodeCtx, kStateCount, kTransCount>(nodes_[3], kStates, kStateCount, kTransitions,
+                                                             kTransCount),
+        } {
+    for (uint32_t i = 0U; i < kNumNodes; ++i) {
+      hsms_[i].SetInitialState(kConnected);
+      hsms_[i].Start();
+    }
   }
-}
 
-// ============================================================================
-// State Machine Factory
-// ============================================================================
-
-using NodeHSM = osp::StateMachine<NodeContext, 8>;
-
-static void BuildNodeHSM(NodeHSM& sm) {
-  // Add states
-  g_state_connected = sm.AddState({"Connected",
-                                   -1,  // root state
-                                   HandleConnected, OnEnterConnected, OnExitConnected, nullptr});
-
-  g_state_suspect = sm.AddState({"Suspect",
-                                 -1,  // root state
-                                 HandleSuspect, OnEnterSuspect, OnExitSuspect, nullptr});
-
-  g_state_disconnected = sm.AddState({"Disconnected",
-                                      -1,  // root state
-                                      HandleDisconnected, OnEnterDisconnected, OnExitDisconnected, nullptr});
-
-  sm.SetInitialState(g_state_connected);
-}
-
-// ============================================================================
-// Demo Scenario
-// ============================================================================
-
-static void SimulateHeartbeats(NodeHSM& sm, NodeContext& ctx, const char* scenario_name, const uint32_t* events,
-                               uint32_t count) {
-  std::printf("\n=== Scenario: %s ===\n", scenario_name);
-
-  for (uint32_t i = 0; i < count; ++i) {
-    osp::Event evt{events[i], nullptr};
-    std::printf("\n[Step %u] Dispatching event %u\n", i + 1, events[i]);
-
-    // Dispatch event
-    sm.Dispatch(evt);
-
-    std::printf("  State: %s, Missed: %u, Total: %u\n", sm.CurrentStateName(), ctx.missed_heartbeats,
-                ctx.total_heartbeats);
+  bool RunAndCheck() noexcept {
+    (void)Schedule(1U);
+    Run();
+    return Check();
   }
-}
+
+  void OnTimer(uint32_t timer_id) noexcept {
+    if (timer_id != kTimerId) {
+      return;
+    }
+    if (tick_ >= kMaxTicks) {
+      Stop();
+      return;
+    }
+    for (uint32_t i = 0U; i < kNumNodes; ++i) {
+      const uint32_t sig = kScript[i][tick_];
+      if (0U != sig) {
+        hsms_[i].Dispatch(osp::Event{sig, nullptr});
+      }
+    }
+    ++tick_;
+  }
+
+ private:
+  bool Check() noexcept {
+    static constexpr uint32_t kExpectedHb[kNumNodes] = {4U, 3U, 2U, 3U};
+    bool pass = true;
+    for (uint32_t i = 0U; i < kNumNodes; ++i) {
+      const NodeCtx& ctx = nodes_[i];
+      std::printf("Node %u: hb=%u missed=%u [%s]\n", static_cast<unsigned>(ctx.node_id),
+                  static_cast<unsigned>(ctx.total_heartbeats), static_cast<unsigned>(ctx.missed_heartbeats),
+                  hsms_[i].CurrentStateName());
+      if ((ctx.total_heartbeats != kExpectedHb[i]) || (0U != ctx.missed_heartbeats) ||
+          (hsms_[i].CurrentState() != kConnected)) {
+        pass = false;
+      }
+    }
+    return pass;
+  }
+
+  NodeCtx nodes_[kNumNodes];
+  osp::TableHsm<NodeCtx, kStateCount, kTransCount> hsms_[kNumNodes];
+  uint32_t tick_ = 0U;
+};
+
+}  // namespace
 
 int main() {
-  osp::log::Init();
-  osp::log::SetLevel(osp::log::Level::kInfo);
+  std::printf("=== newosp node manager demo (table HSM + event loop) ===\n");
 
-  std::printf("=== NodeManager HSM Demo ===\n");
-  std::printf("Demonstrates heartbeat state machine with 3 states:\n");
-  std::printf("  Connected -> Suspect -> Disconnected\n\n");
+  NodeLoop loop;
+  const bool pass = loop.RunAndCheck();
 
-  // -------------------------------------------------------------------------
-  // Node 1: Normal operation
-  // -------------------------------------------------------------------------
-
-  NodeContext ctx1;
-  ctx1.node_id = 101;
-  NodeHSM sm1(ctx1);
-  ctx1.sm = &sm1;
-  BuildNodeHSM(sm1);
-  sm1.Start();
-
-  uint32_t scenario1[] = {kHeartbeatOk, kHeartbeatOk, kHeartbeatOk, kHeartbeatOk};
-  SimulateHeartbeats(sm1, ctx1, "Node 101 - Normal Operation", scenario1, sizeof(scenario1) / sizeof(scenario1[0]));
-
-  // -------------------------------------------------------------------------
-  // Node 2: Missed heartbeats -> Suspect -> Recovery
-  // -------------------------------------------------------------------------
-
-  NodeContext ctx2;
-  ctx2.node_id = 102;
-  NodeHSM sm2(ctx2);
-  ctx2.sm = &sm2;
-  BuildNodeHSM(sm2);
-  sm2.Start();
-
-  uint32_t scenario2[] = {kHeartbeatOk,   kHeartbeatMiss,
-                          kHeartbeatMiss,  // -> Suspect
-                          kHeartbeatMiss,
-                          kHeartbeatOk,  // -> Connected (recovery)
-                          kHeartbeatOk};
-  SimulateHeartbeats(sm2, ctx2, "Node 102 - Suspect and Recovery", scenario2, sizeof(scenario2) / sizeof(scenario2[0]));
-
-  // -------------------------------------------------------------------------
-  // Node 3: Timeout -> Disconnect -> Reconnect
-  // -------------------------------------------------------------------------
-
-  NodeContext ctx3;
-  ctx3.node_id = 103;
-  NodeHSM sm3(ctx3);
-  ctx3.sm = &sm3;
-  BuildNodeHSM(sm3);
-  sm3.Start();
-
-  uint32_t scenario3[] = {kHeartbeatOk,   kHeartbeatMiss,
-                          kHeartbeatMiss,  // -> Suspect
-                          kHeartbeatMiss, kHeartbeatMiss,
-                          kHeartbeatMiss,  // -> Disconnected
-                          kHeartbeatMiss,  // ignored
-                          kReconnect,      // -> Connected
-                          kHeartbeatOk};
-  SimulateHeartbeats(sm3, ctx3, "Node 103 - Timeout and Reconnect", scenario3,
-                     sizeof(scenario3) / sizeof(scenario3[0]));
-
-  // -------------------------------------------------------------------------
-  // Node 4: Immediate disconnect
-  // -------------------------------------------------------------------------
-
-  NodeContext ctx4;
-  ctx4.node_id = 104;
-  NodeHSM sm4(ctx4);
-  ctx4.sm = &sm4;
-  BuildNodeHSM(sm4);
-  sm4.Start();
-
-  uint32_t scenario4[] = {kHeartbeatOk, kHeartbeatOk,
-                          kDisconnect,  // -> Disconnected
-                          kReconnect,   // -> Connected
-                          kHeartbeatOk};
-  SimulateHeartbeats(sm4, ctx4, "Node 104 - Immediate Disconnect", scenario4, sizeof(scenario4) / sizeof(scenario4[0]));
-
-  // -------------------------------------------------------------------------
-  // Summary
-  // -------------------------------------------------------------------------
-
-  std::printf("\n=== Summary ===\n");
-  std::printf("Node 101: State=%s, Connected=%d, Total HB=%u\n", sm1.CurrentStateName(), ctx1.connected,
-              ctx1.total_heartbeats);
-  std::printf("Node 102: State=%s, Connected=%d, Total HB=%u\n", sm2.CurrentStateName(), ctx2.connected,
-              ctx2.total_heartbeats);
-  std::printf("Node 103: State=%s, Connected=%d, Total HB=%u\n", sm3.CurrentStateName(), ctx3.connected,
-              ctx3.total_heartbeats);
-  std::printf("Node 104: State=%s, Connected=%d, Total HB=%u\n", sm4.CurrentStateName(), ctx4.connected,
-              ctx4.total_heartbeats);
-
-  osp::log::Shutdown();
-  return 0;
+  std::printf("RESULT: %s\n", pass ? "PASS" : "FAIL");
+  return pass ? 0 : 1;
 }

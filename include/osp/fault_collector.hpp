@@ -48,6 +48,7 @@
 #ifndef OSP_FAULT_COLLECTOR_HPP_
 #define OSP_FAULT_COLLECTOR_HPP_
 
+#include "osp/breaker.hpp"
 #include "osp/log.hpp"
 #include "osp/platform.hpp"
 #include "osp/semaphore.hpp"
@@ -394,6 +395,7 @@ class FaultCollector {
       if (overflow_cb_) {
         overflow_cb_(fault_index, priority);
       }
+      breaker_.OnOverflow();
       return expected<void, FaultCollectorError>::error(FaultCollectorError::kQueueFull);
     }
 
@@ -409,6 +411,7 @@ class FaultCollector {
       if (overflow_cb_) {
         overflow_cb_(fault_index, priority);
       }
+      breaker_.OnOverflow();
       return expected<void, FaultCollectorError>::error(FaultCollectorError::kQueueFull);
     }
 
@@ -531,6 +534,13 @@ class FaultCollector {
     return BackpressureLevel::kNormal;
   }
 
+  /// Circuit-breaker state driven by backpressure (see osp/breaker.hpp).
+  /// The breaker consumes the drop events above and the watermark sampled in
+  /// the consumer loop, and exposes graded actions for the policy layer.
+  BreakerLevel GetBreakerLevel() const noexcept { return breaker_.Level(); }
+  bool BreakerDropsNonCritical() const noexcept { return breaker_.DropNonCritical(); }
+  bool BreakerSafeEventsOnly() const noexcept { return breaker_.SafeEventsOnly(); }
+
   /// Get queue usage for a specific priority level.
   QueueUsageInfo QueueUsage(FaultPriority pri) const noexcept {
     auto idx = static_cast<uint32_t>(pri);
@@ -623,6 +633,13 @@ class FaultCollector {
     }
     while (running_.load(std::memory_order_acquire) && !shutdown_requested_.load(std::memory_order_acquire)) {
       uint32_t processed = ProcessBatch();
+      // Feed the breaker once per loop: advance cooldown and sample the
+      // overall watermark. Runs on the consumer thread, off the ReportFault
+      // hot path, so producers pay no extra cost for it.
+      breaker_.OnDispatchCycle();
+      const uint32_t total_usage = QueueDepthCurrent();
+      const uint32_t total_capacity = QueueDepth * detail::kPriorityLevels;
+      breaker_.OnWatermark(static_cast<uint8_t>((total_usage * 100U) / total_capacity));
       if (consumer_heartbeat_ != nullptr) {
         consumer_heartbeat_->Beat();
       }
@@ -769,6 +786,9 @@ class FaultCollector {
   std::atomic<uint64_t> stats_total_dropped_{0U};
   std::array<std::atomic<uint64_t>, detail::kPriorityLevels> stats_reported_{};
   std::array<std::atomic<uint64_t>, detail::kPriorityLevels> stats_dropped_{};
+
+  // Circuit breaker driven by queue drops and watermark samples.
+  Breaker<> breaker_;
 
   // Callbacks
   HookFn default_hook_;

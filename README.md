@@ -24,7 +24,7 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 - **Reliability infrastructure**: Software watchdog, fault collector, lifecycle nodes, QoS configuration
 - **Template-based design patterns**: Tag dispatch, variadic templates, CRTP, compile-time composition over virtual-function OOP
 
-## Modules (47 headers)
+## Modules (50 headers)
 
 ### Foundation Layer (12)
 
@@ -58,19 +58,21 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 | `job_pool.hpp` | Job scheduling pool (dependency-ordered, zero-heap batch execution) |
 | `data_dispatcher.hpp` | Shared data block pipeline (InProc/Shm StorePolicy, CAS, heartbeat reaper) |
 
-### State Machine & Behavior Tree (2)
+### State Machine & Behavior Tree (3)
 
 | Module | Description |
 |--------|-------------|
 | `hsm.hpp` | Hierarchical state machine (LCA transitions, guard conditions, ForceTransition, zero heap) |
+| `hsm_table.hpp` | Table-driven HSM (StateDef[]/TransitionDef[] static table + guard predicates) |
 | `bt.hpp` | Behavior tree (Sequence/Fallback/Parallel, flat array storage, cache-friendly) |
 
-### Network & Transport Layer (8)
+### Network & Transport Layer (9)
 
 | Module | Description |
 |--------|-------------|
 | `socket.hpp` | TCP/UDP/Unix Domain Socket RAII wrapper (sockpp) |
 | `io_poller.hpp` | epoll event loop (edge-triggered + timeout) |
+| `event_loop.hpp` | Unified event loop (fd readiness + timers + cross-thread wakeup, CRTP hooks) |
 | `connection.hpp` | Connection pool management (auto-reconnect, heartbeat) |
 | `transport.hpp` | Network transport (v0/v1 frame protocol, SequenceTracker) |
 | `shm_transport.hpp` | Shared memory IPC (lock-free SPSC, ARM memory ordering, CreateOrReplace crash recovery) |
@@ -98,12 +100,13 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 | `qos.hpp` | QoS configuration (Reliability/History/Deadline/Lifespan) |
 | `lifecycle_node.hpp` | Lifecycle node (Unconfigured/Inactive/Active/Finalized, HSM-driven) |
 
-### Reliability & System Layer (5)
+### Reliability & System Layer (6)
 
 | Module | Description |
 |--------|-------------|
 | `watchdog.hpp` | Software watchdog (deadline monitoring, timeout callbacks) |
 | `fault_collector.hpp` | Fault collection and reporting (FaultReporter POD injection, ring buffer) |
+| `breaker.hpp` | Backpressure circuit breaker (5-state, single 32-bit atomic CAS) |
 | `shell_commands.hpp` | Built-in diagnostic shell command bridge (zero-intrusion, 15 Register functions) |
 | `process.hpp` | Process management (Subprocess spawn/pipe/wait, FindPidByName, Freeze/Resume/Kill) |
 | `system_monitor.hpp` | Linux system health monitoring (CPU, memory, disk, temperature) |

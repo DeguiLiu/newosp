@@ -34,6 +34,7 @@
 #ifndef OSP_NODE_MANAGER_HPP_
 #define OSP_NODE_MANAGER_HPP_
 
+#include "osp/event_loop.hpp"
 #include "osp/platform.hpp"
 #include "osp/socket.hpp"
 #include "osp/thread.hpp"
@@ -42,6 +43,7 @@
 
 #if OSP_HAS_NETWORK
 
+#include <cerrno>
 #include <cstring>
 
 #include <atomic>
@@ -128,17 +130,19 @@ struct NodeEntry {
 // ============================================================================
 
 template <uint32_t MaxNodes = OSP_NODE_MANAGER_MAX_NODES>
-class NodeManager {
+class NodeManager : public EventLoop<NodeManager<MaxNodes>, MaxNodes + 1U, 2U> {
  public:
   explicit NodeManager(const NodeManagerConfig& cfg = {}, TimerScheduler<>* scheduler = nullptr) noexcept
-      : config_(cfg),
+      : EventLoop<NodeManager<MaxNodes>, MaxNodes + 1U, 2U>(),
+        config_(cfg),
         running_(false),
         next_node_id_(1),
         node_count_(0),
-        disconnect_fn_(nullptr),
-        disconnect_ctx_(nullptr),
         scheduler_(scheduler),
-        timer_task_id_(0) {}
+        timer_task_id_(0),
+        timer_id_(0),
+        disconnect_fn_(nullptr),
+        disconnect_ctx_(nullptr) {}
 
   ~NodeManager() { Stop(); }
 
@@ -232,6 +236,8 @@ class NodeManager {
 
     // Disable Nagle's algorithm for low-latency heartbeats
     static_cast<void>(sock.SetNoDelay(true));
+    // Non-blocking: OnFd recv must never block the loop thread.
+    static_cast<void>(sock.SetNonBlocking(true));
 
     slot->node_id = AllocNodeId();
     slot->socket = static_cast<TcpSocket&&>(sock);
@@ -241,6 +247,9 @@ class NodeManager {
     slot->active = true;
     slot->is_listener = false;
     ++node_count_;
+
+    // Register the socket for event-driven disconnect detection (ev_io).
+    static_cast<void>(this->AddFd(slot->socket.Fd(), static_cast<uint8_t>(IoEvent::kReadable)));
 
     return expected<uint16_t, NodeManagerError>::success(slot->node_id);
   }
@@ -261,6 +270,7 @@ class NodeManager {
     if (node->is_listener) {
       node->listener.Close();
     } else {
+      static_cast<void>(this->RemoveFd(node->socket.Fd()));
       node->socket.Close();
     }
     node->active = false;
@@ -333,9 +343,20 @@ class NodeManager {
         running_.store(false);
         return expected<void, NodeManagerError>::error(NodeManagerError::kNotRunning);
       }
-    } else if (!heartbeat_thread_.Start(ThreadOptions{"nm-hb"}, [this]() { HeartbeatLoop(); })) {
-      running_.store(false);
-      return expected<void, NodeManagerError>::error(NodeManagerError::kNotRunning);
+    } else {
+      // EventLoop-driven heartbeat: a periodic timer wakes the unified loop;
+      // Run() blocks on the poller with timeout = next heartbeat deadline.
+      auto r = this->Schedule(config_.heartbeat_interval_ms);
+      if (!r.has_value()) {
+        running_.store(false);
+        return expected<void, NodeManagerError>::error(NodeManagerError::kNotRunning);
+      }
+      timer_id_ = r.value();
+      this->ClearStop();
+      if (!run_thread_.Start(ThreadOptions{"nm-loop"}, [this]() { this->Run(); })) {
+        running_.store(false);
+        return expected<void, NodeManagerError>::error(NodeManagerError::kNotRunning);
+      }
     }
 
     return expected<void, NodeManagerError>::success();
@@ -350,9 +371,11 @@ class NodeManager {
     if (scheduler_ != nullptr) {
       static_cast<void>(scheduler_->Remove(timer_task_id_));
     } else {
-      if (heartbeat_thread_.joinable()) {
-        heartbeat_thread_.join();
+      EventLoop<NodeManager<MaxNodes>, MaxNodes + 1U, 2U>::Stop();
+      if (run_thread_.joinable()) {
+        run_thread_.join();
       }
+      static_cast<void>(this->Cancel(timer_id_));
     }
 
     std::lock_guard<osp::Mutex> lock(mutex_);
@@ -404,11 +427,12 @@ class NodeManager {
   uint32_t node_count_;
   NodeEntry nodes_[MaxNodes];
   mutable osp::Mutex mutex_;
-  osp::Thread heartbeat_thread_;
+  osp::Thread run_thread_;
   ThreadHeartbeat* heartbeat_{nullptr};
 
   TimerScheduler<>* scheduler_;
   TimerTaskId timer_task_id_{0};
+  uint32_t timer_id_{0};
 
   NodeDisconnectFn disconnect_fn_;
   void* disconnect_ctx_;
@@ -417,25 +441,99 @@ class NodeManager {
   // Heartbeat Implementation
   // ==========================================================================
 
-  static void HeartbeatTick(void* ctx) noexcept {
-    auto* self = static_cast<NodeManager*>(ctx);
+ public:
+  // EventLoop hooks (CRTP): OnTimer fires on each heartbeat tick. OnFd is
+  // unused for now (no fd watchers are registered).
+  void OnTimer(uint32_t timer_id) noexcept {
+    (void)timer_id;
+    HeartbeatOnce();
+  }
+
+  void OnFd(int32_t fd, uint8_t events) noexcept {
+    if (0 == (events & static_cast<uint8_t>(IoEvent::kReadable))) {
+      return;
+    }
+    // Non-blocking recv: 0 = FIN, >0 = peer alive, <0 EAGAIN = no data,
+    // <0 otherwise = connection error.
+    uint8_t buf[64];
+    const int32_t n = socket_api::Recv(fd, buf, sizeof(buf), 0);
+    if (n > 0) {
+      std::lock_guard<osp::Mutex> lock(mutex_);
+      NodeEntry* node = FindNodeByFd(fd);
+      if (node != nullptr && node->active) {
+        node->last_heartbeat_us = SteadyNowUs();
+      }
+      return;
+    }
+    if (0 == n) {
+      DisconnectByFd(fd);
+      return;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return;  // No data, connection healthy.
+    }
+    DisconnectByFd(fd);
+  }
+
+ private:
+  /// @brief Disconnect a node by socket fd and fire the disconnect callback.
+  void DisconnectByFd(int32_t fd) noexcept {
+    uint16_t node_id = 0U;
+    NodeDisconnectFn fn = nullptr;
+    void* fn_ctx = nullptr;
+    {
+      std::lock_guard<osp::Mutex> lock(mutex_);
+      NodeEntry* node = FindNodeByFd(fd);
+      if (node == nullptr || !node->active) {
+        return;
+      }
+      node_id = node->node_id;
+      static_cast<void>(this->RemoveFd(fd));
+      node->socket.Close();
+      node->active = false;
+      --node_count_;
+      fn = disconnect_fn_;
+      fn_ctx = disconnect_ctx_;
+    }
+    if (fn != nullptr) {
+      fn(node_id, fn_ctx);
+    }
+  }
+
+  void HeartbeatOnce() noexcept {
+    if (heartbeat_ != nullptr) {
+      heartbeat_->Beat();
+    }
+
+    // Snapshot heartbeat targets as (node_id, fd) under the lock, then send
+    // outside it so a blocked TCP send does not hold mutex_.
+    uint16_t target_ids[MaxNodes];
+    int32_t target_fds[MaxNodes];
+    uint32_t target_count = 0U;
+    {
+      std::lock_guard<osp::Mutex> lock(mutex_);
+      for (uint32_t i = 0; i < MaxNodes; ++i) {
+        if (nodes_[i].active && !nodes_[i].is_listener) {
+          target_ids[target_count] = nodes_[i].node_id;
+          target_fds[target_count] = nodes_[i].socket.Fd();
+          ++target_count;
+        }
+      }
+    }
+    for (uint32_t i = 0U; i < target_count; ++i) {
+      SendHeartbeatByFd(target_ids[i], target_fds[i]);
+    }
 
     // Collect pending callbacks under lock
     uint16_t disconnected_ids[MaxNodes];
     uint32_t disconnect_count = 0U;
     NodeDisconnectFn fn = nullptr;
     void* fn_ctx = nullptr;
-
     {
-      std::lock_guard<osp::Mutex> lock(self->mutex_);
-      for (uint32_t i = 0; i < MaxNodes; ++i) {
-        if (self->nodes_[i].active && !self->nodes_[i].is_listener) {
-          self->SendHeartbeat(self->nodes_[i]);
-        }
-      }
-      disconnect_count = self->CollectTimeouts(disconnected_ids);
-      fn = self->disconnect_fn_;
-      fn_ctx = self->disconnect_ctx_;
+      std::lock_guard<osp::Mutex> lock(mutex_);
+      disconnect_count = CollectTimeouts(disconnected_ids);
+      fn = disconnect_fn_;
+      fn_ctx = disconnect_ctx_;
     }
 
     // Execute callbacks outside lock
@@ -446,60 +544,32 @@ class NodeManager {
     }
   }
 
-  void HeartbeatLoop() noexcept {
-    while (running_.load()) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
-      }
-      const uint64_t start_us = SteadyNowUs();
+  static void HeartbeatTick(void* ctx) noexcept { static_cast<NodeManager*>(ctx)->HeartbeatOnce(); }
 
-      uint16_t disconnected_ids[MaxNodes];
-      uint32_t disconnect_count = 0U;
-      NodeDisconnectFn fn = nullptr;
-      void* fn_ctx = nullptr;
-
-      {
-        std::lock_guard<osp::Mutex> lock(mutex_);
-        for (uint32_t i = 0; i < MaxNodes; ++i) {
-          if (nodes_[i].active && !nodes_[i].is_listener) {
-            SendHeartbeat(nodes_[i]);
-          }
-        }
-        disconnect_count = CollectTimeouts(disconnected_ids);
-        fn = disconnect_fn_;
-        fn_ctx = disconnect_ctx_;
-      }
-
-      // Execute callbacks outside lock
-      if (fn != nullptr) {
-        for (uint32_t i = 0; i < disconnect_count; ++i) {
-          fn(disconnected_ids[i], fn_ctx);
-        }
-      }
-
-      const uint64_t elapsed_us = SteadyNowUs() - start_us;
-      const uint64_t interval_us = static_cast<uint64_t>(config_.heartbeat_interval_ms) * 1000U;
-      if (elapsed_us < interval_us) {
-        ThreadSleepUs(interval_us - elapsed_us);
-      }
+  void SendHeartbeatByFd(uint16_t node_id, int32_t fd) noexcept {
+    if (fd < 0) {
+      return;
     }
-  }
-
-  void SendHeartbeat(NodeEntry& node) noexcept {
     uint8_t frame[kHeartbeatFrameSize];
     uint64_t timestamp = SteadyNowUs();
 
     // Encode: magic(4B) + node_id(2B) + timestamp(8B)
     std::memcpy(frame + 0, &kHeartbeatMagic, 4);
-    std::memcpy(frame + 4, &node.node_id, 2);
+    std::memcpy(frame + 4, &node_id, 2);
     std::memcpy(frame + 6, &timestamp, 8);
 
-    auto r = node.socket.Send(frame, kHeartbeatFrameSize);
-    // Only update timestamp if send was successful
-    if (r.has_value() && r.value() == static_cast<int32_t>(kHeartbeatFrameSize)) {
-      node.last_heartbeat_us = timestamp;
+    const int32_t sent = socket_api::Send(fd, frame, kHeartbeatFrameSize, kSendNoSignal);
+    if (sent != static_cast<int32_t>(kHeartbeatFrameSize)) {
+      return;  // Send failed: leave last_heartbeat_us stale to trigger timeout.
     }
-    // If send fails, don't update timestamp - this will trigger timeout detection
+    // Write back the timestamp under the lock, re-validating that the node
+    // still owns this fd so a concurrent Disconnect/Connect fd reuse is not
+    // mis-written to a different node.
+    std::lock_guard<osp::Mutex> lock(mutex_);
+    NodeEntry* node = FindNode(node_id);
+    if (node != nullptr && node->active && node->socket.Fd() == fd) {
+      node->last_heartbeat_us = timestamp;
+    }
   }
 
   /// @brief Collect timed-out nodes for deferred callback execution.
@@ -551,6 +621,15 @@ class NodeManager {
     for (uint32_t i = 0; i < MaxNodes; ++i) {
       if (nodes_[i].active && nodes_[i].node_id == id)
         return &nodes_[i];
+    }
+    return nullptr;
+  }
+
+  NodeEntry* FindNodeByFd(int32_t fd) noexcept {
+    for (uint32_t i = 0; i < MaxNodes; ++i) {
+      if (nodes_[i].active && !nodes_[i].is_listener && nodes_[i].socket.Fd() == fd) {
+        return &nodes_[i];
+      }
     }
     return nullptr;
   }

@@ -1,30 +1,29 @@
 /**
  * @file file_transfer.hpp
- * @brief File transfer with simulated packet loss and HSM-driven retransmission.
+ * @brief File transfer with simulated packet loss and table-driven HSM.
  *
- * Runs on a dedicated thread, independent of the echo channel.
- * Uses osp::StateMachine for transfer state management with retry logic.
+ * Runs on a dedicated thread, independent of the echo channel. The transfer
+ * HSM is a static table (osp::TableHsm); RPC results are recorded by the
+ * Sending action, and the driver loop translates the result into the next
+ * event (kFtAckOk / kFtAckFail) so every transition decision lives in a
+ * table row, never in an action.
  *
- * HSM States:
+ * HSM States (7):
  *   Root
  *   +-- Idle (initial)
  *   +-- Transferring
- *   |   +-- Sending     -- send next chunk
- *   |   +-- WaitingAck  -- wait for server response
- *   |   +-- Retrying    -- resend after simulated loss
- *   +-- Complete
- *   +-- Failed
+ *   |   +-- Sending     -- send one chunk (RPC result recorded in ctx)
+ *   |   +-- Retrying    -- resend after simulated loss or RPC failure
+ *   +-- Complete        -- terminal success (entry flags ctx.complete/success)
+ *   +-- Failed          -- terminal failure (entry flags ctx.complete)
  *
- * Simulated packet loss:
- *   A configurable drop_rate (0.0-1.0) causes random chunks to be "lost"
- *   (server receives but client ignores the response). The HSM detects
- *   the timeout and retransmits.
+ * The former WaitingAck placeholder state was removed: in the synchronous
+ * RPC mode the driver loop is the waiter; a future async mode can add the
+ * state back with real wait semantics.
  *
- * newosp components:
- *   - osp::StateMachine   -- transfer HSM
- *   - osp::FixedVector    -- file data buffer (stack-allocated)
- *   - osp::expected       -- error handling
- *   - osp::log            -- structured logging
+ * Simulated packet loss: a configurable drop_rate (0.0-1.0) causes random
+ * chunks to be "lost" (server receives but client ignores the response).
+ * The HSM detects the timeout and retransmits.
  */
 
 #ifndef NET_STRESS_FILE_TRANSFER_HPP_
@@ -33,6 +32,7 @@
 #include "protocol.hpp"
 
 #include "osp/hsm.hpp"
+#include "osp/hsm_table.hpp"
 #include "osp/log.hpp"
 #include "osp/platform.hpp"
 #include "osp/service.hpp"
@@ -52,13 +52,27 @@ namespace net_stress {
 
 enum FtEvtId : uint32_t {
   kFtStart = 100,
-  kFtChunkSent,
-  kFtAckOk,
-  kFtAckFail,
-  kFtTimeout,
-  kFtRetry,
-  kFtDone,
-  kFtAbort,
+  kFtChunkSent,  // driver asks Sending to transmit the current chunk
+  kFtAckOk,      // chunk acknowledged (or transfer complete)
+  kFtAckFail,    // chunk lost or RPC failed -> Retrying
+  kFtRetry,      // retry budget allows another attempt -> Sending
+  kFtDone,       // all chunks acknowledged -> Complete
+  kFtAbort,      // unrecoverable (max retries, connection lost) -> Failed
+};
+
+// ============================================================================
+// State indices (fixed by table order)
+// ============================================================================
+
+enum FtSmState : int32_t {
+  kFsRoot = 0,
+  kFsIdle,
+  kFsTransferring,
+  kFsSending,
+  kFsRetrying,
+  kFsComplete,
+  kFsFailed,
+  kFsCount
 };
 
 // ============================================================================
@@ -70,10 +84,49 @@ static constexpr uint32_t kMaxRetries = 3;
 static constexpr uint32_t kChunkSize = 2048U;  // bytes per chunk
 
 struct FtCtx;
-using FtSm = osp::StateMachine<FtCtx, kFtSmMaxStates>;
+
+// ============================================================================
+// Row actions and guards (declarations; bodies after FtCtx is complete)
+// ============================================================================
+
+namespace ft_sm_detail {
+
+/// Result of one Sending action, consumed by the driver loop.
+enum class SendResult : uint8_t {
+  kOk,       ///< chunk acknowledged
+  kDone,     ///< last chunk acknowledged
+  kLost,     ///< simulated drop
+  kRpcFail,  ///< RPC call failed or rejected
+  kNoConn,   ///< file RPC not connected
+};
+
+/// Idle + start: reset the transfer counters.
+void ActStart(FtCtx& ctx, const void* data) noexcept;
+
+/// Sending + chunk-sent: transmit the current chunk and record the result
+/// (ctx.send_result). No transition decision here.
+void ActSend(FtCtx& ctx, const void* data) noexcept;
+
+/// Retrying + retry: consume one retry unit.
+void ActRetry(FtCtx& ctx, const void* data) noexcept;
+
+/// Complete entry: flag success.
+void OnEnterComplete(FtCtx& ctx) noexcept;
+
+/// Failed entry: flag failure.
+void OnEnterFailed(FtCtx& ctx) noexcept;
+
+/// Guard: retry budget still available.
+bool GuardCanRetry(FtCtx& ctx, const void* data) noexcept;
+
+}  // namespace ft_sm_detail
+
+// ============================================================================
+// Transfer Context (definition)
+// ============================================================================
 
 struct FtCtx {
-  FtSm* sm;
+  osp::TableHsm<FtCtx, kFsCount, 10>* sm;
 
   // Connection
   uint32_t client_id;
@@ -92,6 +145,9 @@ struct FtCtx {
   uint32_t retry_count;
   float drop_rate;  // simulated loss probability (0.0 - 1.0)
 
+  // One-shot result of the last ActSend (read by the driver loop).
+  ft_sm_detail::SendResult send_result;
+
   // Heartbeat (optional, from ThreadWatchdog)
   osp::ThreadHeartbeat* heartbeat;
 
@@ -100,11 +156,9 @@ struct FtCtx {
   std::atomic<uint32_t> chunks_retried;
   std::atomic<bool> complete;
   std::atomic<bool> success;
-
-  // State indices
-  int32_t si_root, si_idle, si_xfer, si_send, si_wait, si_retry;
-  int32_t si_done, si_fail;
 };
+
+using FtSm = osp::TableHsm<FtCtx, kFsCount, 10>;
 
 inline void InitFtCtx(FtCtx& c) noexcept {
   c.sm = nullptr;
@@ -118,13 +172,12 @@ inline void InitFtCtx(FtCtx& c) noexcept {
   c.bytes_sent = 0;
   c.retry_count = 0;
   c.drop_rate = 0.1f;  // 10% simulated loss
+  c.send_result = ft_sm_detail::SendResult::kNoConn;
   c.heartbeat = nullptr;
   c.chunks_ok.store(0, std::memory_order_relaxed);
   c.chunks_retried.store(0, std::memory_order_relaxed);
   c.complete.store(false, std::memory_order_relaxed);
   c.success.store(false, std::memory_order_relaxed);
-  c.si_root = c.si_idle = c.si_xfer = c.si_send = -1;
-  c.si_wait = c.si_retry = c.si_done = c.si_fail = -1;
 }
 
 // ============================================================================
@@ -132,8 +185,9 @@ inline void InitFtCtx(FtCtx& c) noexcept {
 // ============================================================================
 
 inline bool SimulateDrop(float rate) noexcept {
-  if (rate <= 0.0f)
+  if (rate <= 0.0f) {
     return false;
+  }
   // Thread-safe PRNG (thread_local avoids contention)
   static thread_local std::mt19937 gen(static_cast<uint32_t>(NowNs() & 0xFFFFFFFFULL));
   std::uniform_real_distribution<float> dis(0.0f, 1.0f);
@@ -141,145 +195,120 @@ inline bool SimulateDrop(float rate) noexcept {
 }
 
 // ============================================================================
-// Free-Function State Handlers
+// Static table
 // ============================================================================
 
-namespace ft_hsm {
+namespace ft_sm_detail {
 
-using TR = osp::TransitionResult;
-using Ev = osp::Event;
+inline constexpr osp::StateDef<FtCtx> kFtStates[kFsCount] = {
+    {"Root", -1, nullptr, nullptr},
+    {"Idle", kFsRoot, nullptr, nullptr},
+    {"Transferring", kFsRoot, nullptr, nullptr},
+    {"Sending", kFsTransferring, nullptr, nullptr},
+    {"Retrying", kFsTransferring, nullptr, nullptr},
+    {"Complete", kFsRoot, &OnEnterComplete, nullptr},
+    {"Failed", kFsRoot, &OnEnterFailed, nullptr},
+};
 
-inline TR Root(FtCtx& /*ctx*/, const Ev& /*evt*/) {
-  return TR::kHandled;
+inline constexpr osp::TransitionDef<FtCtx> kFtTrans[] = {
+    // Idle: start resets counters and enters Sending.
+    {kFsIdle, kFtStart, kFsSending, osp::TransitionKind::kExternal, ActStart, nullptr},
+
+    // Transferring (composite): abort bubbles up from Sending/Retrying.
+    {kFsTransferring, kFtAbort, kFsFailed, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // Sending: transmit (action records the result; driver dispatches the
+    // follow-up event). Chunk-sent keeps us in Sending while the driver
+    // inspects ctx.send_result.
+    {kFsSending, kFtChunkSent, kFsSending, osp::TransitionKind::kInternal, ActSend, nullptr},
+    {kFsSending, kFtAckOk, kFsSending, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kFsSending, kFtDone, kFsComplete, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kFsSending, kFtAckFail, kFsRetrying, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // Retrying: retry budget available returns to Sending, exhaustion fails.
+    {kFsRetrying, kFtRetry, kFsSending, osp::TransitionKind::kExternal, ActRetry, GuardCanRetry},
+    {kFsRetrying, kFtRetry, kFsFailed, osp::TransitionKind::kExternal, nullptr, nullptr},
+};
+
+inline constexpr uint32_t kFtTransCount = sizeof(kFtTrans) / sizeof(kFtTrans[0]);
+
+// --- Action / guard bodies (after FtCtx is complete) -----------------------
+
+inline void ActStart(FtCtx& ctx, const void* /*data*/) noexcept {
+  ctx.current_chunk = 0;
+  ctx.bytes_sent = 0;
+  ctx.retry_count = 0;
 }
 
-inline TR Idle(FtCtx& ctx, const Ev& evt) {
-  if (evt.id == kFtStart) {
-    ctx.current_chunk = 0;
-    ctx.bytes_sent = 0;
-    ctx.retry_count = 0;
-    return ctx.sm->RequestTransition(ctx.si_send);
-  }
-  return TR::kUnhandled;
-}
-
-inline TR Transferring(FtCtx& ctx, const Ev& evt) {
-  if (evt.id == kFtAbort) {
-    return ctx.sm->RequestTransition(ctx.si_fail);
-  }
-  return TR::kUnhandled;
-}
-
-inline TR Sending(FtCtx& ctx, const Ev& evt) {
-  if (evt.id != kFtChunkSent)
-    return TR::kUnhandled;
-
+inline void ActSend(FtCtx& ctx, const void* /*data*/) noexcept {
   if (!ctx.file_cli.IsConnected()) {
-    return ctx.sm->RequestTransition(ctx.si_fail);
+    ctx.send_result = SendResult::kNoConn;
+    return;
   }
 
-  // Build chunk request
   FileTransferReq req{};
   req.client_id = ctx.client_id;
   req.chunk_seq = ctx.current_chunk;
   req.total_chunks = ctx.total_chunks;
   req.file_size = ctx.file_size;
 
-  uint32_t offset = ctx.current_chunk * kChunkSize;
-  uint32_t remaining = ctx.file_size - offset;
+  const uint32_t offset = ctx.current_chunk * kChunkSize;
+  const uint32_t remaining = ctx.file_size - offset;
   req.chunk_len = (remaining > kChunkSize) ? kChunkSize : remaining;
-  if (req.chunk_len > kMaxPayloadBytes)
+  if (req.chunk_len > kMaxPayloadBytes) {
     req.chunk_len = kMaxPayloadBytes;
+  }
 
-  // Fill data with pattern (verifiable on server)
   FillPattern(req.data, req.chunk_len, ctx.current_chunk);
 
-  // Simulate packet loss: pretend we didn't get the response
   if (SimulateDrop(ctx.drop_rate)) {
     OSP_LOG_WARN("FILE_TX", "[%u] Simulated drop: chunk %u/%u", ctx.client_id, ctx.current_chunk, ctx.total_chunks);
     ctx.chunks_retried.fetch_add(1, std::memory_order_relaxed);
-    return ctx.sm->RequestTransition(ctx.si_retry);
+    ctx.send_result = SendResult::kLost;
+    return;
   }
 
-  // Actually send
   auto resp = ctx.file_cli.Call(req, 3000);
   if (!resp.has_value() || resp.value().accepted == 0) {
     OSP_LOG_WARN("FILE_TX", "[%u] Chunk %u failed", ctx.client_id, ctx.current_chunk);
-    return ctx.sm->RequestTransition(ctx.si_retry);
+    ctx.send_result = SendResult::kRpcFail;
+    return;
   }
 
-  // Success
   ctx.bytes_sent += req.chunk_len;
   ctx.chunks_ok.fetch_add(1, std::memory_order_relaxed);
   ctx.retry_count = 0;
   ctx.current_chunk++;
-
-  if (ctx.current_chunk >= ctx.total_chunks) {
-    return ctx.sm->RequestTransition(ctx.si_done);
-  }
-
-  // Stay in Sending for next chunk (self-transition via parent)
-  return TR::kHandled;
+  ctx.send_result = (ctx.current_chunk >= ctx.total_chunks) ? SendResult::kDone : SendResult::kOk;
 }
 
-inline TR WaitingAck(FtCtx& /*ctx*/, const Ev& /*evt*/) {
-  // Reserved for future async mode
-  return TR::kUnhandled;
+inline void ActRetry(FtCtx& ctx, const void* /*data*/) noexcept {
+  ++ctx.retry_count;
 }
 
-inline TR Retrying(FtCtx& ctx, const Ev& evt) {
-  if (evt.id == kFtRetry) {
-    ctx.retry_count++;
-    if (ctx.retry_count > kMaxRetries) {
-      OSP_LOG_ERROR("FILE_TX", "[%u] Max retries exceeded at chunk %u", ctx.client_id, ctx.current_chunk);
-      return ctx.sm->RequestTransition(ctx.si_fail);
-    }
-    OSP_LOG_INFO("FILE_TX", "[%u] Retry %u/%u for chunk %u", ctx.client_id, ctx.retry_count, kMaxRetries,
-                 ctx.current_chunk);
-    return ctx.sm->RequestTransition(ctx.si_send);
-  }
-  return TR::kUnhandled;
-}
-
-inline TR Complete(FtCtx& /*ctx*/, const Ev& /*evt*/) {
-  return TR::kHandled;
-}
-
-inline TR Failed(FtCtx& /*ctx*/, const Ev& /*evt*/) {
-  return TR::kHandled;
-}
-
-// Entry actions for terminal states
-inline void OnEnterComplete(FtCtx& ctx) {
+inline void OnEnterComplete(FtCtx& ctx) noexcept {
   ctx.complete.store(true, std::memory_order_relaxed);
   ctx.success.store(true, std::memory_order_relaxed);
 }
 
-inline void OnEnterFailed(FtCtx& ctx) {
+inline void OnEnterFailed(FtCtx& ctx) noexcept {
   ctx.complete.store(true, std::memory_order_relaxed);
   ctx.success.store(false, std::memory_order_relaxed);
 }
 
-}  // namespace ft_hsm
+inline bool GuardCanRetry(FtCtx& ctx, const void* /*data*/) noexcept {
+  return ctx.retry_count < kMaxRetries;
+}
+
+}  // namespace ft_sm_detail
 
 // ============================================================================
-// Build File Transfer HSM
+// Build File Transfer HSM (API-compatible with the previous form)
 // ============================================================================
 
 inline void BuildFtSm(FtSm& sm, FtCtx& ctx) noexcept {
   ctx.sm = &sm;
-  using Cfg = osp::StateConfig<FtCtx>;
-
-  ctx.si_root = sm.AddState(Cfg{"Root", -1, ft_hsm::Root, nullptr, nullptr});
-  ctx.si_idle = sm.AddState(Cfg{"Idle", ctx.si_root, ft_hsm::Idle, nullptr, nullptr});
-  ctx.si_xfer = sm.AddState(Cfg{"Transferring", ctx.si_root, ft_hsm::Transferring, nullptr, nullptr});
-  ctx.si_send = sm.AddState(Cfg{"Sending", ctx.si_xfer, ft_hsm::Sending, nullptr, nullptr});
-  ctx.si_wait = sm.AddState(Cfg{"WaitingAck", ctx.si_xfer, ft_hsm::WaitingAck, nullptr, nullptr});
-  ctx.si_retry = sm.AddState(Cfg{"Retrying", ctx.si_xfer, ft_hsm::Retrying, nullptr, nullptr});
-  ctx.si_done = sm.AddState(Cfg{"Complete", ctx.si_root, ft_hsm::Complete, ft_hsm::OnEnterComplete, nullptr});
-  ctx.si_fail = sm.AddState(Cfg{"Failed", ctx.si_root, ft_hsm::Failed, ft_hsm::OnEnterFailed, nullptr});
-
-  sm.SetInitialState(ctx.si_idle);
+  sm.SetInitialState(kFsIdle);
   sm.Start();
 }
 
@@ -314,33 +343,43 @@ inline bool RunFileTransfer(FtCtx& ctx) noexcept {
                "drop_rate=%.0f%%",
                ctx.client_id, ctx.file_size, ctx.total_chunks, static_cast<double>(ctx.drop_rate) * 100.0);
 
-  // Start HSM
-  osp::Event start_evt{kFtStart, nullptr};
-  ctx.sm->Dispatch(start_evt);
+  // Start HSM (reset a reused terminal HSM to Idle so kFtStart matches).
+  ctx.sm->ForceTransition(kFsIdle);
+  ctx.sm->Dispatch(osp::Event{kFtStart, nullptr});
 
-  // Drive the transfer loop
+  // Driver loop: translate the Sending action result into the next event.
+  // All transition decisions live in the table; this loop only observes.
   while (!ctx.complete.load(std::memory_order_relaxed)) {
-    int32_t cur = ctx.sm->CurrentState();
-
     if (ctx.heartbeat != nullptr) {
       ctx.heartbeat->Beat();
     }
 
-    if (cur == ctx.si_send) {
-      osp::Event evt{kFtChunkSent, nullptr};
-      ctx.sm->Dispatch(evt);
-    } else if (cur == ctx.si_retry) {
-      // Brief delay before retry
+    if (ctx.sm->CurrentState() != kFsSending) {
+      // Retrying: brief delay, then let the table decide retry vs fail.
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      osp::Event evt{kFtRetry, nullptr};
-      ctx.sm->Dispatch(evt);
-    } else {
-      // Complete or Failed -- exit loop
-      break;
+      ctx.sm->Dispatch(osp::Event{kFtRetry, nullptr});
+      continue;
+    }
+
+    ctx.sm->Dispatch(osp::Event{kFtChunkSent, nullptr});
+
+    switch (ctx.send_result) {
+      case ft_sm_detail::SendResult::kDone:
+        ctx.sm->Dispatch(osp::Event{kFtDone, nullptr});
+        break;
+      case ft_sm_detail::SendResult::kOk:
+        ctx.sm->Dispatch(osp::Event{kFtAckOk, nullptr});
+        break;
+      case ft_sm_detail::SendResult::kLost:
+      case ft_sm_detail::SendResult::kRpcFail:
+      case ft_sm_detail::SendResult::kNoConn:
+      default:
+        ctx.sm->Dispatch(osp::Event{kFtAckFail, nullptr});
+        break;
     }
   }
 
-  bool ok = ctx.success.load(std::memory_order_relaxed);
+  const bool ok = ctx.success.load(std::memory_order_relaxed);
   OSP_LOG_INFO("FILE_TX", "[%u] %s: sent=%u/%u retries=%u", ctx.client_id, ok ? "Complete" : "Failed",
                ctx.chunks_ok.load(std::memory_order_relaxed), ctx.total_chunks,
                ctx.chunks_retried.load(std::memory_order_relaxed));

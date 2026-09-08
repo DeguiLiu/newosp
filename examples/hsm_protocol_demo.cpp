@@ -1,40 +1,43 @@
 /**
  * @file hsm_protocol_demo.cpp
- * @brief Demonstrates HSM for a communication protocol state machine.
+ * @brief Table-driven hierarchical protocol HSM driven by an EventLoop timer.
  *
  * Models a simplified connection protocol (TCP-lite / Modbus-like) with
  * hierarchical states showing the power of state inheritance:
  *
  * Operational (root)
- * ├── Disconnected (initial)
- * ├── Connecting
- * ├── Connected (parent state)
- * │   ├── Idle (initial child)
- * │   └── Active
- * └── Disconnecting
+ * +-- Disconnected (initial)
+ * +-- Connecting
+ * +-- Connected (parent state)
+ * |   +-- Idle (initial child)
+ * |   +-- Active
+ * +-- Disconnecting
  *
- * Key feature: Connected state handles DISCONNECT for both Idle and Active
- * children, demonstrating hierarchical event handling.
+ * Key feature: the Connected parent state handles DISCONNECT for both the
+ * Idle and Active children (parent-state event inheritance). The transition
+ * table is a constexpr static table; an EventLoop timer steps a scripted
+ * signal sequence one signal per tick, then self-checking asserts the final
+ * context counters against expected values (RESULT: PASS / FAIL).
  */
 
-#include "osp/hsm.hpp"
+#include "osp/event_loop.hpp"
+#include "osp/hsm_table.hpp"
 
 #include <cstdio>
-#include <cstring>
 
 // ============================================================================
 // Protocol Events
 // ============================================================================
 
 enum ProtocolEvent : uint32_t {
-  CONNECT = 1,
-  SYN_ACK = 2,
-  DISCONNECT = 3,
-  FIN_ACK = 4,
-  TIMEOUT = 5,
-  DATA_READY = 6,
-  DATA_SENT = 7,
-  ERROR = 8
+  kConnect = 1U,
+  kSynAck = 2U,
+  kDisconnect = 3U,
+  kFinAck = 4U,
+  kTimeout = 5U,
+  kDataReady = 6U,
+  kDataSent = 7U,
+  kError = 8U,
 };
 
 // ============================================================================
@@ -42,254 +45,154 @@ enum ProtocolEvent : uint32_t {
 // ============================================================================
 
 struct ProtocolContext {
-  int syn_count = 0;
-  int ack_count = 0;
-  int data_sent_count = 0;
-  int error_count = 0;
+  uint32_t syn_count = 0U;
+  uint32_t ack_count = 0U;
+  uint32_t data_sent_count = 0U;
+  uint32_t error_count = 0U;
   bool connected = false;
-  char last_action[64] = {0};
-
-  void SetAction(const char* action) {
-    strncpy(last_action, action, sizeof(last_action) - 1);
-    last_action[sizeof(last_action) - 1] = '\0';
-  }
 };
 
 // ============================================================================
-// State Indices and State Machine Pointer
+// State indices (fixed by table order)
 // ============================================================================
 
-static int32_t s_operational;
-static int32_t s_disconnected;
-static int32_t s_connecting;
-static int32_t s_connected;
-static int32_t s_idle;
-static int32_t s_active;
-static int32_t s_disconnecting;
-
-static osp::StateMachine<ProtocolContext, 16>* g_sm = nullptr;
-
-// ============================================================================
-// State Handlers
-// ============================================================================
-
-// --- Disconnected ---
-
-osp::TransitionResult OnDisconnected(ProtocolContext& ctx, const osp::Event& event) {
-  if (event.id == CONNECT) {
-    printf("  [Disconnected] CONNECT received -> Connecting\n");
-    return g_sm->RequestTransition(s_connecting);
-  }
-  return osp::TransitionResult::kUnhandled;
-}
-
-void OnEnterDisconnected(ProtocolContext& ctx) {
-  printf("  [Disconnected] Entry: connection closed\n");
-  ctx.connected = false;
-  ctx.SetAction("disconnected");
-}
-
-// --- Connecting ---
-
-osp::TransitionResult OnConnecting(ProtocolContext& ctx, const osp::Event& event) {
-  if (event.id == SYN_ACK) {
-    printf("  [Connecting] SYN_ACK received -> Connected/Idle\n");
-    ctx.ack_count++;
-    return g_sm->RequestTransition(s_idle);
-  }
-  if (event.id == TIMEOUT) {
-    printf("  [Connecting] TIMEOUT -> Disconnected\n");
-    return g_sm->RequestTransition(s_disconnected);
-  }
-  return osp::TransitionResult::kUnhandled;
-}
-
-void OnEnterConnecting(ProtocolContext& ctx) {
-  printf("  [Connecting] Entry: sending SYN...\n");
-  ctx.syn_count++;
-  ctx.SetAction("connecting");
-}
-
-// --- Connected (parent state) ---
-
-osp::TransitionResult OnConnected(ProtocolContext& ctx, const osp::Event& event) {
-  // Connected handles DISCONNECT for both Idle and Active children
-  if (event.id == DISCONNECT) {
-    printf("  [Connected] DISCONNECT received -> Disconnecting\n");
-    return g_sm->RequestTransition(s_disconnecting);
-  }
-  return osp::TransitionResult::kUnhandled;
-}
-
-void OnEnterConnected(ProtocolContext& ctx) {
-  printf("  [Connected] Entry: connection established\n");
-  ctx.connected = true;
-  ctx.SetAction("connected");
-}
-
-void OnExitConnected(ProtocolContext& ctx) {
-  printf("  [Connected] Exit: leaving connected state\n");
-}
-
-// --- Idle (child of Connected) ---
-
-osp::TransitionResult OnIdle(ProtocolContext& ctx, const osp::Event& event) {
-  if (event.id == DATA_READY) {
-    printf("  [Idle] DATA_READY -> Active\n");
-    return g_sm->RequestTransition(s_active);
-  }
-  return osp::TransitionResult::kUnhandled;
-}
-
-void OnEnterIdle(ProtocolContext& ctx) {
-  printf("  [Idle] Entry: waiting for data\n");
-  ctx.SetAction("idle");
-}
-
-// --- Active (child of Connected) ---
-
-osp::TransitionResult OnActive(ProtocolContext& ctx, const osp::Event& event) {
-  if (event.id == DATA_SENT) {
-    printf("  [Active] DATA_SENT -> Idle\n");
-    ctx.data_sent_count++;
-    return g_sm->RequestTransition(s_idle);
-  }
-  if (event.id == ERROR) {
-    printf("  [Active] ERROR -> Idle (recovery)\n");
-    ctx.error_count++;
-    return g_sm->RequestTransition(s_idle);
-  }
-  return osp::TransitionResult::kUnhandled;
-}
-
-void OnEnterActive(ProtocolContext& ctx) {
-  printf("  [Active] Entry: processing data\n");
-  ctx.SetAction("active");
-}
-
-// --- Disconnecting ---
-
-osp::TransitionResult OnDisconnecting(ProtocolContext& ctx, const osp::Event& event) {
-  if (event.id == FIN_ACK) {
-    printf("  [Disconnecting] FIN_ACK received -> Disconnected\n");
-    return g_sm->RequestTransition(s_disconnected);
-  }
-  if (event.id == TIMEOUT) {
-    printf("  [Disconnecting] TIMEOUT -> Disconnected (force close)\n");
-    return g_sm->RequestTransition(s_disconnected);
-  }
-  return osp::TransitionResult::kUnhandled;
-}
-
-void OnEnterDisconnecting(ProtocolContext& ctx) {
-  printf("  [Disconnecting] Entry: sending FIN...\n");
-  ctx.SetAction("disconnecting");
-}
+enum ProtocolState : int32_t {
+  kOperational = 0,
+  kDisconnected,
+  kConnecting,
+  kConnected,
+  kIdle,
+  kActive,
+  kDisconnecting,
+  kStateCount
+};
 
 // ============================================================================
-// State Machine Setup
+// Row actions and guards (free functions; decisions live in table rows)
 // ============================================================================
 
-void SetupStateMachine(osp::StateMachine<ProtocolContext, 16>& sm) {
-  // Root: Operational
-  s_operational = sm.AddState({"Operational",
-                               -1,  // no parent (root)
-                               nullptr, nullptr, nullptr, nullptr});
+namespace protocol_detail {
 
-  // Disconnected
-  s_disconnected = sm.AddState({"Disconnected", s_operational, OnDisconnected, OnEnterDisconnected, nullptr, nullptr});
+inline void ActAck(ProtocolContext& ctx, const void* /*data*/) noexcept { ++ctx.ack_count; }
 
-  // Connecting
-  s_connecting = sm.AddState({"Connecting", s_operational, OnConnecting, OnEnterConnecting, nullptr, nullptr});
+inline void ActDataSent(ProtocolContext& ctx, const void* /*data*/) noexcept { ++ctx.data_sent_count; }
 
-  // Connected (parent state)
-  s_connected = sm.AddState({"Connected", s_operational, OnConnected, OnEnterConnected, OnExitConnected, nullptr});
+inline void ActError(ProtocolContext& ctx, const void* /*data*/) noexcept { ++ctx.error_count; }
 
-  // Idle (child of Connected)
-  s_idle = sm.AddState({"Idle", s_connected, OnIdle, OnEnterIdle, nullptr, nullptr});
+inline void OnEnterDisconnected(ProtocolContext& ctx) noexcept { ctx.connected = false; }
 
-  // Active (child of Connected)
-  s_active = sm.AddState({"Active", s_connected, OnActive, OnEnterActive, nullptr, nullptr});
+inline void OnEnterConnecting(ProtocolContext& ctx) noexcept { ++ctx.syn_count; }
 
-  // Disconnecting
-  s_disconnecting =
-      sm.AddState({"Disconnecting", s_operational, OnDisconnecting, OnEnterDisconnecting, nullptr, nullptr});
+inline void OnEnterConnected(ProtocolContext& ctx) noexcept { ctx.connected = true; }
 
-  sm.SetInitialState(s_disconnected);
-}
+}  // namespace protocol_detail
 
 // ============================================================================
-// Main Simulation
+// Static tables
 // ============================================================================
+
+namespace protocol_detail {
+
+using PD = osp::TransitionDef<ProtocolContext>;
+
+inline constexpr osp::StateDef<ProtocolContext> kStates[kStateCount] = {
+    {"Operational", -1, nullptr, nullptr},
+    {"Disconnected", kOperational, protocol_detail::OnEnterDisconnected, nullptr},
+    {"Connecting", kOperational, protocol_detail::OnEnterConnecting, nullptr},
+    {"Connected", kOperational, protocol_detail::OnEnterConnected, nullptr},
+    {"Idle", kConnected, nullptr, nullptr},
+    {"Active", kConnected, nullptr, nullptr},
+    {"Disconnecting", kOperational, nullptr, nullptr},
+};
+
+// Field order: {from, event, to, kind, action, guard}.
+inline constexpr osp::TransitionDef<ProtocolContext> kTrans[] = {
+    {kDisconnected, kConnect, kConnecting, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kConnecting, kSynAck, kIdle, osp::TransitionKind::kExternal, protocol_detail::ActAck, nullptr},
+    {kConnecting, kTimeout, kDisconnected, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // Connected (parent) handles DISCONNECT for both Idle and Active children.
+    {kConnected, kDisconnect, kDisconnecting, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    {kIdle, kDataReady, kActive, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kActive, kDataSent, kIdle, osp::TransitionKind::kExternal, protocol_detail::ActDataSent, nullptr},
+    {kActive, kError, kIdle, osp::TransitionKind::kExternal, protocol_detail::ActError, nullptr},
+    {kDisconnecting, kFinAck, kDisconnected, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kDisconnecting, kTimeout, kDisconnected, osp::TransitionKind::kExternal, nullptr, nullptr},
+};
+
+inline constexpr uint32_t kTransCount = sizeof(kTrans) / sizeof(kTrans[0]);
+
+}  // namespace protocol_detail
+
+// Scripted signal sequence: 14 signals stepped one per timer tick.
+static constexpr uint32_t kScript[] = {
+    kConnect, kSynAck, kDataReady, kDataSent, kDataReady, kDataSent, kDataReady, kDataSent,
+    kDataReady, kError, kDataReady, kDataSent, kDisconnect, kFinAck,
+};
+static constexpr uint32_t kScriptLen = sizeof(kScript) / sizeof(kScript[0]);
+
+// ============================================================================
+// EventLoop: steps the scripted signal sequence one signal per timer tick
+// ============================================================================
+
+class ProtocolLoop final : public osp::EventLoop<ProtocolLoop> {
+ public:
+  ProtocolLoop()
+      : hsm_(ctx_, protocol_detail::kStates, kStateCount, protocol_detail::kTrans,
+             protocol_detail::kTransCount) {
+    hsm_.SetInitialState(kDisconnected);
+  }
+
+  ~ProtocolLoop() { Stop(); }
+
+  int Run() noexcept {
+    hsm_.Start();
+    std::printf("=== HSM Protocol Demo (table-driven) ===\n");
+
+    idx_ = 0U;
+    auto timer_r = Schedule(1U);
+    if (!timer_r.has_value()) {
+      return 1;
+    }
+    timer_id_ = timer_r.value();
+
+    ClearStop();
+    EventLoop::Run();
+
+    const bool pass = (ctx_.syn_count == 1U) && (ctx_.ack_count == 1U) && (ctx_.data_sent_count == 4U) &&
+                      (ctx_.error_count == 1U) && (!ctx_.connected) &&
+                      (hsm_.CurrentState() == kDisconnected);
+
+    std::printf("\n=== final context ===\n");
+    std::printf("syn_count:       %u\n", ctx_.syn_count);
+    std::printf("ack_count:       %u\n", ctx_.ack_count);
+    std::printf("data_sent_count: %u\n", ctx_.data_sent_count);
+    std::printf("error_count:     %u\n", ctx_.error_count);
+    std::printf("connected:       %s\n", ctx_.connected ? "true" : "false");
+    std::printf("hsm state:       %s\n", hsm_.CurrentStateName());
+    std::printf("RESULT: %s\n", pass ? "PASS" : "FAIL");
+
+    return pass ? 0 : 1;
+  }
+
+  void OnTimer(uint32_t /*timer_id*/) noexcept {
+    if (idx_ >= kScriptLen) {
+      Stop();
+      return;
+    }
+    hsm_.Dispatch(osp::Event{kScript[idx_], nullptr});
+    ++idx_;
+  }
+
+ private:
+  ProtocolContext ctx_;
+  osp::TableHsm<ProtocolContext, kStateCount, protocol_detail::kTransCount> hsm_;
+  uint32_t timer_id_ = 0U;
+  uint32_t idx_ = 0U;
+};
 
 int main() {
-  printf("=== HSM Protocol Demo ===\n\n");
-
-  ProtocolContext ctx;
-  osp::StateMachine<ProtocolContext, 16> sm(ctx);
-  g_sm = &sm;
-
-  SetupStateMachine(sm);
-
-  printf("Starting state machine...\n");
-  sm.Start();
-  printf("Current state: %s\n\n", sm.CurrentStateName());
-
-  // Simulation sequence
-  printf("Step 1: CONNECT\n");
-  sm.Dispatch({CONNECT, nullptr});
-  printf("Current state: %s\n\n", sm.CurrentStateName());
-
-  printf("Step 2: SYN_ACK\n");
-  sm.Dispatch({SYN_ACK, nullptr});
-  printf("Current state: %s\n\n", sm.CurrentStateName());
-
-  // Data transfer cycles
-  for (int i = 1; i <= 3; ++i) {
-    printf("Step %d: DATA_READY\n", 2 + i * 2 - 1);
-    sm.Dispatch({DATA_READY, nullptr});
-    printf("Current state: %s\n\n", sm.CurrentStateName());
-
-    printf("Step %d: DATA_SENT\n", 2 + i * 2);
-    sm.Dispatch({DATA_SENT, nullptr});
-    printf("Current state: %s\n\n", sm.CurrentStateName());
-  }
-
-  printf("Step 9: ERROR (recovery test)\n");
-  sm.Dispatch({DATA_READY, nullptr});
-  sm.Dispatch({ERROR, nullptr});
-  printf("Current state: %s\n\n", sm.CurrentStateName());
-
-  printf("Step 10: DATA_READY (after recovery)\n");
-  sm.Dispatch({DATA_READY, nullptr});
-  printf("Current state: %s\n\n", sm.CurrentStateName());
-
-  printf("Step 11: DATA_SENT\n");
-  sm.Dispatch({DATA_SENT, nullptr});
-  printf("Current state: %s\n\n", sm.CurrentStateName());
-
-  printf("Step 12: DISCONNECT\n");
-  sm.Dispatch({DISCONNECT, nullptr});
-  printf("Current state: %s\n\n", sm.CurrentStateName());
-
-  printf("Step 13: FIN_ACK\n");
-  sm.Dispatch({FIN_ACK, nullptr});
-  printf("Current state: %s\n\n", sm.CurrentStateName());
-
-  // Print statistics
-  printf("=== Final Statistics ===\n");
-  printf("SYN count:       %d\n", ctx.syn_count);
-  printf("ACK count:       %d\n", ctx.ack_count);
-  printf("Data sent count: %d\n", ctx.data_sent_count);
-  printf("Error count:     %d\n", ctx.error_count);
-  printf("Connected:       %s\n", ctx.connected ? "true" : "false");
-  printf("Last action:     %s\n", ctx.last_action);
-  printf("Final state:     %s\n", sm.CurrentStateName());
-
-  printf("\n=== Demo Complete ===\n");
-  printf("Key takeaway: The Connected parent state handled DISCONNECT\n");
-  printf("for both Idle and Active children, demonstrating hierarchical\n");
-  printf("event handling without code duplication.\n");
-
-  return 0;
+  ProtocolLoop loop;
+  return loop.Run();
 }

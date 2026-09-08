@@ -27,10 +27,10 @@
 
 #include "protocol.hpp"
 
+#include "osp/event_loop.hpp"
 #include "osp/log.hpp"
 #include "osp/service.hpp"
 #include "osp/shell.hpp"
-#include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstdio>
@@ -63,6 +63,22 @@ static std::atomic<uint32_t> g_total_file_chunks{0};
 static std::atomic<uint64_t> g_total_file_bytes{0};
 static std::atomic<bool> g_running{true};
 static uint64_t g_start_time_ms{0};
+
+static constexpr uint32_t kStatsTimerId = 1U;
+
+static void StatsTimerCb(void* ctx);
+
+/// @brief Stats reporting timer run on the EventLoop thread.
+class ServerLoop final : public osp::EventLoop<ServerLoop> {
+ public:
+  void OnTimer(uint32_t timer_id) noexcept {
+    if (timer_id == kStatsTimerId) {
+      StatsTimerCb(nullptr);
+    }
+  }
+};
+
+static ServerLoop* g_loop = nullptr;
 
 static void InitSlots() noexcept {
   for (uint32_t i = 0; i < net_stress::kMaxClients; ++i) {
@@ -238,6 +254,9 @@ OSP_SHELL_CMD(cmd_clients, "List connected clients");
 static int cmd_quit(int /*argc*/, char* /*argv*/[]) {
   osp::DebugShell::Printf("Shutting down...\r\n");
   g_running.store(false, std::memory_order_relaxed);
+  if (g_loop != nullptr) {
+    g_loop->Stop();
+  }
   return 0;
 }
 OSP_SHELL_CMD(cmd_quit, "Shutdown server");
@@ -326,20 +345,16 @@ int main(int argc, char* argv[]) {
   }
   OSP_SCOPE_EXIT(shell.Stop());
 
-  // --- Timer: periodic stats ---
-  osp::TimerScheduler<2> timer;
-  auto timer_r = timer.Add(5000U, StatsTimerCb);
-  if (timer_r) {
-    timer.Start();
-  }
-  OSP_SCOPE_EXIT(timer.Stop());
+  // --- EventLoop: periodic stats ---
+  ServerLoop loop;
+  g_loop = &loop;
+  static_cast<void>(loop.Schedule(5000U));
+  OSP_SCOPE_EXIT(g_loop = nullptr);
 
   OSP_LOG_INFO("SERVER", "Server running. Press 'q' + Enter to quit.");
 
-  // --- Main loop ---
-  while (g_running.load(std::memory_order_relaxed)) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }
+  // --- Main loop (EventLoop blocks on poll; timer fires OnTimer) ---
+  loop.Run();
 
   OSP_LOG_INFO("SERVER", "Server shutdown.");
   return 0;

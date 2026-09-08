@@ -6,6 +6,31 @@
 
 ## 最新变更
 
+### 2026-09-08: v0.7.0 表驱动 HSM + 事件循环 + 熔断 (examples 重构)
+
+**变更内容** (3 个新核心组件 + 6 个 examples 重构 + 文档):
+
+1. **新增核心组件 `TableHsm`（`hsm_table.hpp`）**
+   - 静态表驱动 HSM（`StateDef[]`/`TransitionDef[]` + `guard` 条件转移），替代 handler 模式 `StateMachine` 的 if-else 派发。
+   - guard 在 action 前求值（读转移前状态），同 `(from, event)` 多行按序扫描、首个 guard 通过或无 guard 者胜出；拒绝弧静默停留。
+   - 零堆分配、header-only、C++17、`-fno-exceptions -fno-rtti` 兼容。
+
+2. **新增核心组件 `EventLoop`（`event_loop.hpp`）**
+   - CRTP 统一事件循环（fd 就绪 + 定时器 + 跨线程唤醒），超时=最近到期，替代 `while+sleep` 轮询与 `TimerScheduler`。
+   - fd/timer 线程安全，`OnTimer` collect-release-execute 锁外执行；`NextTimeoutMs` 溢出防护。
+
+3. **新增核心组件 `Breaker`（`breaker.hpp`）**
+   - 5 状态背压熔断，单 32 位原子 CAS，接入 `fault_collector`。
+
+4. **examples 重构**
+   - serial_ota：FrameParser 迁移 TableHsm + 增量 CRC（`Crc16Update`）+ 主循环 EventLoop 化 + ISR 中断模拟（`uart_isr.hpp`）。
+   - net_stress：连接/传输 HSM 迁移 TableHsm，client/server/monitor EventLoop 化。
+   - 3 个 HSM demo（node_manager/hsm_protocol/hsm_bt_combo）迁移 TableHsm + EventLoop + 自校验（`RESULT: PASS/FAIL`）。
+
+5. **验证**：全量 1298 用例全绿；3 demo 运行 PASS；核心代码资源泄露/竞争/健壮性评估无实质缺陷；clang-format + cpplint 全通过。
+
+---
+
 ### 2026-08-09: v0.6.3 AsyncBus 高优先级驱逐 (TDD)
 
 **变更内容** (1 项 P0 缺陷修复 + 1 项测试增强):

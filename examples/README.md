@@ -116,7 +116,7 @@ IoT/video edge gateway simulation. 4 clients connect, 32 data messages processed
 GB28181/RTSP video surveillance protocol pipeline. 4 nodes (Registrar, HeartbeatMonitor, StreamController, Client) share a single AsyncBus with priority-aware publishing. Timer-driven heartbeat generation with late-detection. See [streaming_protocol/README.md](streaming_protocol/README.md).
 
 ### serial_ota/
-Industrial serial OTA firmware upgrade with 12 newosp components. Device uses HSM (6 states) for OTA processing, host uses BehaviorTree (4-node Sequence) for upgrade flow. SpscRingbuffer simulates bidirectional UART with ~5% channel noise and ACK-based retransmission. See [serial_ota/README.md](serial_ota/README.md).
+Industrial serial OTA firmware upgrade with 13 newosp components. Device uses HSM (6 states) for OTA processing, host uses BehaviorTree (4-node Sequence) for upgrade flow. SpscRingbuffer simulates bidirectional UART with ~5% channel noise and ACK-based retransmission. See [serial_ota/README.md](serial_ota/README.md).
 
 ### shm_ipc/
 Cross-process shared memory IPC for video frame streaming. 3 processes (producer/consumer/monitor) communicate via POSIX shared memory with lock-free SPSC ring buffer. HSM-driven back-pressure (Streaming -> Paused -> Throttled). Integrates Watchdog + FaultCollector for monitoring. See [shm_ipc/README.md](shm_ipc/README.md).

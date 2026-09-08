@@ -46,6 +46,7 @@
 #include <cstring>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -217,14 +218,23 @@ class Service {
       accept_thread_.join();
     }
 
-    // Wait for worker threads to finish
-    std::lock_guard<osp::Mutex> lock(threads_mutex_);
-    for (auto& entry : worker_entries_) {
-      if (entry.thread.joinable()) {
-        entry.thread.join();
+    // Collect joinable worker threads under the lock, then join outside it:
+    // a slow worker must not block other Stop/GetPort callers on the mutex.
+    std::array<osp::Thread, OSP_SERVICE_MAX_WORKERS> to_join;
+    uint32_t join_count = 0;
+    {
+      std::lock_guard<osp::Mutex> lock(threads_mutex_);
+      for (auto& entry : worker_entries_) {
+        if (entry.thread.joinable()) {
+          to_join[join_count] = std::move(entry.thread);
+          ++join_count;
+        }
       }
+      worker_entries_.clear();
     }
-    worker_entries_.clear();
+    for (uint32_t i = 0; i < join_count; ++i) {
+      to_join[i].join();
+    }
   }
 
   /** @brief Check if the service is running. */
@@ -235,11 +245,17 @@ class Service {
     if (false == running_.load(std::memory_order_acquire)) {
       return 0;
     }
-    std::lock_guard<osp::Mutex> lock(threads_mutex_);
-    int32_t fd = sockfd_.load(std::memory_order_acquire);
+    int32_t fd = -1;
+    {
+      std::lock_guard<osp::Mutex> lock(threads_mutex_);
+      fd = sockfd_.load(std::memory_order_acquire);
+    }
     if (fd < 0) {
       return 0;
     }
+    // fd is used outside the lock: a concurrent Stop() may already have closed
+    // it, so GetSockName can fail with EBADF and we report port 0. This matches
+    // the previous behavior (Stop closes the fd outside threads_mutex_).
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
     if (socket_api::GetSockName(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
@@ -271,17 +287,26 @@ class Service {
   };
 
   void ReapFinishedWorkers() noexcept {
-    std::lock_guard<osp::Mutex> lock(threads_mutex_);
-    for (uint32_t i = 0; i < worker_entries_.size();) {
-      if (worker_entries_[i].finished->load(std::memory_order_acquire)) {
-        if (worker_entries_[i].thread.joinable()) {
-          worker_entries_[i].thread.join();
+    // Collect finished threads under the lock, join them outside it.
+    std::array<osp::Thread, OSP_SERVICE_MAX_WORKERS> to_join;
+    uint32_t join_count = 0;
+    {
+      std::lock_guard<osp::Mutex> lock(threads_mutex_);
+      for (uint32_t i = 0; i < worker_entries_.size();) {
+        if (worker_entries_[i].finished->load(std::memory_order_acquire)) {
+          if (worker_entries_[i].thread.joinable()) {
+            to_join[join_count] = std::move(worker_entries_[i].thread);
+            ++join_count;
+          }
+          worker_entries_[i] = std::move(worker_entries_.back());
+          worker_entries_.pop_back();
+        } else {
+          ++i;
         }
-        worker_entries_[i] = std::move(worker_entries_.back());
-        worker_entries_.pop_back();
-      } else {
-        ++i;
       }
+    }
+    for (uint32_t i = 0; i < join_count; ++i) {
+      to_join[i].join();
     }
   }
 
@@ -323,22 +348,33 @@ class Service {
       }
       WorkerEntry entry;
       entry.finished = finished;
-      bool spawned = false;
+      bool reserved = false;
       {
         std::lock_guard<osp::Mutex> lock(threads_mutex_);
-        // Capacity check under the lock: reject instead of spawning an
-        // untracked worker when the fixed-size table is full. Keep
-        // config_.max_concurrent <= OSP_SERVICE_MAX_WORKERS.
-        if (!worker_entries_.full() && entry.thread.Start(ThreadOptions{"svc-wkr"}, [this, client_fd, finished]() {
-              WorkerScope scope(active_workers_);
-              HandleConnection(client_fd);
-              finished->store(true, std::memory_order_release);
-            })) {
+        // Reserve a slot under the lock; thread creation happens outside the
+        // lock so a slow pthread_create does not block Stop/GetPort callers.
+        if (!worker_entries_.full()) {
           worker_entries_.push_back(std::move(entry));
-          spawned = true;
+          reserved = true;
         }
       }
-      if (!spawned) {
+      if (!reserved) {
+        socket_api::Close(client_fd);
+        continue;
+      }
+      // back() is the slot reserved above: AcceptLoop is the only writer of
+      // worker_entries_ while it runs (Stop joins accept_thread_ first), so it
+      // stays valid until Start returns.
+      if (!worker_entries_.back().thread.Start(ThreadOptions{"svc-wkr"}, [this, client_fd, finished]() {
+            WorkerScope scope(active_workers_);
+            HandleConnection(client_fd);
+            finished->store(true, std::memory_order_release);
+          })) {
+        // Thread creation failed: drop the reserved slot and the client fd.
+        {
+          std::lock_guard<osp::Mutex> lock(threads_mutex_);
+          worker_entries_.pop_back();
+        }
         socket_api::Close(client_fd);
       }
     }

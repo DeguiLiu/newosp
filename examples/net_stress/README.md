@@ -21,23 +21,23 @@ graph TB
         ECHO_SVC["Service&lt;EchoReq, Resp&gt;<br/>port 20001"]
         FILE_SVC["Service&lt;FileTransferReq, Resp&gt;<br/>port 20002"]
         S_SHELL["DebugShell :9600<br/>cmd_stats / cmd_clients / cmd_quit"]
-        S_TIMER["TimerScheduler&lt;2&gt;<br/>5s stats log"]
+        S_TIMER["EventLoop timer<br/>5s stats log"]
     end
 
     subgraph client["Client (client.cpp)"]
         C_HSM["ClientSm x N (HSM 7 states)<br/>Disconnected->Connecting->Connected{Idle,Running}->Error"]
-        C_FT["FileTransferThread x N<br/>FtSm (HSM 8 states)<br/>Idle->Sending->WaitingAck->Retrying->Complete/Failed"]
+        C_FT["FileTransferThread x N<br/>FtSm (TableHsm 7 states)<br/>Idle->Sending->Retrying->Complete/Failed"]
         C_BUS["AsyncBus&lt;BusPayload&gt;<br/>PeerEvent / StatsSnapshot / EchoResult"]
         C_NODE["Node &quot;stress_client&quot;"]
         C_SHELL["DebugShell :9601<br/>7 commands"]
-        C_TIMER["TimerScheduler&lt;4&gt;<br/>echo tick + stats + watchdog"]
+        C_TIMER["EventLoop timer<br/>echo tick + stats + watchdog"]
     end
 
     subgraph monitor["Monitor (monitor.cpp)"]
         M_PROBE["Probe: periodic echo RTT"]
         M_BUS["AsyncBus&lt;MonBusPayload&gt;"]
         M_SHELL["DebugShell :9602<br/>cmd_probe / cmd_history"]
-        M_TIMER["TimerScheduler&lt;2&gt;<br/>periodic probe"]
+        M_TIMER["EventLoop timer<br/>periodic probe"]
     end
 
     C_HSM -->|HandshakeReq| HS_SVC
@@ -56,14 +56,14 @@ graph TB
 |------|--------|------|--------|
 | `Service<Req, Resp>` | `osp/service.hpp` | RPC 服务端 (handshake + echo + file) | S |
 | `Client<Req, Resp>` | `osp/service.hpp` | RPC 客户端 (handshake + echo + file) | C, M |
-| `StateMachine<Ctx, N>` | `osp/hsm.hpp` | 连接 HSM (7 states) + 传输 HSM (8 states) | C |
+| `TableHsm<Ctx, MaxStates, MaxTrans>` | `osp/hsm_table.hpp` | 连接 HSM (7 states) + 传输 HSM (7 states)，静态转移表 | C |
 | `AsyncBus<Payload>` | `osp/bus.hpp` | 进程内事件 pub/sub | C, M |
 | `Node<Payload>` | `osp/node.hpp` | 类型化 pub/sub 封装 | C, M |
 | `ThreadWatchdog<N>` | `osp/watchdog.hpp` | 文件传输线程 + FCCU 消费者线程监控 | C |
 | `FaultCollector<M,Q>` | `osp/fault_collector.hpp` | 结构化故障收集 (线程超时/高错误率/文件失败) | C |
 | `ThreadHeartbeat` | `osp/platform.hpp` | 原子心跳 (文件传输线程 Beat) | C |
 | `DebugShell` | `osp/shell.hpp` | Telnet 调试 (3 实例, 3 端口) | S, C, M |
-| `TimerScheduler<N>` | `osp/timer.hpp` | Echo tick + stats + watchdog check + probe | S, C, M |
+| `EventLoop<Derived>` | `osp/event_loop.hpp` | Echo tick + stats + watchdog check + probe 定时器 | S, C, M |
 | `FixedString` | `osp/vocabulary.hpp` | 栈分配字符串 | C, M |
 | `FixedVector` | `osp/vocabulary.hpp` | 栈分配 RTT 历史 | M |
 | `expected` | `osp/vocabulary.hpp` | 无异常错误处理 | S, C, M |
@@ -159,7 +159,7 @@ Client 进程集成了 `osp::ThreadWatchdog` 和 `osp::FaultCollector`，替代�
 ### 架构
 
 ```
-TimerScheduler (3s 周期)
+EventLoop timer (3s 周期)
   --> ErrorRateCheckCallback
         --> g_watchdog.Check()     -- 检查所有已注册线程心跳
         --> 扫描客户端错误率       -- n_err > n_sent/2 则上报
@@ -218,7 +218,7 @@ FileTransferThread
 | 遗留 OSP | net_stress (newosp) |
 |----------|---------------------|
 | `CMyInstance` (N 实例) | `ClientCtx[]` + HSM per instance |
-| `DaemonInstanceEntry` (timer tick) | `TimerScheduler` callback |
+| `DaemonInstanceEntry` (timer tick) | `EventLoop` `OnTimer` callback |
 | `OspConnectTcpNode` | `osp::Client<>::Connect` |
 | `OspPost(COMM_TEST_EVENT)` | `echo_cli->Call()` (同步 RPC) |
 | `OspNodeDiscCBReg` | HSM disconnect handling |
@@ -228,7 +228,7 @@ FileTransferThread
 ## 设计要点
 
 1. **Placement new for non-default-constructible types**：`ClientCtx` 含 atomic 成员，`ClientSm` 构造需要 Context 引用，使用 aligned storage + placement new，`OSP_SCOPE_EXIT` 显式析构
-2. **HSM 驱动连接生命周期**：每个客户端实例的状态转换由层次状态机管理，自由函数 handler (无虚函数分发)
+2. **HSM 驱动连接生命周期**：每个客户端实例的状态转换由静态转移表 (`StateDef[]`/`TransitionDef[]` + guard) 管理，无虚函数分发
 3. **双通道并行压测**：Echo RPC (timer 驱动周期性) 和文件传输 (独立线程 + HSM 重传) 同时运行
 4. **模拟丢包**：`thread_local` PRNG 生成 10% 概率丢包，HSM 驱动重传逻辑
 5. **ThreadWatchdog 线程监控**：`osp::ThreadWatchdog<N>` 监控文件传输线程和 FCCU 消费者线程心跳 (10s 超时)，超时/恢复回调自动上报/清除故障
@@ -321,7 +321,7 @@ max_clients        = 64
 | `net_stress.ini` | INI 配置文件：端口、客户端数、间隔、超时等 | ~30 行 |
 | `protocol.hpp` | 协议定义：RPC 消息 + Bus 消息 + 配置加载 + 工具函数 | ~280 行 |
 | `client_sm.hpp` | 客户端连接 HSM (7 状态) + Handshake/Echo 辅助函数 | ~325 行 |
-| `file_transfer.hpp` | 文件传输 HSM (8 状态) + 模拟丢包 + 重传逻辑 | ~350 行 |
+| `file_transfer.hpp` | 文件传输 HSM (7 状态) + 模拟丢包 + 重传逻辑 | ~350 行 |
 | `server.cpp` | RPC 服务端 + Shell + Timer | ~350 行 |
 | `client.cpp` | 多实例客户端 + 双通道压测 + ThreadWatchdog + FaultCollector | ~700 行 |
 | `monitor.cpp` | 独立延迟探测 + CAS 统计 + Shell | ~295 行 |

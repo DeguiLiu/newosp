@@ -1,9 +1,11 @@
 /**
  * @file parser.hpp
- * @brief HSM-based protocol frame parser using osp::StateMachine.
+ * @brief HSM-based protocol frame parser using osp::TableHsm.
  *
  * Modern C++17 rewrite of hsm_parser.c from the reference project.
- * Uses osp::StateMachine<ParserContext, 10> for byte-by-byte frame parsing.
+ * Uses the static transition table (osp::TableHsm) for byte-by-byte frame
+ * parsing: every (state, event) pair is one table row; conditional
+ * transitions are guard rows; byte side effects are row actions.
  *
  * Protocol frame format:
  *   0xAA | LEN_LO | LEN_HI | CMD_CLASS | CMD | DATA[LEN-2] | CRC_LO | CRC_HI | 0x55
@@ -18,6 +20,7 @@
 #include "protocol.hpp"
 
 #include "osp/hsm.hpp"
+#include "osp/hsm_table.hpp"
 #include "osp/log.hpp"
 
 #include <cstdint>
@@ -56,17 +59,18 @@ using FrameCallback = void (*)(const Frame& frame, void* user_data);
 // Parser Context
 // ============================================================================
 
-/// Per-instance state indices (avoids mutable statics).
-struct ParserStateIdx {
-  int32_t idle = -1;
-  int32_t len_lo = -1;
-  int32_t len_hi = -1;
-  int32_t cmd_class = -1;
-  int32_t cmd = -1;
-  int32_t data = -1;
-  int32_t crc_lo = -1;
-  int32_t crc_hi = -1;
-  int32_t tail = -1;
+// State indices (table rows are constexpr; indices are fixed by table order).
+enum ParserState : int32_t {
+  kPsIdle = 0,
+  kPsLenLo,
+  kPsLenHi,
+  kPsCmdClass,
+  kPsCmd,
+  kPsData,
+  kPsCrcLo,
+  kPsCrcHi,
+  kPsTail,
+  kPsCount
 };
 
 struct ParserContext {
@@ -74,163 +78,227 @@ struct ParserContext {
   Frame frame = {};
   uint16_t expected_len = 0;
   uint16_t payload_index = 0;
-  uint8_t payload_buf[kMaxPayloadLen + 2U] = {};
+  uint16_t running_crc = 0;  ///< Incremental CRC over [cmd_class, cmd, data...].
   ParserStats stats = {};
   FrameCallback callback = nullptr;
   void* user_data = nullptr;
-
-  osp::StateMachine<ParserContext, 10>* sm = nullptr;
-  ParserStateIdx si;
 };
 
 // ============================================================================
-// State Handlers (inline free functions)
+// Row actions and guards (free functions; decisions live in table rows)
 // ============================================================================
 
 namespace parser_detail {
 
-inline osp::TransitionResult HandleIdle(ParserContext& ctx, const osp::Event& event) noexcept {
-  if (event.id == kEvtByte) {
-    if (ctx.current_byte == kFrameHeader) {
-      std::memset(&ctx.frame, 0, sizeof(ctx.frame));
-      ctx.expected_len = 0;
-      ctx.payload_index = 0;
-      return ctx.sm->RequestTransition(ctx.si.len_lo);
-    }
-    ++ctx.stats.sync_errors;
-    return osp::TransitionResult::kHandled;
-  }
-  if (event.id == kEvtReset || event.id == kEvtTimeout) {
-    return osp::TransitionResult::kHandled;
-  }
-  return osp::TransitionResult::kUnhandled;
+// --- Idle actions ---------------------------------------------------------
+
+/// Header byte seen: reset the frame accumulation.
+inline void ActStartFrame(ParserContext& ctx, const void* /*data*/) {
+  std::memset(&ctx.frame, 0, sizeof(ctx.frame));
+  ctx.expected_len = 0;
+  ctx.payload_index = 0;
+  ctx.running_crc = 0;
 }
 
-inline osp::TransitionResult HandleLenLo(ParserContext& ctx, const osp::Event& event) noexcept {
-  if (event.id == kEvtByte) {
-    ctx.expected_len = ctx.current_byte;
-    return ctx.sm->RequestTransition(ctx.si.len_hi);
-  }
-  if (event.id == kEvtReset || event.id == kEvtTimeout) {
-    return ctx.sm->RequestTransition(ctx.si.idle);
-  }
-  return osp::TransitionResult::kUnhandled;
+/// Non-header byte in Idle: a resync candidate.
+inline void ActSyncError(ParserContext& ctx, const void* /*data*/) {
+  ++ctx.stats.sync_errors;
 }
 
-inline osp::TransitionResult HandleLenHi(ParserContext& ctx, const osp::Event& event) noexcept {
-  if (event.id == kEvtByte) {
-    ctx.expected_len = static_cast<uint16_t>(ctx.expected_len | static_cast<uint16_t>(ctx.current_byte << 8U));
-
-    if (ctx.expected_len < 2U || (ctx.expected_len - 2U) > kMaxPayloadLen) {
-      ++ctx.stats.length_errors;
-      OSP_LOG_WARN("OTA_PARSER", "Invalid length: %u", ctx.expected_len);
-      return ctx.sm->RequestTransition(ctx.si.idle);
-    }
-    return ctx.sm->RequestTransition(ctx.si.cmd_class);
-  }
-  if (event.id == kEvtReset || event.id == kEvtTimeout) {
-    return ctx.sm->RequestTransition(ctx.si.idle);
-  }
-  return osp::TransitionResult::kUnhandled;
+/// Guard: the current byte is the frame header.
+inline bool GuardIsHeader(ParserContext& ctx, const void* /*data*/) {
+  return kFrameHeader == ctx.current_byte;
 }
 
-inline osp::TransitionResult HandleCmdClass(ParserContext& ctx, const osp::Event& event) noexcept {
-  if (event.id == kEvtByte) {
-    ctx.frame.cmd_class = ctx.current_byte;
-    ctx.payload_buf[ctx.payload_index++] = ctx.current_byte;
-    return ctx.sm->RequestTransition(ctx.si.cmd);
-  }
-  if (event.id == kEvtReset || event.id == kEvtTimeout) {
-    return ctx.sm->RequestTransition(ctx.si.idle);
-  }
-  return osp::TransitionResult::kUnhandled;
+// --- Length actions -------------------------------------------------------
+
+inline void ActStoreLenLo(ParserContext& ctx, const void* /*data*/) {
+  ctx.expected_len = ctx.current_byte;
 }
 
-inline osp::TransitionResult HandleCmd(ParserContext& ctx, const osp::Event& event) noexcept {
-  if (event.id == kEvtByte) {
-    ctx.frame.cmd = ctx.current_byte;
-    ctx.payload_buf[ctx.payload_index++] = ctx.current_byte;
-    ctx.frame.data_len = static_cast<uint16_t>(ctx.expected_len - 2U);
-
-    if (ctx.frame.data_len > 0U) {
-      return ctx.sm->RequestTransition(ctx.si.data);
-    }
-    return ctx.sm->RequestTransition(ctx.si.crc_lo);
-  }
-  if (event.id == kEvtReset || event.id == kEvtTimeout) {
-    return ctx.sm->RequestTransition(ctx.si.idle);
-  }
-  return osp::TransitionResult::kUnhandled;
+inline void ActStoreLenHi(ParserContext& ctx, const void* /*data*/) {
+  ctx.expected_len = static_cast<uint16_t>(ctx.expected_len | static_cast<uint16_t>(ctx.current_byte << 8U));
+  // data_len derives from the completed length field so later guards can
+  // read it before the Cmd action stores the command byte.
+  ctx.frame.data_len = static_cast<uint16_t>(ctx.expected_len - 2U);
 }
 
-inline osp::TransitionResult HandleData(ParserContext& ctx, const osp::Event& event) noexcept {
-  if (event.id == kEvtByte) {
-    uint16_t data_offset = static_cast<uint16_t>(ctx.payload_index - 2U);
-    ctx.frame.data[data_offset] = ctx.current_byte;
-    ctx.payload_buf[ctx.payload_index++] = ctx.current_byte;
-
-    if (ctx.payload_index >= ctx.expected_len) {
-      return ctx.sm->RequestTransition(ctx.si.crc_lo);
-    }
-    return osp::TransitionResult::kHandled;
-  }
-  if (event.id == kEvtReset || event.id == kEvtTimeout) {
-    return ctx.sm->RequestTransition(ctx.si.idle);
-  }
-  return osp::TransitionResult::kUnhandled;
+/// Length invalid: too short or payload larger than the buffer.
+inline void ActLengthError(ParserContext& ctx, const void* /*data*/) {
+  ++ctx.stats.length_errors;
+  OSP_LOG_WARN("OTA_PARSER", "Invalid length: %u", ctx.expected_len);
 }
 
-inline osp::TransitionResult HandleCrcLo(ParserContext& ctx, const osp::Event& event) noexcept {
-  if (event.id == kEvtByte) {
-    ctx.frame.crc = ctx.current_byte;
-    return ctx.sm->RequestTransition(ctx.si.crc_hi);
+/// Guard: the accumulated length is valid (>= 2 bytes overhead, payload
+/// fits). Computed from the pending high byte (guards run before actions).
+inline bool GuardLenValid(ParserContext& ctx, const void* /*data*/) {
+  const uint16_t len = static_cast<uint16_t>(ctx.expected_len | static_cast<uint16_t>(ctx.current_byte << 8U));
+  if (len < 2U) {
+    return false;
   }
-  if (event.id == kEvtReset || event.id == kEvtTimeout) {
-    return ctx.sm->RequestTransition(ctx.si.idle);
-  }
-  return osp::TransitionResult::kUnhandled;
+  return (len - 2U) <= kMaxPayloadLen;
 }
 
-inline osp::TransitionResult HandleCrcHi(ParserContext& ctx, const osp::Event& event) noexcept {
-  if (event.id == kEvtByte) {
-    ctx.frame.crc = static_cast<uint16_t>(ctx.frame.crc | static_cast<uint16_t>(ctx.current_byte << 8U));
-    return ctx.sm->RequestTransition(ctx.si.tail);
-  }
-  if (event.id == kEvtReset || event.id == kEvtTimeout) {
-    return ctx.sm->RequestTransition(ctx.si.idle);
-  }
-  return osp::TransitionResult::kUnhandled;
+// --- Command actions ------------------------------------------------------
+
+inline void ActStoreCmdClass(ParserContext& ctx, const void* /*data*/) {
+  ctx.frame.cmd_class = ctx.current_byte;
+  ctx.running_crc = Crc16Update(ctx.running_crc, ctx.current_byte);
+  ++ctx.payload_index;
 }
 
-inline osp::TransitionResult HandleTail(ParserContext& ctx, const osp::Event& event) noexcept {
-  if (event.id == kEvtByte) {
-    if (ctx.current_byte != kFrameTail) {
-      ++ctx.stats.tail_errors;
-      OSP_LOG_WARN("OTA_PARSER", "Bad tail: 0x%02X", ctx.current_byte);
-      return ctx.sm->RequestTransition(ctx.si.idle);
-    }
-
-    uint16_t calc_crc = CalcCrc16(ctx.payload_buf, ctx.expected_len);
-    if (calc_crc != ctx.frame.crc) {
-      ++ctx.stats.crc_errors;
-      OSP_LOG_WARN("OTA_PARSER", "CRC mismatch: calc=0x%04X recv=0x%04X", calc_crc, ctx.frame.crc);
-      return ctx.sm->RequestTransition(ctx.si.idle);
-    }
-
-    ++ctx.stats.frames_received;
-    OSP_LOG_DEBUG("OTA_PARSER", "Frame OK: class=0x%02X cmd=0x%02X len=%u", ctx.frame.cmd_class, ctx.frame.cmd,
-                  ctx.frame.data_len);
-
-    if (ctx.callback != nullptr) {
-      ctx.callback(ctx.frame, ctx.user_data);
-    }
-    return ctx.sm->RequestTransition(ctx.si.idle);
-  }
-  if (event.id == kEvtReset || event.id == kEvtTimeout) {
-    return ctx.sm->RequestTransition(ctx.si.idle);
-  }
-  return osp::TransitionResult::kUnhandled;
+inline void ActStoreCmd(ParserContext& ctx, const void* /*data*/) {
+  ctx.frame.cmd = ctx.current_byte;
+  ctx.running_crc = Crc16Update(ctx.running_crc, ctx.current_byte);
+  ++ctx.payload_index;
 }
+
+/// Guard: the frame carries payload bytes (expected_len > 2 overhead bytes).
+inline bool GuardHasPayload(ParserContext& ctx, const void* /*data*/) {
+  return ctx.expected_len > 2U;
+}
+
+// --- Data actions ---------------------------------------------------------
+
+inline void ActStoreData(ParserContext& ctx, const void* /*data*/) {
+  const uint16_t data_offset = static_cast<uint16_t>(ctx.payload_index - 2U);
+  ctx.frame.data[data_offset] = ctx.current_byte;
+  ctx.running_crc = Crc16Update(ctx.running_crc, ctx.current_byte);
+  ++ctx.payload_index;
+}
+
+/// Guard: this byte is the last payload byte (pre-store evaluation: guards
+/// run before actions, so the +1 accounts for the byte about to be stored).
+inline bool GuardPayloadDone(ParserContext& ctx, const void* /*data*/) {
+  return (ctx.payload_index + 1U) >= ctx.expected_len;
+}
+
+// --- CRC actions ----------------------------------------------------------
+
+inline void ActStoreCrcLo(ParserContext& ctx, const void* /*data*/) {
+  ctx.frame.crc = ctx.current_byte;
+}
+
+inline void ActStoreCrcHi(ParserContext& ctx, const void* /*data*/) {
+  ctx.frame.crc = static_cast<uint16_t>(ctx.frame.crc | static_cast<uint16_t>(ctx.current_byte << 8U));
+}
+
+// --- Tail actions ---------------------------------------------------------
+
+inline void ActTailError(ParserContext& ctx, const void* /*data*/) {
+  ++ctx.stats.tail_errors;
+  OSP_LOG_WARN("OTA_PARSER", "Bad tail: 0x%02X", ctx.current_byte);
+}
+
+inline void ActCrcError(ParserContext& ctx, const void* /*data*/) {
+  ++ctx.stats.crc_errors;
+  OSP_LOG_WARN("OTA_PARSER", "CRC mismatch: calc=0x%04X recv=0x%04X", ctx.running_crc, ctx.frame.crc);
+}
+
+inline void ActFrameOk(ParserContext& ctx, const void* /*data*/) {
+  ++ctx.stats.frames_received;
+  OSP_LOG_DEBUG("OTA_PARSER", "Frame OK: class=0x%02X cmd=0x%02X len=%u", ctx.frame.cmd_class, ctx.frame.cmd,
+                ctx.frame.data_len);
+  if (ctx.callback != nullptr) {
+    ctx.callback(ctx.frame, ctx.user_data);
+  }
+}
+
+/// Guard: the current byte is the frame tail marker.
+inline bool GuardIsTail(ParserContext& ctx, const void* /*data*/) {
+  return kFrameTail == ctx.current_byte;
+}
+
+/// Guard: the current byte is NOT the frame tail marker.
+inline bool GuardNotTail(ParserContext& ctx, const void* /*data*/) {
+  return kFrameTail != ctx.current_byte;
+}
+
+/// Guard: tail marker present but the CRC does not match.
+inline bool GuardTailBadCrc(ParserContext& ctx, const void* /*data*/) {
+  return (kFrameTail == ctx.current_byte) && (ctx.running_crc != ctx.frame.crc);
+}
+
+/// Guard: the received CRC matches the computed CRC.
+inline bool GuardCrcOk(ParserContext& ctx, const void* /*data*/) {
+  return ctx.running_crc == ctx.frame.crc;
+}
+
+}  // namespace parser_detail
+
+// ============================================================================
+// Static transition table
+// ============================================================================
+
+namespace parser_detail {
+
+using TD = osp::TransitionDef<ParserContext>;
+
+inline constexpr osp::StateDef<ParserContext> kParserStates[kPsCount] = {
+    {"Idle", -1, nullptr, nullptr},     {"LenLo", -1, nullptr, nullptr}, {"LenHi", -1, nullptr, nullptr},
+    {"CmdClass", -1, nullptr, nullptr}, {"Cmd", -1, nullptr, nullptr},   {"Data", -1, nullptr, nullptr},
+    {"CrcLo", -1, nullptr, nullptr},    {"CrcHi", -1, nullptr, nullptr}, {"Tail", -1, nullptr, nullptr},
+};
+
+// Byte path. Rows are scanned in order: guarded rows first, fallback next.
+inline constexpr osp::TransitionDef<ParserContext> kParserTrans[] = {
+    // Idle + byte: header starts a frame, anything else is a sync error.
+    {kPsIdle, kEvtByte, kPsLenLo, osp::TransitionKind::kExternal, ActStartFrame, GuardIsHeader},
+    {kPsIdle, kEvtByte, kPsIdle, osp::TransitionKind::kInternal, ActSyncError, nullptr},
+
+    // Reset/timeout always return to Idle (row per state, ordered after the
+    // byte rows of the same source state).
+    {kPsIdle, kEvtReset, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kPsIdle, kEvtTimeout, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // LenLo + byte: low length byte.
+    {kPsLenLo, kEvtByte, kPsLenHi, osp::TransitionKind::kExternal, ActStoreLenLo, nullptr},
+    {kPsLenLo, kEvtReset, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kPsLenLo, kEvtTimeout, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // LenHi + byte: high length byte; invalid length rejects the frame.
+    {kPsLenHi, kEvtByte, kPsCmdClass, osp::TransitionKind::kExternal, ActStoreLenHi, GuardLenValid},
+    {kPsLenHi, kEvtByte, kPsIdle, osp::TransitionKind::kExternal, ActLengthError, nullptr},
+    {kPsLenHi, kEvtReset, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kPsLenHi, kEvtTimeout, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // CmdClass + byte.
+    {kPsCmdClass, kEvtByte, kPsCmd, osp::TransitionKind::kExternal, ActStoreCmdClass, nullptr},
+    {kPsCmdClass, kEvtReset, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kPsCmdClass, kEvtTimeout, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // Cmd + byte: with payload go to Data, otherwise straight to CRC.
+    {kPsCmd, kEvtByte, kPsData, osp::TransitionKind::kExternal, ActStoreCmd, GuardHasPayload},
+    {kPsCmd, kEvtByte, kPsCrcLo, osp::TransitionKind::kExternal, ActStoreCmd, nullptr},
+    {kPsCmd, kEvtReset, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kPsCmd, kEvtTimeout, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // Data + byte: accumulate; when the payload is full move to CRC.
+    {kPsData, kEvtByte, kPsCrcLo, osp::TransitionKind::kExternal, ActStoreData, GuardPayloadDone},
+    {kPsData, kEvtByte, kPsData, osp::TransitionKind::kInternal, ActStoreData, nullptr},
+    {kPsData, kEvtReset, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kPsData, kEvtTimeout, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // CrcLo + byte: low CRC byte.
+    {kPsCrcLo, kEvtByte, kPsCrcHi, osp::TransitionKind::kExternal, ActStoreCrcLo, nullptr},
+    {kPsCrcLo, kEvtReset, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kPsCrcLo, kEvtTimeout, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // CrcHi + byte: high CRC byte, frame complete pending tail.
+    {kPsCrcHi, kEvtByte, kPsTail, osp::TransitionKind::kExternal, ActStoreCrcHi, nullptr},
+    {kPsCrcHi, kEvtReset, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kPsCrcHi, kEvtTimeout, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+
+    // Tail + byte: original order -- bad tail first, then tail-OK/CRC-bad,
+    // then full success. One row per outcome, mutually exclusive guards.
+    {kPsTail, kEvtByte, kPsIdle, osp::TransitionKind::kExternal, ActTailError, GuardNotTail},
+    {kPsTail, kEvtByte, kPsIdle, osp::TransitionKind::kExternal, ActCrcError, GuardTailBadCrc},
+    {kPsTail, kEvtByte, kPsIdle, osp::TransitionKind::kExternal, ActFrameOk, GuardCrcOk},
+    {kPsTail, kEvtReset, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+    {kPsTail, kEvtTimeout, kPsIdle, osp::TransitionKind::kExternal, nullptr, nullptr},
+};
+
+inline constexpr uint32_t kParserTransCount = sizeof(kParserTrans) / sizeof(kParserTrans[0]);
 
 }  // namespace parser_detail
 
@@ -240,21 +308,11 @@ inline osp::TransitionResult HandleTail(ParserContext& ctx, const osp::Event& ev
 
 class FrameParser final {
  public:
-  FrameParser() noexcept : ctx_{}, sm_(ctx_) {
-    ctx_.sm = &sm_;
-
-    using SC = osp::StateConfig<ParserContext>;
-    ctx_.si.idle = sm_.AddState(SC{"Idle", -1, parser_detail::HandleIdle, nullptr, nullptr, nullptr});
-    ctx_.si.len_lo = sm_.AddState(SC{"LenLo", -1, parser_detail::HandleLenLo, nullptr, nullptr, nullptr});
-    ctx_.si.len_hi = sm_.AddState(SC{"LenHi", -1, parser_detail::HandleLenHi, nullptr, nullptr, nullptr});
-    ctx_.si.cmd_class = sm_.AddState(SC{"CmdClass", -1, parser_detail::HandleCmdClass, nullptr, nullptr, nullptr});
-    ctx_.si.cmd = sm_.AddState(SC{"Cmd", -1, parser_detail::HandleCmd, nullptr, nullptr, nullptr});
-    ctx_.si.data = sm_.AddState(SC{"Data", -1, parser_detail::HandleData, nullptr, nullptr, nullptr});
-    ctx_.si.crc_lo = sm_.AddState(SC{"CrcLo", -1, parser_detail::HandleCrcLo, nullptr, nullptr, nullptr});
-    ctx_.si.crc_hi = sm_.AddState(SC{"CrcHi", -1, parser_detail::HandleCrcHi, nullptr, nullptr, nullptr});
-    ctx_.si.tail = sm_.AddState(SC{"Tail", -1, parser_detail::HandleTail, nullptr, nullptr, nullptr});
-
-    sm_.SetInitialState(ctx_.si.idle);
+  FrameParser() noexcept
+      : ctx_{},
+        sm_(ctx_, parser_detail::kParserStates, kPsCount, parser_detail::kParserTrans,
+            parser_detail::kParserTransCount) {
+    sm_.SetInitialState(kPsIdle);
   }
 
   FrameParser(const FrameParser&) = delete;
@@ -270,7 +328,7 @@ class FrameParser final {
   void PutByte(uint8_t byte) noexcept {
     ctx_.current_byte = byte;
     ++ctx_.stats.bytes_received;
-    sm_.Dispatch(osp::Event{kEvtByte, nullptr});
+    sm_.Dispatch(osp::Event{kEvtByte, &byte});
   }
 
   void PutData(const uint8_t* data, uint32_t len) noexcept {
@@ -286,7 +344,7 @@ class FrameParser final {
 
  private:
   ParserContext ctx_;
-  osp::StateMachine<ParserContext, 10> sm_;
+  osp::TableHsm<ParserContext, kPsCount, parser_detail::kParserTransCount> sm_;
 };
 
 }  // namespace ota

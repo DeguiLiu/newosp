@@ -16,7 +16,7 @@ graph TB
 
     subgraph host_side["Host 端 (升级工具)"]
         BT["BehaviorTree<br/>Sequence: start->chunks->end->verify"]
-        HP["FrameParser<br/>StateMachine 9 states"]
+        HP["FrameParser<br/>TableHsm 9 states"]
     end
 
     subgraph channel["信道模拟"]
@@ -27,7 +27,7 @@ graph TB
 
     subgraph device_side["Device 端 (目标设备)"]
         SM["StateMachine<br/>OTA: Idle->Erasing->Receiving->Verifying->Complete"]
-        DP["FrameParser<br/>StateMachine 9 states"]
+        DP["FrameParser<br/>TableHsm 9 states"]
     end
 
     subgraph pool["后台事件处理"]
@@ -36,7 +36,7 @@ graph TB
     end
 
     subgraph infra["基础设施层"]
-        TIMER["TimerScheduler<br/>进度上报 250ms + 超时监控 500ms"]
+        TIMER["EventLoop<br/>进度上报 250ms + 超时监控 500ms"]
         SHELL["DebugShell<br/>9 条 telnet 调试命令"]
         LOG["log<br/>结构化日志"]
     end
@@ -84,7 +84,7 @@ sequenceDiagram
     participant SM as Device SM
     participant HP as Host Parser
     participant WP as WorkerPool
-    participant TM as TimerScheduler
+    participant TM as EventLoop
 
     Note over ML: OSP_SCOPE_EXIT 注册清理
 
@@ -130,9 +130,9 @@ sequenceDiagram
 
 | # | 组件 | 头文件 | 在本 Demo 中的用途 |
 |---|------|--------|-------------------|
-| 1 | `StateMachine` | osp/hsm.hpp | Device OTA 状态机 (6 states) + 双端 HSM 帧解析器 (9 states) |
+| 1 | `TableHsm` | osp/hsm_table.hpp | 双端帧解析器 (9 states) 静态转移表；Device OTA 状态机 (6 states) 仍用 `StateMachine` |
 | 2 | `BehaviorTree` | osp/bt.hpp | Host 升级流程：Sequence(start -> chunks -> end -> verify) |
-| 3 | `TimerScheduler` | osp/timer.hpp | 进度上报 (250ms) + 超时监控 (500ms, 上限 30s) |
+| 3 | `EventLoop` | osp/event_loop.hpp | 进度上报 (250ms) + 超时监控 (500ms, 上限 30s) |
 | 4 | `AsyncBus` | osp/bus.hpp | 无锁 MPSC 总线：OtaProgressMsg / OtaStateChangeMsg / OtaCompleteMsg |
 | 5 | `WorkerPool` | osp/worker_pool.hpp | 后台事件处理：dispatcher + 2 workers, 优先级分发 |
 | 6 | `SpscRingbuffer` | osp/spsc_ringbuffer.hpp | 模拟 UART 双向 FIFO 通道 (host<->device, 各 512B) |
@@ -290,7 +290,7 @@ graph TD
 | kUartFifoSize | 512 | 模拟 UART FIFO 深度 (字节) |
 | Shell port | 5090 | Telnet 调试端口 |
 | OTA tick | 5 ms | BT tick 间隔 |
-| Progress report | 250 ms | 进度上报间隔 (TimerScheduler) |
+| Progress report | 250 ms | 进度上报间隔 (EventLoop) |
 | Timeout | 30000 ms | OTA 最大超时 |
 
 ## 编译运行
@@ -311,8 +311,8 @@ telnet localhost 5090
 
 ```
 [INFO ] [OTA_MAIN] === Serial OTA Demo ===
-[INFO ] [OTA_MAIN] Components: StateMachine + BehaviorTree + DebugShell +
-                   TimerScheduler + AsyncBus + WorkerPool + SpscRingbuffer + vocabulary
+[INFO ] [OTA_MAIN] Components: TableHsm + StateMachine + BehaviorTree + DebugShell +
+                   EventLoop + AsyncBus + WorkerPool + SpscRingbuffer + vocabulary
 [INFO ] [OTA_MAIN] Firmware: 4096 bytes, chunk: 128, addr: 0x0
 [INFO ] [OTA_MAIN] WorkerPool: 2 workers, queue=64
 [INFO ] [OTA_HOST] Starting OTA: size=4096 crc=0xE0B6 chunk=128
@@ -337,12 +337,12 @@ telnet localhost 5090
 
 | uart_statemachine_ringbuffer_linux | serial_ota_demo |
 |-----------------------------------|-----------------|
-| hsm_parser.c (C 状态机) | parser.hpp: osp::StateMachine (C++17 HSM) |
+| hsm_parser.c (C 状态机) | parser.hpp: osp::TableHsm (C++17 静态表 HSM) |
 | cmd_handler.c (OTA 命令处理) | device.hpp: DeviceHandler + HSM state handlers |
 | uart_protocol.h (帧格式) | protocol.hpp: packed structs + constexpr CRC |
 | main.c (测试驱动) | host.hpp: osp::BehaviorTree (自动化流程) |
 | printf 调试 | osp::DebugShell (telnet) + osp::log |
-| -- | osp::TimerScheduler (定时调度) |
+| -- | osp::EventLoop (定时调度) |
 | -- | osp::AsyncBus + WorkerPool (事件分发+后台处理) |
 | -- | osp::SpscRingbuffer (UART FIFO 模拟) |
 | -- | osp::FixedVector/FixedString (零堆分配容器) |

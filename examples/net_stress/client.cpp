@@ -40,11 +40,11 @@
 #include "protocol.hpp"
 
 #include "osp/bus.hpp"
+#include "osp/event_loop.hpp"
 #include "osp/fault_collector.hpp"
 #include "osp/log.hpp"
 #include "osp/node.hpp"
 #include "osp/shell.hpp"
-#include "osp/timer.hpp"
 #include "osp/vocabulary.hpp"
 #include "osp/watchdog.hpp"
 
@@ -181,7 +181,7 @@ static void CleanupFileThreadSlot(uint32_t idx) noexcept {
   }
 
   if (ft.initialized) {
-    FtSmOf(idx).~StateMachine();
+    FtSmOf(idx).~TableHsm();
     FtCtxOf(idx).~FtCtx();
     ft.initialized = false;
   }
@@ -200,23 +200,6 @@ static void OnWatchdogTimeout(uint32_t slot_id, const char* name, void* /*ctx*/)
 static void OnWatchdogRecovered(uint32_t slot_id, const char* name, void* /*ctx*/) {
   OSP_LOG_INFO("WATCHDOG", "Thread '%s' (slot %u) recovered", name, slot_id);
   g_faults.ClearFault(kFiThreadTimeout);
-}
-
-// Error rate check (called by TimerScheduler)
-static void ErrorRateCheckCallback(void* /*ctx*/) {
-  g_watchdog.Check();
-
-  for (uint32_t i = 0; i < g_num_clients; ++i) {
-    auto& c = Ctx(i);
-    if (c.connected) {
-      uint32_t err = c.n_err.load(std::memory_order_relaxed);
-      uint32_t sent = c.n_sent.load(std::memory_order_relaxed);
-      if (sent > 10 && err > sent / 2) {
-        OSP_LOG_WARN("WATCHDOG", "Client [%u] high error rate: %u/%u", i, err, sent);
-        static_cast<void>(g_faults.ReportFault(kFiHighErrorRate, c.id, osp::FaultPriority::kMedium));
-      }
-    }
-  }
 }
 
 // ============================================================================
@@ -260,6 +243,89 @@ static uint32_t AggConnected() noexcept {
 }
 
 // ============================================================================
+// Event Loop (replaces TimerScheduler + busy-wait main loop)
+// ============================================================================
+
+// Global pointers wired to main-local objects so shell commands can drive them.
+static StressNode* g_node = nullptr;
+class ClientLoop;  // defined below
+static ClientLoop* g_loop = nullptr;
+
+// Main-loop event loop: three periodic timers mapped to OnTimer slots.
+class ClientLoop final : public osp::EventLoop<ClientLoop> {
+ public:
+  ClientLoop() = default;
+
+  // Cross-thread stop: shell cmd_quit invokes Stop() to wake the blocked Run().
+  void RequestStop() noexcept { Stop(); }
+
+  // libev ev_timer equivalent: dispatch a fired timer id to its handler.
+  void OnTimer(uint32_t timer_id) noexcept {
+    if (timer_id == tick_id_) {
+      ClientTick();
+    } else if (timer_id == stats_id_) {
+      ClientStats();
+    } else if (timer_id == errorrate_id_) {
+      ErrorRateCheck();
+    }
+  }
+
+  uint32_t tick_id_ = 0U;
+  uint32_t stats_id_ = 0U;
+  uint32_t errorrate_id_ = 0U;
+
+ private:
+  void ClientTick() noexcept {
+    if (!g_test_running.load(std::memory_order_relaxed))
+      return;
+
+    for (uint32_t i = 0; i < g_num_clients; ++i) {
+      if (Ctx(i).connected) {
+        Dispatch(Ctx(i), kEvtTick);
+      }
+    }
+
+    // Process bus messages
+    if (g_node != nullptr) {
+      g_node->SpinOnce();
+    }
+  }
+
+  void ClientStats() noexcept {
+    if (g_node == nullptr)
+      return;
+
+    StatsSnapshot ss{};
+    ss.active_clients = AggConnected();
+    ss.total_sent = AggSent();
+    ss.total_recv = AggRecv();
+    ss.total_errors = AggErr();
+    ss.total_rtt_us = AggRtt();
+    ss.rtt_samples = ss.total_recv;
+    ss.elapsed_ms = NowMs() - g_start_time_ms;
+
+    g_node->Publish(ss);
+    g_node->SpinOnce();
+  }
+
+  void ErrorRateCheck() noexcept {
+    g_watchdog.Check();
+
+    for (uint32_t i = 0; i < g_num_clients; ++i) {
+      auto& c = Ctx(i);
+      if (c.connected) {
+        uint32_t err = c.n_err.load(std::memory_order_relaxed);
+        uint32_t sent = c.n_sent.load(std::memory_order_relaxed);
+        if (sent > 10 && err > sent / 2) {
+          OSP_LOG_WARN("WATCHDOG", "Client [%u] high error rate: %u/%u", i, err, sent);
+          static_cast<void>(g_faults.ReportFault(kFiHighErrorRate, c.id, osp::FaultPriority::kMedium));
+        }
+      }
+    }
+  }
+};
+
+// ============================================================================
 // Bus Subscribers
 // ============================================================================
 
@@ -282,43 +348,6 @@ static void SetupBusSubscribers(StressNode& node) {
       OSP_LOG_WARN("BUS", "Echo failed: client=%u seq=%u", er.client_id, er.seq);
     }
   }));
-}
-
-// ============================================================================
-// Timer Callbacks
-// ============================================================================
-
-/// Daemon tick: trigger echo on all running clients.
-static void TickCallback(void* ctx) {
-  auto* node = static_cast<StressNode*>(ctx);
-  if (!g_test_running.load(std::memory_order_relaxed))
-    return;
-
-  for (uint32_t i = 0; i < g_num_clients; ++i) {
-    if (Ctx(i).connected) {
-      Dispatch(Ctx(i), kEvtTick);
-    }
-  }
-
-  // Process bus messages
-  node->SpinOnce();
-}
-
-/// Stats reporting timer.
-static void StatsCallback(void* ctx) {
-  auto* node = static_cast<StressNode*>(ctx);
-
-  StatsSnapshot ss{};
-  ss.active_clients = AggConnected();
-  ss.total_sent = AggSent();
-  ss.total_recv = AggRecv();
-  ss.total_errors = AggErr();
-  ss.total_rtt_us = AggRtt();
-  ss.rtt_samples = ss.total_recv;
-  ss.elapsed_ms = NowMs() - g_start_time_ms;
-
-  node->Publish(ss);
-  node->SpinOnce();
 }
 
 // ============================================================================
@@ -452,6 +481,9 @@ OSP_SHELL_CMD(cmd_faults, "Show fault collector statistics");
 static int cmd_quit(int /*argc*/, char* /*argv*/[]) {
   osp::DebugShell::Printf("Shutting down...\r\n");
   g_running.store(false, std::memory_order_relaxed);
+  if (g_loop != nullptr) {
+    g_loop->RequestStop();
+  }
   return 0;
 }
 OSP_SHELL_CMD(cmd_quit, "Quit client");
@@ -517,6 +549,8 @@ int main(int argc, char* argv[]) {
   StressBus::Instance().Reset();
   StressNode node("stress_client", 1);
   static_cast<void>(node.Start());
+  g_node = &node;
+  OSP_SCOPE_EXIT(g_node = nullptr);
   SetupBusSubscribers(node);
 
   // --- Setup Watchdog + FaultCollector ---
@@ -552,7 +586,9 @@ int main(int argc, char* argv[]) {
     ctx->interval_ms = interval_ms;
     ctx->payload_len = payload_len;
 
-    auto* sm = new (g_slots[i].sm_buf) ClientSm(*ctx);  // NOLINT
+    auto* sm = new (g_slots[i].sm_buf)
+        ClientSm(*ctx, client_sm_detail::kClientStates, kCsCount, client_sm_detail::kClientTrans,
+                 client_sm_detail::kClientTransCount);  // NOLINT
     BuildClientSm(*sm, *ctx);
     g_slots[i].initialized = true;
   }
@@ -560,8 +596,8 @@ int main(int argc, char* argv[]) {
   // RAII cleanup for placement-new objects
   OSP_SCOPE_EXIT(for (uint32_t i = 0; i < g_num_clients; ++i) {
     if (g_slots[i].initialized) {
-      CleanupClient(Ctx(i));
-      Sm(i).~StateMachine();
+      client_sm_detail::CleanupClient(Ctx(i));
+      Sm(i).~TableHsm();
       Ctx(i).~ClientCtx();
       g_slots[i].initialized = false;
     }
@@ -639,7 +675,8 @@ int main(int argc, char* argv[]) {
       fc->heartbeat = wd_reg.value().heartbeat;
     }
 
-    auto* fsm = new (ft.sm_buf) FtSm(*fc);  // NOLINT
+    auto* fsm = new (ft.sm_buf) FtSm(*fc, ft_sm_detail::kFtStates, kFsCount, ft_sm_detail::kFtTrans,
+                                     ft_sm_detail::kFtTransCount);  // NOLINT
     BuildFtSm(*fsm, *fc);
     ft.initialized = true;
 
@@ -679,22 +716,26 @@ int main(int argc, char* argv[]) {
   OSP_SCOPE_EXIT(shell.Stop());
 
   // --- Timer: periodic echo tick + stats + watchdog check ---
-  osp::TimerScheduler<4> timer;
-  static_cast<void>(timer.Add(interval_ms, TickCallback, &node));
-  static_cast<void>(timer.Add(5000U, StatsCallback, &node));
-  static_cast<void>(timer.Add(3000U, ErrorRateCheckCallback));
-  static_cast<void>(timer.Start());
-  OSP_SCOPE_EXIT(timer.Stop());
+  ClientLoop loop;
+  g_loop = &loop;
+  auto tick_r = loop.Schedule(interval_ms);
+  auto stats_r = loop.Schedule(5000U);
+  auto errorrate_r = loop.Schedule(3000U);
+  if (tick_r.has_value()) {
+    loop.tick_id_ = tick_r.value();
+  }
+  if (stats_r.has_value()) {
+    loop.stats_id_ = stats_r.value();
+  }
+  if (errorrate_r.has_value()) {
+    loop.errorrate_id_ = errorrate_r.value();
+  }
+  OSP_SCOPE_EXIT(g_loop = nullptr);
 
   OSP_LOG_INFO("CLIENT", "Running. Press 'q' + Enter to quit.");
 
-  // --- Main loop ---
-  while (g_running.load(std::memory_order_relaxed)) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }
-
-  // --- Final stats ---
-  timer.Stop();
+  // --- Main loop (EventLoop::Run blocks until cmd_quit -> Stop) ---
+  loop.Run();
   g_test_running.store(false, std::memory_order_relaxed);
 
   // Join file transfer threads

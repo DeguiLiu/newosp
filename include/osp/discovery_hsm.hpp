@@ -29,6 +29,13 @@
  * Header-only, C++17, compatible with -fno-exceptions -fno-rtti.
  * Manages discovery lifecycle: Idle -> Announcing -> Discovering -> Stable/Degraded
  *
+ * Synchronous dispatch model: event methods dispatch under the internal
+ * mutex and are observable on return. There is no background thread.
+ *
+ * Reentrancy constraint: state entry actions and registered callbacks
+ * (on_stable / on_degraded / fault reporter) run under the internal mutex
+ * and MUST NOT call back into this class's public methods (deadlock).
+ *
  * This is an independent enhancement module that does not modify discovery.hpp.
  */
 
@@ -234,7 +241,7 @@ inline void OnEnterDiscDegraded(DiscoveryHsmContext& ctx) {
 template <uint32_t MaxNodes = 64>
 class HsmDiscovery {
  public:
-  HsmDiscovery() noexcept : hsm_(context_), started_(false) {
+  HsmDiscovery() noexcept : hsm_(context_) {
     context_.sm = &hsm_;
 
     // Add states
@@ -256,7 +263,7 @@ class HsmDiscovery {
     hsm_.SetInitialState(context_.idx_idle);
   }
 
-  ~HsmDiscovery() = default;
+  ~HsmDiscovery() { Stop(); }
 
   HsmDiscovery(const HsmDiscovery&) = delete;
   HsmDiscovery& operator=(const HsmDiscovery&) = delete;
@@ -293,22 +300,26 @@ class HsmDiscovery {
   // Lifecycle Control
   // ==========================================================================
 
+  /// @brief Start (Idle -> Announcing). Mutex-held: serialized against
+  /// Stop and event methods; a second Start while running is a no-op.
   void Start() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_) {
-      hsm_.Start();
-      started_ = true;
+    if (started_) {
+      return;
     }
-    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStart), nullptr};
-    hsm_.Dispatch(evt);
+    EnsureHsmStarted();
+    hsm_.Dispatch(osp::Event{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStart), nullptr});
+    started_ = true;
   }
 
+  /// @brief Stop (any active state -> Stopped). Mutex-held.
   void Stop() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!started_) {
       return;
-    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStop), nullptr};
-    hsm_.Dispatch(evt);
+    }
+    hsm_.Dispatch(osp::Event{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtStop), nullptr});
+    started_ = false;
   }
 
   // ==========================================================================
@@ -317,34 +328,34 @@ class HsmDiscovery {
 
   void OnNodeFound() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!started_) {
       return;
-    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeFound), nullptr};
-    hsm_.Dispatch(evt);
+    }
+    hsm_.Dispatch(osp::Event{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeFound), nullptr});
   }
 
   void OnNodeLost() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!started_) {
       return;
-    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeLost), nullptr};
-    hsm_.Dispatch(evt);
+    }
+    hsm_.Dispatch(osp::Event{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNodeLost), nullptr});
   }
 
   void CheckStability() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!started_) {
       return;
-    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNetworkStable), nullptr};
-    hsm_.Dispatch(evt);
+    }
+    hsm_.Dispatch(osp::Event{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNetworkStable), nullptr});
   }
 
   void TriggerDegraded() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!started_) {
       return;
-    Event evt{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNetworkDegraded), nullptr};
-    hsm_.Dispatch(evt);
+    }
+    hsm_.Dispatch(osp::Event{static_cast<uint32_t>(DiscoveryHsmEvent::kDiscEvtNetworkDegraded), nullptr});
   }
 
   // ==========================================================================
@@ -353,50 +364,57 @@ class HsmDiscovery {
 
   const char* GetState() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!hsm_started_) {
       return "NotStarted";
+    }
     return hsm_.CurrentStateName();
   }
 
   bool IsStable() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!hsm_started_) {
       return false;
+    }
     return hsm_.IsInState(context_.idx_stable);
   }
 
   bool IsDegraded() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!hsm_started_) {
       return false;
+    }
     return hsm_.IsInState(context_.idx_degraded);
   }
 
   bool IsDiscovering() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!hsm_started_) {
       return false;
+    }
     return hsm_.IsInState(context_.idx_discovering);
   }
 
   bool IsAnnouncing() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!hsm_started_) {
       return false;
+    }
     return hsm_.IsInState(context_.idx_announcing);
   }
 
   bool IsIdle() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!hsm_started_) {
       return true;
+    }
     return hsm_.IsInState(context_.idx_idle);
   }
 
   bool IsStopped() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_)
+    if (!hsm_started_) {
       return false;
+    }
     return hsm_.IsInState(context_.idx_stopped);
   }
 
@@ -417,9 +435,18 @@ class HsmDiscovery {
   }
 
  private:
+  /// @brief Lazily enter the initial state on the first Start (mutex held).
+  void EnsureHsmStarted() noexcept {
+    if (!hsm_started_) {
+      hsm_.Start();
+      hsm_started_ = true;
+    }
+  }
+
   DiscoveryHsmContext context_;
   StateMachine<DiscoveryHsmContext, 8> hsm_;
-  bool started_;
+  bool started_{false};
+  bool hsm_started_{false};
   mutable std::mutex mutex_;
 };
 
