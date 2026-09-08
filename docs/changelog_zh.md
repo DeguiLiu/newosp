@@ -6,6 +6,22 @@
 
 ## 最新变更
 
+### 2026-09-09: v0.7.1 OnFd user_data 下沉 + fd 复用竞态修复
+
+**变更内容** (2 项 P1 修复):
+
+1. **P1: NodeManager fd 复用竞态**
+   - `OnFd` 原用 `FindNodeByFd(fd)` 定位节点，fd 被 close 复用后可能误判到新节点。
+   - 修复: `AddFd` 携带稳定 `node_id`（user_data），`DisconnectByNodeId` 二次校验 `socket.Fd()==fd`。
+
+2. **P1: user_data 下沉到 IoPoller**
+   - 上一版 `OnFd` 就绪时持 `fd_mutex_` 线性扫表回填 user_data，仍留 fd 复用窗口且热路径加锁。
+   - 修复: `PollResult` 增加 `user_data` 字段，`IoPoller::Add` 绑定 tag、`Wait` 就绪事件直接回填，`EventLoop::Run` 删除持锁扫描，热路径零锁。
+
+**验证**: 全量 1298 用例全绿；`[io_poller]` user_data 往返 + Remove 清 tag 测试。
+
+---
+
 ### 2026-09-08: v0.7.0 表驱动 HSM + 事件循环 + 熔断 (examples 重构)
 
 **变更内容** (3 个新核心组件 + 6 个 examples 重构 + 文档):
