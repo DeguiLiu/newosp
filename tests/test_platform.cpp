@@ -123,3 +123,61 @@ TEST_CASE("ThreadSleepUs waits approximately the requested duration", "[platform
   // Loose lower bound only: ignore scheduler noise, never fail on early wake.
   REQUIRE(elapsed_us >= 15000);
 }
+
+// ============================================================================
+// BeatLoop Tests (CRTP-free beat skeleton)
+// ============================================================================
+
+TEST_CASE("BeatLoop beats per iteration while predicate holds", "[platform][beatloop]") {
+  osp::ThreadHeartbeat hb;
+  REQUIRE(hb.LastBeatUs() == 0);
+
+  int iterations = 0;
+  osp::detail::BeatLoop(&hb, [&iterations]() { return iterations < 5; }, [&iterations]() { ++iterations; });
+
+  REQUIRE(iterations == 5);
+  REQUIRE(hb.LastBeatUs() > 0);
+}
+
+TEST_CASE("BeatLoop false predicate never runs body nor beats", "[platform][beatloop]") {
+  osp::ThreadHeartbeat hb;
+  bool ran = false;
+  osp::detail::BeatLoop(&hb, []() { return false; }, [&ran]() { ran = true; });
+  REQUIRE(!ran);
+  REQUIRE(hb.LastBeatUs() == 0);
+}
+
+TEST_CASE("BeatLoop null heartbeat is safe", "[platform][beatloop]") {
+  int iterations = 0;
+  osp::detail::BeatLoop(nullptr, [&iterations]() { return iterations < 3; }, [&iterations]() { ++iterations; });
+  REQUIRE(iterations == 3);
+}
+
+TEST_CASE("BeatLoop bool body can stop early", "[platform][beatloop]") {
+  osp::ThreadHeartbeat hb;
+  int iterations = 0;
+  osp::detail::BeatLoop(&hb, []() { return true; }, [&iterations]() -> bool { return ++iterations < 4; });
+  REQUIRE(iterations == 4);
+}
+
+TEST_CASE("BeatLoop atomic flag overload loops while flag is true", "[platform][beatloop]") {
+  osp::ThreadHeartbeat hb;
+  std::atomic<bool> go{true};
+  int iterations = 0;
+  osp::detail::BeatLoop(&hb, go, [&]() {
+    if (++iterations == 3) {
+      go.store(false);
+    }
+  });
+  REQUIRE(iterations == 3);
+  REQUIRE(hb.LastBeatUs() > 0);
+}
+
+TEST_CASE("BeatLoop atomic flag overload supports bool body", "[platform][beatloop]") {
+  osp::ThreadHeartbeat hb;
+  std::atomic<bool> go{true};
+  int iterations = 0;
+  osp::detail::BeatLoop(&hb, go, [&]() -> bool { return ++iterations < 2; });
+  REQUIRE(iterations == 2);
+  REQUIRE(go.load());  // predicate untouched; body stopped it
+}

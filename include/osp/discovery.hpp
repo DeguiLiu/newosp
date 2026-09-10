@@ -472,10 +472,7 @@ class MulticastDiscovery {
     (void)socket_api::ParseIpv4(config_.multicast_group, &mcast_addr.sin_addr);
     mcast_addr.sin_port = socket_api::Htons(config_.port);
 
-    while (running_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
-      }
+    detail::BeatLoop(heartbeat_, running_, [this, &mcast_addr]() {
       // Build announce packet
       uint8_t packet[kAnnounceSize];
       std::memcpy(packet, &kAnnounceMagic, 4);
@@ -494,17 +491,14 @@ class MulticastDiscovery {
 
       // Sleep for announce interval
       ThreadSleepUs(static_cast<uint64_t>(config_.announce_interval_ms) * 1000ULL);
-    }
+    });
   }
 
   void ReceiveLoop() noexcept {
     uint8_t packet[kAnnounceSize];
     constexpr uint32_t kSleepIntervalMs = 100;
 
-    while (running_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
-      }
+    detail::BeatLoop(heartbeat_, running_, [this, &packet]() {
       sockaddr_in sender_addr{};
       socklen_t addr_len = sizeof(sender_addr);
 
@@ -528,7 +522,7 @@ class MulticastDiscovery {
 
       // Sleep briefly to avoid busy-wait
       ThreadSleepUs(static_cast<uint64_t>(kSleepIntervalMs) * 1000ULL);
-    }
+    });
   }
 
   void ProcessAnnounce(const uint8_t* packet, const sockaddr_in& sender) noexcept {

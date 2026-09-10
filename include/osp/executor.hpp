@@ -438,17 +438,14 @@ class StaticExecutor {
    * when the bus is empty to avoid busy-spinning.
    */
   void DispatchLoop() noexcept {
-    while (running_.load(std::memory_order_relaxed)) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
-      }
+    detail::BeatLoop(heartbeat_, running_, [this]() {
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
       } else {
         sleep_.OnBusy();
       }
-    }
+    });
   }
 
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
@@ -576,17 +573,14 @@ class PinnedExecutor {
    * @brief Main dispatch loop for the pinned background thread.
    */
   void DispatchLoop() noexcept {
-    while (running_.load(std::memory_order_relaxed)) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
-      }
+    detail::BeatLoop(heartbeat_, running_, [this]() {
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
       } else {
         sleep_.OnBusy();
       }
-    }
+    });
   }
 
   /**
@@ -820,17 +814,14 @@ class RealtimeExecutor {
    * @brief Main dispatch loop for the realtime background thread.
    */
   void DispatchLoop() noexcept {
-    while (running_.load(std::memory_order_relaxed)) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
-      }
+    detail::BeatLoop(heartbeat_, running_, [this]() {
       uint32_t processed = BusType::Instance().ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
       } else {
         sleep_.OnBusy();
       }
-    }
+    });
   }
 
   /**

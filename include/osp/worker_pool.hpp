@@ -465,17 +465,16 @@ class WorkerPool {
   void DispatcherLoop() noexcept {
     osp::AdaptiveBackoff backoff;
 
-    while (!shutdown_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
-      }
-      uint32_t count = BusType::Instance().ProcessBatch();
-      if (count > 0U) {
-        backoff.Reset();
-      } else {
-        backoff.Wait();
-      }
-    }
+    detail::BeatLoop(
+        heartbeat_, [this]() { return !shutdown_.load(std::memory_order_acquire); },
+        [&backoff, this]() {
+          uint32_t count = BusType::Instance().ProcessBatch();
+          if (count > 0U) {
+            backoff.Reset();
+          } else {
+            backoff.Wait();
+          }
+        });
 
     // Final drain
     for (uint32_t round = 0U; round < 10U; ++round) {

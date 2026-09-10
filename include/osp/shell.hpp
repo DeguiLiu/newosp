@@ -1247,11 +1247,7 @@ inline void DebugShell::Stop() {
 }
 
 inline void DebugShell::AcceptLoop() {
-  while (running_.load(std::memory_order_relaxed)) {
-    if (heartbeat_ != nullptr) {
-      heartbeat_->Beat();
-    }
-
+  detail::BeatLoop(heartbeat_, running_, [this]() -> bool {
     // Use poll() to avoid blocking forever in accept().
     // close(listen_fd_) in Stop() does NOT reliably unblock accept() on Linux.
     struct pollfd pfd;
@@ -1259,11 +1255,11 @@ inline void DebugShell::AcceptLoop() {
     pfd.events = POLLIN;
     int pr = socket_api::Poll(&pfd, 1, 200);
     if (pr == 0)
-      continue;  // Timeout -- re-check running_ flag.
+      return true;  // Timeout -- re-check running_ flag.
     if (pr < 0) {
       if (errno == EINTR)
-        continue;
-      break;  // Fatal poll error.
+        return true;
+      return false;  // Fatal poll error.
     }
 
     struct sockaddr_in client_addr;
@@ -1272,12 +1268,12 @@ inline void DebugShell::AcceptLoop() {
     int client_fd = socket_api::Accept(listen_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len);
     if (client_fd < 0) {
       // accept() returns -1 when listen_fd_ is closed during Stop().
-      break;
+      return false;
     }
 
     if (!running_.load(std::memory_order_relaxed)) {
       socket_api::Close(client_fd);
-      break;
+      return false;
     }
 
     // Find a free session slot.
@@ -1310,7 +1306,8 @@ inline void DebugShell::AcceptLoop() {
       (void)socket_api::Send(client_fd, msg, std::strlen(msg), kSendNoSignal);
       socket_api::Close(client_fd);
     }
-  }
+    return true;
+  });
 }
 
 inline bool DebugShell::RunAuth(Session& s) {

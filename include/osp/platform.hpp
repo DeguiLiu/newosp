@@ -60,6 +60,7 @@
 #include <cstdlib>
 
 #include <atomic>
+#include <type_traits>
 
 #if defined(OSP_PLATFORM_RTTHREAD)
 #include <rtthread.h>
@@ -379,6 +380,46 @@ struct ThreadHeartbeat {
   /** @brief Read last heartbeat timestamp (relaxed: only carries timestamp, no data dependency). */
   [[nodiscard]] uint64_t LastBeatUs() const noexcept { return last_beat_us.load(std::memory_order_relaxed); }
 };
+
+namespace detail {
+
+/**
+ * @brief Liveness-guaranteed thread loop: Beat() is structurally impossible
+ * to forget, since the skeleton owns it and the body cannot exit it (void return).
+ *
+ * Poll a predicate and stop the thread from *outside* (the predicate), or stop
+ * from *inside* via a body returning bool (false ends the loop). To exit early
+ * with side effects (e.g. fatal I/O error), set the predicate false and use a
+ * member flag to distinguish the reason after the loop.
+ *
+ * @param hb     Heartbeat to tick each iteration; nullptr beats nothing (always safe).
+ * @param pred   Loop predicate returning bool, evaluated at the top of every iteration.
+ * @param body   Iteration body; void return = run until predicate is false;
+ *               bool return = false also ends the loop.
+ */
+template <typename Pred, typename Body>
+inline void BeatLoop(ThreadHeartbeat* hb, Pred&& pred, Body&& body) noexcept {
+  while (pred()) {
+    if (hb != nullptr) {
+      hb->Beat();
+    }
+    if constexpr (std::is_same_v<decltype(body()), bool>) {
+      if (!body()) {
+        break;
+      }
+    } else {
+      body();
+    }
+  }
+}
+
+/** Overload: loop flag passed as a plain std::atomic<bool>& instead of a predicate lambda. */
+template <typename Body>
+inline void BeatLoop(ThreadHeartbeat* hb, std::atomic<bool>& flag, Body&& body) noexcept {
+  BeatLoop(hb, [&flag]() { return flag.load(std::memory_order_acquire); }, std::forward<Body>(body));
+}
+
+}  // namespace detail
 
 // ============================================================================
 // Macro Helpers

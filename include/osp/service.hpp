@@ -311,10 +311,7 @@ class Service {
   }
 
   void AcceptLoop() noexcept {
-    while (running_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
-      }
+    detail::BeatLoop(heartbeat_, running_, [this]() -> bool {
       // Reap finished workers
       ReapFinishedWorkers();
 
@@ -323,19 +320,19 @@ class Service {
 
       int32_t fd = sockfd_.load(std::memory_order_acquire);
       if (fd < 0)
-        break;
+        return false;
 
       int32_t client_fd = socket_api::Accept(fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
       if (client_fd < 0) {
         if (!running_.load(std::memory_order_acquire))
-          break;
-        continue;
+          return false;
+        return true;
       }
 
       // Check max_concurrent limit
       if (active_workers_.load(std::memory_order_relaxed) >= config_.max_concurrent) {
         socket_api::Close(client_fd);
-        continue;
+        return true;
       }
 
       // Spawn worker thread to handle this connection. The finished flag is
@@ -344,7 +341,7 @@ class Service {
       std::shared_ptr<std::atomic<bool>> finished(new (std::nothrow) std::atomic<bool>(false));
       if (!finished) {
         socket_api::Close(client_fd);
-        continue;
+        return true;
       }
       WorkerEntry entry;
       entry.finished = finished;
@@ -360,7 +357,7 @@ class Service {
       }
       if (!reserved) {
         socket_api::Close(client_fd);
-        continue;
+        return true;
       }
       // back() is the slot reserved above: AcceptLoop is the only writer of
       // worker_entries_ while it runs (Stop joins accept_thread_ first), so it
@@ -377,7 +374,8 @@ class Service {
         }
         socket_api::Close(client_fd);
       }
-    }
+      return true;
+    });
   }
 
   void HandleConnection(int32_t client_fd) noexcept {

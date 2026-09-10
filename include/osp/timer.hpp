@@ -484,11 +484,7 @@ class TimerScheduler final {
    * and allows Add()/Remove() to proceed during callback execution.
    */
   void ScheduleLoop() {
-    while (running_.load(std::memory_order_acquire)) {
-      if (heartbeat_ != nullptr) {
-        heartbeat_->Beat();
-      }
-
+    detail::BeatLoop(heartbeat_, running_, [this]() {
       PendingTask pending[MaxTasks];
       uint32_t pending_count = 0U;
       uint64_t min_remaining = UINT64_MAX;
@@ -547,7 +543,7 @@ class TimerScheduler final {
       if (sleep_ns >= kMinSleepNs) {
         PreciseSleep(sleep_ns);
       }
-    }
+    });
   }
 
   /**
