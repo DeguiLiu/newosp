@@ -33,7 +33,7 @@ Modern C++17 header-only embedded infrastructure library for embedded Linux plat
 | `platform.hpp` | Platform/architecture detection, compiler hints, `OSP_ASSERT`, `SteadyNowUs` |
 | `opt.hpp` | Compile-time behavior switches (lwIP-opt-style, OSP_* defaults) |
 | `vocabulary.hpp` | `expected`, `optional`, `FixedVector`, `FixedString`, `FixedFunction`, `function_ref`, `not_null`, `NewType`, `ScopeGuard` |
-| `config.hpp` | Multi-format config parser (INI/JSON/YAML), template-based backend dispatch |
+| `config.hpp` | Multi-format config parser (INI/JSON/YAML/TOML), template-based backend dispatch |
 | `log.hpp` | Logging macros, compile-time level filtering (stderr backend) |
 | `async_log.hpp` | Async logging backend (Per-Thread SPSC, severity routing, drop-stats reporting, auto-start) |
 | `timer.hpp` | Timer task scheduler based on `std::chrono::steady_clock` |
@@ -218,7 +218,8 @@ ctest --test-dir build --output-on-failure
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
     -DOSP_CONFIG_INI=ON \
     -DOSP_CONFIG_JSON=ON \
-    -DOSP_CONFIG_YAML=ON
+    -DOSP_CONFIG_YAML=ON \
+    -DOSP_CONFIG_TOML=ON
 cmake --build build -j$(nproc)
 ```
 
@@ -231,6 +232,7 @@ cmake --build build -j$(nproc)
 | `OSP_CONFIG_INI` | ON | Enable INI config backend (inicpp) |
 | `OSP_CONFIG_JSON` | OFF | Enable JSON config backend (nlohmann/json) |
 | `OSP_CONFIG_YAML` | OFF | Enable YAML config backend (fkYAML) |
+| `OSP_CONFIG_TOML` | OFF | Enable TOML config backend (vendored toml++) |
 | `OSP_NO_EXCEPTIONS` | OFF | Disable exceptions (`-fno-exceptions`) |
 | `OSP_WITH_SOCKPP` | ON | Enable sockpp network library (socket/transport) |
 

@@ -44,6 +44,8 @@ jobs:
         config:
           - name: "No exceptions/RTTI"
             cmake_flags: "-DOSP_NO_EXCEPTIONS=ON -DOSP_BUILD_EXAMPLES=OFF"
+          - name: "TOML config (vendored toml++)"
+            cmake_flags: "-DOSP_CONFIG_TOML=ON -DOSP_BUILD_EXAMPLES=OFF"
 
     steps:
     - uses: actions/checkout@v5

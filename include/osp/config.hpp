@@ -42,6 +42,10 @@
  * All formats are flattened to "section + key = value" model.
  * Compatible with -fno-exceptions -fno-rtti.
  *
+ * TOML uses the vendored toml++ amalgamated header (include/osp/toml.hpp,
+ * MIT).  Its non-throwing parse API is forced via TOML_EXCEPTIONS=0, so no
+ * backend depends on exception support at build time.
+ *
  * Usage:
  * @code
  *   osp::MultiConfig cfg;
