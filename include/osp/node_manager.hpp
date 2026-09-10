@@ -626,7 +626,6 @@ class NodeManager : public EventLoop<NodeManager<MaxNodes>, MaxNodes + 1U, 2U> {
     }
     return nullptr;
   }
-
 };
 
 }  // namespace osp

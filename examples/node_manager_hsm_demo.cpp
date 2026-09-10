@@ -34,13 +34,13 @@ enum State : int32_t {
 
 struct NodeCtx {
   uint16_t node_id = 0U;
-  uint32_t missed_heartbeats = 0U;    // consecutive misses in the current run
-  uint32_t total_heartbeats = 0U;     // heartbeats received
+  uint32_t missed_heartbeats = 0U;  // consecutive misses in the current run
+  uint32_t total_heartbeats = 0U;   // heartbeats received
   bool connected = false;
 };
 
-static constexpr uint32_t kMissToSuspect = 2U;       // Connected -> Suspect threshold
-static constexpr uint32_t kMissToDisconnect = 5U;    // Suspect -> Disconnected threshold
+static constexpr uint32_t kMissToSuspect = 2U;     // Connected -> Suspect threshold
+static constexpr uint32_t kMissToDisconnect = 5U;  // Suspect -> Disconnected threshold
 
 // --- Row actions / guards (free functions; decisions live in the table) -----
 
@@ -107,7 +107,7 @@ inline constexpr osp::TransitionDef<NodeCtx> kTransitions[] = {
 inline constexpr uint32_t kTransCount = sizeof(kTransitions) / sizeof(kTransitions[0]);
 
 static constexpr uint32_t kNumNodes = 4U;
-static constexpr uint32_t kMaxTicks = 9U;   // length of the longest script
+static constexpr uint32_t kMaxTicks = 9U;  // length of the longest script
 static constexpr uint32_t kTimerId = 1U;
 
 // Per-node heartbeat script, one signal per tick (0 = node exhausted).

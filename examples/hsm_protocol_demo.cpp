@@ -73,17 +73,29 @@ enum ProtocolState : int32_t {
 
 namespace protocol_detail {
 
-inline void ActAck(ProtocolContext& ctx, const void* /*data*/) noexcept { ++ctx.ack_count; }
+inline void ActAck(ProtocolContext& ctx, const void* /*data*/) noexcept {
+  ++ctx.ack_count;
+}
 
-inline void ActDataSent(ProtocolContext& ctx, const void* /*data*/) noexcept { ++ctx.data_sent_count; }
+inline void ActDataSent(ProtocolContext& ctx, const void* /*data*/) noexcept {
+  ++ctx.data_sent_count;
+}
 
-inline void ActError(ProtocolContext& ctx, const void* /*data*/) noexcept { ++ctx.error_count; }
+inline void ActError(ProtocolContext& ctx, const void* /*data*/) noexcept {
+  ++ctx.error_count;
+}
 
-inline void OnEnterDisconnected(ProtocolContext& ctx) noexcept { ctx.connected = false; }
+inline void OnEnterDisconnected(ProtocolContext& ctx) noexcept {
+  ctx.connected = false;
+}
 
-inline void OnEnterConnecting(ProtocolContext& ctx) noexcept { ++ctx.syn_count; }
+inline void OnEnterConnecting(ProtocolContext& ctx) noexcept {
+  ++ctx.syn_count;
+}
 
-inline void OnEnterConnected(ProtocolContext& ctx) noexcept { ctx.connected = true; }
+inline void OnEnterConnected(ProtocolContext& ctx) noexcept {
+  ctx.connected = true;
+}
 
 }  // namespace protocol_detail
 
@@ -127,8 +139,8 @@ inline constexpr uint32_t kTransCount = sizeof(kTrans) / sizeof(kTrans[0]);
 
 // Scripted signal sequence: 14 signals stepped one per timer tick.
 static constexpr uint32_t kScript[] = {
-    kConnect, kSynAck, kDataReady, kDataSent, kDataReady, kDataSent, kDataReady, kDataSent,
-    kDataReady, kError, kDataReady, kDataSent, kDisconnect, kFinAck,
+    kConnect,  kSynAck,    kDataReady, kDataSent,  kDataReady, kDataSent,   kDataReady,
+    kDataSent, kDataReady, kError,     kDataReady, kDataSent,  kDisconnect, kFinAck,
 };
 static constexpr uint32_t kScriptLen = sizeof(kScript) / sizeof(kScript[0]);
 
@@ -139,8 +151,7 @@ static constexpr uint32_t kScriptLen = sizeof(kScript) / sizeof(kScript[0]);
 class ProtocolLoop final : public osp::EventLoop<ProtocolLoop> {
  public:
   ProtocolLoop()
-      : hsm_(ctx_, protocol_detail::kStates, kStateCount, protocol_detail::kTrans,
-             protocol_detail::kTransCount) {
+      : hsm_(ctx_, protocol_detail::kStates, kStateCount, protocol_detail::kTrans, protocol_detail::kTransCount) {
     hsm_.SetInitialState(kDisconnected);
   }
 
@@ -161,8 +172,7 @@ class ProtocolLoop final : public osp::EventLoop<ProtocolLoop> {
     EventLoop::Run();
 
     const bool pass = (ctx_.syn_count == 1U) && (ctx_.ack_count == 1U) && (ctx_.data_sent_count == 4U) &&
-                      (ctx_.error_count == 1U) && (!ctx_.connected) &&
-                      (hsm_.CurrentState() == kDisconnected);
+                      (ctx_.error_count == 1U) && (!ctx_.connected) && (hsm_.CurrentState() == kDisconnected);
 
     std::printf("\n=== final context ===\n");
     std::printf("syn_count:       %u\n", ctx_.syn_count);

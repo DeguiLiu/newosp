@@ -95,7 +95,7 @@ inline constexpr uint8_t operator|(IoEvent a, IoEvent b) {
 
 struct PollResult {
   int32_t fd;
-  uint8_t events;    // bitmask of IoEvent
+  uint8_t events;       // bitmask of IoEvent
   uintptr_t user_data;  // caller-provided tag added with Add(), returned on readiness
 };
 
@@ -545,8 +545,12 @@ inline IoPoller::~IoPoller() {
 }
 
 inline IoPoller::IoPoller(IoPoller&& other) noexcept
-    : poller_fd_(other.poller_fd_), results_{}, result_count_(0), fd_count_(other.fd_count_),
-      tags_(other.tags_), tag_count_(other.tag_count_) {
+    : poller_fd_(other.poller_fd_),
+      results_{},
+      result_count_(0),
+      fd_count_(other.fd_count_),
+      tags_(other.tags_),
+      tag_count_(other.tag_count_) {
   for (uint32_t i = 0; i < fd_count_; ++i) {
     fds_[i] = other.fds_[i];
   }

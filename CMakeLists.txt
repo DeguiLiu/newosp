@@ -133,7 +133,8 @@ endif()
 if(TARGET sockpp-static)
     install(TARGETS sockpp-static EXPORT ospTargets)
 endif()
-install(DIRECTORY include/osp DESTINATION include)
+install(DIRECTORY include/osp DESTINATION include
+    PATTERN "CPPLINT.cfg" EXCLUDE)
 install(EXPORT ospTargets
     FILE ospConfig.cmake
     NAMESPACE osp::

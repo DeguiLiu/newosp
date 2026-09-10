@@ -40,14 +40,7 @@ struct DeviceContext {
 // State indices (fixed by table order) and events
 // ============================================================================
 
-enum DeviceState : int32_t {
-  kIdle = 0,
-  kInitializing,
-  kRunning,
-  kError,
-  kShutdown,
-  kStateCount
-};
+enum DeviceState : int32_t { kIdle = 0, kInitializing, kRunning, kError, kShutdown, kStateCount };
 
 enum DeviceEvent : uint32_t {
   kEvtStart = 1U,
@@ -142,8 +135,7 @@ inline constexpr uint32_t kTransCount = sizeof(kTransitions) / sizeof(kTransitio
 
 class BtComboLoop : public osp::EventLoop<BtComboLoop> {
  public:
-  BtComboLoop()
-      : hsm_(ctx_, dev_detail::kStates, kStateCount, dev_detail::kTransitions, dev_detail::kTransCount) {
+  BtComboLoop() : hsm_(ctx_, dev_detail::kStates, kStateCount, dev_detail::kTransitions, dev_detail::kTransCount) {
     hsm_.SetInitialState(kIdle);
     hsm_.Start();
     static_cast<void>(Schedule(1U));
@@ -163,9 +155,8 @@ class BtComboLoop : public osp::EventLoop<BtComboLoop> {
 
  private:
   static constexpr uint32_t kScript[] = {
-      kEvtStart,    kEvtInitDone, kEvtTick, kEvtTick, kEvtTick,
-      kEvtTick,     kEvtTick,     kEvtError, kEvtReset, kEvtStart,
-      kEvtInitDone, kEvtTick,     kEvtTick,  kEvtTick, kEvtStop,
+      kEvtStart, kEvtInitDone, kEvtTick,     kEvtTick, kEvtTick, kEvtTick, kEvtTick, kEvtError,
+      kEvtReset, kEvtStart,    kEvtInitDone, kEvtTick, kEvtTick, kEvtTick, kEvtStop,
   };
   static constexpr uint32_t kScriptLen = sizeof(kScript) / sizeof(kScript[0]);
 
@@ -198,8 +189,8 @@ int main() {
   loop.Run();
 
   // Self-check against the scripted scenario.
-  const bool pass = (loop.ctx()->initialized) && (loop.ctx()->error_count == 1U) &&
-                    (loop.ctx()->cycle_count == 8U) && (loop.hsm().CurrentState() == kShutdown);
+  const bool pass = (loop.ctx()->initialized) && (loop.ctx()->error_count == 1U) && (loop.ctx()->cycle_count == 8U) &&
+                    (loop.hsm().CurrentState() == kShutdown);
 
   std::printf("\n=== Final Statistics ===\n");
   std::printf("initialized:  %s\n", loop.ctx()->initialized ? "true" : "false");

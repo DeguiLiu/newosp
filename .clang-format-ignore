@@ -1,0 +1,3 @@
+# Vendored third-party header (toml++ v3.4.0, MIT). Excluded so it stays
+# diffable against upstream; upstream marks it "PLEASE DON'T EDIT IT DIRECTLY".
+include/osp/toml.hpp

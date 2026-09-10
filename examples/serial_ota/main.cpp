@@ -156,9 +156,8 @@ class OtaLoop : public osp::EventLoop<OtaLoop> {
     uint8_t buf[kDrainBufSize];
     // Remote the returned byte count: every PutData byte is accounted by the
     // device parser's own statistics.
-    (void)ota::DrainRing(g_host_to_dev_fifo, buf, sizeof(buf), [](const uint8_t* p, size_t n) {
-      g_device_parser.PutData(p, static_cast<uint32_t>(n));
-    });
+    (void)ota::DrainRing(g_host_to_dev_fifo, buf, sizeof(buf),
+                         [](const uint8_t* p, size_t n) { g_device_parser.PutData(p, static_cast<uint32_t>(n)); });
   }
 
   void OnTimer(uint32_t timer_id) noexcept {
@@ -183,8 +182,8 @@ class OtaLoop : public osp::EventLoop<OtaLoop> {
     if (!g_ota_running.load(std::memory_order_relaxed) || start_time_ == nullptr) {
       return;
     }
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-                                                                              *start_time_);
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - *start_time_);
     if (static_cast<uint32_t>(elapsed.count()) > kMaxOtaTimeMs) {
       OSP_LOG_ERROR("OTA_MAIN", "OTA timeout after %u ms", static_cast<uint32_t>(elapsed.count()));
       g_ota_running.store(false, std::memory_order_relaxed);
@@ -225,12 +224,11 @@ static void HostSendToDevice(const uint8_t* data, uint32_t len, void* ctx) {
       corrupt_buf[pos] ^= 0x01U;
       ++g_corrupt_count;
       (void)ota::IsrPushChunked(g_host_to_dev_fifo, corrupt_buf, static_cast<size_t>(copy_len), kIsrChunk,
-                           [loop]() { loop->Wake(); });
+                                [loop]() { loop->Wake(); });
       return;
     }
   }
-  (void)ota::IsrPushChunked(g_host_to_dev_fifo, data, static_cast<size_t>(len), kIsrChunk,
-                       [loop]() { loop->Wake(); });
+  (void)ota::IsrPushChunked(g_host_to_dev_fifo, data, static_cast<size_t>(len), kIsrChunk, [loop]() { loop->Wake(); });
 }
 
 /// Device TX -> push to the dev->host ring (whole frame, then wake the loop so
@@ -280,8 +278,7 @@ static void HostFrameCallback(const ota::Frame& frame, void* /*ctx*/) {
 static void OtaHostThread() noexcept {
   uint8_t buf[kDrainBufSize];
 
-  while (g_ota_running.load(std::memory_order_relaxed) &&
-         g_tick_count.load(std::memory_order_relaxed) < kMaxTicks) {
+  while (g_ota_running.load(std::memory_order_relaxed) && g_tick_count.load(std::memory_order_relaxed) < kMaxTicks) {
     const osp::NodeStatus status = g_host->Tick();
 
     // Wait until the frame we just queued is fully consumed by the device
@@ -291,9 +288,8 @@ static void OtaHostThread() noexcept {
     }
 
     // Drain any device responses back into the host parser.
-    (void)ota::DrainRing(g_dev_to_host_fifo, buf, sizeof(buf), [](const uint8_t* p, size_t n) {
-      g_host_parser.PutData(p, static_cast<uint32_t>(n));
-    });
+    (void)ota::DrainRing(g_dev_to_host_fifo, buf, sizeof(buf),
+                         [](const uint8_t* p, size_t n) { g_host_parser.PutData(p, static_cast<uint32_t>(n)); });
 
     g_tick_count.fetch_add(1, std::memory_order_relaxed);
 
@@ -362,10 +358,9 @@ static int cmd_ota_status(int /*argc*/, char* /*argv*/[]) {
     const auto status = static_cast<osp::NodeStatus>(g_bt_status.load(std::memory_order_relaxed));
     const uint32_t bytes_sent = g_bt_bytes_sent.load(std::memory_order_relaxed);
     osp::DebugShell::Printf("\r\nHost BT:    %s\r\n", osp::NodeStatusToString(status));
-    osp::DebugShell::Printf("  progress: %.1f%%\r\n", (kFirmwareSize > 0U)
-                                                           ? static_cast<double>(bytes_sent) * 100.0 /
-                                                                 static_cast<double>(kFirmwareSize)
-                                                           : 0.0);
+    osp::DebugShell::Printf("  progress: %.1f%%\r\n", (kFirmwareSize > 0U) ? static_cast<double>(bytes_sent) * 100.0 /
+                                                                                 static_cast<double>(kFirmwareSize)
+                                                                           : 0.0);
     osp::DebugShell::Printf("  sent:     %u bytes\r\n", bytes_sent);
     osp::DebugShell::Printf("  ticks:    %u\r\n", g_tick_count.load(std::memory_order_relaxed));
   }
