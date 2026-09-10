@@ -133,12 +133,12 @@ struct DataBlock {
   std::atomic<uint32_t> refcount;  ///< Consumer reference count (atomic)
   std::atomic<uint8_t> state;      ///< BlockState enum
   uint8_t pad[3];
-  uint32_t block_id;       ///< Pool index
-  uint32_t payload_size;   ///< Actual data size in payload
-  uint32_t fault_id;       ///< Associated fault code (0 = none)
-  uint64_t alloc_time_us;  ///< Allocation timestamp (steady clock)
-  uint64_t deadline_us;    ///< Timeout deadline (0 = no timeout)
-  uint32_t next_free;      ///< Embedded free list pointer
+  uint32_t block_id;                ///< Pool index
+  uint32_t payload_size;            ///< Actual data size in payload
+  uint32_t fault_id;                ///< Associated fault code (0 = none)
+  uint64_t alloc_time_us;           ///< Allocation timestamp (steady clock)
+  uint64_t deadline_us;             ///< Timeout deadline (0 = no timeout)
+  std::atomic<uint32_t> next_free;  ///< Free list link (relaxed; ordering comes from the head CAS)
   uint32_t reserved;
 
   void Reset() noexcept {
@@ -160,6 +160,10 @@ struct DataBlock {
 };
 
 static_assert(std::is_trivially_destructible<DataBlock>::value, "DataBlock must be trivially destructible");
+// DataBlock sits in shared memory and is touched cross-process; its atomics
+// must be lock-free so no per-process lock state can leak into the mapping.
+static_assert(std::atomic<uint32_t>::is_always_lock_free, "DataBlock requires lock-free 32-bit atomics");
+static_assert(std::atomic<uint8_t>::is_always_lock_free, "DataBlock requires lock-free 8-bit atomics");
 
 // ============================================================================
 // detail
@@ -228,7 +232,7 @@ struct InProcStore {
       DataBlock* blk = GetBlock(i);
       blk->Reset();
       blk->block_id = i;
-      blk->next_free = (i + 1U < MaxBlocks) ? (i + 1U) : detail::kJobInvalidIndex;
+      blk->next_free.store((i + 1U < MaxBlocks) ? (i + 1U) : detail::kJobInvalidIndex, std::memory_order_relaxed);
     }
     free_head_.store(detail::JobPackHead(0U, 0U), std::memory_order_relaxed);
     free_count_.store(MaxBlocks, std::memory_order_relaxed);
@@ -377,7 +381,7 @@ struct ShmStore {
       DataBlock* blk = GetBlock(i);
       blk->Reset();
       blk->block_id = i;
-      blk->next_free = (i + 1U < MaxBlocks) ? (i + 1U) : detail::kJobInvalidIndex;
+      blk->next_free.store((i + 1U < MaxBlocks) ? (i + 1U) : detail::kJobInvalidIndex, std::memory_order_relaxed);
     }
     header_->free_head.store(detail::JobPackHead(0U, 0U), std::memory_order_release);
     header_->free_count.store(MaxBlocks, std::memory_order_release);
@@ -778,7 +782,7 @@ class DataDispatcher {
       if (gen == 0U) {
         gen = 1U;  // skip the 0 sentinel on 32-bit tag wraparound
       }
-      uint32_t next = blk->next_free;
+      uint32_t next = blk->next_free.load(std::memory_order_relaxed);
       uint64_t new_head = detail::JobPackHead(next, detail::JobHeadTag(head) + 1U);
       if (store_.FreeHead().compare_exchange_weak(head, new_head, std::memory_order_acq_rel,
                                                   std::memory_order_acquire)) {
@@ -1207,7 +1211,7 @@ class DataDispatcher {
     uint64_t head = store_.FreeHead().load(std::memory_order_acquire);
     uint64_t new_head = 0U;
     do {
-      blk->next_free = detail::JobHeadIndex(head);
+      blk->next_free.store(detail::JobHeadIndex(head), std::memory_order_relaxed);
       new_head = detail::JobPackHead(block_id, detail::JobHeadTag(head) + 1U);
     } while (
         !store_.FreeHead().compare_exchange_weak(head, new_head, std::memory_order_acq_rel, std::memory_order_acquire));
