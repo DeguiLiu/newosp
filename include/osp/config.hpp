@@ -37,6 +37,7 @@
  *   - IniBackend  : inicpp library (embedded) (OSP_CONFIG_INI_ENABLED)
  *   - JsonBackend : nlohmann/json              (OSP_CONFIG_JSON_ENABLED)
  *   - YamlBackend : fkYAML                     (OSP_CONFIG_YAML_ENABLED)
+ *   - TomlBackend : toml++ (embedded)          (OSP_CONFIG_TOML_ENABLED)
  *
  * All formats are flattened to "section + key = value" model.
  * Compatible with -fno-exceptions -fno-rtti.
@@ -78,6 +79,14 @@
 #include <fkYAML/node.hpp>
 #endif
 
+#ifdef OSP_CONFIG_TOML_ENABLED
+// Non-throwing parse_result API; works under both exception modes.
+#ifndef TOML_EXCEPTIONS
+#define TOML_EXCEPTIONS 0
+#endif
+#include "osp/toml.hpp"
+#endif
+
 namespace osp {
 
 // ============================================================================
@@ -89,6 +98,7 @@ enum class ConfigFormat : uint8_t {
   kIni,
   kJson,
   kYaml,
+  kToml,
 };
 
 // ============================================================================
@@ -109,6 +119,14 @@ inline bool ExtCaseEqual(const char* a, const char* b) noexcept {
   return *a == *b;
 }
 
+/**
+ * CRTP skeleton for file-backed parsers: fixed-flow read into a stack buffer,
+ * then delegate the format-specific traversal to Derived::ParseBuffer.
+ * Defined after ConfigStore; INI does not use it (inicpp has its own file API).
+ */
+template <typename Derived>
+struct FileBackedParser;
+
 }  // namespace detail
 
 struct IniBackend {
@@ -128,6 +146,11 @@ struct YamlBackend {
   static bool MatchesExtension(const char* ext) noexcept {
     return detail::ExtCaseEqual(ext, "yaml") || detail::ExtCaseEqual(ext, "yml");
   }
+};
+
+struct TomlBackend {
+  static constexpr ConfigFormat kFormat = ConfigFormat::kToml;
+  static bool MatchesExtension(const char* ext) noexcept { return detail::ExtCaseEqual(ext, "toml"); }
 };
 
 // ============================================================================
@@ -357,6 +380,24 @@ class ConfigStore {
 
   template <typename>
   friend struct ConfigParser;
+  template <typename>
+  friend struct detail::FileBackedParser;
+};
+
+/**
+ * CRTP skeleton for file-backed parsers: fixed-flow read into a stack buffer,
+ * then delegate the format-specific traversal to Derived::ParseBuffer.
+ * INI does not use it (inicpp has its own file API).
+ */
+template <typename Derived>
+struct detail::FileBackedParser {
+  static expected<void, ConfigError> ParseFile(ConfigStore& store, const char* path) {
+    char buf[OSP_CONFIG_MAX_FILE_SIZE];
+    auto r = ConfigStore::ReadFileToBuffer(path, buf, sizeof(buf));
+    if (!r.has_value())
+      return expected<void, ConfigError>::error(r.get_error());
+    return Derived::ParseBuffer(store, buf, r.value());
+  }
 };
 
 // ============================================================================
@@ -462,15 +503,7 @@ struct ConfigParser<IniBackend> {
 
 #ifdef OSP_CONFIG_JSON_ENABLED
 template <>
-struct ConfigParser<JsonBackend> {
-  static expected<void, ConfigError> ParseFile(ConfigStore& store, const char* path) {
-    char buf[OSP_CONFIG_MAX_FILE_SIZE];
-    auto r = ConfigStore::ReadFileToBuffer(path, buf, sizeof(buf));
-    if (!r.has_value())
-      return expected<void, ConfigError>::error(r.get_error());
-    return ParseBuffer(store, buf, r.value());
-  }
-
+struct ConfigParser<JsonBackend> : detail::FileBackedParser<ConfigParser<JsonBackend>> {
   static expected<void, ConfigError> ParseBuffer(ConfigStore& store, const char* data, uint32_t) {
     auto j = nlohmann::json::parse(data, nullptr, false);
     if (j.is_discarded() || !j.is_object())
@@ -516,15 +549,7 @@ struct ConfigParser<JsonBackend> {
 
 #ifdef OSP_CONFIG_YAML_ENABLED
 template <>
-struct ConfigParser<YamlBackend> {
-  static expected<void, ConfigError> ParseFile(ConfigStore& store, const char* path) {
-    char buf[OSP_CONFIG_MAX_FILE_SIZE];
-    auto r = ConfigStore::ReadFileToBuffer(path, buf, sizeof(buf));
-    if (!r.has_value())
-      return expected<void, ConfigError>::error(r.get_error());
-    return ParseBuffer(store, buf, r.value());
-  }
-
+struct ConfigParser<YamlBackend> : detail::FileBackedParser<ConfigParser<YamlBackend>> {
   static expected<void, ConfigError> ParseBuffer(ConfigStore& store, const char* data, uint32_t size) {
     std::string yaml_str(data, size);
     auto root = fkyaml::node::deserialize(yaml_str);
@@ -564,6 +589,66 @@ struct ConfigParser<YamlBackend> {
       std::snprintf(b, sz, "%ld", static_cast<long>(n.get_value<int64_t>()));
     } else if (n.is_float_number()) {
       std::snprintf(b, sz, "%g", n.get_value<double>());
+    } else {
+      b[0] = '\0';
+    }
+  }
+};
+#endif
+
+// --- TOML Backend ---
+
+#ifdef OSP_CONFIG_TOML_ENABLED
+template <>
+struct ConfigParser<TomlBackend> : detail::FileBackedParser<ConfigParser<TomlBackend>> {
+  static expected<void, ConfigError> ParseBuffer(ConfigStore& store, const char* data, uint32_t size) {
+    auto result = toml::parse(std::string_view(data, size));
+    if (!result)
+      return expected<void, ConfigError>::error(ConfigError::kParseError);
+
+    for (auto&& kv : result.table()) {
+      const toml::node& val = kv.second;
+      if (val.is_table()) {
+        const auto& tbl = *val.as_table();
+        for (auto&& skill : tbl) {
+          char key[ConfigStore::kMaxKeyLen];
+          CopyKey(skill.first, key, sizeof(key));
+          char sv[ConfigStore::kMaxValueLen];
+          ToStr(skill.second, sv, sizeof(sv));
+          if (!store.AddEntry(std::string(kv.first).c_str(), key, sv))
+            return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+        }
+      } else {
+        char key[ConfigStore::kMaxKeyLen];
+        CopyKey(kv.first, key, sizeof(key));
+        char sv[ConfigStore::kMaxValueLen];
+        ToStr(val, sv, sizeof(sv));
+        if (!store.AddEntry("", key, sv))
+          return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+      }
+    }
+    return expected<void, ConfigError>::success();
+  }
+
+ private:
+  static void CopyKey(std::string_view src, char* dst, uint32_t dst_size) noexcept {
+    uint32_t i = 0;
+    while (i < (dst_size - 1U) && i < src.size()) {
+      dst[i] = src[i];
+      ++i;
+    }
+    dst[i] = '\0';
+  }
+
+  static void ToStr(const toml::node& n, char* b, uint32_t sz) noexcept {
+    if (n.is_string()) {
+      ConfigStore::SafeCopy(b, static_cast<const std::string&>(*n.as_string()).c_str(), sz);
+    } else if (n.is_boolean()) {
+      ConfigStore::SafeCopy(b, static_cast<bool>(*n.as_boolean()) ? "true" : "false", sz);
+    } else if (n.is_integer()) {
+      std::snprintf(b, sz, "%ld", static_cast<long>(static_cast<int64_t>(*n.as_integer())));
+    } else if (n.is_floating_point()) {
+      std::snprintf(b, sz, "%g", static_cast<double>(*n.as_floating_point()));
     } else {
       b[0] = '\0';
     }
@@ -640,23 +725,9 @@ class Config final : public ConfigStore {
 // Convenience Type Aliases
 // ============================================================================
 
-using MultiConfig = Config<
-#ifdef OSP_CONFIG_INI_ENABLED
-    IniBackend
-#endif
-#if defined(OSP_CONFIG_INI_ENABLED) && (defined(OSP_CONFIG_JSON_ENABLED) || defined(OSP_CONFIG_YAML_ENABLED))
-    ,
-#endif
-#ifdef OSP_CONFIG_JSON_ENABLED
-    JsonBackend
-#endif
-#if defined(OSP_CONFIG_JSON_ENABLED) && defined(OSP_CONFIG_YAML_ENABLED)
-    ,
-#endif
-#ifdef OSP_CONFIG_YAML_ENABLED
-    YamlBackend
-#endif
-    >;
+// Tags always exist; formats disabled at build time fall through to the
+// generic ConfigParser, which returns kFormatNotSupported at load time.
+using MultiConfig = Config<IniBackend, JsonBackend, YamlBackend, TomlBackend>;
 
 #ifdef OSP_CONFIG_INI_ENABLED
 using IniConfig = Config<IniBackend>;

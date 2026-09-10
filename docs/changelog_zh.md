@@ -6,6 +6,24 @@
 
 ## 最新变更
 
+### 2026-09-10: v0.8.0 TOML 配置后端 + FileBackedParser CRTP 骨架
+
+**变更内容** (1 个新 backend + 1 处骨架重构):
+
+1. **新增 TOML backend（`TomlBackend`, CMake `OSP_CONFIG_TOML`, 默认 OFF）**
+   - vendor toml++ v3.4.0 合并单头文件到 `include/osp/toml.hpp`（MIT, SPDX 头保留, 仿 inicpp 内嵌先例, 无 FetchContent 依赖）。
+   - `TOML_EXCEPTIONS=0` 非抛出 `parse_result` API + `static_cast<T>(*as_xxx())` 取标量, 已实测兼容 `-fno-exceptions -fno-rtti`。
+   - 扁平化沿用两层模型: `[section]` key → section+key, 顶层裸 key → 空 section; 数组/内联表值存空串（同 YAML backend 惯例）。
+   - `ConfigFormat::kToml` 枚举 + `osp/toml_LICENSE` 许可证文件。
+
+2. **重构: `detail::FileBackedParser<Derived>` CRTP 骨架**
+   - JSON/YAML/TOML 三个文件后端逐字重复的 `ParseFile`（栈缓冲 → `ReadFileToBuffer` → 转发 `ParseBuffer`）上收到骨架, 编译期 `static_cast` 绑定、零虚表; INI 不用（inicpp 有自己的文件 API）。
+   - `MultiConfig` 改为无条件含 4 个 backend tag, 禁用格式由泛型 `ConfigParser` 兜底返回 `kFormatNotSupported`, 删除条件逗号宏拼贴。
+
+**验证**: `[config]` 48 用例全绿（TOML 10 用例先 RED 后 GREEN）; 全开构建 ctest 1356/1356, 默认构建 1332/1332; noex/no-rtti 语法检查通过。
+
+---
+
 ### 2026-09-09: v0.7.1 OnFd user_data 下沉 + fd 复用竞态修复
 
 **变更内容** (2 项 P1 修复):

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(newosp VERSION 0.7.1 LANGUAGES C CXX)
+project(newosp VERSION 0.8.0 LANGUAGES C CXX)
 
 include(FetchContent)
 
@@ -20,6 +20,7 @@ option(OSP_NO_EXCEPTIONS  "Build tests with -fno-exceptions -fno-rtti" OFF)
 option(OSP_CONFIG_INI     "Enable INI config support (inicpp)"         ON)
 option(OSP_CONFIG_JSON    "Enable JSON config support (nlohmann/json)" OFF)
 option(OSP_CONFIG_YAML    "Enable YAML config support (fkYAML)"        OFF)
+option(OSP_CONFIG_TOML    "Enable TOML config support (toml++)"        OFF)
 option(OSP_WITH_SOCKPP    "Use sockpp for network transport"           OFF)
 option(OSP_WITH_NETWORK   "Enable BSD-socket network modules"          ON)
 
@@ -55,6 +56,11 @@ if(OSP_CONFIG_YAML)
 
     target_compile_definitions(osp INTERFACE OSP_CONFIG_YAML_ENABLED)
     target_link_libraries(osp INTERFACE fkYAML::fkYAML)
+endif()
+
+# --- TOML Config (using embedded toml.hpp, toml++ v3.4.0, MIT) ---
+if(OSP_CONFIG_TOML)
+    target_compile_definitions(osp INTERFACE OSP_CONFIG_TOML_ENABLED)
 endif()
 
 # --- Network stack control ---

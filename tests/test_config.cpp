@@ -371,6 +371,118 @@ TEST_CASE("YAML auto-detect extension yml", "[config][yaml]") {
 #endif  // OSP_CONFIG_YAML_ENABLED
 
 // ============================================================================
+// TOML (toml++ backend) Tests
+// ============================================================================
+
+TEST_CASE("TOML enum and extension match", "[config][toml]") {
+  REQUIRE(osp::ConfigFormat::kToml != osp::ConfigFormat::kAuto);
+}
+
+#ifdef OSP_CONFIG_TOML_ENABLED
+
+using TomlCfg = osp::Config<osp::TomlBackend>;
+
+TEST_CASE("TOML LoadBuffer basic", "[config][toml]") {
+  const char* toml_data =
+      "[network]\n"
+      "port = 5090\n"
+      "host = \"0.0.0.0\"\n"
+      "[log]\n"
+      "level = \"INFO\"\n";
+
+  TomlCfg cfg;
+  auto result = cfg.LoadBuffer(toml_data, static_cast<uint32_t>(std::strlen(toml_data)), osp::ConfigFormat::kToml);
+  REQUIRE(result.has_value());
+
+  REQUIRE(cfg.GetInt("network", "port", 0) == 5090);
+  REQUIRE(std::strcmp(cfg.GetString("network", "host"), "0.0.0.0") == 0);
+  REQUIRE(std::strcmp(cfg.GetString("log", "level"), "INFO") == 0);
+}
+
+TEST_CASE("TOML flat keys (no section)", "[config][toml]") {
+  const char* toml_data = "name = \"test\"\ncount = 42\n";
+
+  TomlCfg cfg;
+  auto result = cfg.LoadBuffer(toml_data, static_cast<uint32_t>(std::strlen(toml_data)), osp::ConfigFormat::kToml);
+  REQUIRE(result.has_value());
+
+  REQUIRE(std::strcmp(cfg.GetString("", "name"), "test") == 0);
+  REQUIRE(cfg.GetInt("", "count", 0) == 42);
+}
+
+TEST_CASE("TOML boolean values", "[config][toml]") {
+  const char* toml_data = "[flags]\ndebug = true\nverbose = false\n";
+
+  TomlCfg cfg;
+  cfg.LoadBuffer(toml_data, static_cast<uint32_t>(std::strlen(toml_data)), osp::ConfigFormat::kToml);
+
+  REQUIRE(cfg.GetBool("flags", "debug") == true);
+  REQUIRE(cfg.GetBool("flags", "verbose") == false);
+}
+
+TEST_CASE("TOML numeric values", "[config][toml]") {
+  const char* toml_data = "[math]\npi = 3.14159\nnegative = -10\nport = 65535\n";
+
+  TomlCfg cfg;
+  cfg.LoadBuffer(toml_data, static_cast<uint32_t>(std::strlen(toml_data)), osp::ConfigFormat::kToml);
+
+  REQUIRE(cfg.GetDouble("math", "pi") > 3.14);
+  REQUIRE(cfg.GetDouble("math", "pi") < 3.15);
+  REQUIRE(cfg.GetInt("math", "negative", 0) == -10);
+  REQUIRE(cfg.GetPort("math", "port") == 65535);
+}
+
+TEST_CASE("TOML array value flattened to string", "[config][toml]") {
+  const char* toml_data = "[net]\nports = [ 8001, 8002 ]\n";
+
+  TomlCfg cfg;
+  auto result = cfg.LoadBuffer(toml_data, static_cast<uint32_t>(std::strlen(toml_data)), osp::ConfigFormat::kToml);
+  REQUIRE(result.has_value());
+  // Array values are not scalars; stored as empty (same as YAML backend), GetInt falls back.
+  REQUIRE(cfg.GetInt("net", "ports", -1) == -1);
+}
+
+TEST_CASE("TOML parse error", "[config][toml]") {
+  const char* bad_toml = "this is not toml ]\n";
+  TomlCfg cfg;
+  auto result = cfg.LoadBuffer(bad_toml, static_cast<uint32_t>(std::strlen(bad_toml)), osp::ConfigFormat::kToml);
+  REQUIRE(!result.has_value());
+  REQUIRE(result.get_error() == osp::ConfigError::kParseError);
+}
+
+TEST_CASE("TOML LoadFile from disk", "[config][toml]") {
+  const char* path = "/tmp/__osp_test_config__.toml";
+  FILE* f = std::fopen(path, "w");
+  REQUIRE(f != nullptr);
+  std::fprintf(f, "[server]\nport = 9090\nname = \"test\"\n");
+  std::fclose(f);
+
+  TomlCfg cfg;
+  auto result = cfg.LoadFile(path);
+  REQUIRE(result.has_value());
+  REQUIRE(cfg.GetInt("server", "port", 0) == 9090);
+  REQUIRE(std::strcmp(cfg.GetString("server", "name"), "test") == 0);
+
+  std::remove(path);
+}
+
+TEST_CASE("TOML auto-detect extension", "[config][toml]") {
+  TomlCfg cfg;
+  auto result = cfg.LoadFile("/tmp/__nonexistent__.toml");
+  REQUIRE(!result.has_value());
+  REQUIRE(result.get_error() == osp::ConfigError::kFileNotFound);
+}
+
+TEST_CASE("TOML MatchesExtension", "[config][toml]") {
+  REQUIRE(osp::TomlBackend::MatchesExtension("toml") == true);
+  REQUIRE(osp::TomlBackend::MatchesExtension("TOML") == true);
+  REQUIRE(osp::TomlBackend::MatchesExtension("ini") == false);
+  REQUIRE(osp::TomlBackend::kFormat == osp::ConfigFormat::kToml);
+}
+
+#endif  // OSP_CONFIG_TOML_ENABLED
+
+// ============================================================================
 // MultiConfig Tests (all enabled backends)
 // ============================================================================
 
