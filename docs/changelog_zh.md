@@ -6,6 +6,21 @@
 
 ## 最新变更
 
+### 2026-09-10: v0.8.1 BeatLoop 循环骨架 (编译期 AOP)
+
+**变更内容** (1 处行为保持重构):
+
+1. **新增 `detail::BeatLoop(hb, flag-or-pred, body)` 函数模板骨架** (`platform.hpp`)
+   - 线程循环的每轮打点 (空检查 + `Beat()`) 由骨架统一拥有, 无法被遗漏或放错位置; 三类失效 (遗漏 / 分支内 / 阻塞后) 在迁移点上由构造消除。
+   - `std::atomic<bool>&` 重载直接传循环标志, 免写谓词 lambda; `if constexpr` 支持 void body (仅谓词终止) 与 bool body (体内可主动终止) 两种签名。
+   - 模板参数全内联, 生成代码与手写 while 等价, 兼容 `-fno-exceptions -fno-rtti`。
+
+2. **迁移 9 处线程循环 / 7 个头文件**: executor×3 `DispatchLoop`、worker_pool `DispatcherLoop`、discovery `AnnounceLoop`/`ReceiveLoop`、timer `ScheduleLoop`、service/shell `AcceptLoop`; `continue`/`break` 翻译为 `return true`/`false`。非循环打点 (`node_manager.HeartbeatOnce`、`node_manager_hsm.OnTimer`、`fault_collector.ConsumerLoop` 体内打点) 有意保留。
+
+**验证**: 6 个 `[platform][beatloop]` 单测 (正常/立即退出/空指针/体内终止/atomic 重载×2), 先 RED 后 GREEN; 全量 ctest 1338/1338 通过; noex 构建通过。
+
+---
+
 ### 2026-09-10: v0.8.0 TOML 配置后端 + FileBackedParser CRTP 骨架
 
 **变更内容** (1 个新 backend + 1 处骨架重构):
