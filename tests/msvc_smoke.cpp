@@ -9,6 +9,15 @@
  * an OBJECT library on every platform so GCC/Clang catch regressions too.
  */
 
+// Regression guard (Windows only — inert under GCC/Clang): <windows.h> defines
+// RT_VERSION as a resource-type constant. osp/platform.hpp must not mistake it
+// for the RT-Thread marker, or it includes a non-existent <rtthread.h> and every
+// Windows consumer that pulls windows.h first fails to build. Including it ahead
+// of the osp headers exercises the real detection order such consumers hit.
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "osp/async_log.hpp"
 #include "osp/breaker.hpp"
 #include "osp/config.hpp"
@@ -26,3 +35,9 @@
 
 // Every header must at least define a complete osp::Thread.
 static_assert(sizeof(osp::Thread) > 0, "osp::Thread must be complete");
+
+#ifdef _WIN32
+#ifdef OSP_PLATFORM_RTTHREAD
+#error "windows.h's RT_VERSION was misread as an RT-Thread marker"
+#endif
+#endif
