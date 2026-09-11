@@ -35,24 +35,45 @@ for hdr in "${CLOSURE[@]}"; do
     continue
   fi
 
-  # Walk each file tracking #if depth. A construct is "guarded" when at least
-  # one enclosing #if/#ifdef condition names a platform/compiler macro.
+  # Walk each file tracking #if depth and branch. A construct is "guarded" when
+  # some enclosing level guarantees it is unreachable on Windows:
+  #   - a positive POSIX/compiler guard on the *then* branch
+  #     (OSP_PLATFORM_LINUX/MACOS, __linux__, __APPLE__, __GNUC__, __clang__,
+  #      __has_include, or a negated OSP_PLATFORM_WINDOWS), or
+  #   - the *else* branch of a Windows guard (i.e. the !Windows path).
+  # Critically, the #else of an RT-Thread or compiler guard is NOT safe: it is
+  # exactly the branch MSVC takes (this is the original thread.hpp leak).
   violations="$(awk -v tok="$TOKENS" '
-    function guardlike(l) {
-      return l ~ /OSP_PLATFORM_|__linux__|__APPLE__|__GNUC__|__clang__|_WIN32|_MSC_VER|__SANITIZE_THREAD__|__has_include|__has_feature/
+    function classify(l) {
+      if (l ~ /ifndef[[:space:]]+OSP_PLATFORM_WINDOWS/) return "posix"
+      if (l ~ /![[:space:]]*(defined[[:space:]]*\([[:space:]]*)?OSP_PLATFORM_WINDOWS/) return "posix"
+      if (l ~ /OSP_PLATFORM_WINDOWS|_WIN32|_MSC_VER/) return "windows"
+      if (l ~ /OSP_PLATFORM_RTTHREAD/) return "rt"
+      if (l ~ /OSP_PLATFORM_LINUX|OSP_PLATFORM_MACOS|__linux__|__APPLE__|__GNUC__|__clang__|__has_include|__has_feature/) return "posix"
+      return "other"
     }
     /^[[:space:]]*#[[:space:]]*if/ {
       depth++
-      guard[depth] = guardlike($0)
+      kind[depth] = classify($0)
+      branch[depth] = "then"
+    }
+    /^[[:space:]]*#[[:space:]]*elif/ {
+      kind[depth] = classify($0)
+      branch[depth] = "then"
+    }
+    /^[[:space:]]*#[[:space:]]*else/ {
+      branch[depth] = "else"
     }
     /^[[:space:]]*#[[:space:]]*endif/ {
-      guard[depth] = 0
+      kind[depth] = ""
+      branch[depth] = ""
       if (depth > 0) { depth-- }
     }
     $0 ~ tok {
       ok = 0
       for (i = 1; i <= depth; i++) {
-        if (guard[i]) { ok = 1 }
+        if (kind[i] == "posix" && branch[i] == "then") { ok = 1 }
+        if (kind[i] == "windows" && branch[i] == "else") { ok = 1 }
       }
       if (!ok) { printf "%d:%s\n", NR, $0 }
     }
