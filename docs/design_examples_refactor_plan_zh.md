@@ -39,7 +39,7 @@
 
 ### 3.1 API
 
-新增 `include/osp/hsm_table.hpp`，与 `include/osp/hsm.hpp` 的 `StateMachine` 并存（按 coact 迁移策略），不破坏现有 `HsmDiscovery`/`HsmService`/`HsmNodeManager`。
+新增 `include/osp/hsm_table.hpp`，与 `include/osp/hsm.hpp` 的 `StateMachine` 并存（**增量迁移**：新旧并存，调用方逐个切换），不破坏现有 `HsmDiscovery`/`HsmService`/`HsmNodeManager`。
 
 ```cpp
 namespace osp {
@@ -200,5 +200,5 @@ P1 完成后向用户报告框架测试覆盖与 API，再继续 P2。P2–P4 �
 ## 7. 不在本计划范围
 
 - 装饰器模式在 transport 的进一步组合（设计文档 §3 已判定 transport 已组合）。
-- `coact` 静态 HSM 完整语义（guard、条件表、区域状态）。
+- 静态 HSM 的进阶语义（条件表、区域状态）。
 - 新平台 / 工具链支持。

@@ -114,7 +114,7 @@ inline uint32_t FreePoolHeadTag(uint32_t head) noexcept {
 // bytes. The ABA-tagged head-CAS orders them (free StoreIndex -> alloc
 // LoadIndex happen-before via the head RMW), so the pool is correct under the
 // C++ memory model; TSan may flag the `next` read/write as a benign race (same
-// pattern as coact's single-block reclaim). Not a correctness defect -- the
+// pattern as any tagged-head single-block reclaim). Not a correctness defect -- the
 // 16-bit tag window far exceeds practical block reuse.
 //
 // @tparam BlockSize  Size of each block in bytes (>= sizeof(uint32_t))
