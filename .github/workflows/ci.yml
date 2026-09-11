@@ -167,4 +167,7 @@ jobs:
       run: cmake --build build --config Release --target osp_msvc_tests -j
 
     - name: Run portable tests
-      run: build\tests\Release\osp_msvc_tests.exe
+      shell: pwsh
+      run: |
+        $exe = Get-ChildItem -Recurse -Filter osp_msvc_tests.exe build | Select-Object -First 1
+        & $exe.FullName
