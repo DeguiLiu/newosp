@@ -337,7 +337,7 @@ All dependencies are fetched automatically via CMake FetchContent:
 ## Documentation
 
 - Architecture design: [docs/design_zh.md](docs/design_zh.md)
-- Coding standards: [docs/coding_standards_zh.md](docs/coding_standards_zh.md)
+- Coding standards: [docs/cpp_coding_conventions_zh.md](docs/cpp_coding_conventions_zh.md)
 - Developer reference: [docs/reference_zh.md](docs/reference_zh.md)
 - Shell commands design: [docs/design_shell_commands_zh.md](docs/design_shell_commands_zh.md)
 - Serial integration design: [docs/cserialport_integration_analysis.md](docs/cserialport_integration_analysis.md)
