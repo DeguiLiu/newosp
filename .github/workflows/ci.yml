@@ -136,3 +136,35 @@ jobs:
         # Analyze test files, report only include/osp/ warnings via HeaderFilterRegex
         find tests -name '*.cpp' -print0 | xargs -0 clang-tidy --config-file=.ai/.clang-tidy -p build 2>&1 | \
           grep -E 'include/osp/' | sort -u || true
+
+  # Second platform: MSVC on Windows. Additive to the Linux jobs above; the
+  # POSIX-only core suite is not built here (see tests/CMakeLists.txt).
+  windows-msvc:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Set up CMake
+      uses: lukka/get-cmake@latest
+
+    - name: POSIX-leak lint (consumer header closure)
+      shell: bash
+      run: .ai/check-posix-leak.sh
+
+    - name: Configure CMake (MSVC, no network, TOML)
+      run: >
+        cmake -B build
+        -DOSP_BUILD_TESTS=ON
+        -DOSP_BUILD_EXAMPLES=OFF
+        -DOSP_WITH_NETWORK=OFF
+        -DOSP_CONFIG_TOML=ON
+
+    - name: Build header-closure smoke TU
+      run: cmake --build build --config Release --target osp_header_smoke -j
+
+    - name: Build portable tests
+      run: cmake --build build --config Release --target osp_msvc_tests -j
+
+    - name: Run portable tests
+      run: build\tests\Release\osp_msvc_tests.exe

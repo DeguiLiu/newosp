@@ -1,0 +1,2 @@
+# Keep shell scripts LF-only so they run under Git Bash on Windows CI.
+*.sh text eol=lf
