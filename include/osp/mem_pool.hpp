@@ -40,7 +40,6 @@
 #define OSP_MEM_POOL_HPP_
 
 #include "osp/platform.hpp"
-#include "osp/thread.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <cstddef>
