@@ -300,12 +300,12 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 
 ## 7. 风格与注释
 
-- **newosp 的风格以其 `.clang-format` 与 `docs/coding_standards_zh.md` 为准（Google 基线）：2 空格缩进、Attach 花括号、120 列、指针左对齐、命名空间不缩进、include 排序（主头文件 > 项目头文件 > C 封装 > C++ 标准库）**。
+- **风格以 `.ai/.clang-format`（Google 基线）为准**：2 空格缩进、Attach 花括号、120 列、指针左对齐、命名空间不缩进、include 排序（主头文件 > 项目头文件 > C 封装 > C++ 标准库）。
   - 注意：coact 原文档的 **Allman 花括号 / 4 空格不适用于 newosp**，不得据以评审。这是本文与 coact 版差异最大的一处。
 - 注释英文，`/* */` 块注释与 `//` 行注释皆可；文件头 `@file` / `@brief` 一句话定位 + MIT 许可证头（newosp 多数头为完整 MIT 文本，部分用 `SPDX-License-Identifier: MIT`）。
 - **决策注释义务**：反直觉的选择（不加锁、丢弃语义、单槽深度、锁外执行、`block_id` 引用计数）必须在代码处写明"为什么"，且注释要能被下一个人单独读懂。
   - 落点：`NodeManager` 的 "send outside it so a blocked TCP send does not hold mutex_"；`EventLoop` 的 "Hooks run outside the mutex"；`SpscRingbuffer` 的单生产者 / 单消费者契约（spsc_ringbuffer.hpp 头注释）。
-- 命名（`docs/coding_standards_zh.md`，与 coact 版基本一致，补充 newosp 细节）：
+- 命名（本仓库既有约定，与 coact 版基本一致，补充 newosp 细节）：
   - 类型 / 类 / 公有函数 `PascalCase`（`AsyncBus`、`Publish`）；
   - 变量 / 成员 `snake_case`，成员常带尾下划线（`sender_id_`）；
   - 常量 / 枚举值 `kPascalCase`（`kCacheLineSize`、`kSuccess`）；
@@ -412,5 +412,26 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 46. [ ] 反直觉决策处均有"为什么"注释？
 47. [ ] 错误路径有消费或计数（`expected` / 错误码被处理），无静默丢弃返回值？
 48. [ ] （示例程序）结尾自验证不变量并以退出码给出结论？
+
+## 9. 工程质量：CI 与测试
+
+本节原为 `docs/coding_standards_zh.md`，已合并到此，因为两份文档在风格与命名上互相引用又各自漂移——`docs/design_examples_refactor_zh.md` 曾记录它们"在缩进/花括号上不一致"，那处不一致已随本文改用 `.ai/.clang-format` 而消除。合成一份后不再存在两个真相源。
+
+### 9.1 CI 流水线
+
+| 阶段 | 内容 |
+|------|------|
+| build-and-test | Ubuntu，Debug + Release |
+| build-with-options | `-fno-exceptions -fno-rtti` 兼容性 |
+| sanitizers | ASan、TSan、UBSan |
+| code-quality | clang-format + cpplint |
+
+### 9.2 测试策略
+
+- 框架：Catch2 v3.5.2
+- 每模块一个独立测试文件：`test_<module>.cpp`
+- 覆盖目标：基础 API + 边界条件 + 多线程场景
+- Sanitizer 验证：全部测试须在 ASan / TSan / UBSan 下通过
+- 规模：758+ 个 test case（持续增长）
 
 （完）

@@ -69,7 +69,7 @@
 
 ## 5. 参考的规范
 
-### 5.1 代码风格：`docs/coding_standards_zh.md`
+### 5.1 代码风格与工程质量：`docs/cpp_coding_conventions_zh.md` 第 7、9 章
 
 newosp 仓库的统一编码规范，examples 重构严格遵循：
 
@@ -78,9 +78,9 @@ newosp 仓库的统一编码规范，examples 重构严格遵循：
 - 命名：类/函数 PascalCase、变量 snake_case、常量 kPascalCase、宏 OSP_UPPER_CASE
 - include 排序：主头文件 > 项目头文件 > C 封装 > C++ 标准库
 
-### 5.2 现代 C++ 与设计模式：`docs/cpp_coding_conventions_zh.md`
+### 5.2 类型纪律与设计模式：同上，第 2、4、5、6 章
 
-作为设计模式与类型纪律的参考（第 2、4、5、6 章）：
+作为类型纪律与设计模式准入条件的参考：
 
 - 固定宽度整型（`<cstdint>`），禁裸 `int/long/char`
 - Yoda 比较（常量在左）、单语句也带 `{}`、单函数 return 不超过 5
@@ -88,9 +88,9 @@ newosp 仓库的统一编码规范，examples 重构严格遵循：
 - 第 6 章设计模式准入条件（CRTP/策略/命令/组合的「何时用/红线」）
 - `static_assert` 声明 ABI/布局契约
 
-### 5.3 冲突处理
+### 5.3 规范已合并
 
-两份规范在缩进/花括号上不一致（`coding_standards_zh.md` 为 2 空格 + Attach，`cpp_coding_conventions_zh.md` 为 4 空格 + Allman）。**examples 与 newosp 现有代码统一采用 `coding_standards_zh.md`（2 空格 + Attach）**；`cpp_coding_conventions_zh.md` 只取其类型纪律与设计模式准入条件，不取其缩进/花括号风格。
+两份规范曾各自漂移：`coding_standards_zh.md` 为 2 空格 + Attach，而当时的 `cpp_coding_conventions_zh.md` 为 4 空格 + Allman。二者现已合并为 `docs/cpp_coding_conventions_zh.md` 一份，风格以该文第 7 章为准（`.ai/.clang-format`：2 空格 + Attach），examples 与仓库现有代码同此，不再存在两套风格。
 
 ## 6. 六个目录的改造点
 

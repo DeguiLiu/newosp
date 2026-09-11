@@ -380,7 +380,7 @@ int main() {
 ## 文档
 
 - [架构设计](docs/design_zh.md) - 系统架构、模块设计、资源预算
-- [编码规范](docs/coding_standards_zh.md) - 代码风格、命名约定、CI、测试策略
+- [编码规范](docs/cpp_coding_conventions_zh.md) - 类型纪律、设计模式准入、风格与命名、CI 与测试
 - [开发参考](docs/reference_zh.md) - 编译期配置汇总、线程安全性总结
 - [Shell 命令设计](docs/design_shell_commands_zh.md) - 内置诊断命令规划
 - [串口集成设计](docs/cserialport_integration_analysis.md) - CSerialPort 集成方案
