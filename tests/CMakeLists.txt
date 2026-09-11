@@ -11,6 +11,12 @@ include(Catch)
 
 find_package(Threads REQUIRED)
 
+# --- Header-closure smoke TU (must stay MSVC-clean) ------------------------
+# Compiles every header in the Windows consumer set; an OBJECT library so it has
+# no main() and its only job is to fail compilation on a non-portable include.
+add_library(osp_header_smoke OBJECT msvc_smoke.cpp)
+target_link_libraries(osp_header_smoke PRIVATE osp)
+
 # Core test sources (no network, no sockpp dependency)
 set(OSP_TEST_CORE_SOURCES
     test_platform.cpp
