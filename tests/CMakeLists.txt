@@ -182,3 +182,28 @@ if(OSP_WITH_LWIP)
         PROPERTIES SKIP_RETURN_CODE 4
     )
 endif()
+
+# --- Windows/MSVC portable test subset -------------------------------------
+# The full core suite depends on the POSIX layer (termios/fork/epoll/...), which
+# MSVC does not provide. On MSVC build and run only the tests whose module
+# headers are in the portable Windows consumer closure; osp_header_smoke proves
+# the rest of that closure compiles.
+if(MSVC)
+    add_executable(osp_msvc_tests
+        test_thread.cpp
+        test_hsm.cpp
+        test_hsm_table.cpp
+        test_vocabulary.cpp
+        test_mem_pool.cpp
+        test_spsc_ringbuffer.cpp
+        test_log.cpp
+        test_async_log.cpp
+        test_semaphore.cpp
+        test_timer.cpp
+        test_watchdog.cpp
+    )
+    target_link_libraries(osp_msvc_tests Catch2::Catch2WithMain osp Threads::Threads)
+    catch_discover_tests(osp_msvc_tests
+        PROPERTIES SKIP_RETURN_CODE 4
+    )
+endif()
