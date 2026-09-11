@@ -1,15 +1,15 @@
 # newosp C++ 编码规约（中文版）
 
-本文档是 **newosp 仓库** C++ 代码的完整编码规约，**改编自 coact 仓库的同名文档**（`coact/docs/cpp_coding_conventions_zh.md`）。视角是现代 C++17——不是从 C/MISRA 移植过来的 C-with-classes，而是编译期确定、低拷贝、低分支、静态多态优先的表达。目标读者：在本仓库编写或评审 C++ 代码的工程师与自动化审查代理。每条规约写成可判定形式——评审时对每条回答"是/否"即可。
+本文档是 **newosp 仓库** C++ 代码的完整编码规约。视角是现代 C++17——不是从 C/MISRA 移植过来的 C-with-classes，而是编译期确定、低拷贝、低分支、静态多态优先的表达。目标读者：在本仓库编写或评审 C++ 代码的工程师与自动化审查代理。每条规约写成可判定形式——评审时对每条回答"是/否"即可。
 
-**关键前提：coact 的规约不自动适用于 newosp。** coact 面向 RT-Thread 单核 MCU，强调无锁单核临界区、业务零堆、ISP 管线与 Active Object 运行时；newosp 是面向嵌入式 Linux（并兼容 RT-Thread / macOS / Windows）的头文件库，定位是节点 / 服务 / 传输 / 事件总线框架。凡 coact 特化且 newosp 没有对应机制的条目，本文不改写为规则，而是显式标注「newosp 无对应机制」或改写到 newosp 的真实等价物。评审时不得因为"coact 文档这么写"就要求 newosp 代码具备它不存在的机制。
+**关键前提：本文只描述 newosp 真实具备的机制。** newosp 是面向嵌入式 Linux（并兼容 RT-Thread / macOS / Windows）的头文件库，定位是节点 / 服务 / 传输 / 事件总线框架。本仓库没有对应机制的写法，本文标注「无对应机制」并给出真实等价物，而不作为规则提出；评审时不应要求代码具备本仓库不存在的机制。
 
 规约锚点分两层：
 
 - 框架层：`include/osp/` 头文件（`hsm.hpp`、`hsm_table.hpp`、`vocabulary.hpp`、`mem_pool.hpp`、`spsc_ringbuffer.hpp`、`bus.hpp`、`event_loop.hpp`、`breaker.hpp`、`watchdog.hpp`、`timer.hpp`、`semaphore.hpp`、`thread.hpp`、`platform.hpp`、`config.hpp`、`log.hpp`、`async_log.hpp`、`node.hpp`、`static_node.hpp`、`node_manager.hpp`、`service.hpp`、`service_hsm.hpp`、`data_dispatcher.hpp`、`data_fusion.hpp`、`transport.hpp`、`qos.hpp` 等）；
 - 示例层：`examples/`（`hsm_protocol_demo.cpp`、`node_manager_hsm_demo.cpp`、`hsm_bt_combo_demo.cpp` 等带自验证的示例）。
 
-`expected` / `FixedString` / `FixedVector` / `FixedFunction` / `NewType` / `ScopeGuard` 的统一实现入口是 `vocabulary.hpp`——**newosp 没有 coact 的 `expected.hpp` 兼容转发头**。落点标注到文件与类名/函数名，不标注行号（行号随重构漂移）；抽象规约配以最小通用片段自证。
+`expected` / `FixedString` / `FixedVector` / `FixedFunction` / `NewType` / `ScopeGuard` 的统一实现入口是 `vocabulary.hpp`（`expected` 为小写类型名，没有单独的转发头）。落点标注到文件与类名/函数名，不标注行号（行号随重构漂移）；抽象规约配以最小通用片段自证。
 
 适用范围：`include/osp/`、`examples/`、`tests/` 下全部 C++ 代码。C 接口（RT-Thread / POSIX）约束单独收口在 7.2 节，正文不展开。
 
@@ -29,7 +29,7 @@
   - 编译期平台宏：`OSP_PLATFORM_*`（platform.hpp），仅用于选择后端；
   - 后端策略模板：`ThreadT<Ops>` 注入线程后端（`PosixThreadOps` / `RtThreadOps` / `Win32ThreadOps`，thread.hpp）、`IoPoller` 注入 epoll / kqueue / poll 后端（io_poller.hpp）、`SleepStrategy` 注入空闲策略（executor.hpp）。
 - **平台 `#ifdef` 只允许出现在平台边界头**（`platform.hpp`、`thread.hpp`、`io_poller.hpp`、`executor.hpp`、`log.hpp`、`shm_transport.hpp`）；业务、协议、节点、服务代码不得出现平台分支。
-- newosp **没有** coact 的 PAL 抽象层（`pal.hpp` / `pal_posix.hpp` / `pal_rtthread.hpp`）与 `Runtime<Config, PalT, Profile>` 注入点，新代码不得引用。也没有 `RttSingleCoreProfile` / `HostSmpProfile` 这类并发 Profile——单核 / SMP 语义差异由实际同步原语（`Mutex` / `std::atomic` / 无锁环）承担，而不是模板 Profile。
+- 平台差异**不引入 PAL 抽象层，也不引入模板化的并发 Profile**：单核 / SMP 语义差异由实际同步原语（`Mutex` / `std::atomic` / 无锁环）承担，新代码不得引用 `pal*.hpp` 或 `Runtime<...>` 注入点这类不存在的机制。
 
 ### 1.3 现代 C++17 基调
 
@@ -52,7 +52,7 @@
 - **固定宽度整型**：优先 `<cstdint>` 体系（`uint8_t / uint16_t / uint32_t / int32_t` 等），禁裸 `int / long / char / unsigned`；宽度契约用 `static_assert` 钉在定义处，不靠人肉记忆。
 - **强类型代替弱转换**：领域枚举用 `enum class X : 底层类型`（禁 `#define` 常量、禁裸 `enum`）；语义 id 用 `NewType<T, Tag>`（vocabulary.hpp）而不是裸整数；可判空的语义类型用 `explicit operator bool()` 或 `not_null<T>`（vocabulary.hpp），不返回裸 int / 指针；错误用 `expected<V, E>` 或错误码枚举，不返回裸 int。
   - 落点：`enum class Level : uint8_t`（log.hpp）、`enum class BreakerLevel : uint8_t`（breaker.hpp）、`enum class MessagePriority : uint8_t`（bus.hpp）、`enum class TransitionKind : uint8_t`（hsm_table.hpp）、`enum class TransitionResult : uint8_t`（hsm.hpp）；`NewType` / `SessionId` / `TimerTaskId`（vocabulary.hpp）、`WatchdogSlotId`（watchdog.hpp）、`SubscriptionHandle`（bus.hpp）、`ConnectionId`（connection.hpp）；`explicit operator bool()`（vocabulary.hpp 的 expected / optional / FixedFunction）；`not_null<T>`、`function_ref<Sig>`（vocabulary.hpp）。
-  - 纠正：coact 文档里的 `Expected`（大写）与 `expected.hpp` 在 newosp 不存在；newosp 的类型名是小写 `expected`，定义在 `vocabulary.hpp`。
+  - 类型名是**小写** `expected`，定义在 `vocabulary.hpp`。
 - **隐式转换显式标注**：任何跨宽度 / 跨符号赋值必须写 `static_cast<目标类型>(...)`。
   - 落点：`static constexpr uint32_t kQueueDepth = static_cast<uint32_t>(OSP_BUS_QUEUE_DEPTH);`（bus.hpp）等框架层一致使用。
 - 常量左侧（Yoda 比较）作为**新增代码**的统一写法：`0 == x` / `nullptr == p`。存量代码两种写法并存，评审以改动 diff 为准。
@@ -76,18 +76,18 @@ MISRA C:2012 在本仓库不再逐条适用；它的精神已翻译成 C++17 表
   - 落点：`JobHandler` 函数指针表（`StageConfig`，data_dispatcher.hpp）；总线回调经 `FixedFunction` 小缓冲擦除（bus.hpp 的 `CallbackType`）。
 - **热路径零堆、定容优先**。newosp 面向嵌入式 Linux（不是 MCU），**允许**在冷路径 / 解析层使用 `std::string` / `std::vector`（如 config.hpp、inicpp.hpp、toml.hpp、process.hpp）；但数据 / 事件 / 日志热路径必须零堆，存储优先编译期容量类型或内联 / 调用方存储。
   - 落点：`AsyncBus` "zero heap allocation in hot path"（bus.hpp）；`FixedVector<T, Capacity>` / `FixedString<Capacity>` / `FixedFunction<Sig, BufferSize>`（vocabulary.hpp）；`SpscRingbuffer<T, BufferSize>` 内联 `std::array`（spsc_ringbuffer.hpp）；`async_log.hpp` 每线程 SPSC + 定长 `LogEntry`。
-  - 纠正 coact 的"业务代码零堆"：newosp 无此强制；强制的是**热路径**零堆，冷路径允许标准容器。
+  - 强制范围仅限**热路径**零堆；冷路径允许标准容器，本仓库不存在"全仓库零堆"的强制。
 - **侵入式空闲链代替堆容器**：`FixedPool` 在块首 4 字节内嵌 `next` 索引，配合 tagged 头无锁回收（mem_pool.hpp）。
   - 落点：`FixedPool<BlockSize, MaxBlocks>` 的内联 `alignas(std::max_align_t) uint8_t storage_[...]` + `std::atomic<uint32_t> free_head_`（mem_pool.hpp，注释明确 "Inline storage -- zero heap allocation"）。
 - **减少裸指针 → 引用 / 值语义句柄**：所有权清晰的传参用引用（`const T&`）；跨线程 / 跨边界的可空句柄用值语义 id，不用裸指针 + 注释描述谁拥有。
   - 落点：`Publisher<T, PayloadVariant>` 持总线引用 + sender_id（node.hpp）；`SubscriptionHandle`（bus.hpp）；`ConnectionId`（connection.hpp）；`NewType` id（vocabulary.hpp）。
-- **newosp 无 `EventPool`**（coact 那种由调用方提供存储块、池只做管理的机制）。newosp 的池自带内联存储（`FixedPool` / `ObjectPool`），或由调用方在 `Pipeline` / `DataDispatcher` 上层管理块；不得引用 `EventPool`。
+- **池自带内联存储**（`FixedPool` / `ObjectPool`），或由调用方在 `Pipeline` / `DataDispatcher` 上层管理块；本仓库**没有**"池只做管理、存储完全由调用方提供"的形态，不得引用 `EventPool` 这类不存在的类型。
 
 ### 2.4 placement new 与对象生命周期纪律
 
-- **placement new 用于固定 / 复用存储的就地构造；若类型非平凡析构，必须显式配对析构**——由容器在析构 / 赋值 / 回收路径调用 `~T()`。这是 coact"placement new 仅用于平凡可析构类型"在 newosp 的等价物：newosp 的支持面更宽（允许非平凡析构），代价是析构配对的纪律。
+- **placement new 用于固定 / 复用存储的就地构造；若类型非平凡析构，必须显式配对析构**——由容器在析构 / 赋值 / 回收路径调用 `~T()`。newosp 允许非平凡析构类型进复用存储（支持面比"仅限平凡可析构"更宽），代价就是这条析构配对的纪律。
   - 落点：`ObjectPool<T>::Create` 的 `::new (mem) T(...)` 与 `Destroy` / 析构中的 `obj->~T()`（mem_pool.hpp）；`expected<V, E>` 的 placement new 与 `reinterpret_cast<V*>(&storage_)->~V()`（vocabulary.hpp）；`FixedVector` 的 `::new (&storage_[...]) T(...)`（vocabulary.hpp）。
-- **原始存储的 newosp 既有形态是 `alignas(T) uint8_t[]` / `std::aligned_storage` + placement new**，不是 coact 的 `std::byte[]` + `std::launder`（`std::launder` 仅见于第三方 toml.hpp）。原始存储必须经 placement new 构造后访问，禁止裸类型双关；`std::byte` + `std::launder` 更严格，但 newosp 无先例，作为改进方向而非既有规约，不得声称已采用。
+- **原始存储的既有形态是 `alignas(T) uint8_t[]` / `std::aligned_storage` + placement new，不使用 `std::byte[]` + `std::launder`**（`std::launder` 仅见于第三方 toml.hpp）。原始存储必须经 placement new 构造后访问，禁止裸类型双关；`std::byte` + `std::launder` 更严格，但本仓库无先例，作为改进方向而非既有规约，不得声称已采用。
   - 落点：`FixedVector`（vocabulary.hpp）与 `FixedPool`（mem_pool.hpp）的 `alignas` 存储数组；`hsm_storage_`（app.hpp / lifecycle_node.hpp / node_manager_hsm.hpp）。
 - **跨边界结构体的布局契约在定义处 `static_assert`**：`is_trivially_copyable` / `is_standard_layout` / `is_trivially_destructible`。违约编译失败而非现场崩溃。
   - 落点：`LogEntry`（async_log.hpp）、`RecvFrameSlot`（transport.hpp）、`DataBlock` / `ConsumerSlot`（data_dispatcher.hpp）、`Service` 的 Request / Response（service.hpp）、共享内存 `Slot`（shm_transport.hpp）。
@@ -118,16 +118,16 @@ MISRA C:2012 在本仓库不再逐条适用；它的精神已翻译成 C++17 表
 - 非消费者线程（worker、I/O 线程）与消费者的**唯一耦合是消息 / 事件平面**；不得直接读对方内部字段。
 - **大块数据不随消息拷贝**：消息 / 事件携带 `block_id` / 描述符 / `Event{ id, data }`（hsm.hpp），真实字节留在拥有者或 `DataDispatcher` 块存储中。
   - 落点：`DataDispatcher::Release(block_id, generation)` 的块生命周期（data_dispatcher.hpp）；`Event` 定义（hsm.hpp）。
-- 纠正：coact 的 Active Object（AO）、`alloc_typed`、`EventPool`、`coordinator()`、DDR / 像素数据平面在 newosp 均无对应物；newosp 的等价物是事件总线 + 节点 / 服务 + `DataDispatcher` 块引用。
+- 本仓库的并发模型就是**事件总线 + 节点 / 服务 + `DataDispatcher` 块引用**；不存在 Active Object 运行时、集中式 coordinator 或"数据平面直接进事件"的形态。
 
 ### 3.2 同步与锁
 
-- newosp **没有** coact 的 `L1 Singleton → L2 Context → L3 Device` 命名锁层级。通用规则：多锁场景必须在头注释声明获取顺序，禁止反向获取；单锁 / 无锁结构优先。
+- **不设命名的锁层级**（L1 / L2 / L3 之类）。通用规则：多锁场景必须在头注释声明获取顺序，禁止反向获取；单锁 / 无锁结构优先。
   - 落点：`SpscRingbuffer`（单生产者 / 单消费者无锁，spsc_ringbuffer.hpp）、`AsyncBus`（无锁 MPSC，bus.hpp）、`EventQueue`（无锁 MPSC，hsm.hpp）。
 - **最弱足够原则**：若数据已被互斥机制（单消费者序列化、单写者、消息平面）覆盖，**不加锁**，且必须写注释论证为什么不需要锁。
 - **回调 / 系统调用不得在锁内执行**：采用 collect-release-execute——锁内收集 / 更新，锁外执行回调或阻塞操作。
   - 落点：`EventLoop` 的 "Hooks run outside the mutex (collect-release-execute)"（event_loop.hpp）；`Discovery` 的 collect-release-execute（discovery.hpp）；`NodeManager` 的 "send outside it so a blocked TCP send does not hold mutex_"（node_manager.hpp）；`Service::Stop` 锁内收集线程、锁外 join（service.hpp）。
-- 全局可变状态（若有）必须**单写者** + 注释声明它不是黑板；黑板（多生产者 + 轮询消费者）仅在明确需求下允许。该通用内核保留；coact 的"模拟硬件寄存器全局"在 newosp 无对应实例。
+- 全局可变状态（若有）必须**单写者** + 注释声明它不是黑板；黑板（多生产者 + 轮询消费者）仅在明确需求下允许。
 - 跨线程枚举 / 标志用 `std::atomic` 且必须断言 `is_always_lock_free`（libatomic 回退是隐藏的锁 / 堆依赖，构建期必须失败）。
   - 落点：`static_assert(std::atomic<bool>::is_always_lock_free, ...)`（event_loop.hpp）；`std::atomic<uint32_t>`（breaker.hpp）；`std::atomic<uint8_t> / <uint32_t>`（data_dispatcher.hpp）；共享内存原子（shm_transport.hpp）。
 
@@ -169,10 +169,8 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 
 - newosp 的 `Event` 是值类型（`{ uint32_t id; const void* data; }`，hsm.hpp），**没有引用计数**；**引用计数的块生命周期在 `DataDispatcher`**：`Alloc()` 取块、`Release(block_id, generation)` 归还，归零回收。业务只提交不手动回收，并以可验证方式断言零泄漏。
   - 落点：`DataDispatcher::Release` 与 `BlockState` 生命周期（data_dispatcher.hpp）。
-  - 纠正：coact 的 `Event::ref_ctr` / `EventPool::used()` 在 newosp 不存在。
 - 组件静态属性（容量、策略、handler）一律走模板参数 / 编译期常量，不走构造参数或运行期 setter。
   - 落点：`StaticNode<PayloadVariant, Handler>` 编译期绑定 handler（static_node.hpp）；容量模板参数（`StateMachine` / `ServiceRegistry` / `Pipeline`）。
-  - 纠正：coact 的 `Ao<Context, HsmT, Traits>` / `AoTrait` 在 newosp 无对应物。
 - 运行期可观测性来自专用组件，不往业务代码里加散装打印探针：
   - `SystemMonitor<MaxDiskPaths>` 周期快照（system_monitor.hpp）；
   - `FaultCollector<...>` 故障环形缓冲与统计（fault_collector.hpp）；
@@ -245,8 +243,7 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 - **不为用而用**：任何特性必须能回答"不用它会怎样"。
 - **三个相似才抽基类**：出现第三处结构相似时才提取（CRTP / Policy / 宏），两处时容忍重复。
 - **禁过度设计**：helper / util / 抽象层最小化；宁可局部直白，不要全局优雅。
-- 若新增压缩 HSM 表的宏，必须保持"表即数据"（只拼表项，不嵌控制流），用后 `#undef`。
-- 纠正：coact 的 `COACT_HSM_STATES` / `COACT_HSM_TRANS` 宏压缩表在 newosp 不存在；newosp 的 `TableHsm` 使用调用方提供的 `StateDef[]` / `TransitionDef[]` 数组，无宏表压缩先例。
+- `TableHsm` 使用调用方提供的 `StateDef[]` / `TransitionDef[]` 数组，本仓库**无宏表压缩先例**；若新增压缩宏，须保持"表即数据"（只拼表项，不嵌控制流）并在用后 `#undef`。
 
 ## 6. 设计模式使用边界
 
@@ -263,7 +260,6 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 - **准入**：同一算法骨架 × 可替换的无状态算法，策略是**只有静态方法 / 无状态方法**的 struct——定制点风格。
 - **红线**：策略禁止携带状态（有状态策略改用 CRTP 或独立类）；策略方法必须 `noexcept`（可 `constexpr`）。
 - **落点**：`ThreadT<Ops>` 的 `PosixThreadOps` / `RtThreadOps` / `Win32ThreadOps`（thread.hpp）；`SleepStrategy` 的 `YieldSleepStrategy` / `PreciseSleepStrategy` + `StaticExecutor<PayloadVariant, SleepStrategy>`（executor.hpp）；`IoPoller` 后端策略（io_poller.hpp）。
-- 纠正：coact 的 `RttSingleCoreProfile` / `HostSmpProfile` / `policy.hpp` 在 newosp 不存在。
 
 ### 6.3 命令（延迟执行 / 顺序契约）
 
@@ -276,7 +272,7 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 - **准入**：需要向固定成员集合传播同一操作（广播 / 订阅 / init / deinit）。
 - **红线**：**编译期固定成员**；成员集合运行期不可变；禁止未定界递归，受控定深递归须声明上界（见 2.2）。
 - **落点**：`AsyncBus` 一对多订阅广播，`SubscriptionHandle` 标识订阅（bus.hpp）；`ServiceRegistry<MaxServices>`（service.hpp）；`FusedSubscription<PayloadVariant, MsgTypes...>` 编译期订阅集合 + `TimeSynchronizer`（data_fusion.hpp）。
-- 纠正：coact 的 `AoRegistry` 在 newosp 不存在；`Pipeline::ExecuteStage` 是受控定深递归的例外，见 2.2。
+- `Pipeline::ExecuteStage` 是受控定深递归的例外，见 2.2。
 
 ### 6.5 模式选择决策表
 
@@ -297,11 +293,11 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 ## 7. 风格与注释
 
 - **风格以 `.ai/.clang-format`（Google 基线）为准**：2 空格缩进、Attach 花括号、120 列、指针左对齐、命名空间不缩进、include 排序（主头文件 > 项目头文件 > C 封装 > C++ 标准库）。
-  - 注意：coact 原文档的 **Allman 花括号 / 4 空格不适用于 newosp**，不得据以评审。这是本文与 coact 版差异最大的一处。
+  - 注意：**Attach 花括号、2 空格缩进**，不是 Allman / 4 空格——评审以此为准。
 - 注释英文，`/* */` 块注释与 `//` 行注释皆可；文件头 `@file` / `@brief` 一句话定位 + MIT 许可证头（newosp 多数头为完整 MIT 文本，部分用 `SPDX-License-Identifier: MIT`）。
 - **决策注释义务**：反直觉的选择（不加锁、丢弃语义、单槽深度、锁外执行、`block_id` 引用计数）必须在代码处写明"为什么"，且注释要能被下一个人单独读懂。
   - 落点：`NodeManager` 的 "send outside it so a blocked TCP send does not hold mutex_"；`EventLoop` 的 "Hooks run outside the mutex"；`SpscRingbuffer` 的单生产者 / 单消费者契约（spsc_ringbuffer.hpp 头注释）。
-- 命名（本仓库既有约定，与 coact 版基本一致，补充 newosp 细节）：
+- 命名（本仓库既有约定）：
   - 类型 / 类 / 公有函数 `PascalCase`（`AsyncBus`、`Publish`）；
   - 变量 / 成员 `snake_case`，成员常带尾下划线（`sender_id_`）；
   - 常量 / 枚举值 `kPascalCase`（`kCacheLineSize`、`kSuccess`）；
@@ -327,7 +323,6 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 - `rt_kprintf` 仅允许 `%d %u %x %s %lu`（禁 `%llu / %zu / %f`），`size_t` 显式转 `(unsigned long)`。
 - 文件 I/O 首选 POSIX `open / read / close`（config.hpp 解析路径即此）；`std::fopen` 存量见 config.hpp，不作为新增代码范式；格式化用 `snprintf`（禁 `sprintf`；头文件现无 `sprintf`）。
 - host 侧示例可用 `std::printf`；面向 RT-Thread 打印通道时按上一条约束。
-  - 纠正：coact 的 `pal_rtthread.hpp` 与 `diag/log_rtthread.hpp`（coact 侧路径）在 newosp 均不存在。
 
 ### 7.3 其他
 
@@ -366,7 +361,7 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 
 19. [ ] 组件间仅经总线 / 事件队列通信，无共享可变状态跨线程裸访问？
 20. [ ] 大块数据留在 owner / `DataDispatcher`，消息 / 事件只带 `block_id` / 描述符（零拷贝）？
-21. [ ] 多锁场景已在注释声明获取顺序、无反向获取（newosp 无 coact 的 L1/L2/L3 命名层级）？
+21. [ ] 多锁场景已在注释声明获取顺序、无反向获取（本仓库不设命名锁层级）？
 22. [ ] 每处"不加锁"的决定都有注释论证（最弱足够原则）？
 23. [ ] 跨线程标志 / 枚举为 `std::atomic` 且断言 `is_always_lock_free`？
 24. [ ] worker 交接为定容环 / 单槽、忙则拒绝 + 计数，无阻塞排队？
@@ -402,7 +397,7 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 
 ### 风格
 
-45. [ ] 符合 newosp `.clang-format`（2 空格 / Attach / 120 列 / 指针左对齐）与第 7 章命名约定（非 coact 的 Allman / 4 空格）？
+45. [ ] 符合 `.ai/.clang-format`（2 空格 / Attach / 120 列 / 指针左对齐）与第 7 章命名约定？
 46. [ ] 反直觉决策处均有"为什么"注释？
 47. [ ] 错误路径有消费或计数（`expected` / 错误码被处理），无静默丢弃返回值？
 48. [ ] （示例程序）结尾自验证不变量并以退出码给出结论？
