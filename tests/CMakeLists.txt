@@ -1,10 +1,20 @@
 include(FetchContent)
 
 set(CATCH2_VERSION v3.5.2)
+
+# DOWNLOAD_EXTRACT_TIMESTAMP was added in CMake 3.24. On older CMake (3.22 is
+# what Ubuntu 22.04 ships) ExternalProject does not recognise the keyword,
+# swallows it into the URL list and configure fails with "At least one entry of
+# URL is a path (invalid in a list)" — the whole test suite becomes unbuildable.
+set(_osp_catch2_ts "")
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    set(_osp_catch2_ts DOWNLOAD_EXTRACT_TIMESTAMP ON)
+endif()
+
 FetchContent_Declare(
     Catch2
     URL ${OSP_GITHUB_MIRROR}https://github.com/catchorg/Catch2/archive/refs/tags/${CATCH2_VERSION}.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP ON
+    ${_osp_catch2_ts}
 )
 FetchContent_MakeAvailable(Catch2)
 include(Catch)
