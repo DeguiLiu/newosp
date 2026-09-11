@@ -69,7 +69,7 @@
 
 ## 5. 参考的规范
 
-### 5.1 代码风格与工程质量：`docs/cpp_coding_conventions_zh.md` 第 7、9 章
+### 5.1 代码风格与命名：`docs/cpp_coding_conventions_zh.md` 第 7 章
 
 newosp 仓库的统一编码规范，examples 重构严格遵循：
 

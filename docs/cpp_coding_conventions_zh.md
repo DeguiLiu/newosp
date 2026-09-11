@@ -407,25 +407,4 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 47. [ ] 错误路径有消费或计数（`expected` / 错误码被处理），无静默丢弃返回值？
 48. [ ] （示例程序）结尾自验证不变量并以退出码给出结论？
 
-## 9. 工程质量：CI 与测试
-
-本节原为 `docs/coding_standards_zh.md`，已合并到此，因为两份文档在风格与命名上互相引用又各自漂移——`docs/design_examples_refactor_zh.md` 曾记录它们"在缩进/花括号上不一致"，那处不一致已随本文改用 `.ai/.clang-format` 而消除。合成一份后不再存在两个真相源。
-
-### 9.1 CI 流水线
-
-| 阶段 | 内容 |
-|------|------|
-| build-and-test | Ubuntu，Debug + Release |
-| build-with-options | `-fno-exceptions -fno-rtti` 兼容性 |
-| sanitizers | ASan、TSan、UBSan |
-| code-quality | clang-format + cpplint |
-
-### 9.2 测试策略
-
-- 框架：Catch2 v3.5.2
-- 每模块一个独立测试文件：`test_<module>.cpp`
-- 覆盖目标：基础 API + 边界条件 + 多线程场景
-- Sanitizer 验证：全部测试须在 ASan / TSan / UBSan 下通过
-- 规模：758+ 个 test case（持续增长）
-
 （完）
