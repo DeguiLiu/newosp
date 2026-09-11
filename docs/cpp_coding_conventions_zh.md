@@ -87,9 +87,8 @@ MISRA C:2012 在本仓库不再逐条适用；它的精神已翻译成 C++17 表
 
 - **placement new 用于固定 / 复用存储的就地构造；若类型非平凡析构，必须显式配对析构**——由容器在析构 / 赋值 / 回收路径调用 `~T()`。这是 coact"placement new 仅用于平凡可析构类型"在 newosp 的等价物：newosp 的支持面更宽（允许非平凡析构），代价是析构配对的纪律。
   - 落点：`ObjectPool<T>::Create` 的 `::new (mem) T(...)` 与 `Destroy` / 析构中的 `obj->~T()`（mem_pool.hpp）；`expected<V, E>` 的 placement new 与 `reinterpret_cast<V*>(&storage_)->~V()`（vocabulary.hpp）；`FixedVector` 的 `::new (&storage_[...]) T(...)`（vocabulary.hpp）。
-- **原始存储的 newosp 既有形态是 `alignas(T) uint8_t[]` / `std::aligned_storage` + placement new + 显式转型**，不是 coact 的 `std::byte[]` + `std::launder`；newosp 核心代码不使用 `std::launder`（仅第三方 toml.hpp 使用）。
-  - 落点：`FixedVector` 的 `alignas(T) uint8_t storage_[sizeof(T) * Capacity]`（vocabulary.hpp）；`FixedPool` 的 `alignas(std::max_align_t) uint8_t storage_[...]`（mem_pool.hpp）；`hsm_storage_`（app.hpp / lifecycle_node.hpp / node_manager_hsm.hpp）。
-  - 保留规则：原始存储必须经 placement new 构造后访问，禁止裸类型双关。`std::byte` + `std::launder` 是更严格的写法，但 newosp 无先例，作为改进方向而非既有规约；不得声称 newosp 已采用。
+- **原始存储的 newosp 既有形态是 `alignas(T) uint8_t[]` / `std::aligned_storage` + placement new**，不是 coact 的 `std::byte[]` + `std::launder`（`std::launder` 仅见于第三方 toml.hpp）。原始存储必须经 placement new 构造后访问，禁止裸类型双关；`std::byte` + `std::launder` 更严格，但 newosp 无先例，作为改进方向而非既有规约，不得声称已采用。
+  - 落点：`FixedVector`（vocabulary.hpp）与 `FixedPool`（mem_pool.hpp）的 `alignas` 存储数组；`hsm_storage_`（app.hpp / lifecycle_node.hpp / node_manager_hsm.hpp）。
 - **跨边界结构体的布局契约在定义处 `static_assert`**：`is_trivially_copyable` / `is_standard_layout` / `is_trivially_destructible`。违约编译失败而非现场崩溃。
   - 落点：`LogEntry`（async_log.hpp）、`RecvFrameSlot`（transport.hpp）、`DataBlock` / `ConsumerSlot`（data_dispatcher.hpp）、`Service` 的 Request / Response（service.hpp）、共享内存 `Slot`（shm_transport.hpp）。
 - **move 语义即所有权语言**：跨线程 / 跨槽位交接用 `T&&` + `std::move`；失败路径**不得消费调用者的值**（先确认容量再 move）。
@@ -104,8 +103,8 @@ MISRA C:2012 在本仓库不再逐条适用；它的精神已翻译成 C++17 表
 - **大对象不入栈帧**：MB 级存储 / 查找表用 `static` / 内联成员 / 编译期容量容器，绝不作为大局部变量出现在函数栈上；确需局部的小容器用编译期容量（模板参数）。热路径批量缓冲用固定大小栈数组并声明上界。
   - 落点：`async_log.hpp` WriterLoop 的 `LogEntry batch[N]` 固定批量缓冲（注释明确 "on its thread stack"）；`FixedPool` / `AsyncBus` 的环形存储为内联成员而非栈对象。
 - **按引用传大结构，按值传描述符 / 标量**：`sizeof` 超过若干字节的结构体一律 `const T&` 入参；小 POD（`NewType` id、枚举、`MessageHeader`）按值传，避免多一层间接。
-- **事件 / 消息只带描述符或小载荷**：大块数据经 `DataDispatcher` 的 `block_id` 管理，处理函数栈帧里不会出现大缓冲（承 3.1）。
-- **禁未定界递归与深调用链**：递归在定容栈上不可静态界定（同 2.2）；`Pipeline` 的同步递归深度 ≤ `MaxStages`，须一并核算栈预算。热路径调用深度应可被人工核验到"最深一条链 × 单帧上限 ≤ 栈预算"。
+- **事件 / 消息只带描述符或小载荷**（规则与落点见 3.1）：处理函数栈帧里不会出现大缓冲。
+- **禁未定界递归与深调用链**（规则见 2.2）：热路径调用深度应可被人工核验到"最深一条链 × 单帧上限 ≤ 栈预算"。
 - **小缓冲类型擦除留在调用者栈，不外溢堆**：需要可调用对象承载捕获时，用固定内联缓冲的 `FixedFunction<Sig, BufferSize>`（默认 `2 * sizeof(void*)`），超出缓冲即编译失败（`static_assert(sizeof(Decay) <= BufferSize)`）而非静默回落堆——把栈占用显式化、有界化（vocabulary.hpp）。`expected` / `FixedString` / `FixedVector` 同族"内联、零分配"。
 
 ## 3. 线程与并发
@@ -207,13 +206,13 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 
 - **何时用**：一切新枚举；跨边界 / 进消息的枚举必须带底层类型。
 - **红线**：禁止裸 `enum`（newosp 头文件现无裸 enum，保持）。
-- **落点**：`Level : uint8_t`（log.hpp）、`BreakerLevel : uint8_t`（breaker.hpp）、`MessagePriority : uint8_t`（bus.hpp）、`TransitionKind : uint8_t`（hsm_table.hpp）、`TransitionResult : uint8_t`（hsm.hpp）。
+- **落点**：见 2.1；同一批枚举不在两处重复列举。
 
 ### 5.4 `static_assert` 类型萃取
 
 - **何时用**：凡是"该类型必须满足 X"的假设，一律在定义处或模板内断言（`is_standard_layout` / `is_trivially_copyable` / `is_trivially_destructible` / `atomic<T>::is_always_lock_free` / `is_same`）。违约必须编译失败，不许到现场才炸。
 - **红线**：禁止断言显然为真的平凡事实凑数。
-- **落点**：`is_trivially_copyable`（async_log.hpp、transport.hpp、service.hpp）；`is_trivially_destructible`（data_dispatcher.hpp）；`is_standard_layout`（shm_transport.hpp）；`is_always_lock_free`（event_loop.hpp、breaker.hpp、data_dispatcher.hpp）；`FixedFunction` 的 `static_assert(sizeof(Decay) <= BufferSize)`（vocabulary.hpp）。
+- **落点**：见 2.4（跨边界结构体布局契约）与 2.5（`FixedFunction` 的缓冲上界断言）。
 
 ### 5.5 `[[nodiscard]]` / `noexcept` / `explicit`
 
@@ -223,26 +222,23 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
   - `explicit`：单参构造与转换运算符（`explicit operator bool()` 让"有值"判断不会静默变 int）。
 - **红线**：不整文件机械标注；`[[nodiscard]]` 用于"忽略它必然是错"的场景。
 - **落点**：`[[nodiscard]] expected<void, LoopError> AddFd(...) noexcept`（event_loop.hpp）；`[[nodiscard]] bool has_value()` 与 `explicit operator bool()`（vocabulary.hpp）；`noexcept` 遍布 guard / 静态钩子 / policy（vocabulary.hpp、bus.hpp、event_loop.hpp 等）。
-- 纠正：coact 的 `class [[nodiscard]] Expected final` 整类标注在 newosp 不存在——newosp 的 `expected` 类本身未整类标注。
 
 ### 5.6 `std::exchange`
 
-- **何时用**：仅当需要**"取旧值 + 置新值"一体的原子语义交接**——即旧值确实被消费，且置新值是交接的一部分。
-- **红线**：单纯赋值不得硬改成 `std::exchange`；不消费返回值时写 `static_cast<void>(std::exchange(...))` 并保留注释。
-- **落点**：**newosp 核心头文件暂无 `std::exchange` 用例**（仅第三方 toml.hpp 使用）。本条为保留规约：若引入 `std::exchange`，按上述判定；newosp 既有的所有权交接用 `std::move`（`SpscRingbuffer::Push(T&&)`、move-only 的 `FixedFunction`）。
+- **何时用**：仅当需要**"取旧值 + 置新值"一体的原子语义交接**——即旧值确实被消费，且置新值是交接的一部分。**红线**：单纯赋值不得硬改成 `std::exchange`；不消费返回值时写 `static_cast<void>(std::exchange(...))` 并保留注释。
+- **newosp 核心头文件暂无用例**（仅第三方 toml.hpp 使用），所有权交接用 `std::move`（见 2.4）。本条为保留规约，若引入则按上款判定。
 
 ### 5.7 placement new + 对齐存储
 
 - **何时用**：在原始内存（池块、内联缓冲、复用槽位）中就地构造，见 2.4。对齐由 `alignas(T)` / `alignas(std::max_align_t)` 在**存储声明处**保证，不在使用处补救。
 - **红线**：非平凡析构类型进复用内存必须显式配对析构；禁止未经构造直接访问原始存储。
-- **落点**：`FixedVector` 的 `alignas(T) uint8_t storage_[...]`（vocabulary.hpp）；`FixedPool` 的 `alignas(std::max_align_t) uint8_t storage_[...]`（mem_pool.hpp）；`ObjectPool` 的 `::new (mem) T(...)`（mem_pool.hpp）。
-- 说明：newosp **无** `std::byte[] + std::launder` 既有形态；不得把 `std::launder` 当成 newosp 的当规约。
+- **落点**：见 2.4 的 placement new 与对齐存储；同一批存储形态不在两处重复列举。
 
 ### 5.8 `std::move` / 右值引用（值类别即所有权）
 
 - **何时用**：跨线程 / 跨槽位交接对象时以 `T&&` 参数 + `std::move` 表达"源从此失效"；失败路径不得消费调用者的值（先查容量再 move）。
 - **红线**：move 后的源对象禁止再读；禁止对 const 对象强行 `const_cast` 后 move；复制成本可忽略的标量 / 描述符不必 move（过度 move 与漏 move 同罪）。
-- **落点**：`SpscRingbuffer::Push(T&&)` / `PushImpl` 先判满再 move（spsc_ringbuffer.hpp）；`FixedFunction` 拷贝 `= delete`、仅可 move（vocabulary.hpp）；`expected` 的 move 构造 / 赋值（vocabulary.hpp）。
+- **落点**：见 2.4 的 move 语义条；同一批交接点不在两处重复列举。
 
 ### 5.9 特性使用总红线
 
@@ -312,8 +308,7 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
   - HSM 事件枚举 `k<Module>Evt<Name>`（`kSvcEvtStart`、`kDiscEvtNodeFound`）；
   - 宏 `OSP_UPPER_CASE`（`OSP_LOG_INFO`、`OSP_ASSERT`）；
   - 模板参数 `PascalCase`（`PayloadVariant`、`BufferSize`）。
-- **RAII 装饰器**：成对操作（进入 / 退出必须同时发生）包成 guard 对象，拷贝 / 赋值 `= delete`；显式 `Start/Stop`、`Init/Deinit` 生命周期用于跨事件边界的长寿命资源（配对语义写头注释，见 3.3 drain-on-stop）。
-  - 落点：`ScopeGuard`（拷贝 `= delete`，vocabulary.hpp）；`WatchdogGuard`（watchdog.hpp）；`DirGuard` / `PipeGuard`（process.hpp）。
+- **RAII 装饰器**：规则与落点见 2.2，此处不重复。显式 `Start/Stop`、`Init/Deinit` 生命周期用于跨事件边界的长寿命资源（配对语义写头注释，见 3.3 drain-on-stop）。
 
 ### 7.1 错误处理：`expected` 与错误码
 
@@ -322,7 +317,6 @@ newosp 的两套 HSM 都在类型系统里显式分层，评审直接看签名�
 - 简单场景：bool / 错误码枚举（`ConfigError`（vocabulary.hpp）、`TimerError`、`SemaphoreError`、`WorkerPoolError`、`JobPoolError`、`NodeError`、`ServiceError` 等）。
 - 值或错误二选一：`expected<V, E>`（小写，include/osp/vocabulary.hpp）——`success() / error()` 工厂、`expected<void,E>` 特化、支持 move-only `V`、固定内联存储、零堆、兼容 `-fno-exceptions`。
   - 落点：`expected<void, LoopError>` / `expected<uint32_t, LoopError>`（event_loop.hpp）；`expected<RegResult, WatchdogError>`（watchdog.hpp）；`expected<void, ConfigError>`（config.hpp 的 `Config<Backends...>`）。
-  - 纠正：coact 的 `Expected` / `expected.hpp` / 整类 `[[nodiscard]]` 不适用于 newosp。
 - 错误路径不得静默：返回值被消费或被计数（丢包计数 `messages_dropped`、背压级别、fault 计数），无"丢弃返回值且无注释"的调用点。
 
 ### 7.2 平台 / C 接口边界
