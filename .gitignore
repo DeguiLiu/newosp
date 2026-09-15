@@ -30,3 +30,7 @@ scripts/
 # Executable binaries in root (benchmark/test executables)
 /bench_*
 /test_*
+
+# Test-generated binary dumps
+sd.bin
+/examples/sd.bin

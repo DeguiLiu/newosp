@@ -69,6 +69,22 @@ set(OSP_TEST_CORE_SOURCES
     test_async_log.cpp
     test_data_dispatcher.cpp
     test_thread.cpp
+    test_config_toml.cpp
+    test_observability.cpp
+)
+
+# Windows-branch tests.  Each file guards its body with
+# `#if defined(OSP_PLATFORM_WINDOWS)`, so off Windows they compile to an empty
+# translation unit instead of being excluded here.
+set(OSP_TEST_WINDOWS_SOURCES
+    test_frame_channel.cpp
+    test_io_poller_win.cpp
+    test_process_win.cpp
+    test_shm_transport_win.cpp
+    test_shutdown_win.cpp
+    test_socket_win.cpp
+    test_system_monitor_win.cpp
+    test_thread_win.cpp
 )
 
 # example headers under test (serial_ota parser)
@@ -97,7 +113,7 @@ set(OSP_TEST_SOCKPP_SOURCES
 
 if(OSP_NO_EXCEPTIONS)
     # -fno-exceptions mode: core tests only (sockpp uses throw internally)
-    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES})
+    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES} ${OSP_TEST_WINDOWS_SOURCES})
     if(OSP_WITH_NETWORK)
         target_sources(osp_tests PRIVATE ${OSP_TEST_NETWORK_SOURCES})
     endif()
@@ -105,12 +121,13 @@ if(OSP_NO_EXCEPTIONS)
     target_compile_options(osp_tests PRIVATE -fno-exceptions -fno-rtti)
 elseif(NOT OSP_WITH_NETWORK)
     # No-network mode: core tests only (network headers are disabled)
-    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES})
+    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES} ${OSP_TEST_WINDOWS_SOURCES})
     target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
 else()
     # Normal mode: all tests
     add_executable(osp_tests
         ${OSP_TEST_CORE_SOURCES}
+        ${OSP_TEST_WINDOWS_SOURCES}
         ${OSP_TEST_NETWORK_SOURCES}
         ${OSP_TEST_SOCKPP_SOURCES}
     )
