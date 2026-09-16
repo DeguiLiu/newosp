@@ -48,6 +48,26 @@
 // default is 1, which would define read/write/close macros that clobber C++
 // stdlib headers). Calls go through socket_api below, never through macros.
 #include <lwip/sockets.h>
+#elif OSP_NET_BACKEND == 3
+// Winsock. CMake defines WIN32_LEAN_AND_MEAN; guard it here too so direct cl
+// builds (no CMake) stay consistent. winsock2.h must precede any windows.h.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <afunix.h>  // sockaddr_un for the (non-functional on Winsock) AF_UNIX surface
+// POSIX shutdown() how constants; Winsock uses SD_* (same numeric values).
+// Provided so modules can call socket_api::Shutdown(fd, SHUT_RDWR) uniformly.
+#ifndef SHUT_RD
+#define SHUT_RD SD_RECEIVE
+#endif
+#ifndef SHUT_WR
+#define SHUT_WR SD_SEND
+#endif
+#ifndef SHUT_RDWR
+#define SHUT_RDWR SD_BOTH
+#endif
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -81,6 +101,21 @@ inline constexpr int32_t kSendNoSignal = 0;
 #endif
 
 // ============================================================================
+// Backend-neutral socket descriptor / poll descriptor types.
+// POSIX fds are int; Winsock SOCKET handles are UINT_PTR (64-bit on Win64).
+// INVALID_SOCKET maps to -1 when stored in SocketHandle, so `fd < 0` remains
+// the invalid-handle test on every backend.
+// ============================================================================
+
+#if OSP_NET_BACKEND == 3
+using SocketHandle = intptr_t;
+using PollFd = WSAPOLLFD;  // struct pollfd alias whose fd is a SOCKET
+#else
+using SocketHandle = int32_t;
+using PollFd = struct pollfd;
+#endif
+
+// ============================================================================
 // socket_api -- backend-neutral socket call layer.
 // The lwIP backend calls lwip_* directly; the POSIX backend calls the system
 // functions. No macros involved, so C++ stdlib headers stay clean.
@@ -88,97 +123,137 @@ inline constexpr int32_t kSendNoSignal = 0;
 
 namespace socket_api {
 
-inline int Socket(int domain, int type, int protocol) noexcept {
+#if OSP_NET_BACKEND == 3
+// One-time WSAStartup before the first socket call. Static-local guard keeps
+// it idempotent and -fno-exceptions safe. Winsock requires a successful
+// WSAStartup (version 2.2) per process before any socket call.
+inline bool EnsureWsaStarted() noexcept {
+  static const bool started = []() noexcept {
+    WSADATA wsa_data;
+    return WSAStartup(0x0202, &wsa_data) == 0;
+  }();
+  return started;
+}
+#endif
+
+inline SocketHandle Socket(int domain, int type, int protocol) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_socket(domain, type, protocol);
+  return static_cast<SocketHandle>(lwip_socket(domain, type, protocol));
+#elif OSP_NET_BACKEND == 3
+  if (!EnsureWsaStarted()) {
+    return static_cast<SocketHandle>(INVALID_SOCKET);
+  }
+  return static_cast<SocketHandle>(::socket(domain, type, protocol));
 #else
-  return ::socket(domain, type, protocol);
+  return static_cast<SocketHandle>(::socket(domain, type, protocol));
 #endif
 }
 
-inline int Bind(int fd, const sockaddr* addr, socklen_t len) noexcept {
+inline int Bind(SocketHandle fd, const sockaddr* addr, socklen_t len) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_bind(fd, addr, len);
+  return lwip_bind(static_cast<int>(fd), addr, len);
+#elif OSP_NET_BACKEND == 3
+  return ::bind(static_cast<SOCKET>(fd), addr, static_cast<int>(len));
 #else
   return ::bind(fd, addr, len);
 #endif
 }
 
-inline int Listen(int fd, int backlog) noexcept {
+inline int Listen(SocketHandle fd, int backlog) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_listen(fd, backlog);
+  return lwip_listen(static_cast<int>(fd), backlog);
+#elif OSP_NET_BACKEND == 3
+  return ::listen(static_cast<SOCKET>(fd), backlog);
 #else
   return ::listen(fd, backlog);
 #endif
 }
 
-inline int Accept(int fd, sockaddr* addr, socklen_t* len) noexcept {
+inline SocketHandle Accept(SocketHandle fd, sockaddr* addr, socklen_t* len) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_accept(fd, addr, len);
+  return static_cast<SocketHandle>(lwip_accept(static_cast<int>(fd), addr, len));
+#elif OSP_NET_BACKEND == 3
+  return static_cast<SocketHandle>(::accept(static_cast<SOCKET>(fd), addr, len));
 #else
-  return ::accept(fd, addr, len);
+  return static_cast<SocketHandle>(::accept(fd, addr, len));
 #endif
 }
 
-inline int Connect(int fd, const sockaddr* addr, socklen_t len) noexcept {
+inline int Connect(SocketHandle fd, const sockaddr* addr, socklen_t len) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_connect(fd, addr, len);
+  return lwip_connect(static_cast<int>(fd), addr, len);
+#elif OSP_NET_BACKEND == 3
+  return ::connect(static_cast<SOCKET>(fd), addr, static_cast<int>(len));
 #else
   return ::connect(fd, addr, len);
 #endif
 }
 
-inline int Send(int fd, const void* data, size_t len, int flags) noexcept {
+inline int Send(SocketHandle fd, const void* data, size_t len, int flags) noexcept {
 #if OSP_NET_BACKEND == 1
-  return static_cast<int>(lwip_send(fd, data, len, flags));
+  return static_cast<int>(lwip_send(static_cast<int>(fd), data, len, flags));
+#elif OSP_NET_BACKEND == 3
+  return ::send(static_cast<SOCKET>(fd), static_cast<const char*>(data), static_cast<int>(len), flags);
 #else
   return static_cast<int>(::send(fd, data, len, flags));
 #endif
 }
 
-inline int Recv(int fd, void* buf, size_t len, int flags) noexcept {
+inline int Recv(SocketHandle fd, void* buf, size_t len, int flags) noexcept {
 #if OSP_NET_BACKEND == 1
-  return static_cast<int>(lwip_recv(fd, buf, len, flags));
+  return static_cast<int>(lwip_recv(static_cast<int>(fd), buf, len, flags));
+#elif OSP_NET_BACKEND == 3
+  return ::recv(static_cast<SOCKET>(fd), static_cast<char*>(buf), static_cast<int>(len), flags);
 #else
   return static_cast<int>(::recv(fd, buf, len, flags));
 #endif
 }
 
-inline int SendTo(int fd, const void* data, size_t len, int flags, const sockaddr* dest, socklen_t dest_len) noexcept {
+inline int SendTo(SocketHandle fd, const void* data, size_t len, int flags, const sockaddr* dest, socklen_t dest_len) noexcept {
 #if OSP_NET_BACKEND == 1
-  return static_cast<int>(lwip_sendto(fd, data, len, flags, dest, dest_len));
+  return static_cast<int>(lwip_sendto(static_cast<int>(fd), data, len, flags, dest, dest_len));
+#elif OSP_NET_BACKEND == 3
+  return ::sendto(static_cast<SOCKET>(fd), static_cast<const char*>(data), static_cast<int>(len), flags, dest, static_cast<int>(dest_len));
 #else
   return static_cast<int>(::sendto(fd, data, len, flags, dest, dest_len));
 #endif
 }
 
-inline int RecvFrom(int fd, void* buf, size_t len, int flags, sockaddr* src, socklen_t* src_len) noexcept {
+inline int RecvFrom(SocketHandle fd, void* buf, size_t len, int flags, sockaddr* src, socklen_t* src_len) noexcept {
 #if OSP_NET_BACKEND == 1
-  return static_cast<int>(lwip_recvfrom(fd, buf, len, flags, src, src_len));
+  return static_cast<int>(lwip_recvfrom(static_cast<int>(fd), buf, len, flags, src, src_len));
+#elif OSP_NET_BACKEND == 3
+  return ::recvfrom(static_cast<SOCKET>(fd), static_cast<char*>(buf), static_cast<int>(len), flags, src, src_len);
 #else
   return static_cast<int>(::recvfrom(fd, buf, len, flags, src, src_len));
 #endif
 }
 
-inline int Close(int fd) noexcept {
+inline int Close(SocketHandle fd) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_close(fd);
+  return lwip_close(static_cast<int>(fd));
+#elif OSP_NET_BACKEND == 3
+  return ::closesocket(static_cast<SOCKET>(fd));
 #else
   return ::close(fd);
 #endif
 }
 
-inline int SetSockOpt(int fd, int level, int optname, const void* optval, socklen_t optlen) noexcept {
+inline int SetSockOpt(SocketHandle fd, int level, int optname, const void* optval, socklen_t optlen) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_setsockopt(fd, level, optname, optval, optlen);
+  return lwip_setsockopt(static_cast<int>(fd), level, optname, optval, optlen);
+#elif OSP_NET_BACKEND == 3
+  return ::setsockopt(static_cast<SOCKET>(fd), level, optname, static_cast<const char*>(optval), static_cast<int>(optlen));
 #else
   return ::setsockopt(fd, level, optname, optval, optlen);
 #endif
 }
 
-inline int GetSockOpt(int fd, int level, int optname, void* optval, socklen_t* optlen) noexcept {
+inline int GetSockOpt(SocketHandle fd, int level, int optname, void* optval, socklen_t* optlen) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_getsockopt(fd, level, optname, optval, optlen);
+  return lwip_getsockopt(static_cast<int>(fd), level, optname, optval, optlen);
+#elif OSP_NET_BACKEND == 3
+  return ::getsockopt(static_cast<SOCKET>(fd), level, optname, static_cast<char*>(optval), optlen);
 #else
   return ::getsockopt(fd, level, optname, optval, optlen);
 #endif
@@ -224,25 +299,31 @@ inline uint32_t Ntohl(uint32_t v) noexcept {
 #endif
 }
 
-inline int Shutdown(int fd, int32_t how) noexcept {
+inline int Shutdown(SocketHandle fd, int32_t how) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_shutdown(fd, how);
+  return lwip_shutdown(static_cast<int>(fd), how);
+#elif OSP_NET_BACKEND == 3
+  return ::shutdown(static_cast<SOCKET>(fd), how);
 #else
   return ::shutdown(fd, how);
 #endif
 }
 
-inline int GetSockName(int fd, sockaddr* addr, socklen_t* len) noexcept {
+inline int GetSockName(SocketHandle fd, sockaddr* addr, socklen_t* len) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_getsockname(fd, addr, len);
+  return lwip_getsockname(static_cast<int>(fd), addr, len);
+#elif OSP_NET_BACKEND == 3
+  return ::getsockname(static_cast<SOCKET>(fd), addr, len);
 #else
   return ::getsockname(fd, addr, len);
 #endif
 }
 
-inline int GetPeerName(int fd, sockaddr* addr, socklen_t* len) noexcept {
+inline int GetPeerName(SocketHandle fd, sockaddr* addr, socklen_t* len) noexcept {
 #if OSP_NET_BACKEND == 1
-  return lwip_getpeername(fd, addr, len);
+  return lwip_getpeername(static_cast<int>(fd), addr, len);
+#elif OSP_NET_BACKEND == 3
+  return ::getpeername(static_cast<SOCKET>(fd), addr, len);
 #else
   return ::getpeername(fd, addr, len);
 #endif
@@ -261,16 +342,35 @@ inline const char* InetNtop(int32_t af, const void* src, char* dst, socklen_t si
 inline int Select(int nfds, fd_set* readset, fd_set* writeset, fd_set* exceptset, timeval* timeout) noexcept {
 #if OSP_NET_BACKEND == 1
   return lwip_select(nfds, readset, writeset, exceptset, timeout);
+#elif OSP_NET_BACKEND == 3
+  // Winsock ignores nfds; pass 0 explicitly to document that.
+  return ::select(0, readset, writeset, exceptset, timeout);
 #else
   return ::select(nfds, readset, writeset, exceptset, timeout);
 #endif
 }
 
-inline int Poll(pollfd* fds, uint32_t nfds, int32_t timeout_ms) noexcept {
+// Poll on socket descriptors. On Winsock this is WSAPoll (PollFd is WSAPOLLFD
+// whose fd is a SOCKET); on POSIX/lwIP it is poll() over struct pollfd.
+inline int Poll(PollFd* fds, uint32_t nfds, int32_t timeout_ms) noexcept {
 #if OSP_NET_BACKEND == 1
   return lwip_poll(fds, static_cast<unsigned long>(nfds), timeout_ms);
+#elif OSP_NET_BACKEND == 3
+  return ::WSAPoll(fds, static_cast<ULONG>(nfds), timeout_ms);
 #else
   return ::poll(fds, static_cast<nfds_t>(nfds), timeout_ms);
+#endif
+}
+
+// Report whether the last Send/Recv-style call failed with "would block".
+// Winsock surfaces it via WSAGetLastError() == WSAEWOULDBLOCK instead of errno.
+inline bool IsWouldBlock() noexcept {
+#if OSP_NET_BACKEND == 1
+  return errno == EAGAIN || errno == EWOULDBLOCK;
+#elif OSP_NET_BACKEND == 3
+  return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+  return errno == EAGAIN || errno == EWOULDBLOCK;
 #endif
 }
 
@@ -282,13 +382,17 @@ inline int ParseIpv4Text(const char* ip, void* out) noexcept {
   return socket_api::ParseIpv4(ip, out);
 }
 
-// Set or clear non-blocking mode on an fd. Returns 0 on success, -1 on failure.
-inline int SetFdNonBlocking(int32_t fd, bool enable) noexcept {
+// Set or clear non-blocking mode on a socket handle. Returns 0 on success,
+// -1 on failure.
+inline int SetFdNonBlocking(SocketHandle fd, bool enable) noexcept {
 #if OSP_NET_BACKEND == 1
   // FIONBIO expects an int* arg; lwip_ioctl reads it as *(int*)argp. Using int
   // (not unsigned long) keeps the value correct on big-endian targets.
   int mode = enable ? 1 : 0;
-  return lwip_ioctl(fd, FIONBIO, &mode);
+  return lwip_ioctl(static_cast<int>(fd), FIONBIO, &mode);
+#elif OSP_NET_BACKEND == 3
+  u_long mode = enable ? 1UL : 0UL;
+  return ::ioctlsocket(static_cast<SOCKET>(fd), FIONBIO, &mode);
 #else
   int32_t flags = ::fcntl(fd, F_GETFL, 0);
   if (flags < 0) {
@@ -314,7 +418,8 @@ enum class SocketError : uint8_t {
   kAlreadyClosed,
   kSetOptFailed,
   kPathTooLong,
-  kWouldBlock  ///< EAGAIN/EWOULDBLOCK -- transient, caller may retry.
+  kWouldBlock,    ///< EAGAIN/EWOULDBLOCK (or WSAEWOULDBLOCK) -- transient, caller may retry.
+  kNotSupported   ///< Operation not available on this backend/platform (e.g. AF_UNIX on Winsock).
 };
 
 // ============================================================================
@@ -406,7 +511,7 @@ class TcpSocket {
    * @return TcpSocket on success, SocketError::kInvalidFd on failure.
    */
   static expected<TcpSocket, SocketError> Create() noexcept {
-    int32_t fd = socket_api::Socket(AF_INET, SOCK_STREAM, 0);
+    SocketHandle fd = socket_api::Socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
       return expected<TcpSocket, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -431,7 +536,7 @@ class TcpSocket {
     }
     auto n = socket_api::Send(fd_, data, len, kSendNoSignal);
     if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (socket_api::IsWouldBlock()) {
         return expected<int32_t, SocketError>::error(SocketError::kWouldBlock);
       }
       return expected<int32_t, SocketError>::error(SocketError::kSendFailed);
@@ -445,7 +550,7 @@ class TcpSocket {
     }
     auto n = socket_api::Recv(fd_, buf, len, 0);
     if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (socket_api::IsWouldBlock()) {
         return expected<int32_t, SocketError>::error(SocketError::kWouldBlock);
       }
       return expected<int32_t, SocketError>::error(SocketError::kRecvFailed);
@@ -494,7 +599,7 @@ class TcpSocket {
   }
 
   /** @brief Return the raw file descriptor. */
-  int32_t Fd() const noexcept { return fd_; }
+  SocketHandle Fd() const noexcept { return fd_; }
 
   /** @brief Check whether the socket holds a valid file descriptor. */
   bool IsValid() const noexcept { return fd_ >= 0; }
@@ -503,9 +608,9 @@ class TcpSocket {
   friend class TcpListener;
 
   /** @brief Construct from an already-open file descriptor (used by Accept). */
-  explicit TcpSocket(int32_t fd) noexcept : fd_(fd) {}
+  explicit TcpSocket(SocketHandle fd) noexcept : fd_(fd) {}
 
-  int32_t fd_;
+  SocketHandle fd_;
 };
 
 // ============================================================================
@@ -545,7 +650,7 @@ class UdpSocket {
    * @return UdpSocket on success, SocketError::kInvalidFd on failure.
    */
   static expected<UdpSocket, SocketError> Create() noexcept {
-    int32_t fd = socket_api::Socket(AF_INET, SOCK_DGRAM, 0);
+    SocketHandle fd = socket_api::Socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
       return expected<UdpSocket, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -596,15 +701,15 @@ class UdpSocket {
   }
 
   /** @brief Return the raw file descriptor. */
-  int32_t Fd() const noexcept { return fd_; }
+  SocketHandle Fd() const noexcept { return fd_; }
 
   /** @brief Check whether the socket holds a valid file descriptor. */
   bool IsValid() const noexcept { return fd_ >= 0; }
 
  private:
-  explicit UdpSocket(int32_t fd) noexcept : fd_(fd) {}
+  explicit UdpSocket(SocketHandle fd) noexcept : fd_(fd) {}
 
-  int32_t fd_;
+  SocketHandle fd_;
 };
 
 // ============================================================================
@@ -645,7 +750,7 @@ class TcpListener {
    * @return TcpListener on success, SocketError::kInvalidFd on failure.
    */
   static expected<TcpListener, SocketError> Create() noexcept {
-    int32_t fd = socket_api::Socket(AF_INET, SOCK_STREAM, 0);
+    SocketHandle fd = socket_api::Socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
       return expected<TcpListener, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -682,7 +787,7 @@ class TcpListener {
     if (fd_ < 0) {
       return expected<TcpSocket, SocketError>::error(SocketError::kInvalidFd);
     }
-    int32_t client_fd = socket_api::Accept(fd_, nullptr, nullptr);
+    SocketHandle client_fd = socket_api::Accept(fd_, nullptr, nullptr);
     if (client_fd < 0) {
       return expected<TcpSocket, SocketError>::error(SocketError::kAcceptFailed);
     }
@@ -699,7 +804,7 @@ class TcpListener {
       return expected<TcpSocket, SocketError>::error(SocketError::kInvalidFd);
     }
     socklen_t addr_len = client_addr.Size();
-    int32_t client_fd = socket_api::Accept(fd_, client_addr.RawMut(), &addr_len);
+    SocketHandle client_fd = socket_api::Accept(fd_, client_addr.RawMut(), &addr_len);
     if (client_fd < 0) {
       return expected<TcpSocket, SocketError>::error(SocketError::kAcceptFailed);
     }
@@ -715,22 +820,22 @@ class TcpListener {
   }
 
   /** @brief Return the raw file descriptor. */
-  int32_t Fd() const noexcept { return fd_; }
+  SocketHandle Fd() const noexcept { return fd_; }
 
   /** @brief Check whether the socket holds a valid file descriptor. */
   bool IsValid() const noexcept { return fd_ >= 0; }
 
  private:
-  explicit TcpListener(int32_t fd) noexcept : fd_(fd) {}
+  explicit TcpListener(SocketHandle fd) noexcept : fd_(fd) {}
 
-  int32_t fd_;
+  SocketHandle fd_;
 };
 
 // ============================================================================
 // UnixAddress
 // ============================================================================
 
-#if OSP_NET_BACKEND == 0
+#if OSP_NET_BACKEND == 0 || OSP_NET_BACKEND == 3
 /**
  * @brief Wrapper for Unix Domain Socket address (sockaddr_un).
  *
@@ -818,7 +923,7 @@ class UnixSocket {
    * @return UnixSocket on success, SocketError::kInvalidFd on failure.
    */
   static expected<UnixSocket, SocketError> Create() noexcept {
-    int32_t fd = socket_api::Socket(AF_UNIX, SOCK_STREAM, 0);
+    SocketHandle fd = socket_api::Socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
       return expected<UnixSocket, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -843,7 +948,7 @@ class UnixSocket {
     }
     auto n = socket_api::Send(fd_, data, len, kSendNoSignal);
     if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (socket_api::IsWouldBlock()) {
         return expected<int32_t, SocketError>::error(SocketError::kWouldBlock);
       }
       return expected<int32_t, SocketError>::error(SocketError::kSendFailed);
@@ -857,7 +962,7 @@ class UnixSocket {
     }
     auto n = socket_api::Recv(fd_, buf, len, 0);
     if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (socket_api::IsWouldBlock()) {
         return expected<int32_t, SocketError>::error(SocketError::kWouldBlock);
       }
       return expected<int32_t, SocketError>::error(SocketError::kRecvFailed);
@@ -884,7 +989,7 @@ class UnixSocket {
   }
 
   /** @brief Return the raw file descriptor. */
-  int32_t Fd() const noexcept { return fd_; }
+  SocketHandle Fd() const noexcept { return fd_; }
 
   /** @brief Check whether the socket holds a valid file descriptor. */
   bool IsValid() const noexcept { return fd_ >= 0; }
@@ -893,9 +998,9 @@ class UnixSocket {
   friend class UnixListener;
 
   /** @brief Construct from an already-open file descriptor (used by Accept). */
-  explicit UnixSocket(int32_t fd) noexcept : fd_(fd) {}
+  explicit UnixSocket(SocketHandle fd) noexcept : fd_(fd) {}
 
-  int32_t fd_;
+  SocketHandle fd_;
 };
 
 // ============================================================================
@@ -936,7 +1041,7 @@ class UnixListener {
    * @return UnixListener on success, SocketError::kInvalidFd on failure.
    */
   static expected<UnixListener, SocketError> Create() noexcept {
-    int32_t fd = socket_api::Socket(AF_UNIX, SOCK_STREAM, 0);
+    SocketHandle fd = socket_api::Socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
       return expected<UnixListener, SocketError>::error(SocketError::kInvalidFd);
     }
@@ -949,11 +1054,17 @@ class UnixListener {
     if (fd_ < 0) {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
     }
+#if OSP_NET_BACKEND == 3
+    // Winsock has no ::unlink and AF_UNIX path semantics differ; reject.
+    (void)addr;
+    return expected<void, SocketError>::error(SocketError::kNotSupported);
+#else
     ::unlink(addr.Path());  // Remove stale socket file
     if (socket_api::Bind(fd_, addr.Raw(), addr.Size()) < 0) {
       return expected<void, SocketError>::error(SocketError::kBindFailed);
     }
     return expected<void, SocketError>::success();
+#endif
   }
 
   expected<void, SocketError> Listen(int32_t backlog = kDefaultBacklog) noexcept {
@@ -974,7 +1085,7 @@ class UnixListener {
     if (fd_ < 0) {
       return expected<UnixSocket, SocketError>::error(SocketError::kInvalidFd);
     }
-    int32_t client_fd = socket_api::Accept(fd_, nullptr, nullptr);
+    SocketHandle client_fd = socket_api::Accept(fd_, nullptr, nullptr);
     if (client_fd < 0) {
       return expected<UnixSocket, SocketError>::error(SocketError::kAcceptFailed);
     }
@@ -990,18 +1101,18 @@ class UnixListener {
   }
 
   /** @brief Return the raw file descriptor. */
-  int32_t Fd() const noexcept { return fd_; }
+  SocketHandle Fd() const noexcept { return fd_; }
 
   /** @brief Check whether the socket holds a valid file descriptor. */
   bool IsValid() const noexcept { return fd_ >= 0; }
 
  private:
-  explicit UnixListener(int32_t fd) noexcept : fd_(fd) {}
+  explicit UnixListener(SocketHandle fd) noexcept : fd_(fd) {}
 
-  int32_t fd_;
+  SocketHandle fd_;
 };
 
-#endif  // OSP_NET_BACKEND == 0 (AF_UNIX unsupported by lwIP)
+#endif  // OSP_NET_BACKEND == 0 || OSP_NET_BACKEND == 3 (AF_UNIX unsupported by lwIP/Winsock)
 
 }  // namespace osp
 

@@ -97,7 +97,10 @@ namespace osp {
 // Users may override via CMake (-DOSP_HAS_NETWORK=0) for bare-metal or
 // RTOS configurations that do not enable a network stack.
 #ifndef OSP_HAS_NETWORK
-#if defined(__has_include)
+#if defined(OSP_PLATFORM_WINDOWS)
+// Windows: the BSD-socket API lives in winsock2.h; there is no POSIX socket header.
+#define OSP_HAS_NETWORK 1
+#elif defined(__has_include)
 #if __has_include(<sys/socket.h>)
 #define OSP_HAS_NETWORK 1
 #else
@@ -118,10 +121,13 @@ namespace osp {
 // ============================================================================
 
 // OSP_NET_BACKEND: 0 = POSIX BSD socket (Linux), 1 = lwIP native socket API,
-// 2 = network disabled. Selected from platform macros; overridable via defs.
+// 2 = network disabled, 3 = Winsock (Windows). Selected from platform macros;
+// overridable via defs.
 #ifndef OSP_NET_BACKEND
 #if defined(OSP_PLATFORM_RTTHREAD)
 #define OSP_NET_BACKEND 1
+#elif defined(OSP_PLATFORM_WINDOWS)
+#define OSP_NET_BACKEND 3  // Winsock
 #elif !OSP_HAS_NETWORK
 #define OSP_NET_BACKEND 2
 #else
