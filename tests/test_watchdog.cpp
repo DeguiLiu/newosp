@@ -226,8 +226,32 @@ TEST_CASE("ThreadWatchdog: recovery callback fires", "[watchdog]") {
   wd.Feed(id.value().id);
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
   wd.Check();
+  wd.Check();
+  wd.Check();
 
   REQUIRE(recovery_fired.load(std::memory_order_acquire));
+}
+
+TEST_CASE("ThreadWatchdog: per-slot recovery beats", "[watchdog]") {
+  osp::ThreadWatchdog<8> wd;
+
+  std::atomic<uint32_t> recover_count{0};
+  wd.SetOnRecovered([](uint32_t, const char*, void* ctx) {
+    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
+  }, &recover_count);
+
+  auto id = wd.Register("fast_recovery", 50, 1);
+  REQUIRE(id.has_value());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  wd.Check();
+  REQUIRE(wd.IsTimedOut(id.value().id));
+
+  wd.Feed(id.value().id);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  wd.Check();
+  REQUIRE_FALSE(wd.IsTimedOut(id.value().id));
+  REQUIRE(recover_count.load() == 1U);
 }
 
 TEST_CASE("ThreadWatchdog: TimedOutCount tracks correctly", "[watchdog]") {
@@ -567,10 +591,14 @@ TEST_CASE("ThreadWatchdog: StartAutoCheck detects timeout without manual Check",
 TEST_CASE("ThreadWatchdog: StartAutoCheck is idempotent", "[watchdog]") {
   osp::ThreadWatchdog<8> wd;
 
-  wd.StartAutoCheck(50);
-  wd.StartAutoCheck(50);  // second call is no-op
+  REQUIRE(wd.StartAutoCheck(50).has_value());
+  REQUIRE(wd.IsAutoCheckRunning());
+  REQUIRE(wd.StartAutoCheck(50).has_value());  // second call is idempotent
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  REQUIRE(wd.CheckCycles() > 0U);
 
   wd.StopAutoCheck();
+  REQUIRE_FALSE(wd.IsAutoCheckRunning());
   wd.StopAutoCheck();  // second call is no-op
 }
 
@@ -600,9 +628,12 @@ TEST_CASE("ThreadWatchdog: AutoCheck recovery detection", "[watchdog]") {
   std::this_thread::sleep_for(std::chrono::milliseconds(150));
   REQUIRE(timeout_count.load() >= 1U);
 
-  // Resume beating -> should recover
-  hb->Beat();
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  // Resume beating continuously -> should recover after several healthy
+  // checks. A single beat followed by silence is not a recovery.
+  for (int i = 0; i < 5; ++i) {
+    hb->Beat();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
   REQUIRE(recover_count.load() >= 1U);
 
   wd.StopAutoCheck();

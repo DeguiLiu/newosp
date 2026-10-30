@@ -39,6 +39,7 @@
 #include "osp/vocabulary.hpp"
 
 #include <climits>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 
@@ -54,6 +55,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <signal.h>
 #include <thread>
 #include <unistd.h>
 #endif
@@ -68,7 +70,18 @@ namespace osp {
 // ShmError
 // ============================================================================
 
-enum class ShmError : uint8_t { kCreateFailed = 0, kOpenFailed, kMapFailed, kFull, kEmpty, kTimeout, kClosed };
+enum class ShmError : uint8_t {
+  kCreateFailed = 0,
+  kOpenFailed,
+  kMapFailed,
+  kFull,
+  kEmpty,
+  kTimeout,
+  kClosed,
+  kAlreadyExists,
+  kLayoutMismatch,
+  kOwnerAlive,
+};
 
 // Huge pages: reduces TLB misses for large shared memory segments (e.g. video
 // frames).  Requires system-level huge page reservation:
@@ -81,6 +94,104 @@ static constexpr int kShmMmapFlags = MAP_SHARED;
 #endif
 
 #if defined(OSP_PLATFORM_LINUX)
+
+// ============================================================================
+// Shared memory layout header - common prefix for every mapped segment
+// ============================================================================
+
+enum class ShmLayoutKind : uint32_t {
+  kSlotRing = 1U,
+  kSpscByteRing = 2U,
+  kSpmcByteRing = 3U,
+};
+
+inline constexpr uint32_t kShmLayoutMagic = 0x4F53484DU;  // "OSHM"
+inline constexpr uint16_t kShmLayoutVersion = 1U;
+
+struct alignas(64) ShmLayoutHeader {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t header_size;
+  uint32_t kind;
+  uint32_t slot_size;
+  uint32_t slot_count;
+  uint32_t total_size;
+  uint32_t layout_hash;
+  uint64_t epoch;
+  int32_t owner_pid;
+  uint32_t flags;
+  uint8_t reserved[16];
+};
+
+static_assert(sizeof(ShmLayoutHeader) == 64U, "ShmLayoutHeader must be 64 bytes");
+
+inline constexpr uint32_t ShmLayoutHash(ShmLayoutKind kind, uint32_t slot_size, uint32_t slot_count,
+                                        uint32_t total_size) noexcept {
+  uint32_t hash = 2166136261U;  // FNV-1a
+  const auto mix = [&hash](uint32_t value) {
+    hash = (hash ^ value) * 16777619U;
+  };
+  mix(kShmLayoutVersion);
+  mix(static_cast<uint32_t>(kind));
+  mix(slot_size);
+  mix(slot_count);
+  mix(total_size);
+  return hash;
+}
+
+inline void WriteShmLayoutHeader(void* base, ShmLayoutKind kind, uint32_t slot_size, uint32_t slot_count,
+                                 uint32_t total_size) noexcept {
+  auto* header = static_cast<ShmLayoutHeader*>(base);
+  header->magic = kShmLayoutMagic;
+  header->version = kShmLayoutVersion;
+  header->header_size = static_cast<uint16_t>(sizeof(ShmLayoutHeader));
+  header->kind = static_cast<uint32_t>(kind);
+  header->slot_size = slot_size;
+  header->slot_count = slot_count;
+  header->total_size = total_size;
+  header->layout_hash = ShmLayoutHash(kind, slot_size, slot_count, total_size);
+  header->epoch = SteadyNowUs();
+  header->owner_pid = static_cast<int32_t>(::getpid());
+  header->flags = 0U;
+  std::memset(header->reserved, 0, sizeof(header->reserved));
+}
+
+inline expected<ShmLayoutHeader*, ShmError> ValidateShmLayout(void* base, uint32_t total_size,
+                                                               ShmLayoutKind kind, uint32_t slot_size,
+                                                               uint32_t slot_count) noexcept {
+  if (base == nullptr || total_size < sizeof(ShmLayoutHeader)) {
+    return expected<ShmLayoutHeader*, ShmError>::error(ShmError::kLayoutMismatch);
+  }
+  auto* header = static_cast<ShmLayoutHeader*>(base);
+  if (header->magic != kShmLayoutMagic || header->version != kShmLayoutVersion ||
+      header->header_size != sizeof(ShmLayoutHeader) || header->kind != static_cast<uint32_t>(kind) ||
+      header->slot_size != slot_size || header->slot_count != slot_count ||
+      header->total_size != total_size ||
+      header->layout_hash != ShmLayoutHash(kind, slot_size, slot_count, total_size)) {
+    return expected<ShmLayoutHeader*, ShmError>::error(ShmError::kLayoutMismatch);
+  }
+  return expected<ShmLayoutHeader*, ShmError>::success(header);
+}
+
+inline bool IsProcessAlive(pid_t pid) noexcept {
+  if (pid <= 0) {
+    return false;
+  }
+#if defined(SYS_pidfd_open)
+  const int fd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
+  if (fd >= 0) {
+    ::close(fd);
+    return true;
+  }
+  if (errno == ESRCH) {
+    return false;
+  }
+#endif
+  if (::kill(pid, 0) == 0) {
+    return true;
+  }
+  return errno == EPERM;
+}
 
 // ============================================================================
 // SharedMemorySegment - POSIX shm_open/mmap RAII wrapper
@@ -156,7 +267,8 @@ class SharedMemorySegment final {
 
     seg.fd_ = ::shm_open(seg.name_.c_str(), O_CREAT | O_RDWR | O_EXCL, kShmPermissions);
     if (seg.fd_ < 0) {
-      return expected<SharedMemorySegment, ShmError>::error(ShmError::kCreateFailed);
+      return expected<SharedMemorySegment, ShmError>::error(
+          errno == EEXIST ? ShmError::kAlreadyExists : ShmError::kCreateFailed);
     }
 
     uint32_t aligned_size = PageAlign(size);
@@ -178,16 +290,37 @@ class SharedMemorySegment final {
   }
 
   /**
-   * @brief Create a shared memory segment, removing any stale one first.
+   * @brief Replace an existing segment only when its recorded owner is dead.
    *
-   * Useful when a previous process crashed without calling Unlink().
-   * Equivalent to shm_unlink + Create.
-   *
-   * @param name Segment name (will be prefixed with /osp_shm_).
-   * @param size Size in bytes (will be page-aligned).
-   * @return expected with SharedMemorySegment on success.
+   * A live owner is rejected with kOwnerAlive. A segment without a valid
+   * layout header is rejected with kLayoutMismatch; use ForceReplace() after
+   * an explicit external liveness check when migrating legacy segments.
    */
   static expected<SharedMemorySegment, ShmError> CreateOrReplace(const char* name, uint32_t size) noexcept {
+    auto existing = Open(name);
+    if (!existing.has_value()) {
+      if (existing.get_error() == ShmError::kOpenFailed) {
+        return Create(name, size);
+      }
+      return expected<SharedMemorySegment, ShmError>::error(existing.get_error());
+    }
+    const auto& segment = existing.value();
+    if (!segment.HasValidLayout()) {
+      return expected<SharedMemorySegment, ShmError>::error(ShmError::kLayoutMismatch);
+    }
+    if (IsProcessAlive(static_cast<pid_t>(segment.OwnerPid()))) {
+      return expected<SharedMemorySegment, ShmError>::error(ShmError::kOwnerAlive);
+    }
+    return ForceReplace(name, size);
+  }
+
+  /**
+   * @brief Unconditionally unlink and recreate a segment.
+   *
+   * This is the explicit escape hatch for a confirmed-dead owner or legacy
+   * segments. Prefer Create()/CreateOrReplace() in normal operation.
+   */
+  static expected<SharedMemorySegment, ShmError> ForceReplace(const char* name, uint32_t size) noexcept {
     FixedString<OSP_SHM_CHANNEL_NAME_MAX> full_name;
     BuildName(full_name, name);
     ::shm_unlink(full_name.c_str());
@@ -238,6 +371,35 @@ class SharedMemorySegment final {
   const void* Data() const noexcept { return addr_; }
   uint32_t Size() const noexcept { return size_; }
   const char* Name() const noexcept { return name_.c_str(); }
+
+  /// Epoch of the common layout header, or 0 when this is not a coact/osp
+  /// shared-memory segment with a valid layout header.
+  uint64_t Epoch() const noexcept {
+    if (addr_ == nullptr || size_ < sizeof(ShmLayoutHeader)) {
+      return 0U;
+    }
+    const auto* header = static_cast<const ShmLayoutHeader*>(addr_);
+    return (header->magic == kShmLayoutMagic) ? header->epoch : 0U;
+  }
+
+  /// True when the mapped segment starts with a valid layout header.
+  bool HasValidLayout() const noexcept {
+    if (addr_ == nullptr || size_ < sizeof(ShmLayoutHeader)) {
+      return false;
+    }
+    const auto* header = static_cast<const ShmLayoutHeader*>(addr_);
+    return header->magic == kShmLayoutMagic && header->version == kShmLayoutVersion &&
+           header->header_size == sizeof(ShmLayoutHeader) &&
+           header->total_size == size_;
+  }
+
+  /// Recorded creator PID, or 0 when no valid layout header exists.
+  int32_t OwnerPid() const noexcept {
+    if (!HasValidLayout()) {
+      return 0;
+    }
+    return static_cast<const ShmLayoutHeader*>(addr_)->owner_pid;
+  }
 
  private:
   /// @brief Build full shm name: "/osp_shm_" + user name.
@@ -295,6 +457,7 @@ class ShmRingBuffer final {
   static constexpr uint32_t kSlotSize = SlotSize;
   static constexpr uint32_t kSlotCount = SlotCount;
   static constexpr uint32_t kBufferMask = SlotCount - 1;
+  static constexpr uint32_t kLayoutOffset = sizeof(ShmLayoutHeader);
 
   /**
    * @brief Initialize the ring buffer at a shared memory address.
@@ -302,9 +465,11 @@ class ShmRingBuffer final {
    * @param shm_addr Pointer to shared memory (must be at least Size() bytes).
    * @return Pointer to the initialized ShmRingBuffer.
    */
-  static ShmRingBuffer* InitAt(void* shm_addr) noexcept {
+  static ShmRingBuffer* InitAt(void* shm_addr, uint32_t total_size = Size()) noexcept {
     OSP_ASSERT(shm_addr != nullptr);
-    auto* rb = static_cast<ShmRingBuffer*>(shm_addr);
+    WriteShmLayoutHeader(shm_addr, ShmLayoutKind::kSlotRing, SlotSize, SlotCount, total_size);
+    auto* rb = reinterpret_cast<ShmRingBuffer*>(  // NOLINT
+        static_cast<uint8_t*>(shm_addr) + kLayoutOffset);
 
     // Initialize atomics using placement new
     new (&rb->producer_pos_) std::atomic<uint32_t>(0);
@@ -323,16 +488,21 @@ class ShmRingBuffer final {
    * @param shm_addr Pointer to shared memory containing initialized buffer.
    * @return Pointer to the ShmRingBuffer.
    */
-  static ShmRingBuffer* AttachAt(void* shm_addr) noexcept {
-    OSP_ASSERT(shm_addr != nullptr);
-    return static_cast<ShmRingBuffer*>(shm_addr);
+  static expected<ShmRingBuffer*, ShmError> AttachChecked(void* shm_addr, uint32_t total_size) noexcept {
+    auto valid = ValidateShmLayout(shm_addr, total_size, ShmLayoutKind::kSlotRing, SlotSize, SlotCount);
+    if (!valid.has_value()) {
+      return expected<ShmRingBuffer*, ShmError>::error(valid.get_error());
+    }
+    return expected<ShmRingBuffer*, ShmError>::success(
+        reinterpret_cast<ShmRingBuffer*>(  // NOLINT
+            static_cast<uint8_t*>(shm_addr) + kLayoutOffset));
   }
 
   /**
    * @brief Calculate required size for the ring buffer structure.
    * @return Size in bytes.
    */
-  static constexpr uint32_t Size() noexcept { return sizeof(ShmRingBuffer); }
+  static constexpr uint32_t Size() noexcept { return kLayoutOffset + sizeof(ShmRingBuffer); }
 
   /**
    * @brief Try to push data into the ring buffer (non-blocking).
@@ -436,7 +606,7 @@ class ShmRingBuffer final {
   alignas(64) std::atomic<uint32_t> consumer_pos_;
   Slot slots_[SlotCount];
 
-  // Private constructor - use InitAt/AttachAt
+  // Private constructor - use InitAt/AttachChecked
   ShmRingBuffer() = default;
 };
 
@@ -498,13 +668,13 @@ class ShmChannel final {
     }
 
     channel.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
-    channel.ring_buffer_ = RingBuffer::InitAt(channel.shm_segment_.Data());
+    channel.ring_buffer_ = RingBuffer::InitAt(channel.shm_segment_.Data(), channel.shm_segment_.Size());
 
     return expected<ShmChannel, ShmError>::success(static_cast<ShmChannel&&>(channel));
   }
 
   /**
-   * @brief Create a writer endpoint, removing any stale channel first.
+   * @brief Create a writer endpoint, replacing only a dead owner's channel.
    *
    * Useful when a previous process crashed without calling Unlink().
    *
@@ -522,8 +692,23 @@ class ShmChannel final {
     }
 
     channel.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
-    channel.ring_buffer_ = RingBuffer::InitAt(channel.shm_segment_.Data());
+    channel.ring_buffer_ = RingBuffer::InitAt(channel.shm_segment_.Data(), channel.shm_segment_.Size());
 
+    return expected<ShmChannel, ShmError>::success(static_cast<ShmChannel&&>(channel));
+  }
+
+  /// Explicitly unlink and recreate the channel. Use only after confirming the
+  /// previous writer is dead.
+  static expected<ShmChannel, ShmError> ForceReplaceWriter(const char* name) noexcept {
+    ShmChannel channel;
+    channel.is_writer_ = true;
+    uint32_t shm_size = RingBuffer::Size();
+    auto result = SharedMemorySegment::ForceReplace(name, shm_size);
+    if (!result.has_value()) {
+      return expected<ShmChannel, ShmError>::error(result.get_error());
+    }
+    channel.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    channel.ring_buffer_ = RingBuffer::InitAt(channel.shm_segment_.Data(), channel.shm_segment_.Size());
     return expected<ShmChannel, ShmError>::success(static_cast<ShmChannel&&>(channel));
   }
 
@@ -542,7 +727,11 @@ class ShmChannel final {
     }
 
     channel.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
-    channel.ring_buffer_ = RingBuffer::AttachAt(channel.shm_segment_.Data());
+    auto attached = RingBuffer::AttachChecked(channel.shm_segment_.Data(), channel.shm_segment_.Size());
+    if (!attached.has_value()) {
+      return expected<ShmChannel, ShmError>::error(attached.get_error());
+    }
+    channel.ring_buffer_ = attached.value();
 
     return expected<ShmChannel, ShmError>::success(static_cast<ShmChannel&&>(channel));
   }
@@ -641,6 +830,9 @@ class ShmChannel final {
    */
   uint32_t Depth() const noexcept { return ring_buffer_ ? ring_buffer_->Depth() : 0; }
 
+  /// @brief Segment epoch (changes when CreateOrReplace rebuilds the segment).
+  uint64_t Epoch() const noexcept { return shm_segment_.Epoch(); }
+
  private:
   SharedMemorySegment shm_segment_;
   RingBuffer* ring_buffer_;
@@ -683,6 +875,7 @@ static_assert(sizeof(ShmByteRingHeader) == 16, "ShmByteRingHeader must be 16 byt
  */
 class ShmSpscByteRing final {
   static constexpr uint32_t kHeaderSize = 16;
+  static constexpr uint32_t kLayoutOffset = sizeof(ShmLayoutHeader);
 
  public:
   ShmSpscByteRing() noexcept : header_(nullptr), data_(nullptr), mask_(0) {}
@@ -694,11 +887,13 @@ class ShmSpscByteRing final {
    */
   static ShmSpscByteRing InitAt(void* shm_base, uint32_t total_size) noexcept {
     OSP_ASSERT(shm_base != nullptr);
-    OSP_ASSERT(total_size > kHeaderSize);
+    OSP_ASSERT(total_size > kLayoutOffset + kHeaderSize);
     ShmSpscByteRing ring;
-    ring.header_ = static_cast<ShmByteRingHeader*>(shm_base);
-    ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
-    uint32_t cap = RoundDownPow2(total_size - kHeaderSize);
+    uint32_t cap = RoundDownPow2(total_size - kLayoutOffset - kHeaderSize);
+    WriteShmLayoutHeader(shm_base, ShmLayoutKind::kSpscByteRing, cap, 0U, total_size);
+    ring.header_ = reinterpret_cast<ShmByteRingHeader*>(  // NOLINT
+        static_cast<uint8_t*>(shm_base) + kLayoutOffset);
+    ring.data_ = static_cast<uint8_t*>(shm_base) + kLayoutOffset + kHeaderSize;
     ring.header_->head.store(0, std::memory_order_relaxed);
     ring.header_->tail.store(0, std::memory_order_relaxed);
     ring.header_->capacity = cap;
@@ -712,21 +907,34 @@ class ShmSpscByteRing final {
    * @brief Bind to shared memory as consumer (reads existing header).
    * @param shm_base Pointer to the start of shared memory.
    */
-  static ShmSpscByteRing AttachAt(void* shm_base) noexcept {
-    OSP_ASSERT(shm_base != nullptr);
+  static expected<ShmSpscByteRing, ShmError> AttachChecked(void* shm_base, uint32_t total_size) noexcept {
+    if (shm_base == nullptr || total_size <= kLayoutOffset + kHeaderSize) {
+      return expected<ShmSpscByteRing, ShmError>::error(ShmError::kLayoutMismatch);
+    }
+    const uint32_t cap = RoundDownPow2(total_size - kLayoutOffset - kHeaderSize);
+    auto valid = ValidateShmLayout(shm_base, total_size, ShmLayoutKind::kSpscByteRing, cap, 0U);
+    if (!valid.has_value()) {
+      return expected<ShmSpscByteRing, ShmError>::error(valid.get_error());
+    }
     ShmSpscByteRing ring;
-    ring.header_ = static_cast<ShmByteRingHeader*>(shm_base);
-    ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
+    ring.header_ = reinterpret_cast<ShmByteRingHeader*>(  // NOLINT
+        static_cast<uint8_t*>(shm_base) + kLayoutOffset);
+    ring.data_ = static_cast<uint8_t*>(shm_base) + kLayoutOffset + kHeaderSize;
     std::atomic_thread_fence(std::memory_order_acquire);
-    ring.mask_ = ring.header_->capacity - 1;
-    return ring;
+    if (ring.header_->capacity != cap) {
+      return expected<ShmSpscByteRing, ShmError>::error(ShmError::kLayoutMismatch);
+    }
+    ring.mask_ = cap - 1;
+    return expected<ShmSpscByteRing, ShmError>::success(ring);
   }
 
   /**
    * @brief Calculate minimum shared memory size for given data capacity.
    * @param data_capacity Desired data area size (will be rounded down to power of 2).
    */
-  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept { return kHeaderSize + data_capacity; }
+  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept {
+    return kLayoutOffset + kHeaderSize + data_capacity;
+  }
 
   // ---- Producer API ----
 
@@ -933,7 +1141,7 @@ class ShmByteChannel final {
   }
 
   /**
-   * @brief Create a writer endpoint, removing any stale channel first.
+   * @brief Create a writer endpoint, replacing only a dead owner's channel.
    * @param name Channel name.
    * @param capacity Data area capacity in bytes (rounded down to power of 2).
    */
@@ -943,6 +1151,22 @@ class ShmByteChannel final {
     ch.is_writer_ = true;
     uint32_t shm_size = ShmSpscByteRing::RequiredSize(capacity);
     auto result = SharedMemorySegment::CreateOrReplace(name, shm_size);
+    if (!result.has_value()) {
+      return expected<ShmByteChannel, ShmError>::error(result.get_error());
+    }
+    ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    ch.ring_ = ShmSpscByteRing::InitAt(ch.shm_segment_.Data(), ch.shm_segment_.Size());
+    return expected<ShmByteChannel, ShmError>::success(static_cast<ShmByteChannel&&>(ch));
+  }
+
+  /// Explicitly unlink and recreate the channel. Use only after confirming the
+  /// previous writer is dead.
+  static expected<ShmByteChannel, ShmError> ForceReplaceWriter(
+      const char* name, uint32_t capacity = OSP_SHM_BYTE_RING_CAPACITY) noexcept {
+    ShmByteChannel ch;
+    ch.is_writer_ = true;
+    uint32_t shm_size = ShmSpscByteRing::RequiredSize(capacity);
+    auto result = SharedMemorySegment::ForceReplace(name, shm_size);
     if (!result.has_value()) {
       return expected<ShmByteChannel, ShmError>::error(result.get_error());
     }
@@ -963,7 +1187,11 @@ class ShmByteChannel final {
       return expected<ShmByteChannel, ShmError>::error(result.get_error());
     }
     ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
-    ch.ring_ = ShmSpscByteRing::AttachAt(ch.shm_segment_.Data());
+    auto attached = ShmSpscByteRing::AttachChecked(ch.shm_segment_.Data(), ch.shm_segment_.Size());
+    if (!attached.has_value()) {
+      return expected<ShmByteChannel, ShmError>::error(attached.get_error());
+    }
+    ch.ring_ = attached.value();
     return expected<ShmByteChannel, ShmError>::success(static_cast<ShmByteChannel&&>(ch));
   }
 
@@ -1026,6 +1254,9 @@ class ShmByteChannel final {
   /// @brief Data area capacity.
   uint32_t Capacity() const noexcept { return ring_.Capacity(); }
 
+  /// @brief Segment epoch (changes when CreateOrReplace rebuilds the segment).
+  uint64_t Epoch() const noexcept { return shm_segment_.Epoch(); }
+
  private:
   SharedMemorySegment shm_segment_;
   ShmSpscByteRing ring_;
@@ -1065,6 +1296,7 @@ static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t),
 class ShmSpmcByteRing final {
  public:
   static constexpr uint32_t kHeaderSize = static_cast<uint32_t>(sizeof(ShmSpmcByteRingHeader));
+  static constexpr uint32_t kLayoutOffset = sizeof(ShmLayoutHeader);
 
   ShmSpmcByteRing() noexcept : header_(nullptr), data_(nullptr), mask_(0) {}
 
@@ -1077,14 +1309,16 @@ class ShmSpmcByteRing final {
   static ShmSpmcByteRing InitAt(void* shm_base, uint32_t total_size,
                                 uint32_t max_consumers = OSP_SHM_SPMC_MAX_CONSUMERS) noexcept {
     OSP_ASSERT(shm_base != nullptr);
-    OSP_ASSERT(total_size > kHeaderSize);
+    OSP_ASSERT(total_size > kLayoutOffset + kHeaderSize);
     if (max_consumers > OSP_SHM_SPMC_MAX_CONSUMERS) {
       max_consumers = OSP_SHM_SPMC_MAX_CONSUMERS;
     }
     ShmSpmcByteRing ring;
-    ring.header_ = static_cast<ShmSpmcByteRingHeader*>(shm_base);
-    ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
-    uint32_t cap = RoundDownPow2(total_size - kHeaderSize);
+    uint32_t cap = RoundDownPow2(total_size - kLayoutOffset - kHeaderSize);
+    WriteShmLayoutHeader(shm_base, ShmLayoutKind::kSpmcByteRing, cap, max_consumers, total_size);
+    ring.header_ = reinterpret_cast<ShmSpmcByteRingHeader*>(  // NOLINT
+        static_cast<uint8_t*>(shm_base) + kLayoutOffset);
+    ring.data_ = static_cast<uint8_t*>(shm_base) + kLayoutOffset + kHeaderSize;
     ring.header_->head.store(0, std::memory_order_relaxed);
     ring.header_->capacity = cap;
     ring.header_->max_consumers = max_consumers;
@@ -1102,18 +1336,33 @@ class ShmSpmcByteRing final {
    * @brief Attach to existing shared memory (consumer or observer).
    * @param shm_base Pointer to the start of shared memory.
    */
-  static ShmSpmcByteRing AttachAt(void* shm_base) noexcept {
-    OSP_ASSERT(shm_base != nullptr);
+  static expected<ShmSpmcByteRing, ShmError> AttachChecked(void* shm_base, uint32_t total_size) noexcept {
+    if (shm_base == nullptr || total_size <= kLayoutOffset + kHeaderSize) {
+      return expected<ShmSpmcByteRing, ShmError>::error(ShmError::kLayoutMismatch);
+    }
+    const auto* layout = static_cast<const ShmLayoutHeader*>(shm_base);
+    const uint32_t cap = RoundDownPow2(total_size - kLayoutOffset - kHeaderSize);
+    const uint32_t max_consumers = layout->slot_count;
+    auto valid = ValidateShmLayout(shm_base, total_size, ShmLayoutKind::kSpmcByteRing, cap, max_consumers);
+    if (!valid.has_value() || max_consumers == 0U || max_consumers > OSP_SHM_SPMC_MAX_CONSUMERS) {
+      return expected<ShmSpmcByteRing, ShmError>::error(ShmError::kLayoutMismatch);
+    }
     ShmSpmcByteRing ring;
-    ring.header_ = static_cast<ShmSpmcByteRingHeader*>(shm_base);
-    ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
+    ring.header_ = reinterpret_cast<ShmSpmcByteRingHeader*>(  // NOLINT
+        static_cast<uint8_t*>(shm_base) + kLayoutOffset);
+    ring.data_ = static_cast<uint8_t*>(shm_base) + kLayoutOffset + kHeaderSize;
     std::atomic_thread_fence(std::memory_order_acquire);
-    ring.mask_ = ring.header_->capacity - 1;
-    return ring;
+    if (ring.header_->capacity != cap || ring.header_->max_consumers != max_consumers) {
+      return expected<ShmSpmcByteRing, ShmError>::error(ShmError::kLayoutMismatch);
+    }
+    ring.mask_ = cap - 1;
+    return expected<ShmSpmcByteRing, ShmError>::success(ring);
   }
 
   /// @brief Calculate minimum shared memory size for given data capacity.
-  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept { return kHeaderSize + data_capacity; }
+  static constexpr uint32_t RequiredSize(uint32_t data_capacity) noexcept {
+    return kLayoutOffset + kHeaderSize + data_capacity;
+  }
 
   // ---- Consumer registration ----
 
@@ -1363,7 +1612,7 @@ class ShmSpmcByteChannel final {
   }
 
   /**
-   * @brief Create a writer endpoint, removing any stale channel first.
+   * @brief Create a writer endpoint, replacing only a dead owner's channel.
    */
   static expected<ShmSpmcByteChannel, ShmError> CreateOrReplaceWriter(
       const char* name, uint32_t capacity = OSP_SHM_BYTE_RING_CAPACITY,
@@ -1372,6 +1621,23 @@ class ShmSpmcByteChannel final {
     ch.is_writer_ = true;
     uint32_t shm_size = ShmSpmcByteRing::RequiredSize(capacity);
     auto result = SharedMemorySegment::CreateOrReplace(name, shm_size);
+    if (!result.has_value()) {
+      return expected<ShmSpmcByteChannel, ShmError>::error(result.get_error());
+    }
+    ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
+    ch.ring_ = ShmSpmcByteRing::InitAt(ch.shm_segment_.Data(), ch.shm_segment_.Size(), max_consumers);
+    return expected<ShmSpmcByteChannel, ShmError>::success(static_cast<ShmSpmcByteChannel&&>(ch));
+  }
+
+  /// Explicitly unlink and recreate the channel. Use only after confirming the
+  /// previous writer is dead.
+  static expected<ShmSpmcByteChannel, ShmError> ForceReplaceWriter(
+      const char* name, uint32_t capacity = OSP_SHM_BYTE_RING_CAPACITY,
+      uint32_t max_consumers = OSP_SHM_SPMC_MAX_CONSUMERS) noexcept {
+    ShmSpmcByteChannel ch;
+    ch.is_writer_ = true;
+    uint32_t shm_size = ShmSpmcByteRing::RequiredSize(capacity);
+    auto result = SharedMemorySegment::ForceReplace(name, shm_size);
     if (!result.has_value()) {
       return expected<ShmSpmcByteChannel, ShmError>::error(result.get_error());
     }
@@ -1393,7 +1659,11 @@ class ShmSpmcByteChannel final {
       return expected<ShmSpmcByteChannel, ShmError>::error(result.get_error());
     }
     ch.shm_segment_ = static_cast<SharedMemorySegment&&>(result.value());
-    ch.ring_ = ShmSpmcByteRing::AttachAt(ch.shm_segment_.Data());
+    auto attached = ShmSpmcByteRing::AttachChecked(ch.shm_segment_.Data(), ch.shm_segment_.Size());
+    if (!attached.has_value()) {
+      return expected<ShmSpmcByteChannel, ShmError>::error(attached.get_error());
+    }
+    ch.ring_ = attached.value();
     ch.consumer_id_ = ch.ring_.RegisterConsumer();
     if (ch.consumer_id_ < 0) {
       return expected<ShmSpmcByteChannel, ShmError>::error(ShmError::kFull);
@@ -1460,6 +1730,9 @@ class ShmSpmcByteChannel final {
 
   /// @brief This reader's consumer ID (-1 if writer).
   int32_t ConsumerId() const noexcept { return consumer_id_; }
+
+  /// @brief Segment epoch (changes when CreateOrReplace rebuilds the segment).
+  uint64_t Epoch() const noexcept { return shm_segment_.Epoch(); }
 
  private:
   SharedMemorySegment shm_segment_;

@@ -70,7 +70,7 @@ namespace osp {
 
 /// Fault priority levels (lower value = higher priority).
 enum class FaultPriority : uint8_t {
-  kCritical = 0U,  ///< System safety, never dropped
+  kCritical = 0U,  ///< System safety; admitted ahead of other priorities, still capacity-bounded
   kHigh = 1U,      ///< Hardware fault, comm loss
   kMedium = 2U,    ///< Performance degradation
   kLow = 3U        ///< Diagnostics, statistics
@@ -334,6 +334,10 @@ class FaultCollector {
   /// Must be called before Start(). The pointer must remain valid until Stop().
   void SetConsumerHeartbeat(ThreadHeartbeat* hb) noexcept { consumer_heartbeat_ = hb; }
 
+  /// True when a consumer heartbeat has been wired. Safety profiles should
+  /// require this and fail startup when it is absent.
+  bool IsConsumerMonitored() const noexcept { return consumer_heartbeat_ != nullptr; }
+
   /// Set shutdown callback (invoked when a hook returns kShutdown).
   /// The callback is invoked from the consumer thread.
   void SetShutdownCallback(ShutdownFn fn, void* ctx = nullptr) noexcept {
@@ -355,6 +359,13 @@ class FaultCollector {
     }
     OSP_LOG_INFO("FCCU", "Consumer thread started");
     return expected<void, FaultCollectorError>::success();
+  }
+
+  /// Start with a consumer heartbeat in one call. The heartbeat is the
+  /// application's signal that the fault-processing path itself is alive.
+  expected<void, FaultCollectorError> Start(ThreadHeartbeat* heartbeat) noexcept {
+    SetConsumerHeartbeat(heartbeat);
+    return Start();
   }
 
   /// Stop the consumer thread (blocks until joined).
@@ -388,10 +399,17 @@ class FaultCollector {
     uint32_t pri = static_cast<uint32_t>(priority);
     auto& queue = queues_[pri];
 
+    // A critical fault is a system state, not a log entry. Latch it before
+    // admission so a full queue cannot make the fault disappear entirely.
+    if (priority == FaultPriority::kCritical) {
+      SetFaultActive(fault_index);
+    }
+
     // Priority admission control
     if (OSP_UNLIKELY(!AdmitByPriority(pri, queue.Size()))) {
       stats_dropped_[pri].fetch_add(1U, std::memory_order_relaxed);
       stats_total_dropped_.fetch_add(1U, std::memory_order_relaxed);
+      fault_overflow_.store(true, std::memory_order_release);
       if (overflow_cb_) {
         overflow_cb_(fault_index, priority);
       }
@@ -408,6 +426,7 @@ class FaultCollector {
     if (OSP_UNLIKELY(!queue.TryPush(entry))) {
       stats_dropped_[pri].fetch_add(1U, std::memory_order_relaxed);
       stats_total_dropped_.fetch_add(1U, std::memory_order_relaxed);
+      fault_overflow_.store(true, std::memory_order_release);
       if (overflow_cb_) {
         overflow_cb_(fault_index, priority);
       }
@@ -415,10 +434,12 @@ class FaultCollector {
       return expected<void, FaultCollectorError>::error(FaultCollectorError::kQueueFull);
     }
 
-    // Update stats and active bitmap
+    // Update stats. The active bit was already latched for critical faults.
     stats_reported_[pri].fetch_add(1U, std::memory_order_relaxed);
     stats_total_reported_.fetch_add(1U, std::memory_order_relaxed);
-    SetFaultActive(fault_index);
+    if (priority != FaultPriority::kCritical) {
+      SetFaultActive(fault_index);
+    }
 
     // Record to recent ring buffer
     {
@@ -477,8 +498,20 @@ class FaultCollector {
     for (uint32_t i = 0U; i < kBitmapWords; ++i) {
       active_bitmap_[i].store(0U, std::memory_order_relaxed);
     }
+    fault_overflow_.store(false, std::memory_order_release);
     OSP_LOG_DEBUG("FCCU", "All faults cleared");
   }
+
+  /// True when at least one fault report was rejected by admission or queue
+  /// capacity since the last ClearAllFaults()/ClearFaultOverflow().
+  bool IsFaultOverflow() const noexcept { return fault_overflow_.load(std::memory_order_acquire); }
+
+  /// Clear only the overflow latch, leaving active fault bits untouched.
+  void ClearFaultOverflow() noexcept { fault_overflow_.store(false, std::memory_order_release); }
+
+  /// Number of completed consumer-loop iterations. A stalled consumer can be
+  /// distinguished from a merely idle one by watching this counter advance.
+  uint32_t ConsumerCycles() const noexcept { return consumer_cycles_.load(std::memory_order_relaxed); }
 
   /// Get a snapshot of statistics.
   FaultStatistics GetStatistics() const noexcept {
@@ -643,6 +676,7 @@ class FaultCollector {
       if (consumer_heartbeat_ != nullptr) {
         consumer_heartbeat_->Beat();
       }
+      consumer_cycles_.fetch_add(1U, std::memory_order_relaxed);
       if (processed == 0U) {
         // 10ms timed wait; a Push or shutdown signals to wake early. The queue
         // is the source of truth, so a stale signal only costs an empty batch.
@@ -786,6 +820,8 @@ class FaultCollector {
   std::atomic<uint64_t> stats_total_dropped_{0U};
   std::array<std::atomic<uint64_t>, detail::kPriorityLevels> stats_reported_{};
   std::array<std::atomic<uint64_t>, detail::kPriorityLevels> stats_dropped_{};
+  std::atomic<bool> fault_overflow_{false};
+  std::atomic<uint32_t> consumer_cycles_{0U};
 
   // Circuit breaker driven by queue drops and watermark samples.
   Breaker<> breaker_;

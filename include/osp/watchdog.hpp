@@ -98,6 +98,8 @@ enum class WatchdogError : uint8_t {
   kSlotsFull = 0,   ///< All watchdog slots are occupied.
   kInvalidTimeout,  ///< Timeout value is zero or invalid.
   kNotRegistered,   ///< Slot ID not found or already unregistered.
+  kThreadStartFailed,  ///< Auto-check thread could not be started.
+  kInvalidRecoveryBeats,  ///< Recovery hysteresis must be at least one check.
 };
 
 // ============================================================================
@@ -111,6 +113,8 @@ struct WatchdogSlotInfo {
   uint64_t timeout_us;    ///< Configured timeout (microseconds)
   uint64_t last_beat_us;  ///< Last heartbeat timestamp (microseconds)
   bool timed_out;         ///< Currently timed out
+  uint8_t healthy_beats;  ///< Consecutive healthy checks while timed out
+  uint8_t recover_beats;  ///< Healthy checks required to recover this slot
 };
 
 // ============================================================================
@@ -135,6 +139,10 @@ class ThreadWatchdog final {
   static_assert(MaxThreads > 0, "MaxThreads must be greater than 0");
 
  public:
+  /// Consecutive healthy Check() cycles needed before a timed-out slot is
+  /// considered recovered. One fresh beat is not enough.
+  static constexpr uint8_t kRecoverBeats = 3U;
+
   // --------------------------------------------------------------------------
   // Callback Types
   // --------------------------------------------------------------------------
@@ -180,9 +188,13 @@ class ThreadWatchdog final {
    * @param timeout_ms  Timeout period in milliseconds (must be > 0).
    * @return RegResult on success, or WatchdogError on failure.
    */
-  expected<RegResult, WatchdogError> Register(const char* name, uint32_t timeout_ms) noexcept {
+  expected<RegResult, WatchdogError> Register(const char* name, uint32_t timeout_ms,
+                                              uint8_t recover_beats = kRecoverBeats) noexcept {
     if (timeout_ms == 0U) {
       return expected<RegResult, WatchdogError>::error(WatchdogError::kInvalidTimeout);
+    }
+    if (recover_beats == 0U) {
+      return expected<RegResult, WatchdogError>::error(WatchdogError::kInvalidRecoveryBeats);
     }
 
     std::lock_guard<osp::Mutex> lock(mutex_);
@@ -193,6 +205,8 @@ class ThreadWatchdog final {
         slots_[i].timeout_us = static_cast<uint64_t>(timeout_ms) * 1000ULL;
         slots_[i].heartbeat.Beat();  // Initialize with current time
         slots_[i].timed_out = false;
+        slots_[i].healthy_beats = 0U;
+        slots_[i].recover_beats = recover_beats;
         // Bump generation BEFORE activating, so a stale Feed carrying the old
         // generation is refused once this slot is owned by a new registration.
         const uint32_t generation = slots_[i].generation.fetch_add(1, std::memory_order_relaxed) + 1U;
@@ -288,23 +302,32 @@ class ThreadWatchdog final {
         const uint64_t last_beat = slots_[i].heartbeat.LastBeatUs();
         const bool is_timed_out = (now > last_beat) && ((now - last_beat) > slots_[i].timeout_us);
 
-        if (is_timed_out && !slots_[i].timed_out) {
-          slots_[i].timed_out = true;
-          if (on_timeout_ != nullptr) {
-            timeout_pending[timeout_count].fn = on_timeout_;
-            timeout_pending[timeout_count].slot_id = EncodedId(i);
-            timeout_pending[timeout_count].name = slots_[i].name;
-            timeout_pending[timeout_count].ctx = timeout_ctx_;
-            ++timeout_count;
+        if (is_timed_out) {
+          slots_[i].healthy_beats = 0U;
+          if (!slots_[i].timed_out) {
+            slots_[i].timed_out = true;
+            if (on_timeout_ != nullptr) {
+              timeout_pending[timeout_count].fn = on_timeout_;
+              timeout_pending[timeout_count].slot_id = EncodedId(i);
+              timeout_pending[timeout_count].name = slots_[i].name;
+              timeout_pending[timeout_count].ctx = timeout_ctx_;
+              ++timeout_count;
+            }
           }
-        } else if (!is_timed_out && slots_[i].timed_out) {
-          slots_[i].timed_out = false;
-          if (on_recovered_ != nullptr) {
-            recover_pending[recover_count].fn = on_recovered_;
-            recover_pending[recover_count].slot_id = EncodedId(i);
-            recover_pending[recover_count].name = slots_[i].name;
-            recover_pending[recover_count].ctx = recover_ctx_;
-            ++recover_count;
+        } else if (slots_[i].timed_out) {
+          if (slots_[i].healthy_beats < slots_[i].recover_beats) {
+            ++slots_[i].healthy_beats;
+          }
+          if (slots_[i].healthy_beats >= slots_[i].recover_beats) {
+            slots_[i].timed_out = false;
+            slots_[i].healthy_beats = 0U;
+            if (on_recovered_ != nullptr) {
+              recover_pending[recover_count].fn = on_recovered_;
+              recover_pending[recover_count].slot_id = EncodedId(i);
+              recover_pending[recover_count].name = slots_[i].name;
+              recover_pending[recover_count].ctx = recover_ctx_;
+              ++recover_count;
+            }
           }
         }
 
@@ -400,6 +423,8 @@ class ThreadWatchdog final {
         info.timeout_us = slots_[i].timeout_us;
         info.last_beat_us = slots_[i].heartbeat.LastBeatUs();
         info.timed_out = slots_[i].timed_out;
+        info.healthy_beats = slots_[i].healthy_beats;
+        info.recover_beats = slots_[i].recover_beats;
         fn(info);
       }
     }
@@ -437,23 +462,34 @@ class ThreadWatchdog final {
    *
    * @param interval_ms  Check interval in milliseconds (must be > 0).
    */
-  void StartAutoCheck(uint32_t interval_ms) noexcept {
+  expected<void, WatchdogError> StartAutoCheck(uint32_t interval_ms) noexcept {
     if (interval_ms == 0U) {
-      return;
+      return expected<void, WatchdogError>::error(WatchdogError::kInvalidTimeout);
     }
-    bool expected = false;
-    if (!auto_check_running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-      return;  // Already running
+    bool was_running = false;
+    if (!auto_check_running_.compare_exchange_strong(was_running, true, std::memory_order_acq_rel)) {
+      return expected<void, WatchdogError>::success();  // Already running
     }
     if (!auto_check_thread_.Start([this, interval_ms]() {
           while (auto_check_running_.load(std::memory_order_acquire)) {
             Check();
+            check_cycles_.fetch_add(1U, std::memory_order_relaxed);
             osp::ThreadSleepUs(static_cast<uint64_t>(interval_ms) * 1000ULL);
           }
         })) {
       auto_check_running_.store(false, std::memory_order_release);
+      return expected<void, WatchdogError>::error(WatchdogError::kThreadStartFailed);
     }
+    return expected<void, WatchdogError>::success();
   }
+
+  /// True while the auto-check thread is intended to be running. This is a
+  /// liveness flag, not proof of progress; use CheckCycles() for progress.
+  bool IsAutoCheckRunning() const noexcept { return auto_check_running_.load(std::memory_order_acquire); }
+
+  /// Number of completed auto-check cycles. A stalled Check() callback leaves
+  /// this counter unchanged even though IsAutoCheckRunning() stays true.
+  uint32_t CheckCycles() const noexcept { return check_cycles_.load(std::memory_order_relaxed); }
 
   /**
    * @brief Stop the internal auto-check thread.
@@ -500,6 +536,8 @@ class ThreadWatchdog final {
     ThreadHeartbeat heartbeat;  ///< Heartbeat signal (in platform.hpp).
     uint64_t timeout_us{0};
     bool timed_out{false};  ///< Protected by mutex_.
+    uint8_t healthy_beats{0};  ///< Consecutive fresh checks while timed out.
+    uint8_t recover_beats{kRecoverBeats};  ///< Per-slot recovery hysteresis.
     FixedString<32> name;
   };
 
@@ -510,6 +548,7 @@ class ThreadWatchdog final {
   RecoverCallback on_recovered_{nullptr};
   void* recover_ctx_{nullptr};
   std::atomic<bool> auto_check_running_{false};
+  std::atomic<uint32_t> check_cycles_{0U};
   osp::Thread auto_check_thread_;
 };
 

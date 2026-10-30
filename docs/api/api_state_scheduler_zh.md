@@ -243,6 +243,7 @@ explicit PinnedExecutor(int32_t cpu_core) noexcept;
 | `lock_memory` | `bool` | false | 是否锁定内存（mlockall） |
 | `stack_size` | `uint32_t` | 0 | 栈大小（0=默认） |
 | `cpu_affinity` | `int32_t` | -1 | CPU 绑定（-1=不绑定） |
+| `require_realtime` | `bool` | false | true 时任一实时配置失败则拒绝启动 |
 
 ### RealtimeExecutor\<PayloadVariant\>
 
@@ -254,7 +255,17 @@ explicit PinnedExecutor(int32_t cpu_core) noexcept;
 explicit RealtimeExecutor(const RealtimeConfig& cfg) noexcept;
 ```
 
-**公共方法**: 同 `StaticExecutor`，额外提供 `const RealtimeConfig& GetConfig() const`
+**公共方法**: 同 `StaticExecutor`，额外提供：
+
+```cpp
+const RealtimeConfig& GetConfig() const noexcept;
+expected<void, ExecutorError> StartChecked() noexcept;  // 配置失败返回错误
+ExecutorError GetLastError() const noexcept;
+```
+
+`StartChecked()` 在 `require_realtime == true` 时会等待调度线程完成
+`mlockall`/CPU 绑定/调度策略设置；任一失败则不进入运行态。`Start()` 保留
+兼容行为，忽略返回值。
 
 **使用示例**:
 

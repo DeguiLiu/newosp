@@ -802,6 +802,102 @@ class DataDispatcher {
     return expected<uint32_t, JobPoolError>::error(JobPoolError::kPoolExhausted);
   }
 
+  /// Move-only ownership handle for one allocated block. Destruction releases
+  /// the block through the generation-checked Release() path, so an early
+  /// return cannot skip the release. Use AllocGuard() to create one.
+  class BlockGuard {
+   public:
+    BlockGuard() noexcept = default;
+
+    BlockGuard(BlockGuard&& other) noexcept
+        : dispatcher_(other.dispatcher_),
+          block_id_(other.block_id_),
+          generation_(other.generation_) {
+      other.dispatcher_ = nullptr;
+    }
+
+    BlockGuard& operator=(BlockGuard&& other) noexcept {
+      if (this != &other) {
+        Reset();
+        dispatcher_ = other.dispatcher_;
+        block_id_ = other.block_id_;
+        generation_ = other.generation_;
+        other.dispatcher_ = nullptr;
+      }
+      return *this;
+    }
+
+    BlockGuard(const BlockGuard&) = delete;
+    BlockGuard& operator=(const BlockGuard&) = delete;
+
+    ~BlockGuard() noexcept { Reset(); }
+
+    uint8_t* Writable() noexcept {
+      return (dispatcher_ != nullptr) ? dispatcher_->GetWritable(block_id_) : nullptr;
+    }
+
+    const uint8_t* Readable() const noexcept {
+      return (dispatcher_ != nullptr) ? dispatcher_->GetReadable(block_id_, generation_) : nullptr;
+    }
+
+    uint32_t Id() const noexcept { return block_id_; }
+    uint32_t Generation() const noexcept { return generation_; }
+
+    /// Give up ownership without releasing. Used when ownership is transferred
+    /// to Submit(BlockGuard&&, ...).
+    void Disarm() noexcept { dispatcher_ = nullptr; }
+
+    explicit operator bool() const noexcept { return dispatcher_ != nullptr; }
+
+   private:
+    friend class DataDispatcher;
+
+    BlockGuard(DataDispatcher* dispatcher, uint32_t block_id, uint32_t generation) noexcept
+        : dispatcher_(dispatcher), block_id_(block_id), generation_(generation) {}
+
+    void Reset() noexcept {
+      if (dispatcher_ != nullptr) {
+        if (!dispatcher_->Abandon(block_id_, generation_)) {
+          (void)dispatcher_->Release(block_id_, generation_);
+        }
+        dispatcher_ = nullptr;
+      }
+    }
+
+    DataDispatcher* dispatcher_{nullptr};
+    uint32_t block_id_{0U};
+    uint32_t generation_{0U};
+  };
+
+  /// Allocate with an RAII handle. The handle releases on scope exit unless
+  /// ownership is transferred through Submit(BlockGuard&&, ...).
+  expected<BlockGuard, JobPoolError> AllocGuard() noexcept {
+    auto result = Alloc();
+    if (!result.has_value()) {
+      return expected<BlockGuard, JobPoolError>::error(result.get_error());
+    }
+    const uint32_t block_id = result.value();
+    return expected<BlockGuard, JobPoolError>::success(
+        BlockGuard(this, block_id, GetGeneration(block_id)));
+  }
+
+  /// Release an allocated-but-never-submitted block. Used by BlockGuard when
+  /// ownership was not transferred to Submit(). Returns false for a block that
+  /// has already moved past kAllocated; the caller should use Release() then.
+  bool Abandon(uint32_t block_id, uint32_t generation) noexcept {
+    OSP_ASSERT(block_id < Store::Capacity());
+    if (generation != GetGeneration(block_id)) {
+      return false;
+    }
+    DataBlock* blk = store_.GetBlock(block_id);
+    if (blk->GetState() != BlockState::kAllocated ||
+        blk->refcount.load(std::memory_order_acquire) != 0U) {
+      return false;
+    }
+    Recycle(block_id);
+    return true;
+  }
+
   /// @brief Get writable payload pointer for filling data.
   uint8_t* GetWritable(uint32_t block_id) noexcept {
     OSP_ASSERT(block_id < Store::Capacity());
@@ -837,6 +933,19 @@ class DataDispatcher {
     if (!executed) {
       notify_.OnSubmit(block_id, payload_size);
     }
+  }
+
+  /// Submit a guarded block. Ownership is consumed only on success; the guard
+  /// remains responsible for release if validation fails.
+  expected<void, JobPoolError> Submit(BlockGuard&& guard, uint32_t payload_size,
+                                      uint32_t consumer_count = 0U) noexcept {
+    if (!guard) {
+      return expected<void, JobPoolError>::error(JobPoolError::kInvalidBlockId);
+    }
+    const uint32_t block_id = guard.Id();
+    Submit(block_id, payload_size, consumer_count);
+    guard.Disarm();
+    return expected<void, JobPoolError>::success();
   }
 
   // --------------------------------------------------------------------------
@@ -962,29 +1071,43 @@ class DataDispatcher {
     for (uint32_t i = 0U; i < Store::Capacity(); ++i) {
       DataBlock* blk = store_.GetBlock(i);
       auto st = blk->GetState();
-      if (st == BlockState::kProcessing || st == BlockState::kReady) {
-        if (blk->deadline_us != 0U && now > blk->deadline_us) {
-          // CAS loop: atomically claim refcount (set to 0).
-          // Only the thread that wins the CAS sets kTimeout and recycles.
-          // This prevents a race where Release recycles (kFree) but
-          // ScanTimeout overwrites state to kTimeout afterwards.
-          uint32_t cur = blk->refcount.load(std::memory_order_acquire);
-          bool claimed = false;
-          while (cur > 0U) {
-            if (blk->refcount.compare_exchange_weak(cur, 0U, std::memory_order_acq_rel, std::memory_order_acquire)) {
-              claimed = true;
-              break;
-            }
+      if ((st != BlockState::kProcessing && st != BlockState::kReady) ||
+          blk->deadline_us == 0U || now <= blk->deadline_us) {
+        continue;
+      }
+
+      if (st == BlockState::kReady) {
+        // No handler owns a Ready block. Claim all references before touching
+        // the state so a concurrent Release cannot also recycle it.
+        uint32_t cur = blk->refcount.load(std::memory_order_acquire);
+        bool claimed = false;
+        while (cur > 0U) {
+          if (blk->refcount.compare_exchange_weak(cur, 0U, std::memory_order_acq_rel,
+                                                  std::memory_order_acquire)) {
+            claimed = true;
+            break;
           }
-          if (claimed) {
-            blk->SetState(BlockState::kTimeout);
-            if (on_timeout != nullptr) {
-              on_timeout(i, ctx);
-            }
-            Recycle(i);
-            ++count;
+        }
+        if (claimed) {
+          blk->SetState(BlockState::kTimeout);
+          if (on_timeout != nullptr) {
+            on_timeout(i, ctx);
           }
-          // If !claimed: Release already recycled this block. Skip.
+          Recycle(i);
+          ++count;
+        }
+      } else {
+        // A handler may still hold kProcessing. Only claim the state
+        // transition; do not touch refcount or recycle under the handler.
+        uint8_t expected_state = static_cast<uint8_t>(BlockState::kProcessing);
+        if (blk->state.compare_exchange_strong(expected_state,
+                                                static_cast<uint8_t>(BlockState::kTimeout),
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+          if (on_timeout != nullptr) {
+            on_timeout(i, ctx);
+          }
+          ++count;
         }
       }
     }
@@ -1010,9 +1133,14 @@ class DataDispatcher {
     for (uint32_t i = 0U; i < Store::Capacity(); ++i) {
       DataBlock* blk = store_.GetBlock(i);
       auto st = blk->GetState();
-      if (st == BlockState::kProcessing || st == BlockState::kReady) {
+      if (st == BlockState::kProcessing || st == BlockState::kReady || st == BlockState::kTimeout) {
         if (predicate != nullptr && predicate(i, ctx)) {
           uint32_t cur = blk->refcount.load(std::memory_order_acquire);
+          if (st == BlockState::kTimeout && cur == 0U) {
+            Recycle(i);
+            ++count;
+            continue;
+          }
           bool claimed = false;
           while (cur > 0U) {
             if (blk->refcount.compare_exchange_weak(cur, 0U, std::memory_order_acq_rel, std::memory_order_acquire)) {
@@ -1021,7 +1149,9 @@ class DataDispatcher {
             }
           }
           if (claimed) {
-            blk->SetState(BlockState::kError);
+            if (st != BlockState::kTimeout) {
+              blk->SetState(BlockState::kError);
+            }
             Recycle(i);
             ++count;
           }
@@ -1171,6 +1301,13 @@ class DataDispatcher {
         if ((mask & (static_cast<uint64_t>(1U) << b)) == 0U)
           continue;
         DataBlock* blk = store_.GetBlock(b);
+        const BlockState state = blk->GetState();
+        if (state == BlockState::kProcessing || state == BlockState::kTimeout) {
+          // A heartbeat-expired consumer may merely be paused (SIGSTOP,
+          // scheduler starvation), not dead. Do not recycle the block under a
+          // possible live handler; mark it for explicit ForceCleanup instead.
+          continue;
+        }
         // CAS loop: decrement refcount for this consumer
         uint32_t cur = blk->refcount.load(std::memory_order_acquire);
         while (cur > 0U) {
@@ -1204,7 +1341,19 @@ class DataDispatcher {
 
   void Recycle(uint32_t block_id) noexcept {
     DataBlock* blk = store_.GetBlock(block_id);
-    blk->SetState(BlockState::kFree);
+    // Make recycle idempotent: concurrent Release / ScanTimeout / ForceCleanup
+    // may all observe "last reference" or "timeout" at the same time. Only
+    // the first state transition to kFree pushes the block onto the free list.
+    uint8_t expected_state = blk->state.load(std::memory_order_acquire);
+    for (;;) {
+      if (expected_state == static_cast<uint8_t>(BlockState::kFree)) {
+        return;
+      }
+      if (blk->state.compare_exchange_weak(expected_state, static_cast<uint8_t>(BlockState::kFree),
+                                           std::memory_order_acq_rel, std::memory_order_acquire)) {
+        break;
+      }
+    }
     store_.AllocCount().fetch_sub(1U, std::memory_order_relaxed);
     // CAS push to free list head; tag increments so a pop/pop-cancel ABA
     // cannot make a stale head read succeed.

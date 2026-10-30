@@ -877,6 +877,7 @@ struct RealtimeConfig {
   bool lock_memory = false;         // mlockall(MCL_CURRENT | MCL_FUTURE)
   uint32_t stack_size = 0;          // 0=系统默认
   int cpu_affinity = -1;            // -1=不绑定, >=0=绑定到指定核心
+  bool require_realtime = false;    // true=任一实时配置失败则拒绝启动
 };
 ```
 
@@ -1040,6 +1041,12 @@ shm_transport 优先，TCP 作为远程低频备选。
 
 借鉴 cpp-ipc 的共享内存无锁队列、ROS2 的零拷贝设计和 cpp_py_shmbuf 的 SPSC 字节流环形缓冲区。
 
+每个段首都有 64 字节 `ShmLayoutHeader`（magic/version/kind/slot 尺寸/容量/
+total_size/layout_hash/epoch/owner_pid）。channel 的 `OpenReader()` 使用
+`AttachChecked()` 校验布局；不一致返回 `kLayoutMismatch`。`Create()` 在段已存在时
+返回 `kAlreadyExists`；`CreateOrReplace()` 在 owner 仍存活时返回 `kOwnerAlive`，
+`ForceReplace()`/`ForceReplaceWriter()` 才是显式强制替换路径。
+
 提供三种互补的环形缓冲区:
 
 | 类型 | 模式 | 适用场景 | 消息格式 |
@@ -1094,8 +1101,8 @@ class SharedMemorySegment {
 // MPSC slot-based 环形缓冲区 (小消息、多生产者)
 template <uint32_t SlotSize, uint32_t SlotCount>
 class ShmRingBuffer {
-  static ShmRingBuffer* InitAt(void* shm_addr);
-  static ShmRingBuffer* AttachAt(void* shm_addr);
+  static ShmRingBuffer* InitAt(void* shm_addr, uint32_t total_size = Size());
+  static expected<ShmRingBuffer*, ShmError> AttachChecked(void* shm_addr, uint32_t total_size);
   bool TryPush(const void* data, uint32_t size);
   bool TryPop(void* data, uint32_t& size);
   uint32_t Depth() const noexcept;
@@ -1104,7 +1111,7 @@ class ShmRingBuffer {
 // SPSC 字节流环形缓冲区 (大变长载荷: LiDAR/视频帧)
 class ShmSpscByteRing {
   static ShmSpscByteRing InitAt(void* shm_base, uint32_t total_size);
-  static ShmSpscByteRing AttachAt(void* shm_base);
+  static expected<ShmSpscByteRing, ShmError> AttachChecked(void* shm_base, uint32_t total_size);
   bool Write(const void* data, uint32_t len);     // [4B len][payload]
   uint32_t Read(void* out, uint32_t max_len);      // 返回 payload 长度
   uint32_t ReadableBytes() const noexcept;
@@ -1135,7 +1142,7 @@ class ShmByteChannel {
 // SPMC 字节流环形缓冲区 (1 写 N 读, 数据分发)
 class ShmSpmcByteRing {
   static ShmSpmcByteRing InitAt(void* shm_base, uint32_t total_size, uint32_t max_consumers);
-  static ShmSpmcByteRing AttachAt(void* shm_base);
+  static expected<ShmSpmcByteRing, ShmError> AttachChecked(void* shm_base, uint32_t total_size);
   int32_t RegisterConsumer();                       // 返回 consumer_id, -1 = 满
   void UnregisterConsumer(int32_t consumer_id);
   bool Write(const void* data, uint32_t len);       // 检查最慢消费者
@@ -1630,7 +1637,9 @@ class ThreadWatchdog {
   uint32_t Check() noexcept;  // 返回超时线程数
   void SetOnTimeout(TimeoutCallback fn, void* ctx);
   void SetOnRecovered(RecoverCallback fn, void* ctx);
-  void StartAutoCheck(uint32_t interval_ms);  // 备路自检线程
+  expected<void, WatchdogError> StartAutoCheck(uint32_t interval_ms);  // 备路自检线程
+  bool IsAutoCheckRunning() const noexcept;
+  uint32_t CheckCycles() const noexcept;  // 检查进度，不只看线程是否存在
   void StopAutoCheck();
 };
 ```
@@ -1954,6 +1963,7 @@ osp::RunCommand(argv, out, code);
 | `DirectNotify` / `ShmNotify` | 通知策略 (进程内无操作 / 跨进程回调通知) |
 | `Pipeline<MaxStages, MaxEdges>` | 静态 DAG 拓扑 (stage + edge + 同步执行) |
 | `DataDispatcher<Store, Notify>` | 核心模板: 组合 Store + Notify + Pipeline + 背压 + Fault |
+| `DataDispatcher::BlockGuard` | move-only 块所有权守卫；析构自动归还，`Submit(BlockGuard&&)` 转移所有权 |
 | `InProcDispatcher<BS, MB>` | 便捷别名: `DataDispatcher<InProcStore<BS,MB>, DirectNotify>` |
 
 **数据块生命周期**:
@@ -1967,6 +1977,10 @@ kFree --> kAllocated --> kReady --> kProcessing --> kDone --> kFree
                                        +-- 超时 --> kTimeout --+
                                        +-- 异常 --> kError ----+
 ```
+
+`kProcessing` 块超时只标记 `kTimeout`，不重置引用计数、不回收；由 handler
+`Release()` 或显式 `ForceCleanup()` 完成回收。heartbeat 过期的消费者视为
+“可能暂停”而非确认死亡，`CleanupDeadConsumers()` 不回收其 `kProcessing` 块。
 
 **引用计数规则**:
 

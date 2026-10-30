@@ -300,7 +300,51 @@ TEST_CASE("executor - RealtimeConfig default values", "[executor]") {
   REQUIRE(cfg.lock_memory == false);
   REQUIRE(cfg.stack_size == 0);
   REQUIRE(cfg.cpu_affinity == -1);
+  REQUIRE(cfg.require_realtime == false);
 }
+
+TEST_CASE("executor - RealtimeExecutor StartChecked reports success", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::RealtimeConfig cfg;
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+
+  auto result = exec.StartChecked();
+  REQUIRE(result.has_value());
+  REQUIRE(exec.IsRunning());
+  exec.Stop();
+  REQUIRE_FALSE(exec.IsRunning());
+}
+
+#if defined(OSP_PLATFORM_LINUX)
+TEST_CASE("executor - RealtimeExecutor rejects invalid affinity", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::RealtimeConfig cfg;
+  cfg.cpu_affinity = CPU_SETSIZE;
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+
+  auto result = exec.StartChecked();
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::ExecutorError::kAffinityInvalid);
+  REQUIRE_FALSE(exec.IsRunning());
+}
+
+TEST_CASE("executor - require_realtime fails closed on scheduling error", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::RealtimeConfig cfg;
+  cfg.require_realtime = true;
+  cfg.sched_policy = 99;  // invalid policy: pthread_setschedparam must fail
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+
+  auto result = exec.StartChecked();
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::ExecutorError::kSchedFailed);
+  REQUIRE(exec.GetLastError() == osp::ExecutorError::kSchedFailed);
+  REQUIRE_FALSE(exec.IsRunning());
+}
+#endif
 
 TEST_CASE("executor - RealtimeExecutor Start/Stop lifecycle", "[executor]") {
   ExecutorBusFixture fix;

@@ -150,14 +150,14 @@ ring.header_->reserved = 0;
 std::atomic_thread_fence(std::memory_order_release);   // 初始化写完, 才允许其他进程 attach
 ring.mask_ = cap - 1;
 
-// AttachAt: 消费者侧 attach
+// AttachChecked: 消费者侧 attach
 ring.header_ = static_cast<ShmByteRingHeader*>(shm_base);
 ring.data_ = static_cast<uint8_t*>(shm_base) + kHeaderSize;
 std::atomic_thread_fence(std::memory_order_acquire);   // 读到初始化结果, 后续才能安全使用
 ring.mask_ = ring.header_->capacity - 1;
 ```
 
-这是一次性的生产者-消费者交接：`InitAt` 把首部字段写好后，其他进程才通过 `AttachAt` 读取。`InitAt` 中的 release fence 覆盖其前的全部共享内存写入，`AttachAt` 中的 acquire fence 与它配对，保证 fence 之后读取 `capacity` 时看到的是初始化完成后的值。fence 在这里安全，因为它在程序启动阶段只执行一次，且与 head/tail 热路径的 atomic 操作不重叠。
+这是一次性的生产者-消费者交接：`InitAt` 把首部字段写好后，其他进程才通过 `AttachChecked` 读取。`InitAt` 中的 release fence 覆盖其前的全部共享内存写入，`AttachChecked` 中的 acquire fence 与它配对，保证 fence 之后读取 `capacity` 时看到的是初始化完成后的值。fence 在这里安全，因为它在程序启动阶段只执行一次，且与 head/tail 热路径的 atomic 操作不重叠。
 
 fence 并非绝对要消除。同一文件中定长槽 MPSC 环形缓冲区 `ShmRingBuffer` 的 `TryPush`/`TryPop` 仍保留 `store(release)` 前的 release fence 与 `load(acquire)` 后的 acquire fence。那里 sequence 字段本身是 atomic，而 `memcpy` 搬运的数据字段不是；fence 用于为 sequence 之外的 memcpy 数据提供顺序保证。另外，`ShmRingBuffer` 的 `producer_pos_` 与 `consumer_pos_` 各自 64 字节对齐并填充，避免两端频繁写入的位置落进同一缓存行造成 false sharing。
 
@@ -170,7 +170,7 @@ flowchart LR
         B --> C[热路径, 每帧执行]
     end
     subgraph S2["一次性初始化交接"]
-        D[InitAt/AttachAt] --> E[atomic_thread_fence]
+        D[InitAt/AttachChecked] --> E[atomic_thread_fence]
         E --> F[仅初始化执行一次]
     end
     subgraph S3["定长槽 MPSC"]

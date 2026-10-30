@@ -641,8 +641,9 @@ node.ProcessRemote();  // 轮询远程消息
 
 | 方法签名 | 说明 | 线程安全性 |
 |---|---|---|
-| `static expected<SharedMemorySegment, ShmError> Create(const char* name, uint32_t size)` | 创建共享内存段 | 线程安全 |
-| `static expected<SharedMemorySegment, ShmError> CreateOrReplace(const char* name, uint32_t size)` | 创建或替换共享内存段 | 线程安全 |
+| `static expected<SharedMemorySegment, ShmError> Create(const char* name, uint32_t size)` | 创建共享内存段；已存在返回 `kAlreadyExists` | 线程安全 |
+| `static expected<SharedMemorySegment, ShmError> CreateOrReplace(const char* name, uint32_t size)` | 仅替换 owner 已死亡的段；活 owner 返回 `kOwnerAlive` | 线程安全 |
+| `static expected<SharedMemorySegment, ShmError> ForceReplace(const char* name, uint32_t size)` | 显式强制替换（确认旧 owner 已死亡后使用） | 线程安全 |
 | `static expected<SharedMemorySegment, ShmError> Open(const char* name)` | 打开已存在的共享内存段 | 线程安全 |
 
 #### 公共方法
@@ -667,9 +668,9 @@ node.ProcessRemote();  // 轮询远程消息
 
 | 方法签名 | 说明 |
 |---|---|
-| `static ShmRingBuffer* InitAt(void* shm_addr)` | 在共享内存地址初始化 |
-| `static ShmRingBuffer* AttachAt(void* shm_addr)` | 附加到已存在的缓冲 |
-| `static constexpr uint32_t Size()` | 返回所需大小 |
+| `static ShmRingBuffer* InitAt(void* shm_addr, uint32_t total_size = Size())` | 写入布局头并初始化 |
+| `static expected<ShmRingBuffer*, ShmError> AttachChecked(void* shm_addr, uint32_t total_size)` | 校验布局后附加 |
+| `static constexpr uint32_t Size()` | 返回含布局头的所需大小 |
 
 #### 公共方法
 
@@ -692,7 +693,8 @@ node.ProcessRemote();  // 轮询远程消息
 | 方法签名 | 说明 | 线程安全性 |
 |---|---|---|
 | `static expected<ShmChannel, ShmError> CreateWriter(const char* name)` | 创建写端点 | 线程安全 |
-| `static expected<ShmChannel, ShmError> CreateOrReplaceWriter(const char* name)` | 创建或替换写端点 | 线程安全 |
+| `static expected<ShmChannel, ShmError> CreateOrReplaceWriter(const char* name)` | 仅替换 owner 已死亡的写端点 | 线程安全 |
+| `static expected<ShmChannel, ShmError> ForceReplaceWriter(const char* name)` | 显式强制替换写端点 | 线程安全 |
 | `static expected<ShmChannel, ShmError> OpenReader(const char* name)` | 打开读端点 | 线程安全 |
 
 #### 公共方法

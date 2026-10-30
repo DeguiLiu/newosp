@@ -669,8 +669,8 @@ node.ProcessRemote();  // 轮询远程消息
 
 | 方法签名 | 说明 |
 |---|---|
-| `static ShmRingBuffer* InitAt(void* shm_addr)` | 在共享内存地址初始化 |
-| `static ShmRingBuffer* AttachAt(void* shm_addr)` | 附加到已存在的缓冲 |
+| `static ShmRingBuffer* InitAt(void* shm_addr, uint32_t total_size = Size())` | 写入布局头并初始化 |
+| `static expected<ShmRingBuffer*, ShmError> AttachChecked(void* shm_addr, uint32_t total_size)` | 校验布局后附加 |
 | `static constexpr uint32_t Size()` | 返回所需大小 |
 
 #### 公共方法
