@@ -6,6 +6,34 @@
 
 ## 最新变更
 
+### 2026-10-30: v0.9.0 安全关键路径 fail-closed 加固
+
+**变更内容** (5 处行为变更, 其中 1 处源码不兼容):
+
+1. **FaultCollector: critical 故障先锁存再入队** (`fault_collector.hpp`)
+   - critical 故障准入前先调 `SetFaultActive()`, 环形队列满时故障状态仍然生效, 不再出现「最该报的故障被丢」。
+   - 新增 `fault_overflow_` 锁存、`IsFaultOverflow()`/`ClearFaultOverflow()`、`ConsumerCycles()`; `Start(ThreadHeartbeat*)` 与 `IsConsumerMonitored()` 让消费线程存活可判定。`shell_commands.hpp` 同步输出 overflow 与 consumer_cycles。
+
+2. **Watchdog: 启动可检查 + per-slot 恢复滞回** (`watchdog.hpp`)
+   - `StartAutoCheck()` 由 `void` 改为 `expected<void, WatchdogError>`, 新增 `kThreadStartFailed`/`kInvalidRecoveryBeats`; `IsAutoCheckRunning()`/`CheckCycles()` 区分「线程存在」与「检查在推进」。
+   - `Register()` 增加 `recover_beats`, 恢复态要求连续健康心跳而不是单次心跳即清零。
+
+3. **RealtimeExecutor: 实时配置失败返回错误** (`executor.hpp`)
+   - 新增 `expected<void, ExecutorError> StartChecked()` 与 `GetLastError()`; `RealtimeConfig::require_realtime` 为 true 时 mlockall/affinity/调度策略任一失败即拒绝启动 (`kConfigTimeout`/`kAffinityInvalid`)。`Start()` 保留兼容行为。
+
+4. **DataDispatcher: 块所有权显式化 + 超时回收边界** (`data_dispatcher.hpp`)
+   - move-only `BlockGuard` 与 `Submit(BlockGuard&&)` 让块所有权随对象转移, 析构自动归还, `Abandon()` 显式放弃。
+   - `ScanTimeout()` 对 `kProcessing` 只标记 `kTimeout` 不回收; `Recycle()` 改为状态 CAS 幂等; `CleanupDeadConsumers()` 跳过 `kProcessing`/`kTimeout`, `ForceCleanup()` 才能回收。
+
+5. **ShmTransport: 布局头校验 + owner 存活检查 (源码不兼容)** (`shm_transport.hpp`)
+   - 每段首 64 字节 `ShmLayoutHeader` (magic/version/kind/slot 尺寸/容量/total_size/layout_hash/epoch/owner_pid), attach 侧 `ValidateShmLayout()` 校验, 不一致返回 `kLayoutMismatch`。
+   - `Create()` 段已存在返回 `kAlreadyExists`; `CreateOrReplace()` 在 owner 仍存活时返回 `kOwnerAlive` (`pidfd_open` 优先, 回退 `kill(pid,0)`); `ForceReplace()`/`ForceReplaceWriter()` 为显式强制路径。
+   - **删除裸 `AttachAt()`** (`ShmRingBuffer`/`ShmSpscByteRing`/`ShmSpmcByteRing`), 唯一 attach 入口是 `AttachChecked()`。
+
+**验证**: 全量 ctest 1376/1376 通过; `[fault_collector]`/`[watchdog]`/`[executor]`/`[job_pool]`/`[shm_transport]` 定向 ASan+UBSan、TSan 通过; `-fno-exceptions -fno-rtti` smoke 编译通过。设计与剩余缺口见 `docs/design_minimal_safety_optimization_zh.md`。
+
+---
+
 ### 2026-09-10: v0.8.1 BeatLoop 循环骨架 (编译期 AOP)
 
 **变更内容** (1 处行为保持重构):
