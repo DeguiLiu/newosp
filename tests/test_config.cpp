@@ -382,7 +382,7 @@ TEST_CASE("TOML enum and extension match", "[config][toml]") {
 
 using TomlCfg = osp::Config<osp::TomlBackend>;
 
-TEST_CASE("TOML LoadBuffer basic", "[config][toml]") {
+TEST_CASE("TOML config backend loads buffer", "[config][toml]") {
   const char* toml_data =
       "[network]\n"
       "port = 5090\n"
@@ -438,8 +438,9 @@ TEST_CASE("TOML array value flattened to string", "[config][toml]") {
   TomlCfg cfg;
   auto result = cfg.LoadBuffer(toml_data, static_cast<uint32_t>(std::strlen(toml_data)), osp::ConfigFormat::kToml);
   REQUIRE(result.has_value());
-  // Array values are not scalars; stored as empty (same as YAML backend), GetInt falls back.
-  REQUIRE(cfg.GetInt("net", "ports", -1) == -1);
+  // Arrays are serialized comma-separated (see test_config_toml.cpp); the
+  // entry is a string, not a scalar.
+  REQUIRE(std::strcmp(cfg.GetString("net", "ports"), "8001, 8002") == 0);
 }
 
 TEST_CASE("TOML parse error", "[config][toml]") {
@@ -450,7 +451,7 @@ TEST_CASE("TOML parse error", "[config][toml]") {
   REQUIRE(result.get_error() == osp::ConfigError::kParseError);
 }
 
-TEST_CASE("TOML LoadFile from disk", "[config][toml]") {
+TEST_CASE("TOML config backend loads file from disk", "[config][toml]") {
   const char* path = "/tmp/__osp_test_config__.toml";
   FILE* f = std::fopen(path, "w");
   REQUIRE(f != nullptr);

@@ -610,31 +610,33 @@ struct ConfigParser<TomlBackend> : detail::FileBackedParser<ConfigParser<TomlBac
     if (!result)
       return expected<void, ConfigError>::error(ConfigError::kParseError);
 
-    for (auto&& kv : result.table()) {
+    return Flatten(store, result.table(), std::string());
+  }
+
+ private:
+  /// Flatten nested tables into dotted section names, so [a.b] c = 1 is stored
+  /// as section "a.b", key "c" -- the same shape the INI backend produces.
+  static expected<void, ConfigError> Flatten(ConfigStore& store, const toml::table& table, const std::string& prefix) {
+    for (auto&& kv : table) {
+      const std::string name(kv.first.str());
+      const std::string section = prefix.empty() ? name : prefix + "." + name;
       const toml::node& val = kv.second;
       if (val.is_table()) {
-        const auto& tbl = *val.as_table();
-        for (auto&& skill : tbl) {
-          char key[ConfigStore::kMaxKeyLen];
-          CopyKey(skill.first, key, sizeof(key));
-          char sv[ConfigStore::kMaxValueLen];
-          ToStr(skill.second, sv, sizeof(sv));
-          if (!store.AddEntry(std::string(kv.first).c_str(), key, sv))
-            return expected<void, ConfigError>::error(ConfigError::kBufferFull);
-        }
-      } else {
-        char key[ConfigStore::kMaxKeyLen];
-        CopyKey(kv.first, key, sizeof(key));
-        char sv[ConfigStore::kMaxValueLen];
-        ToStr(val, sv, sizeof(sv));
-        if (!store.AddEntry("", key, sv))
-          return expected<void, ConfigError>::error(ConfigError::kBufferFull);
+        auto nested = Flatten(store, *val.as_table(), section);
+        if (!nested)
+          return nested;
+        continue;
       }
+      char key[ConfigStore::kMaxKeyLen];
+      CopyKey(name, key, sizeof(key));
+      char sv[ConfigStore::kMaxValueLen];
+      ToStr(val, sv, sizeof(sv));
+      if (!store.AddEntry(prefix.c_str(), key, sv))
+        return expected<void, ConfigError>::error(ConfigError::kBufferFull);
     }
     return expected<void, ConfigError>::success();
   }
 
- private:
   static void CopyKey(std::string_view src, char* dst, uint32_t dst_size) noexcept {
     uint32_t i = 0;
     while (i < (dst_size - 1U) && i < src.size()) {
@@ -644,7 +646,17 @@ struct ConfigParser<TomlBackend> : detail::FileBackedParser<ConfigParser<TomlBac
     dst[i] = '\0';
   }
 
+  static void AppendStr(char* b, uint32_t sz, uint32_t& used, const char* src) noexcept {
+    while (*src != '\0' && used + 1U < sz) {
+      b[used++] = *src++;
+    }
+    b[used] = '\0';
+  }
+
   static void ToStr(const toml::node& n, char* b, uint32_t sz) noexcept {
+    if (sz == 0U)
+      return;
+    b[0] = '\0';
     if (n.is_string()) {
       ConfigStore::SafeCopy(b, static_cast<const std::string&>(*n.as_string()).c_str(), sz);
     } else if (n.is_boolean()) {
@@ -653,6 +665,17 @@ struct ConfigParser<TomlBackend> : detail::FileBackedParser<ConfigParser<TomlBac
       std::snprintf(b, sz, "%ld", static_cast<long>(static_cast<int64_t>(*n.as_integer())));
     } else if (n.is_floating_point()) {
       std::snprintf(b, sz, "%g", static_cast<double>(*n.as_floating_point()));
+    } else if (n.is_array()) {
+      uint32_t used = 0;
+      bool first = true;
+      for (auto&& elem : *n.as_array()) {
+        char tmp[ConfigStore::kMaxValueLen];
+        ToStr(elem, tmp, sizeof(tmp));
+        if (!first)
+          AppendStr(b, sz, used, ", ");
+        AppendStr(b, sz, used, tmp);
+        first = false;
+      }
     } else {
       b[0] = '\0';
     }
