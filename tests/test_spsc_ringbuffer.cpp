@@ -414,7 +414,7 @@ TEST_CASE("SpscRingbuffer: concurrent batch SPSC", "[spsc][concurrent]") {
 
   std::atomic<bool> ok{true};
 
-  std::thread producer([&rb, kBatchCount, kMaxBatch]() {
+  std::thread producer([&rb, kBatchCount]() {
     uint32_t seq = 0;
     uint32_t batch[kMaxBatch];
     for (size_t b = 0; b < kBatchCount; ++b) {
@@ -433,7 +433,7 @@ TEST_CASE("SpscRingbuffer: concurrent batch SPSC", "[spsc][concurrent]") {
     }
   });
 
-  std::thread consumer([&rb, &ok, kBatchCount, kMaxBatch]() {
+  std::thread consumer([&rb, &ok, kBatchCount]() {
     uint32_t expected = 0;
     uint32_t batch[kMaxBatch];
     for (size_t b = 0; b < kBatchCount; ++b) {
@@ -536,7 +536,7 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable concurrent SPSC", "[spsc][nont
 
   std::atomic<bool> consumer_ok{true};
 
-  std::thread producer([&rb]() {
+  std::thread producer([&rb, kCount]() {
     for (size_t i = 0; i < kCount; ++i) {
       Var v;
       if (i % 2 == 0) {
@@ -550,7 +550,7 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable concurrent SPSC", "[spsc][nont
     }
   });
 
-  std::thread consumer([&rb, &consumer_ok]() {
+  std::thread consumer([&rb, &consumer_ok, kCount]() {
     for (size_t i = 0; i < kCount; ++i) {
       Var val;
       while (!rb.Pop(val)) {
