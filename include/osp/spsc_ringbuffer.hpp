@@ -132,11 +132,11 @@ class SpscRingbuffer {
       if (space == 0) {
         break;
       }
-      const size_t to_write = std::min(count - written, static_cast<size_t>(space));
+      const size_t to_write = (std::min)(count - written, static_cast<size_t>(space));
       const size_t head_offset = cur_head & kMask;
 
       if constexpr (kTriviallyCopyable) {
-        const size_t first_part = std::min(to_write, BufferSize - head_offset);
+        const size_t first_part = (std::min)(to_write, BufferSize - head_offset);
         std::memcpy(&data_buff_[head_offset], buf + written, first_part * sizeof(T));
         if (to_write > first_part) {
           std::memcpy(&data_buff_[0], buf + written + first_part, (to_write - first_part) * sizeof(T));
@@ -193,11 +193,11 @@ class SpscRingbuffer {
       if (available == 0) {
         break;
       }
-      const size_t to_read = std::min(count - read, static_cast<size_t>(available));
+      const size_t to_read = (std::min)(count - read, static_cast<size_t>(available));
       const size_t tail_offset = cur_tail & kMask;
 
       if constexpr (kTriviallyCopyable) {
-        const size_t first_part = std::min(to_read, BufferSize - tail_offset);
+        const size_t first_part = (std::min)(to_read, BufferSize - tail_offset);
         std::memcpy(buf + read, &data_buff_[tail_offset], first_part * sizeof(T));
         if (to_read > first_part) {
           std::memcpy(buf + read + first_part, &data_buff_[0], (to_read - first_part) * sizeof(T));
@@ -222,7 +222,7 @@ class SpscRingbuffer {
     const IndexT cur_tail = tail_.value.load(std::memory_order_relaxed);
     const IndexT cur_head = head_.value.load(AcquireOrder());
     const IndexT available = cur_head - cur_tail;
-    const size_t to_discard = std::min(count, static_cast<size_t>(available));
+    const size_t to_discard = (std::min)(count, static_cast<size_t>(available));
     if (to_discard > 0) {
       tail_.value.store(cur_tail + static_cast<IndexT>(to_discard), ReleaseOrder());
     }
