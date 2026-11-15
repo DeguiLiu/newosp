@@ -875,3 +875,44 @@ TEST_CASE("AsyncBus reports kCallbacksFull when the table is full", "[bus]") {
   REQUIRE_FALSE(bus.Subscribe<SensorData>([](const TestEnvelope&) {}).IsValid());
   REQUIRE(g_callbacks_full_errors.load() == 1);
 }
+
+TEST_CASE("AsyncBus GetHealth reports a stalled queue", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  REQUIRE(bus.GetHealth().stall_ms == 0);
+  REQUIRE(bus.Publish(SensorData{1.0f, 1}, 0));
+
+  auto pending = bus.GetHealth();
+  REQUIRE(pending.depth == 1);
+  REQUIRE(pending.capacity == TestBus::kQueueDepth);
+  REQUIRE_FALSE(pending.id_exhausted);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  REQUIRE(bus.GetHealth().stall_ms >= 4);
+
+  REQUIRE(bus.ProcessBatch() == 1);
+  REQUIRE(bus.GetHealth().stall_ms == 0);
+}
+
+TEST_CASE("AsyncBus DrainAndReset repairs the bus and keeps subscribers", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::atomic<int> received{0};
+  REQUIRE(bus.Subscribe<SensorData>([&received](const TestEnvelope&) { ++received; }).IsValid());
+
+  for (uint32_t i = 0; i < 10; ++i) {
+    REQUIRE(bus.Publish(SensorData{static_cast<float>(i), i}, 0));
+  }
+  REQUIRE(bus.Depth() == 10);
+
+  bus.DrainAndReset();
+  REQUIRE(bus.Depth() == 0);
+  REQUIRE(bus.GetStatistics().discarded_on_repair == 10);
+
+  // The subscription survived the repair.
+  REQUIRE(bus.Publish(SensorData{42.0f, 7}, 0));
+  REQUIRE(bus.ProcessBatch() == 1);
+  REQUIRE(received.load() == 1);
+}

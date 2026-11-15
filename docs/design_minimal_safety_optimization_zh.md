@@ -424,7 +424,8 @@ OSP_STRICT_NODISCARD=1
 - `BusStatistics` 新增 `dropped_by_priority[3]` 与 `eviction_scan_aborts`，`BusStatisticsSnapshot` 同步暴露。
 - 保留 eviction 时改为有界扫描：`OSP_BUS_EVICT_SCAN_MAX`（默认 64）限制单次切片，`kEvictScanSlices`（8）限制单次调用的切片数，旋转游标保证多次发布仍能覆盖低优先级区域；单次准入最多 512 次探测。
 - `Subscribe` 回调表满时上报 `BusError::kCallbacksFull`，不再静默返回无效句柄。
-- 验收：`test_bus.cpp` 新增分级丢弃与回调表满两个用例；默认 profile 与安全 profile 下 `[bus]` 全部通过。
+- 运行期可修复：`GetHealth()` 暴露 `depth`/`stall_ms`/`id_exhausted`/`saturated`；`DrainAndReset()` 在静默状态下丢弃积压并重新装载环，保留订阅与统计，积压计入 `discarded_on_repair`。
+- 验收：`test_bus.cpp` 新增分级丢弃、回调表满、健康查询、运行期修复四个用例；默认 profile 与安全 profile 下 `[bus]` 全部通过。
 
 ### P1-4 Executor 支持注入 bus
 

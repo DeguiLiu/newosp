@@ -195,6 +195,8 @@ struct alignas(osp::kCacheLineSize) BusStatistics {
   std::atomic<uint64_t> admission_rechecks{0};
   /// Eviction scans that stopped at OSP_BUS_EVICT_SCAN_MAX without a victim.
   std::atomic<uint64_t> eviction_scan_aborts{0};
+  /// Pending messages discarded by DrainAndReset().
+  std::atomic<uint64_t> discarded_on_repair{0};
   /// Drops split by the priority of the message that was rejected, indexed by
   /// MessagePriority (LOW=0, MEDIUM=1, HIGH=2). Sums to messages_dropped when
   /// every drop path is counted; kept separate so SFMEA can map a drop to a
@@ -207,6 +209,7 @@ struct alignas(osp::kCacheLineSize) BusStatistics {
     messages_processed.store(0, std::memory_order_relaxed);
     admission_rechecks.store(0, std::memory_order_relaxed);
     eviction_scan_aborts.store(0, std::memory_order_relaxed);
+    discarded_on_repair.store(0, std::memory_order_relaxed);
     for (auto& count : dropped_by_priority) {
       count.store(0, std::memory_order_relaxed);
     }
@@ -219,7 +222,17 @@ struct BusStatisticsSnapshot {
   uint64_t messages_processed;
   uint64_t admission_rechecks;
   uint64_t eviction_scan_aborts;
+  uint64_t discarded_on_repair;
   std::array<uint64_t, 3> dropped_by_priority;
+};
+
+/// Health view a supervisor polls to decide whether the bus needs repair.
+struct BusHealthSnapshot {
+  uint32_t depth;     ///< Pending messages
+  uint32_t capacity;  ///< Ring size
+  uint32_t stall_ms;  ///< 0 when idle or progressing; ms since the last drain with depth > 0
+  bool id_exhausted;  ///< Publish can no longer succeed until repair
+  bool saturated;     ///< depth == capacity
 };
 
 // ============================================================================
@@ -495,7 +508,12 @@ class AsyncBus {
    * Node(bus) constructor; otherwise they default to Instance() (the
    * per-PayloadVariant singleton), preserving the zero-configuration path.
    */
-  AsyncBus() noexcept : producer_pos_(0), cached_consumer_pos_(0), consumer_pos_(0), next_msg_id_(1) {
+  AsyncBus() noexcept
+      : producer_pos_(0),
+        cached_consumer_pos_(0),
+        consumer_pos_(0),
+        last_processed_us_(SteadyNowUs()),
+        next_msg_id_(1) {
     for (uint32_t i = 0; i < kQueueDepth; ++i) {
       ring_buffer_[i].sequence.store(i, std::memory_order_relaxed);
     }
@@ -687,6 +705,7 @@ class AsyncBus {
     if (processed > 0) {
       consumer_pos_.store(cons_pos, std::memory_order_relaxed);
       stats_.messages_processed.fetch_add(processed, std::memory_order_relaxed);
+      last_processed_us_.store(SteadyNowUs(), std::memory_order_relaxed);
     }
     return processed;
   }
@@ -741,6 +760,7 @@ class AsyncBus {
     if (processed > 0) {
       consumer_pos_.store(cons_pos, std::memory_order_relaxed);
       stats_.messages_processed.fetch_add(processed, std::memory_order_relaxed);
+      last_processed_us_.store(SteadyNowUs(), std::memory_order_relaxed);
     }
     return processed;
   }
@@ -756,6 +776,27 @@ class AsyncBus {
 
   /** @brief Queue utilization as percentage (0-100). */
   uint32_t UtilizationPercent() const noexcept { return (Depth() * 100) / kQueueDepth; }
+
+  /**
+   * @brief Health view for a supervisor deciding whether to call
+   *        DrainAndReset().
+   *
+   * stall_ms is 0 when the queue is empty or the consumer drained a message
+   * recently; it grows while messages are pending and ProcessBatch() makes no
+   * progress.
+   */
+  BusHealthSnapshot GetHealth() const noexcept {
+    uint32_t depth = Depth();
+    uint32_t stall_ms = 0;
+    if (depth > 0) {
+      uint64_t last = last_processed_us_.load(std::memory_order_acquire);
+      uint64_t now = SteadyNowUs();
+      if (now > last)
+        stall_ms = static_cast<uint32_t>((now - last) / 1000U);
+    }
+    return BusHealthSnapshot{depth, kQueueDepth, stall_ms,
+                             next_msg_id_.load(std::memory_order_relaxed) >= kMsgIdWrapThreshold, depth >= kQueueDepth};
+  }
 
   /** @brief Current backpressure level based on queue depth. */
   BackpressureLevel GetBackpressureLevel() const noexcept {
@@ -776,6 +817,7 @@ class AsyncBus {
                                  stats_.messages_processed.load(std::memory_order_relaxed),
                                  stats_.admission_rechecks.load(std::memory_order_relaxed),
                                  stats_.eviction_scan_aborts.load(std::memory_order_relaxed),
+                                 stats_.discarded_on_repair.load(std::memory_order_relaxed),
                                  {stats_.dropped_by_priority[0].load(std::memory_order_relaxed),
                                   stats_.dropped_by_priority[1].load(std::memory_order_relaxed),
                                   stats_.dropped_by_priority[2].load(std::memory_order_relaxed)}};
@@ -805,18 +847,26 @@ class AsyncBus {
       callback_spin_lock_.unlock();
     }
 
-    // Reset ring buffer sequences
-    for (uint32_t i = 0; i < kQueueDepth; ++i) {
-      ring_buffer_[i].sequence.store(i, std::memory_order_relaxed);
-      ring_buffer_[i].slot_priority.store(static_cast<uint8_t>(MessagePriority::kMedium), std::memory_order_relaxed);
-    }
-    producer_pos_.store(0, std::memory_order_relaxed);
-    cached_consumer_pos_.store(0, std::memory_order_relaxed);
-    evict_cursor_.store(0, std::memory_order_relaxed);
-    consumer_pos_.store(0, std::memory_order_relaxed);
-    next_msg_id_.store(1, std::memory_order_relaxed);
+    ResetRingState();
     stats_.Reset();
     error_callback_.store(nullptr, std::memory_order_relaxed);
+  }
+
+  /**
+   * @brief Runtime repair: discard pending messages and re-arm the ring.
+   *
+   * Keeps subscriptions, statistics and the error callback, so the repaired
+   * bus keeps delivering to the same handlers. Pending messages are counted in
+   * discarded_on_repair instead of messages_dropped, preserving the drop
+   * evidence. Call it after GetHealth() reports a stall or exhausted ids, with
+   * every producer and the consumer stopped.
+   *
+   * NOT thread-safe - the caller owns the quiesce.
+   */
+  void DrainAndReset() noexcept {
+    uint32_t pending = producer_pos_.load(std::memory_order_relaxed) - consumer_pos_.load(std::memory_order_relaxed);
+    stats_.discarded_on_repair.fetch_add(pending, std::memory_order_relaxed);
+    ResetRingState();
   }
 
  private:
@@ -867,6 +917,20 @@ class AsyncBus {
   void RecordDrop(MessagePriority priority) noexcept {
     stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
     stats_.dropped_by_priority[PriorityIndex(priority)].fetch_add(1, std::memory_order_relaxed);
+  }
+
+  /// Re-arm the ring. Callers own the quiesce guarantee.
+  void ResetRingState() noexcept {
+    for (uint32_t i = 0; i < kQueueDepth; ++i) {
+      ring_buffer_[i].sequence.store(i, std::memory_order_relaxed);
+      ring_buffer_[i].slot_priority.store(static_cast<uint8_t>(MessagePriority::kMedium), std::memory_order_relaxed);
+    }
+    producer_pos_.store(0, std::memory_order_relaxed);
+    cached_consumer_pos_.store(0, std::memory_order_relaxed);
+    evict_cursor_.store(0, std::memory_order_relaxed);
+    consumer_pos_.store(0, std::memory_order_relaxed);
+    next_msg_id_.store(1, std::memory_order_relaxed);
+    last_processed_us_.store(SteadyNowUs(), std::memory_order_relaxed);
   }
 
   bool PublishInternal(PayloadVariant&& payload, uint32_t sender_id, uint64_t timestamp_us, MessagePriority priority,
@@ -1088,6 +1152,7 @@ class AsyncBus {
   std::atomic<uint32_t> evict_cursor_{0};
 
   alignas(osp::kCacheLineSize) std::atomic<uint32_t> consumer_pos_;
+  std::atomic<uint64_t> last_processed_us_;
 
   alignas(osp::kCacheLineSize) std::atomic<uint64_t> next_msg_id_;
   uint32_t next_callback_id_{1};
