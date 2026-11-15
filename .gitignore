@@ -1,6 +1,7 @@
 build/
 build-*/
 build_*/
+Testing/
 cmake-build-*/
 .idea/
 .vscode/
