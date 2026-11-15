@@ -22,8 +22,11 @@ CLOSURE=(
   semaphore spsc_ringbuffer thread timer toml vocabulary watchdog
 )
 
-# grep -E pattern for the forbidden POSIX/GCC-only constructs.
-TOKENS='unistd\.h|pthread\.h|sched\.h|termios\.h|sys/epoll\.h|sys/socket\.h|(^|[^[:alnum:]_])fork[[:space:]]*\('
+# grep -E pattern for the forbidden POSIX/GCC-only constructs. Bracket
+# expressions instead of backslash escapes: awk applies escape processing to
+# -v assignments, so `\(` reaches the regex as `(` and fails to compile on the
+# Git-Bash awk used by the Windows job.
+TOKENS='unistd[.]h|pthread[.]h|sched[.]h|termios[.]h|sys/epoll[.]h|sys/socket[.]h|(^|[^[:alnum:]_])fork[[:space:]]*[(]'
 
 FAILURES=0
 echo "== POSIX-leak check: ${#CLOSURE[@]} consumer headers =="
