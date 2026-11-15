@@ -791,8 +791,10 @@ class AsyncBus {
     if (depth > 0) {
       uint64_t last = last_processed_us_.load(std::memory_order_acquire);
       uint64_t now = SteadyNowUs();
-      if (now > last)
-        stall_ms = static_cast<uint32_t>((now - last) / 1000U);
+      if (now > last) {
+        uint64_t elapsed_ms = (now - last) / 1000U;
+        stall_ms = elapsed_ms > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(elapsed_ms);
+      }
     }
     return BusHealthSnapshot{depth, kQueueDepth, stall_ms,
                              next_msg_id_.load(std::memory_order_relaxed) >= kMsgIdWrapThreshold, depth >= kQueueDepth};
@@ -938,6 +940,7 @@ class AsyncBus {
     // Message ID overflow check
     uint64_t current_id = next_msg_id_.load(std::memory_order_relaxed);
     if (OSP_UNLIKELY(current_id >= kMsgIdWrapThreshold)) {
+      RecordDrop(priority);
       ReportError(BusError::kOverflowDetected, current_id);
       return false;
     }

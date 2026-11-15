@@ -28,7 +28,7 @@
    - 新增 `DrainAndReset()`: 丢弃积压并重新装载环, 保留订阅、统计和错误回调; 丢弃量计入 `discarded_on_repair`, 不污染 `messages_dropped`。
    - `ProcessBatch()` 在真正消费到消息时更新 `last_processed_us_` (每批一次, 非每消息), 作为停滞判定基准。
 
-**验证**: `[bus]` 35 个用例在默认 profile 与安全 profile 下全部通过 (新增分级丢弃、回调表满、健康查询、运行期修复四个用例); 全量 `osp_tests` 1346 例中 1337 通过, 唯一失败为 `test_system_monitor` 的磁盘可用空间断言 (本机 `/` 已 100% 占满, 与本次改动无关); 稳态吞吐无回退 (24B 15.4 M msgs/s)。
+**验证**: `[bus]` 35 个用例在默认 profile 与安全 profile 下全部通过 (新增分级丢弃、回调表满、健康查询、运行期修复四个用例); 全量 `osp_tests` 1348 例中 1339 通过, 唯一失败为 `test_system_monitor` 的磁盘可用空间断言 (本机 `/` 已 100% 占满, 与本次改动无关); 稳态吞吐无回退 (24B 中位数 15.3 M msgs/s)。
 
 ---
 
