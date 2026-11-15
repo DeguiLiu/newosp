@@ -23,6 +23,11 @@ option(OSP_CONFIG_YAML    "Enable YAML config support (fkYAML)"        OFF)
 option(OSP_CONFIG_TOML    "Enable TOML config support (toml++)"        OFF)
 option(OSP_WITH_SOCKPP    "Use sockpp for network transport"           OFF)
 option(OSP_WITH_NETWORK   "Enable BSD-socket network modules"          ON)
+option(OSP_SAFETY_PROFILE "Bounded, detectable bus safety profile"     OFF)
+
+if(OSP_SAFETY_PROFILE)
+    target_compile_definitions(osp INTERFACE OSP_SAFETY_PROFILE=1)
+endif()
 
 # --- INI Config (using embedded inicpp.hpp) ---
 if(OSP_CONFIG_INI)

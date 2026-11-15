@@ -830,3 +830,48 @@ TEST_CASE("AsyncBus PublishTimestamp is monotonic non-decreasing", "[bus]") {
     REQUIRE(stamps[i] >= stamps[i - 1]);
   }
 }
+
+TEST_CASE("AsyncBus drops are counted per priority", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  // No consumer: fill past the LOW admission threshold (60% of the queue).
+  static constexpr int kAttempts = 3000;
+  int failed = 0;
+  for (int i = 0; i < kAttempts; ++i) {
+    if (!bus.PublishWithPriority(SensorData{static_cast<float>(i), 0}, 0, osp::MessagePriority::kLow)) {
+      ++failed;
+    }
+  }
+
+  REQUIRE(failed > 0);
+  auto stats = bus.GetStatistics();
+  REQUIRE(stats.dropped_by_priority[0] == static_cast<uint64_t>(failed));
+  REQUIRE(stats.dropped_by_priority[1] == 0U);
+  REQUIRE(stats.dropped_by_priority[2] == 0U);
+  REQUIRE(stats.messages_dropped == static_cast<uint64_t>(failed));
+}
+
+namespace {
+std::atomic<int> g_callbacks_full_errors{0};
+
+void OnBusError(osp::BusError error, uint64_t /*msg_id*/) {
+  if (error == osp::BusError::kCallbacksFull) {
+    ++g_callbacks_full_errors;
+  }
+}
+}  // namespace
+
+TEST_CASE("AsyncBus reports kCallbacksFull when the table is full", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  g_callbacks_full_errors.store(0);
+  bus.SetErrorCallback(&OnBusError);
+
+  for (uint32_t i = 0; i < OSP_BUS_MAX_CALLBACKS_PER_TYPE; ++i) {
+    REQUIRE(bus.Subscribe<SensorData>([](const TestEnvelope&) {}).IsValid());
+  }
+  REQUIRE_FALSE(bus.Subscribe<SensorData>([](const TestEnvelope&) {}).IsValid());
+  REQUIRE(g_callbacks_full_errors.load() == 1);
+}

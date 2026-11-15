@@ -2,7 +2,7 @@
 
 **结论先行**：先做 P0-a（P0-1/P0-2/P0-3 + 编译期失败可见性），关闭“故障丢失、监督失效、配置静默”三条最高风险路径；P0-b（P0-4/P0-5）涉及 ABI/API 与迁移，必须单独提交。P1 做失败可见性和可分析性；P2 不要混进同一个提交。
 
-**实施状态（2026-10-30）**：P0-1、P0-2、P0-3、P0-5 已完成；P0-4 已完成（布局头、attach 校验、owner 存活检查、force-replace 分离、裸 `AttachAt()` 删除）。P0-4 是 ABI 变更，必须单独版本发布。
+**实施状态（2026-11-15）**：P0-1、P0-2、P0-3、P0-5 已完成；P0-4 已完成（布局头、attach 校验、owner 存活检查、force-replace 分离、裸 `AttachAt()` 删除）。P0-4 是 ABI 变更，必须单独版本发布。P1-3 已完成：`OSP_SAFETY_PROFILE`、有界淘汰扫描、分级丢弃统计。
 
 ## 1. 目标
 
@@ -418,6 +418,14 @@ OSP_STRICT_NODISCARD=1
 
 - 关闭 eviction 会改变高优先级消息的准入行为；这是用“简单、可分析”换“尽力保高优先级”。
 
+实施记录（2026-11-15）：
+
+- `opt.hpp` 新增 `OSP_SAFETY_PROFILE`（默认 0），开启后取 `OSP_BUS_EVICTION=0`、`OSP_STRICT_NODISCARD=1`；`OSP_NODISCARD` 用于 `Publish*` 与 `Subscribe`。
+- `BusStatistics` 新增 `dropped_by_priority[3]` 与 `eviction_scan_aborts`，`BusStatisticsSnapshot` 同步暴露。
+- 保留 eviction 时改为有界扫描：`OSP_BUS_EVICT_SCAN_MAX`（默认 64）限制单次切片，`kEvictScanSlices`（8）限制单次调用的切片数，旋转游标保证多次发布仍能覆盖低优先级区域；单次准入最多 512 次探测。
+- `Subscribe` 回调表满时上报 `BusError::kCallbacksFull`，不再静默返回无效句柄。
+- 验收：`test_bus.cpp` 新增分级丢弃与回调表满两个用例；默认 profile 与安全 profile 下 `[bus]` 全部通过。
+
 ### P1-4 Executor 支持注入 bus
 
 改动：
@@ -536,6 +544,7 @@ Tests 1295 / 500 / 1442 三个口径
 | P0-5 | 新增 guard，裸接口保留 | 不使用 guard，恢复旧 ScanTimeout |
 | P1-1 | nodiscard 可能破坏下游构建 | 关闭 `OSP_STRICT_NODISCARD` |
 | P1-2 | 删除/弃用 ACK 字段 | 保留 deprecated 字段一个版本 |
+| P1-3 | 统计字段新增，API additive；eviction 扫描由无界变为有界 | 关闭 `OSP_SAFETY_PROFILE`，调大 `OSP_BUS_EVICT_SCAN_MAX` |
 
 ## 10. 最小改动的边界
 

@@ -6,6 +6,27 @@
 
 ## 最新变更
 
+### 2026-11-15: AsyncBus 有界可检测 profile (P1-3)
+
+**变更内容** (2 处行为变更, 其余为 additive):
+
+1. **编译期安全 profile** (`opt.hpp`, `CMakeLists.txt`)
+   - 新增 `OSP_SAFETY_PROFILE` (CMake 选项 `-DOSP_SAFETY_PROFILE=ON`), 开启后取 `OSP_BUS_EVICTION=0`、`OSP_STRICT_NODISCARD=1`。
+   - 新增 `OSP_NODISCARD`, 用于 `Publish*` 与 `Subscribe`: 安全 profile 下忽略返回值触发 `-Wunused-result`。
+
+2. **eviction 扫描有界** (`bus.hpp`)
+   - 单次切片 `OSP_BUS_EVICT_SCAN_MAX` (默认 64), 单次调用最多 `kEvictScanSlices` (8) 个切片, 即最坏 512 次探测; 原先最坏为 `QueueDepth` (4096) 次。
+   - 旋转游标跨调用推进扫描起点, 使连续 HIGH 发布仍能覆盖低优先级区域。
+   - 超预算放弃淘汰时计入 `eviction_scan_aborts`。
+
+3. **失败路径可见** (`bus.hpp`)
+   - `BusStatistics` 新增 `dropped_by_priority[3]` 与 `eviction_scan_aborts`, `BusStatisticsSnapshot` 同步暴露。
+   - `Subscribe` 回调表满时上报 `BusError::kCallbacksFull`, 不再静默返回无效句柄。
+
+**验证**: `[bus]` 33 个用例在默认 profile 与安全 profile 下全部通过 (新增分级丢弃、回调表满两个用例); 全量 `osp_tests` 1346 例中 1337 通过, 唯一失败为 `test_system_monitor` 的磁盘可用空间断言 (本机 `/` 已 100% 占满, 与本次改动无关)。
+
+---
+
 ### 2026-10-30: v0.9.0 安全关键路径 fail-closed 加固
 
 **变更内容** (5 处行为变更, 其中 1 处源码不兼容):

@@ -116,8 +116,8 @@ static void RunThroughput(Bus& bus, const char* label, uint32_t count) {
   double secs = static_cast<double>(ns) / 1e9;
   double mps = (secs > 0) ? (static_cast<double>(received) / secs / 1e6) : 0;
   double mbps = (secs > 0) ? (static_cast<double>(received) * sizeof(Msg) / secs / 1e6) : 0;
-  printf("  %-12s  %8u msgs  %8.2f ms  %8.3f M msgs/s  %8.1f MB/s  (rx %u)\n", label, count, secs * 1e3, mps,
-         mbps, received);
+  printf("  %-12s  %8u msgs  %8.2f ms  %8.3f M msgs/s  %8.1f MB/s  (rx %u)\n", label, count, secs * 1e3, mps, mbps,
+         received);
 
   bus.Unsubscribe(handle);
 }

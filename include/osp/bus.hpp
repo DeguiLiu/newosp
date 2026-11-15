@@ -193,12 +193,23 @@ struct alignas(osp::kCacheLineSize) BusStatistics {
   std::atomic<uint64_t> messages_dropped{0};
   std::atomic<uint64_t> messages_processed{0};
   std::atomic<uint64_t> admission_rechecks{0};
+  /// Eviction scans that stopped at OSP_BUS_EVICT_SCAN_MAX without a victim.
+  std::atomic<uint64_t> eviction_scan_aborts{0};
+  /// Drops split by the priority of the message that was rejected, indexed by
+  /// MessagePriority (LOW=0, MEDIUM=1, HIGH=2). Sums to messages_dropped when
+  /// every drop path is counted; kept separate so SFMEA can map a drop to a
+  /// specific channel.
+  std::array<std::atomic<uint64_t>, 3> dropped_by_priority{};
 
   void Reset() noexcept {
     messages_published.store(0, std::memory_order_relaxed);
     messages_dropped.store(0, std::memory_order_relaxed);
     messages_processed.store(0, std::memory_order_relaxed);
     admission_rechecks.store(0, std::memory_order_relaxed);
+    eviction_scan_aborts.store(0, std::memory_order_relaxed);
+    for (auto& count : dropped_by_priority) {
+      count.store(0, std::memory_order_relaxed);
+    }
   }
 };
 
@@ -207,6 +218,8 @@ struct BusStatisticsSnapshot {
   uint64_t messages_dropped;
   uint64_t messages_processed;
   uint64_t admission_rechecks;
+  uint64_t eviction_scan_aborts;
+  std::array<uint64_t, 3> dropped_by_priority;
 };
 
 // ============================================================================
@@ -456,6 +469,13 @@ class AsyncBus {
 
   static constexpr uint64_t kMsgIdWrapThreshold = UINT64_MAX - 10000;
 
+  /// Number of MessagePriority values tracked separately in the drop counters.
+  static constexpr uint32_t kPriorityCount = 3;
+
+  /// Maximum slice count per eviction attempt. Total probes for one call are
+  /// bounded by kEvictScanSlices * OSP_BUS_EVICT_SCAN_MAX.
+  static constexpr uint32_t kEvictScanSlices = 8;
+
   static_assert((kQueueDepth & (kQueueDepth - 1)) == 0, "Queue depth must be power of 2");
   static_assert(kQueueDepth <= 0x7FFFFFFFU, "kQueueDepth too large: eviction/consumed markers must not wrap uint32_t");
 
@@ -513,21 +533,22 @@ class AsyncBus {
    * @param sender_id Sender identifier for tracing.
    * @return true if published, false if dropped.
    */
-  bool Publish(PayloadVariant&& payload, uint32_t sender_id) noexcept {
+  OSP_NODISCARD bool Publish(PayloadVariant&& payload, uint32_t sender_id) noexcept {
     return PublishInternal(std::move(payload), sender_id, PublishTimestamp(), MessagePriority::kMedium, 0);
   }
 
   /**
    * @brief Publish a message with specified priority.
    */
-  bool PublishWithPriority(PayloadVariant&& payload, uint32_t sender_id, MessagePriority priority) noexcept {
+  OSP_NODISCARD bool PublishWithPriority(PayloadVariant&& payload, uint32_t sender_id,
+                                         MessagePriority priority) noexcept {
     return PublishInternal(std::move(payload), sender_id, PublishTimestamp(), priority, 0);
   }
 
   /**
    * @brief Publish with pre-computed timestamp (for latency-sensitive paths).
    */
-  bool PublishFast(PayloadVariant&& payload, uint32_t sender_id, uint64_t timestamp_us) noexcept {
+  OSP_NODISCARD bool PublishFast(PayloadVariant&& payload, uint32_t sender_id, uint64_t timestamp_us) noexcept {
     return PublishInternal(std::move(payload), sender_id, timestamp_us, MessagePriority::kMedium, 0);
   }
 
@@ -538,7 +559,7 @@ class AsyncBus {
    * @param topic Topic string (null-terminated).
    * @return true if published, false if dropped.
    */
-  bool PublishTopic(PayloadVariant&& payload, uint32_t sender_id, const char* topic) noexcept {
+  OSP_NODISCARD bool PublishTopic(PayloadVariant&& payload, uint32_t sender_id, const char* topic) noexcept {
     uint32_t topic_hash = Fnv1a32(topic);
     return PublishInternal(std::move(payload), sender_id, PublishTimestamp(), MessagePriority::kMedium, topic_hash);
   }
@@ -546,8 +567,8 @@ class AsyncBus {
   /**
    * @brief Publish a message with topic and priority.
    */
-  bool PublishTopicWithPriority(PayloadVariant&& payload, uint32_t sender_id, const char* topic,
-                                MessagePriority priority) noexcept {
+  OSP_NODISCARD bool PublishTopicWithPriority(PayloadVariant&& payload, uint32_t sender_id, const char* topic,
+                                              MessagePriority priority) noexcept {
     uint32_t topic_hash = Fnv1a32(topic);
     return PublishInternal(std::move(payload), sender_id, PublishTimestamp(), priority, topic_hash);
   }
@@ -564,7 +585,7 @@ class AsyncBus {
    * @return Valid handle on success, Invalid handle if callbacks are full.
    */
   template <typename T, typename Func>
-  SubscriptionHandle Subscribe(Func&& func) noexcept {
+  OSP_NODISCARD SubscriptionHandle Subscribe(Func&& func) noexcept {
     constexpr size_t type_idx = VariantIndex<T, PayloadVariant>::value;
     static_assert(type_idx < OSP_BUS_MAX_MESSAGE_TYPES, "Type index exceeds OSP_BUS_MAX_MESSAGE_TYPES");
 
@@ -586,6 +607,7 @@ class AsyncBus {
     }
 
     callback_spin_lock_.unlock();
+    ReportError(BusError::kCallbacksFull, callback_id);
     return SubscriptionHandle::Invalid();
   }
 
@@ -752,7 +774,11 @@ class AsyncBus {
     return BusStatisticsSnapshot{stats_.messages_published.load(std::memory_order_relaxed),
                                  stats_.messages_dropped.load(std::memory_order_relaxed),
                                  stats_.messages_processed.load(std::memory_order_relaxed),
-                                 stats_.admission_rechecks.load(std::memory_order_relaxed)};
+                                 stats_.admission_rechecks.load(std::memory_order_relaxed),
+                                 stats_.eviction_scan_aborts.load(std::memory_order_relaxed),
+                                 {stats_.dropped_by_priority[0].load(std::memory_order_relaxed),
+                                  stats_.dropped_by_priority[1].load(std::memory_order_relaxed),
+                                  stats_.dropped_by_priority[2].load(std::memory_order_relaxed)}};
   }
 
   /** @brief Reset all statistics counters. */
@@ -786,6 +812,7 @@ class AsyncBus {
     }
     producer_pos_.store(0, std::memory_order_relaxed);
     cached_consumer_pos_.store(0, std::memory_order_relaxed);
+    evict_cursor_.store(0, std::memory_order_relaxed);
     consumer_pos_.store(0, std::memory_order_relaxed);
     next_msg_id_.store(1, std::memory_order_relaxed);
     stats_.Reset();
@@ -832,6 +859,16 @@ class AsyncBus {
     }
   }
 
+  static constexpr uint32_t PriorityIndex(MessagePriority priority) noexcept {
+    return static_cast<uint32_t>(priority) < kPriorityCount ? static_cast<uint32_t>(priority) : 1U;
+  }
+
+  /// Count one rejected message, both in total and against its priority.
+  void RecordDrop(MessagePriority priority) noexcept {
+    stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
+    stats_.dropped_by_priority[PriorityIndex(priority)].fetch_add(1, std::memory_order_relaxed);
+  }
+
   bool PublishInternal(PayloadVariant&& payload, uint32_t sender_id, uint64_t timestamp_us, MessagePriority priority,
                        uint32_t topic_hash) noexcept {
     // Message ID overflow check
@@ -865,7 +902,7 @@ class AsyncBus {
           // No lower-priority slot to evict: fall through and drop.
         }
 #endif
-        stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
+        RecordDrop(priority);
         ReportError(BusError::kQueueFull, current_id);
         return false;
       }
@@ -884,7 +921,7 @@ class AsyncBus {
         // Sequence mismatch: verify the queue is truly full (not just a CAS race)
         uint32_t cons = consumer_pos_.load(std::memory_order_acquire);
         if (kQueueDepth <= prod_pos - cons) {
-          stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
+          RecordDrop(priority);
           ReportError(BusError::kQueueFull, current_id);
           return false;
         }
@@ -915,16 +952,18 @@ class AsyncBus {
    *        the given HIGH message to that freed ring slot.
    *
    * Called from PublishInternal only for MessagePriority::kHigh when the queue
-   * has reached the kHigh threshold. Scans the active window [consumer_pos+1,
-   * producer_pos] from oldest to newest for a published (p+1), not-yet-consumed
-   * slot whose priority is strictly lower (kLow/kMedium) than the incoming
-   * HIGH, CAS-reserves it (p+1 -> p+1+2k) to arbitrate against a competing
-   * evictor and the consumer, re-verifies the priority under the reserve (so a
-   * just-inserted HIGH is never evicted), then overwrites and re-publishes.
+   * has reached the kHigh threshold. Probes the active window [consumer_pos+1,
+   * producer_pos) for a published (p+1), not-yet-consumed slot whose priority
+   * is strictly lower (kLow/kMedium) than the incoming HIGH, CAS-reserves it
+   * (p+1 -> p+1+2k) to arbitrate against a competing evictor and the consumer,
+   * re-verifies the priority under the reserve (so a just-inserted HIGH is
+   * never evicted), then overwrites and re-publishes.
    *
-   * Best-effort and bounded: each candidate is CAS'd once; on any failure or
-   * when no eligible slot exists it returns false so the caller drops the
-   * incoming message (queue genuinely holds only HIGH, or is fully contested).
+   * Best-effort and bounded: one call probes at most OSP_BUS_EVICT_SCAN_MAX
+   * candidates, and a rotating cursor moves the start so repeated HIGH
+   * publishes still sweep the whole window. Each candidate is CAS'd once; on
+   * any failure or when nothing is evictable it returns false so the caller
+   * drops the incoming message.
    *
    * @return true if the HIGH was admitted by evicting a lower-priority slot.
    */
@@ -933,54 +972,76 @@ class AsyncBus {
     uint32_t prod = producer_pos_.load(std::memory_order_relaxed);
     uint32_t cons = consumer_pos_.load(std::memory_order_acquire);
 
-    // Scan the active window [cons+1, prod) with modular advance. The window is
-    // always < kQueueDepth (queue-full invariant), so a bounded modular probe
-    // never truncates a valid scan and stays wrap-safe around uint32_t.
-    for (uint32_t i = 1; i < kQueueDepth; ++i) {
-      uint32_t p = cons + i;
-      if (p == prod)
-        break;
-      RingBufferNode& node = ring_buffer_[p & kBufferMask];
+    // Probe bounded slices of the candidate offsets [1, span). The window is
+    // always < kQueueDepth (queue-full invariant), so the modular advance
+    // stays wrap-safe around uint32_t.
+    uint32_t span = prod - cons;
+    if (span <= 1)
+      return false;
+    uint32_t candidates = span - 1;
+    uint32_t slice = candidates < OSP_BUS_EVICT_SCAN_MAX ? candidates : OSP_BUS_EVICT_SCAN_MAX;
+    uint32_t start = evict_cursor_.load(std::memory_order_relaxed);
+    uint32_t probed = 0;
 
-      // Peek at the slot state without claiming: only published slots are
-      // candidate for eviction; consuming (p+1+k) / released (p+k) are not.
-      uint32_t seq = node.sequence.load(std::memory_order_acquire);
-      if (seq != (p + 1))
-        continue;
+    // Walk at most kEvictScanSlices slices per call and continue past slices
+    // that hold no evictable slot (an appended HIGH tail), so a HIGH burst
+    // still reaches the LOW/MED region without exceeding the probe budget.
+    for (uint32_t s = 0; s < kEvictScanSlices && probed < candidates; ++s) {
+      for (uint32_t n = 0; n < slice && probed < candidates; ++n) {
+        uint32_t p = cons + 1 + ((start + probed) % candidates);
+        ++probed;
+        RingBufferNode& node = ring_buffer_[p & kBufferMask];
 
-      // Skip slots already holding HIGH (we never evict a higher/equal prio).
-      if (node.slot_priority.load(std::memory_order_relaxed) >= static_cast<uint8_t>(MessagePriority::kHigh))
-        continue;
+        // Peek at the slot state without claiming: only published slots are
+        // candidate for eviction; consuming (p+1+k) / released (p+k) are not.
+        uint32_t seq = node.sequence.load(std::memory_order_acquire);
+        if (seq != (p + 1))
+          continue;
 
-      // Reserve the slot so neither the consumer nor another evictor can touch
-      // it while we overwrite the envelope. CAS from published (p+1) to evict
-      // marker (p+1+2k); fails if a consumer/evictor claimed it just now.
-      if (!node.sequence.compare_exchange_strong(seq, p + 1 + kEvictOffset, std::memory_order_acq_rel,
-                                                 std::memory_order_acquire))
-        continue;
+        // Skip slots already holding HIGH (we never evict a higher/equal prio).
+        uint8_t victim_priority = node.slot_priority.load(std::memory_order_relaxed);
+        if (victim_priority >= static_cast<uint8_t>(MessagePriority::kHigh))
+          continue;
 
-      // Re-verify priority under the reserve: a producer could have slipped a
-      // HIGH into this slot between the peek and the reserve. If so, restore
-      // and keep scanning for an actual lower-priority victim.
-      if (node.slot_priority.load(std::memory_order_relaxed) >= static_cast<uint8_t>(MessagePriority::kHigh)) {
+        // Reserve the slot so neither the consumer nor another evictor can touch
+        // it while we overwrite the envelope. CAS from published (p+1) to evict
+        // marker (p+1+2k); fails if a consumer/evictor claimed it just now.
+        if (!node.sequence.compare_exchange_strong(seq, p + 1 + kEvictOffset, std::memory_order_acq_rel,
+                                                   std::memory_order_acquire))
+          continue;
+
+        // Re-verify priority under the reserve: a producer could have slipped a
+        // HIGH into this slot between the peek and the reserve. If so, restore
+        // and keep scanning for an actual lower-priority victim.
+        victim_priority = node.slot_priority.load(std::memory_order_relaxed);
+        if (victim_priority >= static_cast<uint8_t>(MessagePriority::kHigh)) {
+          node.sequence.store(p + 1, std::memory_order_release);
+          continue;
+        }
+
+        // Overwrite the evicted (lower-priority) payload with the HIGH message
+        // and re-publish at the same ring position, so the consumer sees HIGH
+        // here (it was delivered ahead of messages still queued behind it).
+        uint64_t msg_id = next_msg_id_.fetch_add(1, std::memory_order_relaxed);
+        node.envelope.header = MessageHeader{msg_id, timestamp_us, sender_id, topic_hash, MessagePriority::kHigh};
+        node.envelope.payload = std::move(payload);
+        node.slot_priority.store(static_cast<uint8_t>(MessagePriority::kHigh), std::memory_order_relaxed);
+
         node.sequence.store(p + 1, std::memory_order_release);
-        continue;
+
+        // The evicted LOW/MED is counted as dropped against its own priority;
+        // the incoming HIGH as published.
+        RecordDrop(static_cast<MessagePriority>(victim_priority));
+        stats_.messages_published.fetch_add(1, std::memory_order_relaxed);
+        evict_cursor_.fetch_add(probed, std::memory_order_relaxed);
+        return true;
       }
+    }
 
-      // Overwrite the evicted (lower-priority) payload with the HIGH message
-      // and re-publish at the same ring position, so the consumer sees HIGH
-      // here (it was delivered ahead of messages still queued behind it).
-      uint64_t msg_id = next_msg_id_.fetch_add(1, std::memory_order_relaxed);
-      node.envelope.header = MessageHeader{msg_id, timestamp_us, sender_id, topic_hash, MessagePriority::kHigh};
-      node.envelope.payload = std::move(payload);
-      node.slot_priority.store(static_cast<uint8_t>(MessagePriority::kHigh), std::memory_order_relaxed);
-
-      node.sequence.store(p + 1, std::memory_order_release);
-
-      // The evicted LOW/MED is counted as dropped; the HIGH as published.
-      stats_.messages_dropped.fetch_add(1, std::memory_order_relaxed);
-      stats_.messages_published.fetch_add(1, std::memory_order_relaxed);
-      return true;
+    evict_cursor_.fetch_add(probed, std::memory_order_relaxed);
+    // The probe budget ran out before the whole window was covered.
+    if (probed < candidates) {
+      stats_.eviction_scan_aborts.fetch_add(1, std::memory_order_relaxed);
     }
     return false;
   }
@@ -1023,6 +1084,8 @@ class AsyncBus {
 
   alignas(osp::kCacheLineSize) std::atomic<uint32_t> producer_pos_;
   std::atomic<uint32_t> cached_consumer_pos_;
+  /// Rotating start of the bounded eviction scan; producer-side only.
+  std::atomic<uint32_t> evict_cursor_{0};
 
   alignas(osp::kCacheLineSize) std::atomic<uint32_t> consumer_pos_;
 
