@@ -482,6 +482,43 @@ TEST_CASE("Bus high priority survives low/medium flood via eviction", "[bus]") {
   (void)med_pub;
 }
 
+TEST_CASE("Bus bounded eviction drops HIGH once nothing is evictable", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  // Saturate with LOW then MED (60% / 80% admission thresholds).
+  for (int i = 0; i < 6000; ++i) {
+    (void)bus.PublishWithPriority(SensorData{1.0f, static_cast<uint32_t>(i)}, 0, osp::MessagePriority::kLow);
+  }
+  for (int i = 0; i < 6000; ++i) {
+    (void)bus.PublishWithPriority(MotorCmd{static_cast<int32_t>(i), 0}, 0, osp::MessagePriority::kMedium);
+  }
+  uint32_t evictable = bus.Depth();
+  REQUIRE(evictable > 0);
+
+  // Far more HIGH than evictable slots: the bounded scan must eventually drop
+  // instead of sweeping the whole ring, and every drop must be counted.
+  int high_fail = 0;
+  for (int i = 0; i < 6000; ++i) {
+    if (!bus.PublishWithPriority(AlarmEvent{static_cast<uint32_t>(i), 0}, 0, osp::MessagePriority::kHigh)) {
+      ++high_fail;
+    }
+  }
+
+  REQUIRE(high_fail > 0);
+  auto stats = bus.GetStatistics();
+  REQUIRE(stats.dropped_by_priority[2] == static_cast<uint64_t>(high_fail));
+  // Some of the flood was displaced by HIGH admissions.
+  REQUIRE(stats.dropped_by_priority[0] + stats.dropped_by_priority[1] > 0);
+  REQUIRE(stats.messages_dropped ==
+          stats.dropped_by_priority[0] + stats.dropped_by_priority[1] + stats.dropped_by_priority[2]);
+#if OSP_BUS_EVICTION
+  REQUIRE(stats.eviction_scan_aborts > 0);
+#else
+  REQUIRE(stats.eviction_scan_aborts == 0);
+#endif
+}
+
 TEST_CASE("Bus concurrent publish from multiple threads", "[bus]") {
   BusFixture fix;
   auto& bus = TestBus::Instance();

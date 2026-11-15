@@ -603,6 +603,14 @@ struct ConfigParser<YamlBackend> : detail::FileBackedParser<ConfigParser<YamlBac
 // --- TOML Backend ---
 
 #ifdef OSP_CONFIG_TOML_ENABLED
+/**
+ * @brief TOML backend.
+ *
+ * Nested tables flatten into dotted section names: `[server.auth] user = "bob"`
+ * is stored as section "server.auth", key "user". Arrays are serialized as a
+ * comma-separated string ("a, b, c"), so read them with GetString(); scalar
+ * getters such as GetInt() only parse the first element.
+ */
 template <>
 struct ConfigParser<TomlBackend> : detail::FileBackedParser<ConfigParser<TomlBackend>> {
   static expected<void, ConfigError> ParseBuffer(ConfigStore& store, const char* data, uint32_t size) {

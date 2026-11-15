@@ -18,6 +18,8 @@
    - `WorkerPoolStats` 已改为 `dispatched`/`processed`/`worker_queue_full`/`bus_stats`, 测试仍引用 `submitted`/`rejected`/`depth`, 导致 `osp_tests` 在干净导出下无法编译
    - 移除已不存在的 `hcs_*` 注册用例; `LatencyTracker` 窗口容量调整为 128, 使 100 样本窗口断言成立
 
+   附带修复: TOML 后端把嵌套表展开为点号 section (`[server.auth]` → `server.auth`), 数组序列化为逗号分隔字符串; 该行为以 `test_config_toml.cpp` 为准, `test_config.cpp` 的旧断言同步调整。
+
 3. **CI** (`.github/workflows/ci.yml`)
    - `build-with-options` 增加 `OSP_SAFETY_PROFILE=ON` 条目
    - push 触发分支加入 `windows`
@@ -36,6 +38,8 @@
 ### 2026-11-15: v0.9.1 AsyncBus 有界、可检测、可修复 (P1-3)
 
 > 注: 该版本的 `osp_tests` 在干净导出下无法编译, 修复见 v0.9.2。
+
+> 行为变更: 默认 profile 下 HIGH 消息不再保证入队。单次发布最多探测 512 次（8 切片 × 64），探测预算内没有可淘汰槽位时 HIGH 被丢弃，计入 `dropped_by_priority[2]` 与 `eviction_scan_aborts`。需要“满队列直接拒绝、不做淘汰”时使用 `OSP_SAFETY_PROFILE=ON`。
 
 **变更内容** (2 处行为变更, 其余为 additive):
 
