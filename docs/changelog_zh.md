@@ -6,6 +6,39 @@
 
 ## 最新变更
 
+### 2026-11-15: v0.9.3 Executor bus 注入与 CI 转绿
+
+**变更内容**:
+
+1. **Executor 注入 bus (P1-4)** (`executor.hpp`)
+   - 四个 executor 增加 `BusType* bus_` (默认 `&BusType::Instance()`)，并新增接收 `BusType&` 的构造函数重载
+   - `SpinOnce()` 与三个 `DispatchLoop()` 改用 `bus_->ProcessBatch()`
+   - 两个 `AsyncBus` 实例 + 两个 `SingleThreadExecutor` 互不串消息，已加测试
+
+2. **TOML 后端行为补齐** (`config.hpp`)
+   - 嵌套表展开为点号 section (`[server.auth]` → `server.auth`)，此前只支持一层
+   - 数组序列化为逗号分隔字符串，此前存空字符串
+   - 两处重复的测试用例名已重命名，`test_config.cpp` 的数组断言与新语义对齐
+
+3. **Windows/MSVC 兼容**
+   - `SpscRingbuffer` 改用 `(std::min)(...)`，绕开 `windows.h` 的 `min` 宏
+   - SPSC 并发测试的常量改为 `static constexpr`，同时满足 MSVC 的数组长度与 lambda 捕获规则
+   - `check-posix-leak.sh` 的 awk 正则改用括号表达式，修复 Git-Bash awk 的转义破坏
+
+4. **CI**
+   - push 触发分支加入 `windows`；`build-with-options` 增加 `OSP_SAFETY_PROFILE=ON`
+   - 修复此前阻塞 CI 的格式、POSIX-leak、MSVC 与重复用例名问题
+
+5. **测试与文档**
+   - 新增有界淘汰行为测试：可淘汰消息耗尽后 HIGH 被丢弃并计入 `dropped_by_priority[2]` 与 `eviction_scan_aborts`
+   - `FindPidByName` 测试改断言 PID 不同，不再依赖 comm 名称
+   - 满盘时 `ReadDisk` 不再判失败
+   - 变更日志补充 v0.9.1 的准入行为变更说明
+
+**验证**: 全量 `osp_tests` 1351 例 (默认与安全 profile 均 0 失败); 干净导出构建通过。
+
+---
+
 ### 2026-11-15: v0.9.2 测试构建修复与 span 视图
 
 **变更内容**:
