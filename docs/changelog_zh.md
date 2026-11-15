@@ -33,6 +33,7 @@
    - 新增有界淘汰行为测试：可淘汰消息耗尽后 HIGH 被丢弃并计入 `dropped_by_priority[2]` 与 `eviction_scan_aborts`
    - `FindPidByName` 测试改断言 PID 不同，不再依赖 comm 名称
    - 满盘时 `ReadDisk` 不再判失败
+   - 1 ms 周期定时器测试的下界放宽到 5 次，避免慢速 CI runner 上因调度抖动误报
    - 变更日志补充 v0.9.1 的准入行为变更说明
 
 **验证**: 全量 `osp_tests` 1351 例 (默认与安全 profile 均 0 失败); 干净导出构建通过。
