@@ -444,6 +444,12 @@ OSP_STRICT_NODISCARD=1
 
 - `Node` 必须绑定到同一个 bus；文档要写明生命周期和绑定关系。
 
+实施记录（2026-11-15）：
+
+- 四个 executor 增加 `BusType* bus_`，默认 `&BusType::Instance()`；新增构造函数重载 `SingleThreadExecutor(BusType&)`、`StaticExecutor(BusType&[, SleepStrategy])`、`PinnedExecutor(int32_t, BusType&[, SleepStrategy])`、`RealtimeExecutor(RealtimeConfig, BusType&[, SleepStrategy])`。
+- `SpinOnce()` 与三个 `DispatchLoop()` 改用 `bus_->ProcessBatch()`，不再直接取单例。
+- 验收：`test_executor.cpp` 新增两个用例——两个 `AsyncBus` 实例 + 两个 `SingleThreadExecutor` 互不串消息；`StaticExecutor` 不消费未绑定的 bus（其 `Depth()` 保持不变）。
+
 ### P1-5 Lifecycle：并发保护与恢复守卫
 
 改动：

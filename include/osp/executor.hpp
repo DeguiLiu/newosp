@@ -200,7 +200,19 @@ class SingleThreadExecutor {
  public:
   using BusType = AsyncBus<PayloadVariant>;
 
-  SingleThreadExecutor() noexcept : node_count_(0), running_(false) {
+  SingleThreadExecutor() noexcept : bus_(&BusType::Instance()), node_count_(0), running_(false) {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct an executor bound to a specific bus instance.
+   *
+   * Nodes added to this executor must be bound to the same instance, e.g.
+   * `Node<PayloadVariant> node(bus)`.
+   */
+  explicit SingleThreadExecutor(BusType& bus) noexcept : bus_(&bus), node_count_(0), running_(false) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -281,7 +293,7 @@ class SingleThreadExecutor {
    *
    * @return Number of messages processed.
    */
-  uint32_t SpinOnce() noexcept { return BusType::Instance().ProcessBatch(); }
+  uint32_t SpinOnce() noexcept { return bus_->ProcessBatch(); }
 
   /**
    * @brief Stop the executor.
@@ -300,6 +312,7 @@ class SingleThreadExecutor {
   uint32_t NodeCount() const noexcept { return node_count_; }
 
  private:
+  BusType* bus_;
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
@@ -327,13 +340,32 @@ class StaticExecutor {
  public:
   using BusType = AsyncBus<PayloadVariant>;
 
-  StaticExecutor() noexcept : node_count_(0), running_(false), sleep_() {
+  StaticExecutor() noexcept : bus_(&BusType::Instance()), node_count_(0), running_(false), sleep_() {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
   }
 
-  explicit StaticExecutor(const SleepStrategy& sleep) noexcept : node_count_(0), running_(false), sleep_(sleep) {
+  explicit StaticExecutor(const SleepStrategy& sleep) noexcept
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), sleep_(sleep) {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct an executor bound to a specific bus instance.
+   *
+   * Nodes added to this executor must be bound to the same instance.
+   */
+  explicit StaticExecutor(BusType& bus) noexcept : bus_(&bus), node_count_(0), running_(false), sleep_() {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  StaticExecutor(BusType& bus, const SleepStrategy& sleep) noexcept
+      : bus_(&bus), node_count_(0), running_(false), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -439,7 +471,7 @@ class StaticExecutor {
    */
   void DispatchLoop() noexcept {
     detail::BeatLoop(heartbeat_, running_, [this]() {
-      uint32_t processed = BusType::Instance().ProcessBatch();
+      uint32_t processed = bus_->ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
       } else {
@@ -448,6 +480,7 @@ class StaticExecutor {
     });
   }
 
+  BusType* bus_;
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
@@ -480,7 +513,8 @@ class PinnedExecutor {
    * @brief Construct a pinned executor bound to the specified CPU core.
    * @param cpu_core The CPU core index to pin the dispatcher thread to.
    */
-  explicit PinnedExecutor(int32_t cpu_core) noexcept : node_count_(0), running_(false), cpu_core_(cpu_core), sleep_() {
+  explicit PinnedExecutor(int32_t cpu_core) noexcept
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), cpu_core_(cpu_core), sleep_() {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -492,7 +526,26 @@ class PinnedExecutor {
    * @param sleep Sleep strategy instance.
    */
   PinnedExecutor(int32_t cpu_core, const SleepStrategy& sleep) noexcept
-      : node_count_(0), running_(false), cpu_core_(cpu_core), sleep_(sleep) {
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), cpu_core_(cpu_core), sleep_(sleep) {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct a pinned executor bound to a specific bus instance.
+   *
+   * Nodes added to this executor must be bound to the same instance.
+   */
+  PinnedExecutor(int32_t cpu_core, BusType& bus) noexcept
+      : bus_(&bus), node_count_(0), running_(false), cpu_core_(cpu_core), sleep_() {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  PinnedExecutor(int32_t cpu_core, BusType& bus, const SleepStrategy& sleep) noexcept
+      : bus_(&bus), node_count_(0), running_(false), cpu_core_(cpu_core), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -574,7 +627,7 @@ class PinnedExecutor {
    */
   void DispatchLoop() noexcept {
     detail::BeatLoop(heartbeat_, running_, [this]() {
-      uint32_t processed = BusType::Instance().ProcessBatch();
+      uint32_t processed = bus_->ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
       } else {
@@ -619,6 +672,7 @@ class PinnedExecutor {
 #endif
   }
 
+  BusType* bus_;
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
@@ -684,7 +738,7 @@ class RealtimeExecutor {
    * @param cfg Realtime configuration (scheduling, affinity, memory locking).
    */
   explicit RealtimeExecutor(const RealtimeConfig& cfg) noexcept
-      : node_count_(0), running_(false), config_(cfg), sleep_() {
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), config_(cfg), sleep_() {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -696,7 +750,26 @@ class RealtimeExecutor {
    * @param sleep Sleep strategy instance.
    */
   RealtimeExecutor(const RealtimeConfig& cfg, const SleepStrategy& sleep) noexcept
-      : node_count_(0), running_(false), config_(cfg), sleep_(sleep) {
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), config_(cfg), sleep_(sleep) {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct a realtime executor bound to a specific bus instance.
+   *
+   * Nodes added to this executor must be bound to the same instance.
+   */
+  RealtimeExecutor(const RealtimeConfig& cfg, BusType& bus) noexcept
+      : bus_(&bus), node_count_(0), running_(false), config_(cfg), sleep_() {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  RealtimeExecutor(const RealtimeConfig& cfg, BusType& bus, const SleepStrategy& sleep) noexcept
+      : bus_(&bus), node_count_(0), running_(false), config_(cfg), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -890,7 +963,7 @@ class RealtimeExecutor {
    */
   void DispatchLoop() noexcept {
     detail::BeatLoop(heartbeat_, running_, [this]() {
-      uint32_t processed = BusType::Instance().ProcessBatch();
+      uint32_t processed = bus_->ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
       } else {
@@ -956,6 +1029,7 @@ class RealtimeExecutor {
 #endif
   }
 
+  BusType* bus_;
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
