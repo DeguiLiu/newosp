@@ -31,7 +31,7 @@ newosp 作为激光雷达产品内部的嵌入式通信框架，运行在 ARM-Li
 
 | 指标 | x86 实测 | ARM 估算 (1 GHz) | 激光雷达需求 | 裕量 |
 |------|----------|-------------------|-------------|------|
-| Bus 消息吞吐 | 5.9M msgs/s | 0.5-1.0M msgs/s | < 1K msgs/s (控制消息) | > 500x |
+| Bus 消息吞吐 | 12-15M msgs/s | 1.0-2.0M msgs/s | < 1K msgs/s (控制消息) | > 1000x |
 | SHM SPSC (256B) | 40M ops/s | 5-10M ops/s | < 30K ops/s (帧元数据) | > 150x |
 | SHM SPSC (4KB) | 2.9M ops/s | 0.3-0.6M ops/s | < 25 ops/s (点云分包) | > 10000x |
 | MemPool alloc/free | 98M ops/s | 10-20M ops/s | < 100K ops/s | > 100x |
@@ -55,7 +55,7 @@ newosp 作为激光雷达产品内部的嵌入式通信框架，运行在 ARM-Li
 |------|-------------|----------------------|------|
 | .text | ~80 KB | 256 MB - 1 GB Flash | < 0.1% |
 | 运行时 RAM | < 2 MB | 256 MB - 2 GB DDR | < 1% |
-| AsyncBus 实例 | ~520 KB | - | 可通过 QueueDepth 缩小 |
+| AsyncBus 实例 | ~1.3 MB | - | 可通过 QueueDepth 缩小 |
 
 框架本身的资源占用可忽略不计，绝大部分内存留给点云缓冲和算法处理。
 
@@ -133,10 +133,10 @@ stateDiagram-v2
 
 ### 4.1 控制面/数据面分离
 
-实测数据显示，当 variant 包含 8KB 类型时，Envelope sizeof 达 8232B，Bus 吞吐从 5.9M 降至 0.6M msgs/s。newosp 的架构设计已针对此做了分离:
+实测数据显示，当 variant 包含 8KB 类型时，Envelope sizeof 达 8232B，Bus 吞吐从 12-15M 降至 0.6M msgs/s。newosp 的架构设计已针对此做了分离:
 
 - 数据面 (点云): 走 ShmChannel 零拷贝传递，不经过 Bus，吞吐不受 variant 大小影响
-- 控制面 (消息): 走 Bus pub-sub，variant 仅包含控制消息类型 (< 256B)，Envelope sizeof 保持 ~300B，吞吐 > 5M msgs/s
+- 控制面 (消息): 走 Bus pub-sub，variant 仅包含控制消息类型 (< 256B)，Envelope sizeof 保持 ~300B，稳态吞吐 12-15M msgs/s
 
 这是架构层面的设计选择，而非运行时限制。
 

@@ -169,7 +169,7 @@ Modern C++17 header-only embedded infrastructure library for ARM-Linux industria
 
 ## Performance Highlights
 
-- **Lock-free MPSC Bus**: 10M+ msg/s single-threaded, 5M+ msg/s multi-threaded (4 publishers)
+- **Lock-free MPSC Bus**: 12-15M msg/s single-threaded (steady state, cache-resident ring)
 - **SPSC Ring Buffer**: 50M+ ops/s (batch mode), wait-free on ARM Cortex-A
 - **Shared Memory IPC**: 2.5M+ msg/s (4KB payload), zero-copy between processes
 - **Serial Transport**: 115200 baud with CRC-CCITT, <1ms latency for 256B frames
