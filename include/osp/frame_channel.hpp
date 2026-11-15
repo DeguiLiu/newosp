@@ -64,6 +64,7 @@
 #define OSP_FRAME_CHANNEL_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/span.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <climits>
@@ -737,6 +738,16 @@ class FrameChannel final {
 
     Notify();
     return expected<void, FrameChannelError>::success();
+  }
+
+  /**
+   * @brief Publish one frame from a byte view.
+   * @param meta Frame width/height/dtype.
+   * @param data Payload bytes; the view size is the frame payload size.
+   * @return kFull if the consumer is too far behind; kInvalidArg on bad args.
+   */
+  expected<void, FrameChannelError> WriteFrame(const FrameMeta& meta, byte_span data) noexcept {
+    return WriteFrame(meta, data.data(), data.size_u32());
   }
 
   // ---- Consumer API ----

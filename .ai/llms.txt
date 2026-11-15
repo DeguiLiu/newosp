@@ -34,6 +34,11 @@ newosp is a modern C++17 header-only library designed for ARM-Linux industrial e
 - Type safety: `not_null<T>`, `NewType<T,Tag>`, `ScopeGuard`, `OSP_SCOPE_EXIT(...)`
 - Error enums: `ConfigError`, `TimerError`, `ShellError`, `MemPoolError`
 
+**span.hpp** - Non-owning view (C++17 subset of std::span)
+- Types: `span<T>`, `byte_span` (`span<const std::byte>`), `writable_byte_span`
+- Builders: `make_span(data, size)`, `make_span(array)`, `as_bytes()`, `as_writable_bytes()`
+- Purpose: pointer+length travel together; socket/transport/serial/frame APIs take byte views
+
 **config.hpp** - Multi-format configuration parser
 - Backends: INI (inih), JSON (nlohmann/json), YAML (fkYAML)
 - API: `LoadFile()`, `GetInt()`, `GetString()`, `FindBool()` → `optional<T>`

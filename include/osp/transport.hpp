@@ -39,6 +39,7 @@
 #include "osp/node.hpp"
 #include "osp/platform.hpp"
 #include "osp/socket.hpp"
+#include "osp/span.hpp"
 #include "osp/spsc_ringbuffer.hpp"
 #include "osp/vocabulary.hpp"
 
@@ -534,6 +535,20 @@ class TcpTransport {
   }
 
   /**
+   * @brief Send a framed message from a byte view.
+   * @param type_index Variant type index of the payload.
+   * @param sender_id Sender node identifier.
+   * @param payload Serialized payload bytes; the view size is the frame length.
+   * @return Success or TransportError.
+   */
+  expected<void, TransportError> SendFrame(uint16_t type_index, uint32_t sender_id, byte_span payload) noexcept {
+    if (payload.size() > OSP_TRANSPORT_MAX_FRAME_SIZE) {
+      return expected<void, TransportError>::error(TransportError::kBufferFull);
+    }
+    return SendFrame(type_index, sender_id, payload.data(), payload.size_u32());
+  }
+
+  /**
    * @brief Receive a framed message (blocking).
    * @param hdr Output frame header.
    * @param payload_buf Buffer to receive the payload into.
@@ -573,6 +588,16 @@ class TcpTransport {
     }
 
     return expected<uint32_t, TransportError>::success(hdr.length);
+  }
+
+  /**
+   * @brief Receive a framed message into a writable byte view.
+   * @param hdr Output frame header.
+   * @param payload_buf View to receive the payload into; its size is the limit.
+   * @return Number of payload bytes received, or TransportError.
+   */
+  expected<uint32_t, TransportError> RecvFrame(FrameHeader& hdr, writable_byte_span payload_buf) noexcept {
+    return RecvFrame(hdr, payload_buf.data(), payload_buf.size_u32());
   }
 
   /**
@@ -621,6 +646,23 @@ class TcpTransport {
     }
 
     return expected<void, TransportError>::success();
+  }
+
+  /**
+   * @brief Send a v1 framed message from a byte view.
+   * @param type_index Variant type index of the payload.
+   * @param sender_id Sender node identifier.
+   * @param seq_num Sequence number.
+   * @param timestamp_ns Timestamp in nanoseconds.
+   * @param payload Serialized payload bytes; the view size is the frame length.
+   * @return Success or TransportError.
+   */
+  expected<void, TransportError> SendFrameV1(uint16_t type_index, uint32_t sender_id, uint32_t seq_num,
+                                             uint64_t timestamp_ns, byte_span payload) noexcept {
+    if (payload.size() > OSP_TRANSPORT_MAX_FRAME_SIZE) {
+      return expected<void, TransportError>::error(TransportError::kBufferFull);
+    }
+    return SendFrameV1(type_index, sender_id, seq_num, timestamp_ns, payload.data(), payload.size_u32());
   }
 
   /**
@@ -817,6 +859,14 @@ class TcpTransport {
       remaining -= received;
     }
     return expected<void, TransportError>::success();
+  }
+
+  /// @brief Send all bytes of a read-only view (see SendAll(data, len)).
+  expected<void, TransportError> SendAll(byte_span data) noexcept { return SendAll(data.data(), data.size_u32()); }
+
+  /// @brief Receive exactly the view size into a writable view (see RecvAll(data, len)).
+  expected<void, TransportError> RecvAll(writable_byte_span data) noexcept {
+    return RecvAll(data.data(), data.size_u32());
   }
 
   TcpSocket socket_;

@@ -40,6 +40,7 @@
 #define OSP_SERIAL_TRANSPORT_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/span.hpp"
 #include "osp/spsc_ringbuffer.hpp"
 #include "osp/vocabulary.hpp"
 
@@ -417,6 +418,11 @@ class SerialTransport {
     }
 
     return result;
+  }
+
+  /// @brief Send a frame from a byte view; the view size is the payload size.
+  expected<void, SerialError> Send(uint16_t type_index, byte_span payload) noexcept {
+    return Send(type_index, payload.data(), payload.size_u32());
   }
 
   // ------------------------------------------------------------------

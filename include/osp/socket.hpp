@@ -36,6 +36,7 @@
 #define OSP_SOCKET_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/span.hpp"
 #include "osp/vocabulary.hpp"
 
 #if OSP_HAS_NETWORK
@@ -558,6 +559,15 @@ class TcpSocket {
     return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));
   }
 
+  /**
+   * @brief Send a byte view; the view size bounds the write, so a mismatched
+   *        (pointer, length) pair cannot be passed in.
+   */
+  expected<int32_t, SocketError> Send(byte_span data) noexcept { return Send(data.data(), data.size()); }
+
+  /** @brief Receive into a writable byte view; the view size bounds the read. */
+  expected<int32_t, SocketError> Recv(writable_byte_span buf) noexcept { return Recv(buf.data(), buf.size()); }
+
   expected<void, SocketError> SetNonBlocking(bool enable) noexcept {
     if (fd_ < 0) {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
@@ -690,6 +700,19 @@ class UdpSocket {
       return expected<int32_t, SocketError>::error(SocketError::kRecvFailed);
     }
     return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));
+  }
+
+  /**
+   * @brief Send a datagram from a byte view; the view size bounds the write,
+   *        so a mismatched (pointer, length) pair cannot be passed in.
+   */
+  expected<int32_t, SocketError> SendTo(byte_span data, const SocketAddress& dest) noexcept {
+    return SendTo(data.data(), data.size(), dest);
+  }
+
+  /** @brief Receive a datagram into a writable byte view; the view size bounds the read. */
+  expected<int32_t, SocketError> RecvFrom(writable_byte_span buf, SocketAddress& src) noexcept {
+    return RecvFrom(buf.data(), buf.size(), src);
   }
 
   /** @brief Close the socket. Idempotent. */
@@ -969,6 +992,15 @@ class UnixSocket {
     }
     return expected<int32_t, SocketError>::success(static_cast<int32_t>(n));
   }
+
+  /**
+   * @brief Send a byte view; the view size bounds the write, so a mismatched
+   *        (pointer, length) pair cannot be passed in.
+   */
+  expected<int32_t, SocketError> Send(byte_span data) noexcept { return Send(data.data(), data.size()); }
+
+  /** @brief Receive into a writable byte view; the view size bounds the read. */
+  expected<int32_t, SocketError> Recv(writable_byte_span buf) noexcept { return Recv(buf.data(), buf.size()); }
 
   expected<void, SocketError> SetNonBlocking(bool enable) noexcept {
     if (fd_ < 0) {

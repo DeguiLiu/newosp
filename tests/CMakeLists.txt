@@ -31,6 +31,7 @@ target_link_libraries(osp_header_smoke PRIVATE osp)
 set(OSP_TEST_CORE_SOURCES
     test_platform.cpp
     test_vocabulary.cpp
+    test_span.cpp
     test_log.cpp
     test_timer.cpp
     test_shell.cpp
