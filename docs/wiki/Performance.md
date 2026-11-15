@@ -258,13 +258,13 @@ SmallMsg (24B) 单线程 Publish + ProcessBatch，10,000 样本:
 
 | 百分位 | 延迟 |
 |--------|------|
-| Mean | 95 ns |
-| P50 | 90 ns |
-| P95 | 113 ns |
-| P99 | 157 ns |
+| Mean | 72 ns |
+| P50 | 73 ns |
+| P95 | 75 ns |
+| P99 | 77 ns |
 
 分析:
-- 同线程 publish-to-callback 延迟 P99 < 160 ns
+- 同线程 publish-to-callback 延迟 P99 < 100 ns (2026-11-15 复测 77 ns)
 - 跨线程场景需额外考虑线程唤醒延迟 (通常 1-10 us)
 
 ## 4. 定时器测试
@@ -418,7 +418,7 @@ SmallMsg (24B) 单线程 Publish + ProcessBatch，10,000 样本:
 | 指标 | x86 实测 (QueueDepth=4096) | ARM 估算 (1 GHz) | 说明 |
 |------|------|-------------------|------|
 | Bus 吞吐 | 12-15 M msgs/s | ~1.0-2.0 M msgs/s | 稳态，环缓冲驻留缓存 |
-| Bus 延迟 P99 | 307 ns | ~500-1500 ns | 受缓存层级影响 |
+| Bus 延迟 P99 | 77 ns | ~500-1500 ns | 受缓存层级影响 |
 | ShmRingBuffer (MPSC, 单生产者) 吞吐 | 34 M cycles/s | ~5-10 M cycles/s | wait-free，缩放线性 |
 | MemPool | 95 M ops/s | ~10-20 M ops/s | 纯内存操作 |
 | Timer 抖动 | ~1 ms | ~1-5 ms | 受 OS 调度影响 |
@@ -490,7 +490,7 @@ newosp 作为激光雷达产品内部的嵌入式通信框架，运行在 ARM-Li
 
 | 指标 | x86 实测 | ARM 估算 | 激光雷达需求 | 评估 |
 |------|----------|----------|-------------|------|
-| Bus P99 延迟 | 157 ns | 500-1500 ns | < 100 us | 充足 |
+| Bus P99 延迟 | 77 ns | 500-1500 ns | < 100 us | 充足 |
 | Timer 平均抖动 | < 10 us | < 50 us | < 1 ms | 充足 |
 | Timer 最大抖动 | ~1 ms | 1-5 ms | < 10 ms | 充足 (非 RT 内核) |
 

@@ -221,7 +221,7 @@ Measured on x86 (Intel i7-9750H), ARM estimates based on 1 GHz Cortex-A:
 | Metric | x86 | ARM (est) | Typical Requirement | Margin |
 |--------|-----|-----------|---------------------|--------|
 | Bus throughput | 12-15M msgs/s | 1.0-2.0M msgs/s | < 1K msgs/s | > 1000x |
-| Bus P99 latency | 157 ns | 500-1500 ns | < 100 us | > 60x |
+| Bus P99 latency | 77 ns | 500-1500 ns | < 100 us | > 1000x |
 | SHM SPSC (256B) | 40M ops/s | 5-10M ops/s | < 30K ops/s | > 150x |
 | MemPool alloc | 98M ops/s | 10-20M ops/s | < 100K ops/s | > 100x |
 | Timer jitter (avg) | < 10 us | < 50 us | < 1 ms | > 20x |

@@ -6,7 +6,36 @@
 
 ## 最新变更
 
+### 2026-11-15: v0.9.2 测试构建修复与 span 视图
+
+**变更内容**:
+
+1. **span 视图** (`span.hpp`, `socket.hpp`, `transport.hpp`, `serial_transport.hpp`, `frame_channel.hpp`)
+   - 新增 `span<T>`/`byte_span`/`writable_byte_span` 与 `make_span()`/`as_bytes()`/`as_writable_bytes()`
+   - socket/transport/serial/frame 的读写接口增加 `byte_span` 重载, 指针与长度成对传递
+
+2. **修复自 v0.9.0 起损坏的测试构建** (`tests/test_observability.cpp`)
+   - `WorkerPoolStats` 已改为 `dispatched`/`processed`/`worker_queue_full`/`bus_stats`, 测试仍引用 `submitted`/`rejected`/`depth`, 导致 `osp_tests` 在干净导出下无法编译
+   - 移除已不存在的 `hcs_*` 注册用例; `LatencyTracker` 窗口容量调整为 128, 使 100 样本窗口断言成立
+
+3. **CI** (`.github/workflows/ci.yml`)
+   - `build-with-options` 增加 `OSP_SAFETY_PROFILE=ON` 条目
+   - push 触发分支加入 `windows`
+
+4. **文档校正**
+   - Bus P99 延迟统一为 2026-11-15 实测 77 ns (原文 157 ns 与 307 ns 自相矛盾)
+   - Home 的 TCP 指标由未实测的 "1M+ msg/s" 改为实测 470K frames/s @256B
+
+5. **测试环境** (`tests/test_system_monitor.cpp`)
+   - 满盘时 `available_bytes == 0` 属正常读数, 不再判失败
+
+**验证**: 全量 `osp_tests` 1348 例 (1340 通过、8 跳过、0 失败); `[bus]` 35 例在默认与安全 profile 下通过; 干净导出 (`git archive`) 构建通过。
+
+---
+
 ### 2026-11-15: v0.9.1 AsyncBus 有界、可检测、可修复 (P1-3)
+
+> 注: 该版本的 `osp_tests` 在干净导出下无法编译, 修复见 v0.9.2。
 
 **变更内容** (2 处行为变更, 其余为 additive):
 
