@@ -95,10 +95,10 @@ using WatchdogSlotId = NewType<uint32_t, WatchdogSlotIdTag>;
 // ============================================================================
 
 enum class WatchdogError : uint8_t {
-  kSlotsFull = 0,   ///< All watchdog slots are occupied.
-  kInvalidTimeout,  ///< Timeout value is zero or invalid.
-  kNotRegistered,   ///< Slot ID not found or already unregistered.
-  kThreadStartFailed,  ///< Auto-check thread could not be started.
+  kSlotsFull = 0,         ///< All watchdog slots are occupied.
+  kInvalidTimeout,        ///< Timeout value is zero or invalid.
+  kNotRegistered,         ///< Slot ID not found or already unregistered.
+  kThreadStartFailed,     ///< Auto-check thread could not be started.
   kInvalidRecoveryBeats,  ///< Recovery hysteresis must be at least one check.
 };
 
@@ -535,8 +535,8 @@ class ThreadWatchdog final {
     std::atomic<uint32_t> generation{0};
     ThreadHeartbeat heartbeat;  ///< Heartbeat signal (in platform.hpp).
     uint64_t timeout_us{0};
-    bool timed_out{false};  ///< Protected by mutex_.
-    uint8_t healthy_beats{0};  ///< Consecutive fresh checks while timed out.
+    bool timed_out{false};                 ///< Protected by mutex_.
+    uint8_t healthy_beats{0};              ///< Consecutive fresh checks while timed out.
     uint8_t recover_beats{kRecoverBeats};  ///< Per-slot recovery hysteresis.
     FixedString<32> name;
   };

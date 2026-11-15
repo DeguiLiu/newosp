@@ -38,8 +38,8 @@
 #include "osp/platform.hpp"
 #include "osp/vocabulary.hpp"
 
-#include <climits>
 #include <cerrno>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 
@@ -52,10 +52,10 @@
 #include <chrono>
 #include <fcntl.h>
 #include <linux/futex.h>
+#include <signal.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
-#include <signal.h>
 #include <thread>
 #include <unistd.h>
 #endif
@@ -128,9 +128,7 @@ static_assert(sizeof(ShmLayoutHeader) == 64U, "ShmLayoutHeader must be 64 bytes"
 inline constexpr uint32_t ShmLayoutHash(ShmLayoutKind kind, uint32_t slot_size, uint32_t slot_count,
                                         uint32_t total_size) noexcept {
   uint32_t hash = 2166136261U;  // FNV-1a
-  const auto mix = [&hash](uint32_t value) {
-    hash = (hash ^ value) * 16777619U;
-  };
+  const auto mix = [&hash](uint32_t value) { hash = (hash ^ value) * 16777619U; };
   mix(kShmLayoutVersion);
   mix(static_cast<uint32_t>(kind));
   mix(slot_size);
@@ -156,17 +154,15 @@ inline void WriteShmLayoutHeader(void* base, ShmLayoutKind kind, uint32_t slot_s
   std::memset(header->reserved, 0, sizeof(header->reserved));
 }
 
-inline expected<ShmLayoutHeader*, ShmError> ValidateShmLayout(void* base, uint32_t total_size,
-                                                               ShmLayoutKind kind, uint32_t slot_size,
-                                                               uint32_t slot_count) noexcept {
+inline expected<ShmLayoutHeader*, ShmError> ValidateShmLayout(void* base, uint32_t total_size, ShmLayoutKind kind,
+                                                              uint32_t slot_size, uint32_t slot_count) noexcept {
   if (base == nullptr || total_size < sizeof(ShmLayoutHeader)) {
     return expected<ShmLayoutHeader*, ShmError>::error(ShmError::kLayoutMismatch);
   }
   auto* header = static_cast<ShmLayoutHeader*>(base);
   if (header->magic != kShmLayoutMagic || header->version != kShmLayoutVersion ||
       header->header_size != sizeof(ShmLayoutHeader) || header->kind != static_cast<uint32_t>(kind) ||
-      header->slot_size != slot_size || header->slot_count != slot_count ||
-      header->total_size != total_size ||
+      header->slot_size != slot_size || header->slot_count != slot_count || header->total_size != total_size ||
       header->layout_hash != ShmLayoutHash(kind, slot_size, slot_count, total_size)) {
     return expected<ShmLayoutHeader*, ShmError>::error(ShmError::kLayoutMismatch);
   }
@@ -267,8 +263,8 @@ class SharedMemorySegment final {
 
     seg.fd_ = ::shm_open(seg.name_.c_str(), O_CREAT | O_RDWR | O_EXCL, kShmPermissions);
     if (seg.fd_ < 0) {
-      return expected<SharedMemorySegment, ShmError>::error(
-          errno == EEXIST ? ShmError::kAlreadyExists : ShmError::kCreateFailed);
+      return expected<SharedMemorySegment, ShmError>::error(errno == EEXIST ? ShmError::kAlreadyExists
+                                                                            : ShmError::kCreateFailed);
     }
 
     uint32_t aligned_size = PageAlign(size);
@@ -389,8 +385,7 @@ class SharedMemorySegment final {
     }
     const auto* header = static_cast<const ShmLayoutHeader*>(addr_);
     return header->magic == kShmLayoutMagic && header->version == kShmLayoutVersion &&
-           header->header_size == sizeof(ShmLayoutHeader) &&
-           header->total_size == size_;
+           header->header_size == sizeof(ShmLayoutHeader) && header->total_size == size_;
   }
 
   /// Recorded creator PID, or 0 when no valid layout header exists.
@@ -493,9 +488,8 @@ class ShmRingBuffer final {
     if (!valid.has_value()) {
       return expected<ShmRingBuffer*, ShmError>::error(valid.get_error());
     }
-    return expected<ShmRingBuffer*, ShmError>::success(
-        reinterpret_cast<ShmRingBuffer*>(  // NOLINT
-            static_cast<uint8_t*>(shm_addr) + kLayoutOffset));
+    return expected<ShmRingBuffer*, ShmError>::success(reinterpret_cast<ShmRingBuffer*>(  // NOLINT
+        static_cast<uint8_t*>(shm_addr) + kLayoutOffset));
   }
 
   /**

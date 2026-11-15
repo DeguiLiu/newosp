@@ -810,9 +810,7 @@ class DataDispatcher {
     BlockGuard() noexcept = default;
 
     BlockGuard(BlockGuard&& other) noexcept
-        : dispatcher_(other.dispatcher_),
-          block_id_(other.block_id_),
-          generation_(other.generation_) {
+        : dispatcher_(other.dispatcher_), block_id_(other.block_id_), generation_(other.generation_) {
       other.dispatcher_ = nullptr;
     }
 
@@ -832,9 +830,7 @@ class DataDispatcher {
 
     ~BlockGuard() noexcept { Reset(); }
 
-    uint8_t* Writable() noexcept {
-      return (dispatcher_ != nullptr) ? dispatcher_->GetWritable(block_id_) : nullptr;
-    }
+    uint8_t* Writable() noexcept { return (dispatcher_ != nullptr) ? dispatcher_->GetWritable(block_id_) : nullptr; }
 
     const uint8_t* Readable() const noexcept {
       return (dispatcher_ != nullptr) ? dispatcher_->GetReadable(block_id_, generation_) : nullptr;
@@ -877,8 +873,7 @@ class DataDispatcher {
       return expected<BlockGuard, JobPoolError>::error(result.get_error());
     }
     const uint32_t block_id = result.value();
-    return expected<BlockGuard, JobPoolError>::success(
-        BlockGuard(this, block_id, GetGeneration(block_id)));
+    return expected<BlockGuard, JobPoolError>::success(BlockGuard(this, block_id, GetGeneration(block_id)));
   }
 
   /// Release an allocated-but-never-submitted block. Used by BlockGuard when
@@ -890,8 +885,7 @@ class DataDispatcher {
       return false;
     }
     DataBlock* blk = store_.GetBlock(block_id);
-    if (blk->GetState() != BlockState::kAllocated ||
-        blk->refcount.load(std::memory_order_acquire) != 0U) {
+    if (blk->GetState() != BlockState::kAllocated || blk->refcount.load(std::memory_order_acquire) != 0U) {
       return false;
     }
     Recycle(block_id);
@@ -1071,8 +1065,8 @@ class DataDispatcher {
     for (uint32_t i = 0U; i < Store::Capacity(); ++i) {
       DataBlock* blk = store_.GetBlock(i);
       auto st = blk->GetState();
-      if ((st != BlockState::kProcessing && st != BlockState::kReady) ||
-          blk->deadline_us == 0U || now <= blk->deadline_us) {
+      if ((st != BlockState::kProcessing && st != BlockState::kReady) || blk->deadline_us == 0U ||
+          now <= blk->deadline_us) {
         continue;
       }
 
@@ -1082,8 +1076,7 @@ class DataDispatcher {
         uint32_t cur = blk->refcount.load(std::memory_order_acquire);
         bool claimed = false;
         while (cur > 0U) {
-          if (blk->refcount.compare_exchange_weak(cur, 0U, std::memory_order_acq_rel,
-                                                  std::memory_order_acquire)) {
+          if (blk->refcount.compare_exchange_weak(cur, 0U, std::memory_order_acq_rel, std::memory_order_acquire)) {
             claimed = true;
             break;
           }
@@ -1100,10 +1093,8 @@ class DataDispatcher {
         // A handler may still hold kProcessing. Only claim the state
         // transition; do not touch refcount or recycle under the handler.
         uint8_t expected_state = static_cast<uint8_t>(BlockState::kProcessing);
-        if (blk->state.compare_exchange_strong(expected_state,
-                                                static_cast<uint8_t>(BlockState::kTimeout),
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {
+        if (blk->state.compare_exchange_strong(expected_state, static_cast<uint8_t>(BlockState::kTimeout),
+                                               std::memory_order_acq_rel, std::memory_order_acquire)) {
           if (on_timeout != nullptr) {
             on_timeout(i, ctx);
           }

@@ -651,11 +651,11 @@ enum class ExecutorError : uint8_t {
  * and CPU affinity for realtime execution contexts.
  */
 struct RealtimeConfig {
-  int32_t sched_policy = 0;    // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
-  int32_t sched_priority = 0;  // SCHED_FIFO: 1-99, higher = more priority
-  bool lock_memory = false;    // mlockall(MCL_CURRENT | MCL_FUTURE)
-  uint32_t stack_size = 0;     // 0=system default, non-zero=preallocated stack
-  int32_t cpu_affinity = -1;   // -1=no binding, >=0=bind to specific CPU core
+  int32_t sched_policy = 0;       // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
+  int32_t sched_priority = 0;     // SCHED_FIFO: 1-99, higher = more priority
+  bool lock_memory = false;       // mlockall(MCL_CURRENT | MCL_FUTURE)
+  uint32_t stack_size = 0;        // 0=system default, non-zero=preallocated stack
+  int32_t cpu_affinity = -1;      // -1=no binding, >=0=bind to specific CPU core
   bool require_realtime = false;  // true=fail startup if any realtime setup fails
 };
 

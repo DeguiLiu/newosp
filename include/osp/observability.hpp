@@ -100,9 +100,8 @@ class QueueCounters final {
   void OnDepth(uint64_t depth) noexcept {
     depth_.store(depth, std::memory_order_relaxed);
     uint64_t peak = peak_depth_.load(std::memory_order_relaxed);
-    while (depth > peak && !peak_depth_.compare_exchange_weak(peak, depth, std::memory_order_relaxed,
-                                                             std::memory_order_relaxed)) {
-    }
+    while (depth > peak &&
+           !peak_depth_.compare_exchange_weak(peak, depth, std::memory_order_relaxed, std::memory_order_relaxed)) {}
   }
 
   Snapshot GetSnapshot() const noexcept {
@@ -139,10 +138,10 @@ class QueueCounters final {
 // ============================================================================
 
 enum class QueueStrategy : uint8_t {
-  kFifo = 0,          ///< FIFO; oldest job first.
+  kFifo = 0,            ///< FIFO; oldest job first.
   kCoalesceLatest = 1,  ///< Merge duplicate keys, keep the newest value.
-  kDropNewest = 2,    ///< On full, reject the incoming job.
-  kDropOldest = 3,    ///< On full, evict the oldest job.
+  kDropNewest = 2,      ///< On full, reject the incoming job.
+  kDropOldest = 3,      ///< On full, evict the oldest job.
 };
 
 inline const char* QueueStrategyName(QueueStrategy s) noexcept {
@@ -531,13 +530,11 @@ class LatencyTracker final {
       max_.store(latency_us, std::memory_order_relaxed);
     } else {
       uint64_t cur = min_.load(std::memory_order_relaxed);
-      while (latency_us < cur && !min_.compare_exchange_weak(cur, latency_us, std::memory_order_relaxed,
-                                                            std::memory_order_relaxed)) {
-      }
+      while (latency_us < cur &&
+             !min_.compare_exchange_weak(cur, latency_us, std::memory_order_relaxed, std::memory_order_relaxed)) {}
       cur = max_.load(std::memory_order_relaxed);
-      while (latency_us > cur && !max_.compare_exchange_weak(cur, latency_us, std::memory_order_relaxed,
-                                                            std::memory_order_relaxed)) {
-      }
+      while (latency_us > cur &&
+             !max_.compare_exchange_weak(cur, latency_us, std::memory_order_relaxed, std::memory_order_relaxed)) {}
     }
 
     const uint32_t bucket = observability_detail::FloorLog2(latency_us);

@@ -119,12 +119,7 @@ enum class FrameChannelError : uint8_t {
   kCorrupt
 };
 
-enum class FrameDtype : uint32_t {
-  kUint8 = 0,
-  kUint16 = 1,
-  kFloat32 = 2,
-  kFloat64 = 3
-};
+enum class FrameDtype : uint32_t { kUint8 = 0, kUint16 = 1, kFloat32 = 2, kFloat64 = 3 };
 
 /// @brief Bytes in one data element for a FrameDtype.
 constexpr uint32_t FrameDtypeSize(FrameDtype d) noexcept {
@@ -204,9 +199,8 @@ inline uint32_t FrameCrc32(const uint8_t* data, uint32_t len) noexcept {
     const uint32_t b2 = data[2];
     const uint32_t b3 = data[3];
     const uint32_t x = crc ^ (b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u));
-    crc = kTable.v[7][x & 0xFFu] ^ kTable.v[6][(x >> 8u) & 0xFFu] ^
-          kTable.v[5][(x >> 16u) & 0xFFu] ^ kTable.v[4][(x >> 24u) & 0xFFu] ^
-          kTable.v[3][data[4]] ^ kTable.v[2][data[5]] ^ kTable.v[1][data[6]] ^
+    crc = kTable.v[7][x & 0xFFu] ^ kTable.v[6][(x >> 8u) & 0xFFu] ^ kTable.v[5][(x >> 16u) & 0xFFu] ^
+          kTable.v[4][(x >> 24u) & 0xFFu] ^ kTable.v[3][data[4]] ^ kTable.v[2][data[5]] ^ kTable.v[1][data[6]] ^
           kTable.v[0][data[7]];
     data += 8;
     len -= 8u;
@@ -249,8 +243,7 @@ static_assert(std::atomic<uint32_t>::is_always_lock_free,
               "std::atomic<uint32_t> must be lock-free for shared memory use");
 static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t),
               "std::atomic<uint32_t> must be layout-compatible with uint32_t");
-static_assert(sizeof(FrameSegmentHeader) == kFrameSegmentHeaderBytes,
-              "FrameSegmentHeader must be 64 bytes");
+static_assert(sizeof(FrameSegmentHeader) == kFrameSegmentHeaderBytes, "FrameSegmentHeader must be 64 bytes");
 
 /**
  * @brief Per-slot header (64 bytes).
@@ -278,8 +271,7 @@ struct FrameSlotHeader {
   uint32_t reserved[8];
 };
 
-static_assert(sizeof(FrameSlotHeader) == kFrameSlotHeaderBytes,
-              "FrameSlotHeader must be 64 bytes");
+static_assert(sizeof(FrameSlotHeader) == kFrameSlotHeaderBytes, "FrameSlotHeader must be 64 bytes");
 
 // ============================================================================
 // FrameShmSegment - cross-platform shared-memory RAII
@@ -420,8 +412,7 @@ class FrameShmSegment final {
 // FrameShmSegment implementations
 // ----------------------------------------------------------------------------
 
-inline expected<FrameShmSegment, FrameChannelError> FrameShmSegment::Create(const char* name,
-                                                                            uint32_t size) noexcept {
+inline expected<FrameShmSegment, FrameChannelError> FrameShmSegment::Create(const char* name, uint32_t size) noexcept {
   FrameShmSegment seg;
   BuildFullName(seg.name_, name);
 #if defined(OSP_PLATFORM_WINDOWS)
@@ -465,8 +456,8 @@ inline expected<FrameShmSegment, FrameChannelError> FrameShmSegment::Create(cons
 #endif
 }
 
-inline expected<FrameShmSegment, FrameChannelError> FrameShmSegment::CreateOrReplace(
-    const char* name, uint32_t size) noexcept {
+inline expected<FrameShmSegment, FrameChannelError> FrameShmSegment::CreateOrReplace(const char* name,
+                                                                                     uint32_t size) noexcept {
 #if defined(OSP_PLATFORM_WINDOWS)
   // Windows section objects are destroyed when the last handle closes, so a
   // stale segment cannot survive a crash. "Replace" therefore just creates;
@@ -503,9 +494,7 @@ inline expected<FrameShmSegment, FrameChannelError> FrameShmSegment::Open(const 
   SIZE_T qr = ::VirtualQuery(addr, &mbi, sizeof(mbi));
   seg.h_ = h;
   seg.addr_ = addr;
-  seg.size_ = (qr != 0 && mbi.RegionSize <= 0xFFFFFFFFull)
-                  ? static_cast<uint32_t>(mbi.RegionSize)
-                  : 0u;
+  seg.size_ = (qr != 0 && mbi.RegionSize <= 0xFFFFFFFFull) ? static_cast<uint32_t>(mbi.RegionSize) : 0u;
   return expected<FrameShmSegment, FrameChannelError>::success(static_cast<FrameShmSegment&&>(seg));
 #elif defined(OSP_PLATFORM_LINUX)
   int fd = ::shm_open(seg.name_, O_RDWR, 0600);

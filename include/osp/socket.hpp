@@ -55,9 +55,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <afunix.h>  // sockaddr_un for the (non-functional on Winsock) AF_UNIX surface
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <afunix.h>  // sockaddr_un for the (non-functional on Winsock) AF_UNIX surface
 // POSIX shutdown() how constants; Winsock uses SD_* (same numeric values).
 // Provided so modules can call socket_api::Shutdown(fd, SHUT_RDWR) uniformly.
 #ifndef SHUT_RD
@@ -210,11 +210,13 @@ inline int Recv(SocketHandle fd, void* buf, size_t len, int flags) noexcept {
 #endif
 }
 
-inline int SendTo(SocketHandle fd, const void* data, size_t len, int flags, const sockaddr* dest, socklen_t dest_len) noexcept {
+inline int SendTo(SocketHandle fd, const void* data, size_t len, int flags, const sockaddr* dest,
+                  socklen_t dest_len) noexcept {
 #if OSP_NET_BACKEND == 1
   return static_cast<int>(lwip_sendto(static_cast<int>(fd), data, len, flags, dest, dest_len));
 #elif OSP_NET_BACKEND == 3
-  return ::sendto(static_cast<SOCKET>(fd), static_cast<const char*>(data), static_cast<int>(len), flags, dest, static_cast<int>(dest_len));
+  return ::sendto(static_cast<SOCKET>(fd), static_cast<const char*>(data), static_cast<int>(len), flags, dest,
+                  static_cast<int>(dest_len));
 #else
   return static_cast<int>(::sendto(fd, data, len, flags, dest, dest_len));
 #endif
@@ -244,7 +246,8 @@ inline int SetSockOpt(SocketHandle fd, int level, int optname, const void* optva
 #if OSP_NET_BACKEND == 1
   return lwip_setsockopt(static_cast<int>(fd), level, optname, optval, optlen);
 #elif OSP_NET_BACKEND == 3
-  return ::setsockopt(static_cast<SOCKET>(fd), level, optname, static_cast<const char*>(optval), static_cast<int>(optlen));
+  return ::setsockopt(static_cast<SOCKET>(fd), level, optname, static_cast<const char*>(optval),
+                      static_cast<int>(optlen));
 #else
   return ::setsockopt(fd, level, optname, optval, optlen);
 #endif
@@ -419,8 +422,8 @@ enum class SocketError : uint8_t {
   kAlreadyClosed,
   kSetOptFailed,
   kPathTooLong,
-  kWouldBlock,    ///< EAGAIN/EWOULDBLOCK (or WSAEWOULDBLOCK) -- transient, caller may retry.
-  kNotSupported   ///< Operation not available on this backend/platform (e.g. AF_UNIX on Winsock).
+  kWouldBlock,   ///< EAGAIN/EWOULDBLOCK (or WSAEWOULDBLOCK) -- transient, caller may retry.
+  kNotSupported  ///< Operation not available on this backend/platform (e.g. AF_UNIX on Winsock).
 };
 
 // ============================================================================

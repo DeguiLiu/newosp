@@ -51,8 +51,8 @@
 // RT_VERSION is also a resource-type constant defined by <windows.h>, so the
 // macro test alone would misdetect Windows as RT-Thread and pull in a
 // non-existent <rtthread.h>. Exclude Windows explicitly.
-#if (defined(RT_VERSION) || defined(RT_USING_HOOK) || defined(RT_USING_NEWLIB) || \
-     defined(RT_USING_LIBC)) && !defined(_WIN32)
+#if (defined(RT_VERSION) || defined(RT_USING_HOOK) || defined(RT_USING_NEWLIB) || defined(RT_USING_LIBC)) && \
+    !defined(_WIN32)
 #define OSP_PLATFORM_RTTHREAD 1
 #endif
 #endif
