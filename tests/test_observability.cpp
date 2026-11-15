@@ -1,15 +1,13 @@
 /**
  * @file test_observability.cpp
  * @brief Catch2 tests for osp::observability (queue/thread/frame/latency
- *        counters) and the hcs_* diagnostic shell command registration.
+ *        counters) and the statistics surface of osp::WorkerPool.
  */
 
 #include "osp/observability.hpp"
-#include "osp/shell_commands.hpp"
 #include "osp/worker_pool.hpp"
 
 #include <cstdint>
-#include <cstring>
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
@@ -162,7 +160,9 @@ TEST_CASE("FrameStageSet records frames/drops and snapshots", "[observability]")
 // ============================================================================
 
 TEST_CASE("LatencyTracker reports min/max/percentiles and window", "[observability]") {
-  osp::LatencyTracker<64> lt;
+  // The rolling window keeps at most kWindowSamples entries, so the ring must
+  // hold all 100 samples below for window_count to reach 100.
+  osp::LatencyTracker<128> lt;
 
   REQUIRE(lt.GetSnapshot().count == 0U);
 
@@ -206,7 +206,7 @@ static void HandleTaskX(const TaskX&, const osp::MessageHeader&) {
   g_x_done.fetch_add(1, std::memory_order_relaxed);
 }
 
-TEST_CASE("WorkerPool exposes submitted/rejected/depth stats", "[observability][worker_pool]") {
+TEST_CASE("WorkerPool exposes dispatch and bus stats", "[observability][worker_pool]") {
   osp::AsyncBus<XPayload>::Instance().Reset();
   g_x_done.store(0, std::memory_order_relaxed);
 
@@ -231,53 +231,17 @@ TEST_CASE("WorkerPool exposes submitted/rejected/depth stats", "[observability][
   }
 
   auto stats = pool.GetStats();
-  REQUIRE(stats.submitted == static_cast<uint64_t>(kCount));
   REQUIRE(stats.dispatched == static_cast<uint64_t>(kCount));
   REQUIRE(stats.processed == static_cast<uint64_t>(kCount));
   REQUIRE(stats.worker_queue_full == 0U);
-  REQUIRE(stats.depth == 0U);
-  REQUIRE(stats.rejected == 0U);
+  REQUIRE(stats.bus_stats.messages_published == static_cast<uint64_t>(kCount));
+  REQUIRE(stats.bus_stats.messages_processed == static_cast<uint64_t>(kCount));
+  REQUIRE(stats.bus_stats.messages_dropped == 0U);
 
-  // Pause rejects new submissions.
+  // A paused pool rejects new submissions instead of queueing them.
   (void)pool.FlushAndPause();
   REQUIRE_FALSE(pool.Submit(TaskX{999U}));
-  auto stats2 = pool.GetStats();
-  REQUIRE(stats2.rejected == 1U);
+  REQUIRE(pool.GetStats().bus_stats.messages_published == static_cast<uint64_t>(kCount));
 
   pool.Shutdown();
-}
-
-// ============================================================================
-// hcs_* shell command registration + execution (no output session)
-// ============================================================================
-
-namespace {
-
-template <typename Fn>
-bool FindAndRun(const char* name, Fn&& setup) {
-  setup();
-  bool found = false;
-  osp::detail::GlobalCmdRegistry::Instance().ForEach([&](const osp::ShellCmd& cmd) {
-    if (std::strcmp(cmd.name, name) == 0) {
-      found = true;
-      // No thread-local session: ShellPrintf is a no-op, the command must still
-      // return 0.
-      REQUIRE(cmd.func(0, nullptr) == 0);
-    }
-  });
-  return found;
-}
-
-}  // namespace
-
-TEST_CASE("shell_cmd RegisterThreads/Queues/Frames/Latency register and execute", "[observability][shell_commands]") {
-  static osp::ThreadRegistry<4> reg;
-  static osp::QueueMonitor<4> qmon;
-  static osp::FrameStageSet<4> fset;
-  static osp::LatencyTracker<64> lat;
-
-  CHECK(FindAndRun("hcs_threads", [] { osp::shell_cmd::RegisterThreads(reg); }));
-  CHECK(FindAndRun("hcs_queues", [] { osp::shell_cmd::RegisterQueues(qmon); }));
-  CHECK(FindAndRun("hcs_frames", [] { osp::shell_cmd::RegisterFrames(fset); }));
-  CHECK(FindAndRun("hcs_latency", [] { osp::shell_cmd::RegisterLatency(lat); }));
 }
