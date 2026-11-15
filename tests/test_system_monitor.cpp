@@ -94,7 +94,8 @@ TEST_CASE("SystemMonitor: ReadMemory returns valid data", "[system_monitor]") {
 TEST_CASE("SystemMonitor: ReadDisk root", "[system_monitor]") {
   auto disk = osp::SystemMonitor<4>::ReadDisk("/");
   CHECK(disk.total_bytes > 0);
-  CHECK(disk.available_bytes > 0);
+  // A completely full filesystem legitimately reports 0 available bytes for
+  // unprivileged users; total_bytes > 0 already proves the read worked.
   CHECK(disk.available_bytes <= disk.total_bytes);
   CHECK(disk.used_percent <= 100);
 }
