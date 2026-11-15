@@ -108,24 +108,12 @@ TEST_CASE("FindPidByName does exact match, not substring", "[process]") {
   auto r_bash = osp::FindPidByName("bash", pid_bash);
   auto r_sh = osp::FindPidByName("sh", pid_sh);
 
-  // If both found, they should be different PIDs (unless "sh" is actually sh)
+  // A substring match would resolve "sh" and "bash" to the same process, so
+  // different PIDs is the property under test. The comm is not asserted:
+  // FindPidByName also matches argv[0], and a script may rename its own comm
+  // (GitHub runners have chronyd-starter launched through /bin/sh).
   if (r_bash == osp::ProcessResult::kSuccess && r_sh == osp::ProcessResult::kSuccess) {
-    // "sh" PID's comm should actually be "sh", not "bash"
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/comm", static_cast<int>(pid_sh));
-    char buf[64];
-    int n = open(path, O_RDONLY);  // NOLINT
-    if (n >= 0) {
-      ssize_t sz = read(n, buf, sizeof(buf) - 1);
-      close(n);  // NOLINT
-      if (sz > 0) {
-        buf[sz] = '\0';
-        if (sz > 0 && buf[sz - 1] == '\n')
-          buf[sz - 1] = '\0';
-        // The comm should be "sh", not "bash"
-        REQUIRE(std::string(buf) == "sh");
-      }
-    }
+    REQUIRE(pid_sh != pid_bash);
   }
 }
 
