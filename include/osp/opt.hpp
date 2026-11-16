@@ -33,6 +33,29 @@
 #define OSP_OPT_HPP_
 
 // ============================================================================
+// 0. Functional-safety profile
+// ============================================================================
+
+/// Compile-time safety profile for safety-related builds.
+/// When ON, it selects options that keep every failure path bounded and
+/// observable: no O(N) eviction scan and mandatory [[nodiscard]] on publish
+/// APIs. It does not by itself make the library certified.
+#ifndef OSP_SAFETY_PROFILE
+#define OSP_SAFETY_PROFILE 0
+#endif
+
+/// Treat ignoring Publish()/Subscribe() results as a warning.
+#ifndef OSP_STRICT_NODISCARD
+#define OSP_STRICT_NODISCARD OSP_SAFETY_PROFILE
+#endif
+
+#if OSP_STRICT_NODISCARD
+#define OSP_NODISCARD [[nodiscard]]
+#else
+#define OSP_NODISCARD
+#endif
+
+// ============================================================================
 // 1. Queue / buffer depth
 // ============================================================================
 
@@ -52,8 +75,20 @@
 /// message in-place (replacing its ring slot) so the HIGH gets admitted even
 /// under a low/medium flood. The evicted message is counted as dropped. When
 /// OFF, HIGH is gated exactly like any other priority (full queue drops).
+/// The safety profile turns this off so the admission path stays bounded.
 #ifndef OSP_BUS_EVICTION
+#if OSP_SAFETY_PROFILE
+#define OSP_BUS_EVICTION 0U
+#else
 #define OSP_BUS_EVICTION 1U
+#endif
+#endif
+
+/// Upper bound on the eviction scan, in ring slots. Reaching the limit aborts
+/// the best-effort eviction and counts the abort, so the worst-case admission
+/// path is constant even when eviction is enabled.
+#ifndef OSP_BUS_EVICT_SCAN_MAX
+#define OSP_BUS_EVICT_SCAN_MAX 64U
 #endif
 
 /// WorkerPool per-worker SPSC queue depth.
@@ -119,6 +154,11 @@
 /// Shared-memory maximum consumers per channel.
 #ifndef OSP_SHM_SPMC_MAX_CONSUMERS
 #define OSP_SHM_SPMC_MAX_CONSUMERS 8
+#endif
+
+/// Shared-memory wait-plane spin before entering futex (0 disables).
+#ifndef OSP_SHM_WAIT_SPIN_US
+#define OSP_SHM_WAIT_SPIN_US 50
 #endif
 
 // ============================================================================

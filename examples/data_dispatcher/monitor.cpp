@@ -132,8 +132,8 @@ static int dd_peek(int, char*[]) {
     return 1;
   }
   NotifyMsg msg;
-  uint32_t len = g_state.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
-  if (len != sizeof(msg)) {
+  auto read = g_state.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+  if (!read.has_value() || read.value() != sizeof(msg)) {
     osp::DebugShell::Printf("  no notification available\r\n");
     return 1;
   }

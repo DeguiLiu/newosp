@@ -1,20 +1,37 @@
 include(FetchContent)
 
 set(CATCH2_VERSION v3.5.2)
+
+# DOWNLOAD_EXTRACT_TIMESTAMP was added in CMake 3.24. On older CMake (3.22 is
+# what Ubuntu 22.04 ships) ExternalProject does not recognise the keyword,
+# swallows it into the URL list and configure fails with "At least one entry of
+# URL is a path (invalid in a list)" — the whole test suite becomes unbuildable.
+set(_osp_catch2_ts "")
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    set(_osp_catch2_ts DOWNLOAD_EXTRACT_TIMESTAMP ON)
+endif()
+
 FetchContent_Declare(
     Catch2
     URL ${OSP_GITHUB_MIRROR}https://github.com/catchorg/Catch2/archive/refs/tags/${CATCH2_VERSION}.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP ON
+    ${_osp_catch2_ts}
 )
 FetchContent_MakeAvailable(Catch2)
 include(Catch)
 
 find_package(Threads REQUIRED)
 
+# --- Header-closure smoke TU (must stay MSVC-clean) ------------------------
+# Compiles every header in the Windows consumer set; an OBJECT library so it has
+# no main() and its only job is to fail compilation on a non-portable include.
+add_library(osp_header_smoke OBJECT msvc_smoke.cpp)
+target_link_libraries(osp_header_smoke PRIVATE osp)
+
 # Core test sources (no network, no sockpp dependency)
 set(OSP_TEST_CORE_SOURCES
     test_platform.cpp
     test_vocabulary.cpp
+    test_span.cpp
     test_log.cpp
     test_timer.cpp
     test_shell.cpp
@@ -53,6 +70,22 @@ set(OSP_TEST_CORE_SOURCES
     test_async_log.cpp
     test_data_dispatcher.cpp
     test_thread.cpp
+    test_config_toml.cpp
+    test_observability.cpp
+)
+
+# Windows-branch tests.  Each file guards its body with
+# `#if defined(OSP_PLATFORM_WINDOWS)`, so off Windows they compile to an empty
+# translation unit instead of being excluded here.
+set(OSP_TEST_WINDOWS_SOURCES
+    test_frame_channel.cpp
+    test_io_poller_win.cpp
+    test_process_win.cpp
+    test_shm_transport_win.cpp
+    test_shutdown_win.cpp
+    test_socket_win.cpp
+    test_system_monitor_win.cpp
+    test_thread_win.cpp
 )
 
 # example headers under test (serial_ota parser)
@@ -81,7 +114,7 @@ set(OSP_TEST_SOCKPP_SOURCES
 
 if(OSP_NO_EXCEPTIONS)
     # -fno-exceptions mode: core tests only (sockpp uses throw internally)
-    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES})
+    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES} ${OSP_TEST_WINDOWS_SOURCES})
     if(OSP_WITH_NETWORK)
         target_sources(osp_tests PRIVATE ${OSP_TEST_NETWORK_SOURCES})
     endif()
@@ -89,12 +122,13 @@ if(OSP_NO_EXCEPTIONS)
     target_compile_options(osp_tests PRIVATE -fno-exceptions -fno-rtti)
 elseif(NOT OSP_WITH_NETWORK)
     # No-network mode: core tests only (network headers are disabled)
-    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES})
+    add_executable(osp_tests ${OSP_TEST_CORE_SOURCES} ${OSP_TEST_WINDOWS_SOURCES})
     target_link_libraries(osp_tests Catch2::Catch2WithMain osp Threads::Threads util)
 else()
     # Normal mode: all tests
     add_executable(osp_tests
         ${OSP_TEST_CORE_SOURCES}
+        ${OSP_TEST_WINDOWS_SOURCES}
         ${OSP_TEST_NETWORK_SOURCES}
         ${OSP_TEST_SOCKPP_SOURCES}
     )
@@ -173,6 +207,35 @@ if(OSP_WITH_LWIP)
     target_link_options(osp_lwip_tests PRIVATE "-Wl,-rpath,${OSP_LWIP_LIB_DIR}")
     target_link_libraries(osp_lwip_tests ${OSP_LWIP_LIBRARY})
     catch_discover_tests(osp_lwip_tests
+        PROPERTIES SKIP_RETURN_CODE 4
+    )
+endif()
+
+# --- Lease benchmark (manual; not registered with CTest) --------------------
+add_executable(bench_shm_lease bench_shm_lease.cpp)
+target_link_libraries(bench_shm_lease PRIVATE osp Threads::Threads)
+
+# --- Windows/MSVC portable test subset -------------------------------------
+# The full core suite depends on the POSIX layer (termios/fork/epoll/...), which
+# MSVC does not provide. On MSVC build and run only the tests whose module
+# headers are in the portable Windows consumer closure; osp_header_smoke proves
+# the rest of that closure compiles.
+if(MSVC)
+    add_executable(osp_msvc_tests
+        test_thread.cpp
+        test_hsm.cpp
+        test_hsm_table.cpp
+        test_vocabulary.cpp
+        test_mem_pool.cpp
+        test_spsc_ringbuffer.cpp
+        test_log.cpp
+        test_async_log.cpp
+        test_semaphore.cpp
+        test_timer.cpp
+        test_watchdog.cpp
+    )
+    target_link_libraries(osp_msvc_tests Catch2::Catch2WithMain osp Threads::Threads)
+    catch_discover_tests(osp_msvc_tests
         PROPERTIES SKIP_RETURN_CODE 4
     )
 endif()

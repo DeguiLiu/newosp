@@ -300,7 +300,51 @@ TEST_CASE("executor - RealtimeConfig default values", "[executor]") {
   REQUIRE(cfg.lock_memory == false);
   REQUIRE(cfg.stack_size == 0);
   REQUIRE(cfg.cpu_affinity == -1);
+  REQUIRE(cfg.require_realtime == false);
 }
+
+TEST_CASE("executor - RealtimeExecutor StartChecked reports success", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::RealtimeConfig cfg;
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+
+  auto result = exec.StartChecked();
+  REQUIRE(result.has_value());
+  REQUIRE(exec.IsRunning());
+  exec.Stop();
+  REQUIRE_FALSE(exec.IsRunning());
+}
+
+#if defined(OSP_PLATFORM_LINUX)
+TEST_CASE("executor - RealtimeExecutor rejects invalid affinity", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::RealtimeConfig cfg;
+  cfg.cpu_affinity = CPU_SETSIZE;
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+
+  auto result = exec.StartChecked();
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::ExecutorError::kAffinityInvalid);
+  REQUIRE_FALSE(exec.IsRunning());
+}
+
+TEST_CASE("executor - require_realtime fails closed on scheduling error", "[executor]") {
+  ExecutorBusFixture fix;
+
+  osp::RealtimeConfig cfg;
+  cfg.require_realtime = true;
+  cfg.sched_policy = 99;  // invalid policy: pthread_setschedparam must fail
+  osp::RealtimeExecutor<TestPayload> exec(cfg);
+
+  auto result = exec.StartChecked();
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.get_error() == osp::ExecutorError::kSchedFailed);
+  REQUIRE(exec.GetLastError() == osp::ExecutorError::kSchedFailed);
+  REQUIRE_FALSE(exec.IsRunning());
+}
+#endif
 
 TEST_CASE("executor - RealtimeExecutor Start/Stop lifecycle", "[executor]") {
   ExecutorBusFixture fix;
@@ -623,4 +667,72 @@ TEST_CASE("executor - YieldSleepStrategy backward compatibility", "[executor]") 
   exec.Stop();
 
   REQUIRE(received_count.load(std::memory_order_relaxed) == 3);
+}
+
+// ============================================================================
+// Bus injection: two buses, two executors, no cross-delivery
+// ============================================================================
+
+TEST_CASE("executor - SingleThreadExecutor consumes only its bound bus", "[executor][bus_injection]") {
+  // Separate instances (not the per-variant singleton); static to keep the
+  // 1.3 MB ring off the test thread's stack.
+  static TestBus bus_a;
+  static TestBus bus_b;
+  bus_a.Reset();
+  bus_b.Reset();
+
+  std::atomic<int> received_a{0};
+  std::atomic<int> received_b{0};
+  auto handle_a = bus_a.Subscribe<TestMsg>([&received_a](const osp::MessageEnvelope<TestPayload>&) { ++received_a; });
+  auto handle_b = bus_b.Subscribe<TestMsg>([&received_b](const osp::MessageEnvelope<TestPayload>&) { ++received_b; });
+
+  osp::SingleThreadExecutor<TestPayload> exec_a(bus_a);
+  osp::SingleThreadExecutor<TestPayload> exec_b(bus_b);
+
+  REQUIRE(bus_a.Publish(TestMsg{1}, 0));
+  REQUIRE(bus_b.Publish(TestMsg{2}, 0));
+  REQUIRE(bus_b.Publish(TestMsg{3}, 0));
+
+  REQUIRE(exec_a.SpinOnce() == 1);
+  REQUIRE(received_a.load() == 1);
+  REQUIRE(received_b.load() == 0);
+
+  REQUIRE(exec_b.SpinOnce() == 2);
+  REQUIRE(received_a.load() == 1);
+  REQUIRE(received_b.load() == 2);
+
+  bus_a.Unsubscribe(handle_a);
+  bus_b.Unsubscribe(handle_b);
+  bus_a.Reset();
+  bus_b.Reset();
+}
+
+TEST_CASE("executor - StaticExecutor consumes only its bound bus", "[executor][bus_injection]") {
+  static TestBus bus_a;
+  static TestBus bus_b;
+  bus_a.Reset();
+  bus_b.Reset();
+
+  std::atomic<int> received_a{0};
+  std::atomic<int> received_b{0};
+  auto handle_a = bus_a.Subscribe<TestMsg>([&received_a](const osp::MessageEnvelope<TestPayload>&) { ++received_a; });
+
+  osp::StaticExecutor<TestPayload> exec(bus_a);
+  exec.Start();
+
+  REQUIRE(bus_a.Publish(TestMsg{1}, 0));
+  REQUIRE(bus_b.Publish(TestMsg{2}, 0));  // no subscriber on b
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (received_a.load(std::memory_order_relaxed) < 1 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  exec.Stop();
+  REQUIRE(received_a.load() == 1);
+  REQUIRE(bus_b.Depth() == 1);  // untouched by the executor
+
+  bus_a.Unsubscribe(handle_a);
+  bus_a.Reset();
+  bus_b.Reset();
 }

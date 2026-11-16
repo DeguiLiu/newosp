@@ -446,6 +446,31 @@ TEST_CASE("kCritical never dropped when queue has space", "[fault_collector]") {
   REQUIRE(accepted >= 7U);
 }
 
+TEST_CASE("critical overflow is latched before enqueue", "[fault_collector]") {
+  // Queue depth 8, ten distinct critical faults, consumer not started.
+  FaultCollector<16, 8> fc;
+  for (uint16_t i = 0U; i < 10U; ++i) {
+    REQUIRE(fc.RegisterFault(i, 0x100U + i).has_value());
+  }
+
+  for (uint16_t i = 0U; i < 10U; ++i) {
+    fc.ReportFault(i, i, FaultPriority::kCritical);
+  }
+
+  // Eight fit in the ring; the other two are rejected physically, but all ten
+  // critical fault bits must remain latched.
+  REQUIRE(fc.ActiveFaultCount() == 10U);
+  REQUIRE(fc.GetStatistics().total_dropped >= 2U);
+  REQUIRE(fc.IsFaultOverflow());
+  for (uint16_t i = 0U; i < 10U; ++i) {
+    REQUIRE(fc.IsFaultActive(i));
+  }
+
+  fc.ClearAllFaults();
+  REQUIRE(fc.ActiveFaultCount() == 0U);
+  REQUIRE_FALSE(fc.IsFaultOverflow());
+}
+
 TEST_CASE("kLow dropped before kCritical", "[fault_collector]") {
   FaultCollector<4, 8> fc;
   fc.RegisterFault(0U, 0x01010001U);
@@ -748,6 +773,7 @@ TEST_CASE("SetConsumerHeartbeat updates heartbeat in consumer loop", "[fault_col
   REQUIRE(hb.LastBeatUs() == 0U);
 
   fc.SetConsumerHeartbeat(&hb);
+  REQUIRE(fc.IsConsumerMonitored());
   fc.Start();
 
   // Wait for consumer loop to beat at least once
@@ -759,6 +785,7 @@ TEST_CASE("SetConsumerHeartbeat updates heartbeat in consumer loop", "[fault_col
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   uint64_t second_beat = hb.LastBeatUs();
   REQUIRE(second_beat >= first_beat);
+  REQUIRE(fc.ConsumerCycles() > 0U);
 
   fc.Stop();
 }

@@ -669,8 +669,8 @@ node.ProcessRemote();  // 轮询远程消息
 
 | 方法签名 | 说明 |
 |---|---|
-| `static ShmRingBuffer* InitAt(void* shm_addr)` | 在共享内存地址初始化 |
-| `static ShmRingBuffer* AttachAt(void* shm_addr)` | 附加到已存在的缓冲 |
+| `static ShmRingBuffer* InitAt(void* shm_addr, uint32_t total_size = Size())` | 写入布局头并初始化 |
+| `static expected<ShmRingBuffer*, ShmError> AttachChecked(void* shm_addr, uint32_t total_size)` | 校验布局后附加 |
 | `static constexpr uint32_t Size()` | 返回所需大小 |
 
 #### 公共方法
@@ -815,7 +815,7 @@ reader.Read(buf, size);
 | `error_rate_window` | `uint32_t` | 100 | 错误率窗口大小 |
 | `degraded_error_threshold` | `uint32_t` | 10 | 降级错误阈值 |
 | `failed_error_threshold` | `uint32_t` | 30 | 失败错误阈值 |
-| `max_frames_per_second` | `uint32_t` | 1000 | 最大帧率 (0=无限制) |
+| `max_frames_per_second` | `uint32_t` | 1000 | 最大帧率 (0=无限制)；相邻帧最小间隔 1000/N 微秒，无突发 |
 | `write_retry_count` | `uint32_t` | 3 | 写重试次数 |
 | `write_retry_delay_us` | `uint32_t` | 1000 | 写重试延迟 (微秒) |
 

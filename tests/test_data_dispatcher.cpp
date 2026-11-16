@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <thread>
+#include <utility>
 #include <unistd.h>
 #include <vector>
 
@@ -73,6 +74,40 @@ TEST_CASE("Pool: alloc and release single block", "[job_pool]") {
   REQUIRE(d.FreeBlocks() == 4U);
   REQUIRE(d.AllocBlocks() == 0U);
   REQUIRE(d.GetBlockState(r0.value()) == BlockState::kFree);
+}
+
+TEST_CASE("Pool: BlockGuard releases on scope exit", "[job_pool]") {
+  Disp<64, 4> d;
+  Disp<64, 4>::Config cfg;
+  d.Init(cfg);
+
+  {
+    auto result = d.AllocGuard();
+    REQUIRE(result.has_value());
+    REQUIRE(d.FreeBlocks() == 3U);
+    REQUIRE(result.value().Writable() != nullptr);
+  }
+
+  REQUIRE(d.FreeBlocks() == 4U);
+  REQUIRE(d.AllocBlocks() == 0U);
+}
+
+TEST_CASE("Pool: Submit(BlockGuard&&) transfers ownership", "[job_pool]") {
+  Disp<64, 4> d;
+  Disp<64, 4>::Config cfg;
+  d.Init(cfg);
+
+  auto result = d.AllocGuard();
+  REQUIRE(result.has_value());
+  auto guard = std::move(result.value());
+  const uint32_t bid = guard.Id();
+  std::memset(guard.Writable(), 0x5A, 8U);
+
+  auto submitted = d.Submit(std::move(guard), 8U, 1U);
+  REQUIRE(submitted.has_value());
+  REQUIRE(d.GetBlockState(bid) == BlockState::kReady);
+  REQUIRE(d.Release(bid));
+  REQUIRE(d.FreeBlocks() == 4U);
 }
 
 TEST_CASE("Pool: exhaust pool returns kPoolExhausted", "[job_pool]") {
@@ -235,6 +270,29 @@ TEST_CASE("Pool: timeout detection fires", "[job_pool]") {
 
   REQUIRE(count == 1U);
   REQUIRE(timeout_bid == bid);
+  REQUIRE(d.FreeBlocks() == 4U);
+}
+
+TEST_CASE("Pool: timeout marks processing block without recycling", "[job_pool]") {
+  Disp<64, 4> d;
+  Disp<64, 4>::Config cfg;
+  d.Init(cfg);
+
+  auto r = d.Alloc();
+  REQUIRE(r.has_value());
+  uint32_t bid = r.value();
+  DataBlock* blk = d.GetStore().GetBlock(bid);
+  RawSubmit(blk, 8U, 1U, 1U);
+  blk->SetState(BlockState::kProcessing);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+  REQUIRE(d.ScanTimeout(nullptr, nullptr) == 1U);
+  REQUIRE(d.GetBlockState(bid) == BlockState::kTimeout);
+  REQUIRE(d.FreeBlocks() == 3U);  // still held by the processing handler
+
+  // The handler eventually releases; only then is the block recycled.
+  REQUIRE(d.Release(bid));
   REQUIRE(d.FreeBlocks() == 4U);
 }
 
@@ -1141,6 +1199,44 @@ TEST_CASE("ConsumerSlot: cleanup dead consumer as sole holder recycles block", "
   REQUIRE(reclaimed == 1U);
   REQUIRE(d.FreeBlocks() == 8U);
   REQUIRE(d.AllocBlocks() == 0U);
+
+  CleanupTestShm(shm_name, ptr, size);
+}
+
+TEST_CASE("ConsumerSlot: cleanup does not recycle a processing block", "[job_pool][ShmStore]") {
+  const char* shm_name = "/osp_test_dd_processing";
+  uint32_t size = TestShmStore::RequiredShmSize();
+  void* ptr = CreateTestShm(shm_name, size);
+  REQUIRE(ptr != nullptr);
+
+  TestShmDisp d;
+  TestShmDisp::Config cfg;
+  d.Init(cfg, ptr, size);
+
+  auto r = d.Alloc();
+  REQUIRE(r.has_value());
+  uint32_t bid = r.value();
+  d.Submit(bid, 10U, 1U);
+
+  int32_t cid = d.RegisterConsumer(5000U);
+  REQUIRE(cid >= 0);
+  d.TrackBlockHold(cid, bid);
+  d.GetStore().GetBlock(bid)->SetState(BlockState::kProcessing);
+
+  // A paused consumer looks "dead" by heartbeat, but may still be using the
+  // block. The reaper must not recycle it underneath the handler.
+  d.GetStore()
+      .GetConsumerSlot(static_cast<uint32_t>(cid))
+      ->heartbeat_us.store(SteadyNowUs() - OSP_JOB_CONSUMER_TIMEOUT_US - 1000000ULL, std::memory_order_relaxed);
+
+  REQUIRE(d.CleanupDeadConsumers() == 0U);
+  REQUIRE(d.FreeBlocks() == 7U);
+
+  // Explicit force cleanup is the escape hatch once the owner is confirmed dead.
+  auto* bid_ptr = &bid;
+  REQUIRE(d.ForceCleanup([](uint32_t block_id, void* ctx) { return block_id == *static_cast<const uint32_t*>(ctx); },
+                         bid_ptr) == 1U);
+  REQUIRE(d.FreeBlocks() == 8U);
 
   CleanupTestShm(shm_name, ptr, size);
 }

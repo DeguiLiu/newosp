@@ -3,8 +3,8 @@
 # newosp 性能与内存基准报告
 
 > 从属于 [design_zh.md](design_zh.md) 第 12 节资源预算
-> 版本: 1.0
-> 日期: 2026-02-14
+> 版本: 1.1
+> 日期: 2026-11-15
 > 数据来源: `examples/benchmark.cpp`, `examples/benchmarks/` 实测
 
 ## 1. 测试环境
@@ -25,40 +25,40 @@
 
 ### 2.1 AsyncBus 消息吞吐
 
-测试 `AsyncBus<Payload>` 的 Publish + ProcessBatch 端到端吞吐，三种消息大小。
+测试 `AsyncBus<Payload>` 的 Publish + ProcessBatch 稳态吞吐: 每发布 64 条排空一次，环缓冲工作集保持在缓存内。该指标衡量持续传输速率，与队列容量无关。`Payload = variant<24B, 64B, 256B>`，Envelope sizeof = 296 B。
 
-#### 默认队列深度 (QueueDepth=4096)
+本小节数据于 2026-11-15 复测: Intel Xeon Gold 6348 @2.60GHz (VMware, `taskset -c 5` 单核)、GCC 11.4.0、`-O3 -std=c++17`；每次 100,000 条，取 7 次运行中位数。
 
-| 消息大小 | 数量 | 耗时 | 吞吐率 | 接收数 |
-|----------|------|------|--------|--------|
-| Small (24B) | 10,000 | 0.61 ms | 5.344 M msgs/s | 3,276 |
-| Medium (64B) | 10,000 | 0.72 ms | 4.536 M msgs/s | 3,276 |
-| Large (256B) | 10,000 | 0.78 ms | 4.218 M msgs/s | 3,276 |
-| Small (24B) | 100,000 | 4.47 ms | 0.734 M msgs/s | 3,276 |
-| Medium (64B) | 100,000 | 5.28 ms | 0.620 M msgs/s | 3,276 |
-| Large (256B) | 100,000 | 5.66 ms | 0.579 M msgs/s | 3,276 |
+| 消息大小 | 数量 | 耗时 | 吞吐率 | 载荷带宽 |
+|----------|------|------|--------|----------|
+| Small (24B) | 100,000 | 6.5 ms | 15.3 M msgs/s | 368 MB/s |
+| Medium (64B) | 100,000 | 8.4 ms | 11.9 M msgs/s | 763 MB/s |
+| Large (256B) | 100,000 | 8.2 ms | 12.3 M msgs/s | 3.14 GB/s |
 
-默认队列 4096 在 10K 消息时即触发背压，实际接收仅 3,276 条。100K 消息时吞吐率被队列满拖至 < 1M msgs/s。
-
-#### 大队列深度 (QueueDepth=131072)
-
-编译时通过 `-DOSP_BUS_QUEUE_DEPTH=131072U` 覆盖:
-
-| 消息大小 | 数量 | 耗时 | 吞吐率 | 接收数 |
-|----------|------|------|--------|--------|
-| Small (24B) | 10,000 | 1.65 ms | 6.059 M msgs/s | 10,000 |
-| Medium (64B) | 10,000 | 1.46 ms | 6.869 M msgs/s | 10,000 |
-| Large (256B) | 10,000 | 1.40 ms | 7.160 M msgs/s | 10,000 |
-| Small (24B) | 100,000 | 17.00 ms | 5.884 M msgs/s | 100,000 |
-| Medium (64B) | 100,000 | 17.38 ms | 5.753 M msgs/s | 100,000 |
-| Large (256B) | 100,000 | 17.96 ms | 5.568 M msgs/s | 100,000 |
+| 消息大小 | 中位数 | 7 次波动范围 |
+|----------|--------|--------------|
+| Small (24B) | 15.3 M msgs/s | 14.5-15.6 M |
+| Medium (64B) | 11.9 M msgs/s | 10.4-12.2 M |
+| Large (256B) | 12.3 M msgs/s | 11.5-12.3 M |
 
 分析:
-- 大队列下 100K 消息全部接收，吞吐稳定在 5.6-6.1 M msgs/s
-- 相比默认队列 100K 场景 (0.6-0.7M)，提升约 8-9 倍
-- 消息大小对吞吐影响约 10% (24B vs 256B)，variant 拷贝开销可控
-- 队列深度是吞吐的决定性因素，而非 CAS 竞争
-- 大队列代价: AsyncBus 实例从 518 KB 增至 ~16 MB (131072 x 128B envelope)
+- 稳态吞吐 11.9-15.3 M msgs/s，单条成本约 65-84 ns
+- Envelope 为定长 296 B (variant 最大成员 + 消息头)，槽位成本固定 320 B。因此 24B 与 256B 的 msgs/s 相同，载荷带宽随 payload 线性增长 (368 MB/s → 3.14 GB/s)
+- 24B 与 256B 的波动主要来自虚拟机调度抖动，中位数分别为 15.3 M 与 12.3 M
+- 100,000 条为稳定测量窗口; 10,000 条的时间窗仅约 1 ms，受启动升温影响，读数在 7.5-12 M 之间波动，不作指标
+- `Publish` 每条调用一次 `steady_clock`；需要更高吞吐时改用 `PublishFast` 显式传入时间戳
+
+#### 背压与容量 (非吞吐指标)
+
+以下数据来自"先灌满环再排空"的测试法，用于衡量队列容量与丢弃行为，不代表吞吐上限:
+
+| 消息大小 | 数量 | 耗时 | 接收数 | 说明 |
+|----------|------|------|--------|------|
+| Small (24B) | 100,000 | 3.3-5.8 ms | 3,276 | QueueDepth=4096，其余被背压拒绝 |
+| Medium (64B) | 100,000 | 4.4-5.6 ms | 3,276 | 同上 |
+| Large (256B) | 100,000 | 4.6-5.1 ms | 3,276 | 同上 |
+
+队列深度只决定突发缓冲容量，不决定吞吐: 增大 `QueueDepth` 能接收更多消息，但工作集随之扩大，每条消息都变成冷内存写，单位消息成本反而上升。早期报告的 5.6-7.2 M msgs/s 即来自该方法 (131072 深环冷写 42 MB)，并非总线吞吐上限。
 
 ### 2.2 ShmRingBuffer (MPSC) 单生产者吞吐
 
@@ -247,7 +247,7 @@ Unix Domain Socket 比 TCP loopback 快 2.83x。
 - Envelope 包含完整 variant (8232B)，无论实际 payload 大小，每次 Publish 都拷贝整个 variant
 - 因此 64B 和 8192B 的 M msgs/s 差异仅 ~10% (0.689 vs 0.628)，瓶颈在 envelope 拷贝而非 payload 大小
 - 字节吞吐随 payload 线性增长: 8192B 达到 4.9 GB/s
-- 与 2.1 节小 payload (5.9M msgs/s) 对比，大 variant 导致吞吐下降约 9x，因 envelope sizeof 从 104B 增至 8232B
+- 与 2.1 节小 payload (12-15M msgs/s) 对比，大 variant 使吞吐降至 0.66M msgs/s，因 envelope sizeof 从 296B 增至 8232B (28 倍)
 - 数据来源: `examples/benchmarks/bus_payload_benchmark.cpp`
 
 ## 3. 延迟测试
@@ -258,13 +258,13 @@ SmallMsg (24B) 单线程 Publish + ProcessBatch，10,000 样本:
 
 | 百分位 | 延迟 |
 |--------|------|
-| Mean | 95 ns |
-| P50 | 90 ns |
-| P95 | 113 ns |
-| P99 | 157 ns |
+| Mean | 72 ns |
+| P50 | 73 ns |
+| P95 | 75 ns |
+| P99 | 77 ns |
 
 分析:
-- 同线程 publish-to-callback 延迟 P99 < 160 ns
+- 同线程 publish-to-callback 延迟 P99 < 100 ns (2026-11-15 复测 77 ns)
 - 跨线程场景需额外考虑线程唤醒延迟 (通常 1-10 us)
 
 ## 4. 定时器测试
@@ -408,17 +408,17 @@ SmallMsg (24B) 单线程 Publish + ProcessBatch，10,000 样本:
 |------|------|------|
 | .text | ~80 KB | 仅链接使用的模块 (header-only LTO) |
 | 栈内存 | ~16 KB/线程 | 主线程 + 2 worker + 1 timer |
-| AsyncBus | ~520 KB | 单 Bus 实例 (可通过模板参数缩小) |
+| AsyncBus | ~1.3 MB | 单 Bus 实例，QueueDepth=4096、Envelope=296 B |
 | ShmRingBuffer | ~264 KB/通道 | 按需创建 |
 | MemPool | ~65 KB/池 | 按需创建 |
 | 总 RAM | < 2 MB | 不含应用层数据 |
 
 ### 7.2 性能缩放参考
 
-| 指标 | x86 实测 (QueueDepth=131072) | ARM 估算 (1 GHz) | 说明 |
+| 指标 | x86 实测 (QueueDepth=4096) | ARM 估算 (1 GHz) | 说明 |
 |------|------|-------------------|------|
-| Bus 吞吐 | 5.9 M msgs/s | ~0.5-1.0 M msgs/s | 受 CAS 性能影响 |
-| Bus 延迟 P99 | 307 ns | ~500-1500 ns | 受缓存层级影响 |
+| Bus 吞吐 | 12-15 M msgs/s | ~1.0-2.0 M msgs/s | 稳态，环缓冲驻留缓存 |
+| Bus 延迟 P99 | 77 ns | ~500-1500 ns | 受缓存层级影响 |
 | ShmRingBuffer (MPSC, 单生产者) 吞吐 | 34 M cycles/s | ~5-10 M cycles/s | wait-free，缩放线性 |
 | MemPool | 95 M ops/s | ~10-20 M ops/s | 纯内存操作 |
 | Timer 抖动 | ~1 ms | ~1-5 ms | 受 OS 调度影响 |
@@ -428,18 +428,18 @@ SmallMsg (24B) 单线程 Publish + ProcessBatch，10,000 样本:
 
 | QueueDepth | AsyncBus 内存 | 适用场景 |
 |------------|---------------|----------|
-| 1024 | ~130 KB | 低频控制消息 (< 1K msgs/s) |
-| 4096 (默认) | ~520 KB | 通用场景 (< 10K msgs/s 突发) |
-| 16384 | ~2 MB | 中等突发 (视频帧元数据) |
-| 131072 | ~16 MB | 高吞吐压测 / 大突发缓冲 |
+| 1024 | ~329 KB | 低频控制消息 (< 1K msgs/s) |
+| 4096 (默认) | ~1.32 MB | 通用场景 (< 10K msgs/s 突发) |
+| 16384 | ~5.25 MB | 中等突发 (视频帧元数据) |
+| 131072 | ~42.0 MB | 大突发缓冲（不提升稳态吞吐） |
 
 ### 7.4 调优建议
 
 | 场景 | 建议 |
 |------|------|
-| 内存受限 (< 512 KB) | 缩小 `QueueDepth` (默认 4096)，减少 Bus 实例内存 |
+| 内存受限 (< 512 KB) | 将 `QueueDepth` 降到 1024 (~322 KB) |
 | 低延迟要求 (< 10 us) | 使用 `RealtimeExecutor` (SCHED_FIFO) + CPU affinity |
-| 高吞吐要求 (> 1M msgs/s) | 增大 `QueueDepth`，或使用 SPSC 直连替代 Bus 广播 |
+| 高吞吐要求 (> 10M msgs/s) | 保持环缓冲工作集在缓存内并批量排空；大块数据用 SPSC/ShmChannel 替代 Bus 广播 |
 | 突发流量场景 | 增大 `QueueDepth` 吸收突发，避免背压丢弃 |
 | 多进程 IPC | 使用 `ShmChannel` 替代 TCP，延迟降低 10x |
 
@@ -448,8 +448,8 @@ SmallMsg (24B) 单线程 Publish + ProcessBatch，10,000 样本:
 # newosp 性能评估: 工业激光雷达应用场景
 
 > 从属于 [benchmark_report_zh.md](benchmark_report_zh.md) 实测数据
-> 版本: 1.0
-> 日期: 2026-02-14
+> 版本: 1.1
+> 日期: 2026-11-15
 
 ## 1. 目标场景
 
@@ -478,7 +478,7 @@ newosp 作为激光雷达产品内部的嵌入式通信框架，运行在 ARM-Li
 
 | 指标 | x86 实测 | ARM 估算 (1 GHz) | 激光雷达需求 | 裕量 |
 |------|----------|-------------------|-------------|------|
-| Bus 消息吞吐 | 5.9M msgs/s | 0.5-1.0M msgs/s | < 1K msgs/s (控制消息) | > 500x |
+| Bus 消息吞吐 | 12-15M msgs/s | 1.0-2.0M msgs/s | < 1K msgs/s (控制消息) | > 1000x |
 | SHM SPSC (256B) | 40M ops/s | 5-10M ops/s | < 30K ops/s (帧元数据) | > 150x |
 | SHM SPSC (4KB) | 2.9M ops/s | 0.3-0.6M ops/s | < 25 ops/s (点云分包) | > 10000x |
 | MemPool alloc/free | 98M ops/s | 10-20M ops/s | < 100K ops/s | > 100x |
@@ -490,7 +490,7 @@ newosp 作为激光雷达产品内部的嵌入式通信框架，运行在 ARM-Li
 
 | 指标 | x86 实测 | ARM 估算 | 激光雷达需求 | 评估 |
 |------|----------|----------|-------------|------|
-| Bus P99 延迟 | 157 ns | 500-1500 ns | < 100 us | 充足 |
+| Bus P99 延迟 | 77 ns | 500-1500 ns | < 100 us | 充足 |
 | Timer 平均抖动 | < 10 us | < 50 us | < 1 ms | 充足 |
 | Timer 最大抖动 | ~1 ms | 1-5 ms | < 10 ms | 充足 (非 RT 内核) |
 
@@ -502,7 +502,7 @@ newosp 作为激光雷达产品内部的嵌入式通信框架，运行在 ARM-Li
 |------|-------------|----------------------|------|
 | .text | ~80 KB | 256 MB - 1 GB Flash | < 0.1% |
 | 运行时 RAM | < 2 MB | 256 MB - 2 GB DDR | < 1% |
-| AsyncBus 实例 | ~520 KB | - | 可通过 QueueDepth 缩小 |
+| AsyncBus 实例 | ~1.3 MB | - | 可通过 QueueDepth 缩小 |
 
 框架本身的资源占用可忽略不计，绝大部分内存留给点云缓冲和算法处理。
 
@@ -580,10 +580,10 @@ stateDiagram-v2
 
 ### 4.1 控制面/数据面分离
 
-实测数据显示，当 variant 包含 8KB 类型时，Envelope sizeof 达 8232B，Bus 吞吐从 5.9M 降至 0.6M msgs/s。newosp 的架构设计已针对此做了分离:
+实测数据显示，当 variant 包含 8KB 类型时，Envelope sizeof 达 8232B，Bus 吞吐从 12-15M 降至 0.6M msgs/s。newosp 的架构设计已针对此做了分离:
 
 - 数据面 (点云): 走 ShmChannel 零拷贝传递，不经过 Bus，吞吐不受 variant 大小影响
-- 控制面 (消息): 走 Bus pub-sub，variant 仅包含控制消息类型 (< 256B)，Envelope sizeof 保持 ~300B，吞吐 > 5M msgs/s
+- 控制面 (消息): 走 Bus pub-sub，variant 仅包含控制消息类型 (< 256B)，Envelope sizeof 保持 ~300B，稳态吞吐 12-15M msgs/s
 
 这是架构层面的设计选择，而非运行时限制。
 

@@ -96,7 +96,7 @@ Application Layer ──┬──> Service & Discovery ──┬──> Transpor
 newosp separates control messages from bulk data transfer:
 
 - **Control Plane**: Small messages (< 256B) routed through AsyncBus using `std::variant`
-  - Throughput: 5.9M msgs/s (x86), 0.5-1.0M msgs/s (ARM)
+  - Throughput: 12-15M msgs/s (x86, steady state), 1.0-2.0M msgs/s (ARM est.)
   - Use case: Commands, status updates, configuration changes
 
 - **Data Plane**: Large payloads (KB-MB) transferred via ShmChannel zero-copy
@@ -220,8 +220,8 @@ Measured on x86 (Intel i7-9750H), ARM estimates based on 1 GHz Cortex-A:
 
 | Metric | x86 | ARM (est) | Typical Requirement | Margin |
 |--------|-----|-----------|---------------------|--------|
-| Bus throughput | 5.9M msgs/s | 0.5-1.0M msgs/s | < 1K msgs/s | > 500x |
-| Bus P99 latency | 157 ns | 500-1500 ns | < 100 us | > 60x |
+| Bus throughput | 12-15M msgs/s | 1.0-2.0M msgs/s | < 1K msgs/s | > 1000x |
+| Bus P99 latency | 77 ns | 500-1500 ns | < 100 us | > 1000x |
 | SHM SPSC (256B) | 40M ops/s | 5-10M ops/s | < 30K ops/s | > 150x |
 | MemPool alloc | 98M ops/s | 10-20M ops/s | < 100K ops/s | > 100x |
 | Timer jitter (avg) | < 10 us | < 50 us | < 1 ms | > 20x |

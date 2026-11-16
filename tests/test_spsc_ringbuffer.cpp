@@ -374,12 +374,12 @@ TEST_CASE("SpscRingbuffer: struct element type", "[spsc][boundary]") {
 // ============================================================================
 
 TEST_CASE("SpscRingbuffer: concurrent SPSC 1M elements", "[spsc][concurrent]") {
-  constexpr size_t kCount = 1000000;
+  static constexpr size_t kCount = 1000000;
   osp::SpscRingbuffer<int, 1024> rb;
 
   std::atomic<bool> consumer_ok{true};
 
-  std::thread producer([&rb, kCount]() {
+  std::thread producer([&rb]() {
     for (size_t i = 0; i < kCount; ++i) {
       while (!rb.Push(static_cast<int>(i))) {
         std::this_thread::yield();
@@ -387,7 +387,7 @@ TEST_CASE("SpscRingbuffer: concurrent SPSC 1M elements", "[spsc][concurrent]") {
     }
   });
 
-  std::thread consumer([&rb, &consumer_ok, kCount]() {
+  std::thread consumer([&rb, &consumer_ok]() {
     for (size_t i = 0; i < kCount; ++i) {
       int val = -1;
       while (!rb.Pop(val)) {
@@ -408,13 +408,13 @@ TEST_CASE("SpscRingbuffer: concurrent SPSC 1M elements", "[spsc][concurrent]") {
 }
 
 TEST_CASE("SpscRingbuffer: concurrent batch SPSC", "[spsc][concurrent]") {
-  constexpr size_t kBatchCount = 100000;
-  constexpr size_t kMaxBatch = 64;
+  static constexpr size_t kBatchCount = 100000;
+  static constexpr size_t kMaxBatch = 64;
   osp::SpscRingbuffer<uint32_t, 1024> rb;
 
   std::atomic<bool> ok{true};
 
-  std::thread producer([&rb, kBatchCount, kMaxBatch]() {
+  std::thread producer([&rb]() {
     uint32_t seq = 0;
     uint32_t batch[kMaxBatch];
     for (size_t b = 0; b < kBatchCount; ++b) {
@@ -433,7 +433,7 @@ TEST_CASE("SpscRingbuffer: concurrent batch SPSC", "[spsc][concurrent]") {
     }
   });
 
-  std::thread consumer([&rb, &ok, kBatchCount, kMaxBatch]() {
+  std::thread consumer([&rb, &ok]() {
     uint32_t expected = 0;
     uint32_t batch[kMaxBatch];
     for (size_t b = 0; b < kBatchCount; ++b) {
@@ -531,7 +531,7 @@ TEST_CASE("SpscRingbuffer: non-trivially copyable PushBatch/PopBatch", "[spsc][n
 
 TEST_CASE("SpscRingbuffer: non-trivially copyable concurrent SPSC", "[spsc][nontrivial][concurrent]") {
   using Var = std::variant<int, double>;
-  constexpr size_t kCount = 100000;
+  static constexpr size_t kCount = 100000;
   osp::SpscRingbuffer<Var, 256> rb;
 
   std::atomic<bool> consumer_ok{true};

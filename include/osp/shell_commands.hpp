@@ -123,6 +123,8 @@ inline void RegisterFaults(FaultCollectorType& fc) {
     ShellPrintf("  total_reported:  %" PRIu64 "\r\n", stats.total_reported);
     ShellPrintf("  total_processed: %" PRIu64 "\r\n", stats.total_processed);
     ShellPrintf("  total_dropped:   %" PRIu64 "\r\n", stats.total_dropped);
+    ShellPrintf("  overflow_latched: %s\r\n", s_fc->IsFaultOverflow() ? "YES" : "NO");
+    ShellPrintf("  consumer_cycles: %" PRIu32 "\r\n", s_fc->ConsumerCycles());
     for (uint32_t i = 0U; i < 4U; ++i) {
       ShellPrintf("  %-10s reported=%" PRIu64 "  dropped=%" PRIu64 "\r\n", detail::FaultPriorityName(i),
                   stats.priority_reported[i], stats.priority_dropped[i]);

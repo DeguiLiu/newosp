@@ -482,6 +482,43 @@ TEST_CASE("Bus high priority survives low/medium flood via eviction", "[bus]") {
   (void)med_pub;
 }
 
+TEST_CASE("Bus bounded eviction drops HIGH once nothing is evictable", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  // Saturate with LOW then MED (60% / 80% admission thresholds).
+  for (int i = 0; i < 6000; ++i) {
+    (void)bus.PublishWithPriority(SensorData{1.0f, static_cast<uint32_t>(i)}, 0, osp::MessagePriority::kLow);
+  }
+  for (int i = 0; i < 6000; ++i) {
+    (void)bus.PublishWithPriority(MotorCmd{static_cast<int32_t>(i), 0}, 0, osp::MessagePriority::kMedium);
+  }
+  uint32_t evictable = bus.Depth();
+  REQUIRE(evictable > 0);
+
+  // Far more HIGH than evictable slots: the bounded scan must eventually drop
+  // instead of sweeping the whole ring, and every drop must be counted.
+  int high_fail = 0;
+  for (int i = 0; i < 6000; ++i) {
+    if (!bus.PublishWithPriority(AlarmEvent{static_cast<uint32_t>(i), 0}, 0, osp::MessagePriority::kHigh)) {
+      ++high_fail;
+    }
+  }
+
+  REQUIRE(high_fail > 0);
+  auto stats = bus.GetStatistics();
+  REQUIRE(stats.dropped_by_priority[2] == static_cast<uint64_t>(high_fail));
+  // Some of the flood was displaced by HIGH admissions.
+  REQUIRE(stats.dropped_by_priority[0] + stats.dropped_by_priority[1] > 0);
+  REQUIRE(stats.messages_dropped ==
+          stats.dropped_by_priority[0] + stats.dropped_by_priority[1] + stats.dropped_by_priority[2]);
+#if OSP_BUS_EVICTION
+  REQUIRE(stats.eviction_scan_aborts > 0);
+#else
+  REQUIRE(stats.eviction_scan_aborts == 0);
+#endif
+}
+
 TEST_CASE("Bus concurrent publish from multiple threads", "[bus]") {
   BusFixture fix;
   auto& bus = TestBus::Instance();
@@ -829,4 +866,90 @@ TEST_CASE("AsyncBus PublishTimestamp is monotonic non-decreasing", "[bus]") {
   for (size_t i = 1; i < stamps.size(); ++i) {
     REQUIRE(stamps[i] >= stamps[i - 1]);
   }
+}
+
+TEST_CASE("AsyncBus drops are counted per priority", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  // No consumer: fill past the LOW admission threshold (60% of the queue).
+  static constexpr int kAttempts = 3000;
+  int failed = 0;
+  for (int i = 0; i < kAttempts; ++i) {
+    if (!bus.PublishWithPriority(SensorData{static_cast<float>(i), 0}, 0, osp::MessagePriority::kLow)) {
+      ++failed;
+    }
+  }
+
+  REQUIRE(failed > 0);
+  auto stats = bus.GetStatistics();
+  REQUIRE(stats.dropped_by_priority[0] == static_cast<uint64_t>(failed));
+  REQUIRE(stats.dropped_by_priority[1] == 0U);
+  REQUIRE(stats.dropped_by_priority[2] == 0U);
+  REQUIRE(stats.messages_dropped == static_cast<uint64_t>(failed));
+}
+
+namespace {
+std::atomic<int> g_callbacks_full_errors{0};
+
+void OnBusError(osp::BusError error, uint64_t /*msg_id*/) {
+  if (error == osp::BusError::kCallbacksFull) {
+    ++g_callbacks_full_errors;
+  }
+}
+}  // namespace
+
+TEST_CASE("AsyncBus reports kCallbacksFull when the table is full", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  g_callbacks_full_errors.store(0);
+  bus.SetErrorCallback(&OnBusError);
+
+  for (uint32_t i = 0; i < OSP_BUS_MAX_CALLBACKS_PER_TYPE; ++i) {
+    REQUIRE(bus.Subscribe<SensorData>([](const TestEnvelope&) {}).IsValid());
+  }
+  REQUIRE_FALSE(bus.Subscribe<SensorData>([](const TestEnvelope&) {}).IsValid());
+  REQUIRE(g_callbacks_full_errors.load() == 1);
+}
+
+TEST_CASE("AsyncBus GetHealth reports a stalled queue", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  REQUIRE(bus.GetHealth().stall_ms == 0);
+  REQUIRE(bus.Publish(SensorData{1.0f, 1}, 0));
+
+  auto pending = bus.GetHealth();
+  REQUIRE(pending.depth == 1);
+  REQUIRE(pending.capacity == TestBus::kQueueDepth);
+  REQUIRE_FALSE(pending.id_exhausted);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  REQUIRE(bus.GetHealth().stall_ms >= 4);
+
+  REQUIRE(bus.ProcessBatch() == 1);
+  REQUIRE(bus.GetHealth().stall_ms == 0);
+}
+
+TEST_CASE("AsyncBus DrainAndReset repairs the bus and keeps subscribers", "[bus]") {
+  BusFixture fix;
+  auto& bus = TestBus::Instance();
+
+  std::atomic<int> received{0};
+  REQUIRE(bus.Subscribe<SensorData>([&received](const TestEnvelope&) { ++received; }).IsValid());
+
+  for (uint32_t i = 0; i < 10; ++i) {
+    REQUIRE(bus.Publish(SensorData{static_cast<float>(i), i}, 0));
+  }
+  REQUIRE(bus.Depth() == 10);
+
+  bus.DrainAndReset();
+  REQUIRE(bus.Depth() == 0);
+  REQUIRE(bus.GetStatistics().discarded_on_repair == 10);
+
+  // The subscription survived the repair.
+  REQUIRE(bus.Publish(SensorData{42.0f, 7}, 0));
+  REQUIRE(bus.ProcessBatch() == 1);
+  REQUIRE(received.load() == 1);
 }

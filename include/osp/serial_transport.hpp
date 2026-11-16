@@ -40,6 +40,7 @@
 #define OSP_SERIAL_TRANSPORT_HPP_
 
 #include "osp/platform.hpp"
+#include "osp/span.hpp"
 #include "osp/spsc_ringbuffer.hpp"
 #include "osp/vocabulary.hpp"
 
@@ -266,8 +267,8 @@ class SerialTransport {
         last_byte_time_ms_(0U),
         last_tx_time_ms_(0U),
         last_rx_time_ms_(0U),
-        frame_count_window_start_ms_(0U),
-        frames_sent_in_window_(0U),
+        next_send_us_(0U),
+        error_window_start_ms_(0U),
         error_count_in_window_(0U) {}
 
   ~SerialTransport() { Close(); }
@@ -304,7 +305,8 @@ class SerialTransport {
     const uint64_t now = SteadyNowUs() / 1000U;
     last_tx_time_ms_ = now;
     last_rx_time_ms_ = now;
-    frame_count_window_start_ms_ = now;
+    error_window_start_ms_ = now;
+    next_send_us_ = SteadyNowUs();
 
     return expected<void, SerialError>::success();
 #else
@@ -341,18 +343,10 @@ class SerialTransport {
       return expected<void, SerialError>::error(SerialError::kPortNotOpen);
     }
 
-    // Rate limiting check
+    // Rate limiting check: GCRA, one frame per interval, no window burst.
     if (cfg_.max_frames_per_second > 0U) {
-      const uint64_t now = SteadyNowUs() / 1000U;
-      const uint64_t window_duration_ms = 1000U;
-
-      if (now - frame_count_window_start_ms_ >= window_duration_ms) {
-        // Reset window
-        frame_count_window_start_ms_ = now;
-        frames_sent_in_window_ = 0U;
-      }
-
-      if (frames_sent_in_window_ >= cfg_.max_frames_per_second) {
+      const uint64_t now_us = SteadyNowUs();
+      if (now_us < next_send_us_) {
         ++stats_.rate_limit_drops;
         return expected<void, SerialError>::error(SerialError::kRateLimitExceeded);
       }
@@ -412,11 +406,23 @@ class SerialTransport {
     const expected<void, SerialError> result = WriteAll(buf, pos, seq);
 
     if (result.has_value()) {
-      ++frames_sent_in_window_;
+      if (cfg_.max_frames_per_second > 0U) {
+        uint64_t interval_us = 1000000U / cfg_.max_frames_per_second;
+        if (interval_us == 0U)
+          interval_us = 1U;
+        const uint64_t now_us = SteadyNowUs();
+        const uint64_t base = (now_us > next_send_us_) ? now_us : next_send_us_;
+        next_send_us_ = base + interval_us;
+      }
       last_tx_time_ms_ = SteadyNowUs() / 1000U;
     }
 
     return result;
+  }
+
+  /// @brief Send a frame from a byte view; the view size is the payload size.
+  expected<void, SerialError> Send(uint16_t type_index, byte_span payload) noexcept {
+    return Send(type_index, payload.data(), payload.size_u32());
   }
 
   // ------------------------------------------------------------------
@@ -616,9 +622,9 @@ class SerialTransport {
     const uint64_t now = SteadyNowUs() / 1000U;
     const uint64_t window_duration_ms = 10000U;  // 10 second window
 
-    if (now - frame_count_window_start_ms_ >= window_duration_ms) {
+    if (now - error_window_start_ms_ >= window_duration_ms) {
       error_count_in_window_ = 1U;  // Current error
-      frame_count_window_start_ms_ = now;
+      error_window_start_ms_ = now;
     }
   }
 
@@ -1044,11 +1050,11 @@ class SerialTransport {
   uint64_t last_tx_time_ms_;
   uint64_t last_rx_time_ms_;
 
-  // Rate limiting state
-  uint64_t frame_count_window_start_ms_;
-  uint32_t frames_sent_in_window_;
+  // Rate limiting state (GCRA)
+  uint64_t next_send_us_;
 
   // Error rate tracking
+  uint64_t error_window_start_ms_;
   uint32_t error_count_in_window_;
 };
 

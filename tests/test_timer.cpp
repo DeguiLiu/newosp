@@ -1226,8 +1226,9 @@ TEST_CASE("TimerScheduler: period_ms=1 minimum legal period fires rapidly", "[ti
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   sched.Stop();
 
-  // Should fire many times (>10) in 50ms with 1ms period
-  REQUIRE(counter.load() > 10);
+  // 50 ms at a 1 ms period: allow for scheduler jitter on loaded CI runners
+  // (a Windows job measured 9 ticks).
+  REQUIRE(counter.load() > 5);
 }
 
 TEST_CASE("TimerScheduler: UINT32_MAX period_ms does not overflow", "[timer][edge]") {

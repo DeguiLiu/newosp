@@ -439,6 +439,51 @@ TEST_CASE("transport - full roundtrip NetworkNode A to B via TCP", "[transport][
   REQUIRE(received.sensor_id == outgoing.sensor_id);
 }
 
+TEST_CASE("transport - NetworkNode AdvertiseTo v2 crc path", "[transport][network_node][v2][hardening]") {
+  osp::AsyncBus<TestPayload>::Instance().Reset();
+
+  osp::NetworkNode<TestPayload> node_b("receiver_v2", 20);
+  REQUIRE(node_b.Start().has_value());
+
+  osp::TcpListener listener_b;
+  uint16_t port_b = SetupListener(listener_b);
+
+  osp::NetworkNode<TestPayload> node_a("sender_v2", 10);
+  REQUIRE(node_a.Start().has_value());
+  node_a.SetSendVersion(2);
+
+  osp::TcpSocket accepted_sock;
+  std::thread accept_thread([&listener_b, &accepted_sock]() {
+    auto r = listener_b.Accept();
+    if (r.has_value()) {
+      accepted_sock = static_cast<osp::TcpSocket&&>(r.value());
+    }
+  });
+
+  auto ep_b = osp::Endpoint::FromString("127.0.0.1", port_b);
+  REQUIRE(node_a.AdvertiseTo<SensorData>(ep_b).has_value());
+  accept_thread.join();
+  REQUIRE(accepted_sock.IsValid());
+
+  osp::TcpTransport recv_transport;
+  recv_transport.AcceptFrom(static_cast<osp::TcpSocket&&>(accepted_sock));
+
+  SensorData outgoing{3.5f, 21};
+  REQUIRE(node_a.Publish(outgoing));
+  node_a.SpinOnce();
+
+  osp::FrameHeaderV1 hdr;
+  uint8_t payload_buf[256];
+  auto recv_r = recv_transport.RecvFrameAuto(hdr, payload_buf, sizeof(payload_buf));
+  REQUIRE(recv_r.has_value());
+  REQUIRE(hdr.magic == osp::kFrameMagicV2);
+  REQUIRE(hdr.sender_id == 10);
+
+  SensorData received;
+  REQUIRE(osp::Serializer<SensorData>::Deserialize(payload_buf, recv_r.value(), received));
+  REQUIRE(received.sensor_id == outgoing.sensor_id);
+}
+
 // ============================================================================
 // 11. P0-4 Transport Frame Extension Tests (v1 format)
 // ============================================================================
@@ -874,4 +919,322 @@ TEST_CASE("Transport frame version mismatch", "[transport][tcp][integration]") {
   REQUIRE(hdr_v1.timestamp_ns == 0);  // v0 doesn't have timestamp
 
   client_thread.join();
+}
+
+
+// ============================================================================
+// Frame-level failure, CRC32 v2, payload-too-large
+// ============================================================================
+
+TEST_CASE("transport - half-frame send disconnects", "[transport][tcp][hardening]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+
+  osp::TcpTransport client;
+  auto ep = osp::Endpoint::FromString("127.0.0.1", port);
+  REQUIRE(client.Connect(ep).has_value());
+
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+
+  uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  client.TestSetSendBudget(osp::FrameCodec::kHeaderSize);
+  auto r = client.SendFrame(0, 1, payload, sizeof(payload));
+  REQUIRE_FALSE(r.has_value());
+  REQUIRE(r.get_error() == osp::TransportError::kSendFailed);
+  REQUIRE_FALSE(client.IsConnected());
+
+  auto r2 = client.SendFrame(0, 1, payload, sizeof(payload));
+  REQUIRE_FALSE(r2.has_value());
+  REQUIRE(r2.get_error() == osp::TransportError::kNotConnected);
+}
+
+TEST_CASE("transport - header-complete payload-blocked send disconnects", "[transport][tcp][hardening]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+
+  osp::TcpTransport client;
+  auto ep = osp::Endpoint::FromString("127.0.0.1", port);
+  REQUIRE(client.Connect(ep).has_value());
+
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+
+  uint8_t payload[8] = {9, 8, 7, 6, 5, 4, 3, 2};
+  client.TestSetSendBudget(osp::FrameCodec::kHeaderSize + 3);
+  auto r = client.SendFrame(0, 1, payload, sizeof(payload));
+  REQUIRE_FALSE(r.has_value());
+  REQUIRE(r.get_error() == osp::TransportError::kSendFailed);
+  REQUIRE_FALSE(client.IsConnected());
+}
+
+TEST_CASE("transport - partial recv after header disconnects", "[transport][tcp][hardening]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+
+  osp::TcpTransport client;
+  auto ep = osp::Endpoint::FromString("127.0.0.1", port);
+  REQUIRE(client.Connect(ep).has_value());
+
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+
+  uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  REQUIRE(client.SendFrame(0, 7, payload, sizeof(payload)).has_value());
+
+  osp::FrameHeader hdr;
+  uint8_t buf[64];
+  server.TestSetRecvBudget(osp::FrameCodec::kHeaderSize);
+  auto r = server.RecvFrame(hdr, buf, sizeof(buf));
+  REQUIRE_FALSE(r.has_value());
+  REQUIRE(r.get_error() == osp::TransportError::kRecvFailed);
+  REQUIRE_FALSE(server.IsConnected());
+}
+
+TEST_CASE("transport - declared length over buffer disconnects", "[transport][tcp][hardening]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+
+  std::thread client_thread([port]() {
+    auto sock_r = osp::TcpSocket::Create();
+    if (!sock_r.has_value())
+      return;
+    osp::TcpSocket sock = static_cast<osp::TcpSocket&&>(sock_r.value());
+    auto addr_r = osp::SocketAddress::FromIpv4("127.0.0.1", port);
+    if (!addr_r.has_value() || !sock.Connect(addr_r.value()).has_value())
+      return;
+
+    osp::FrameHeader hdr;
+    hdr.magic = osp::kFrameMagicV0;
+    hdr.length = 5000;
+    hdr.type_index = 0;
+    hdr.sender_id = 1;
+    uint8_t hdr_buf[osp::FrameCodec::kHeaderSize];
+    osp::FrameCodec::EncodeHeader(hdr, hdr_buf, sizeof(hdr_buf));
+    (void)sock.Send(hdr_buf, osp::FrameCodec::kHeaderSize);
+  });
+
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+
+  osp::FrameHeaderV1 hdr_v1;
+  uint8_t buf[64];
+  auto r = server.RecvFrameAuto(hdr_v1, buf, sizeof(buf));
+  REQUIRE_FALSE(r.has_value());
+  REQUIRE(r.get_error() == osp::TransportError::kInvalidFrame);
+  REQUIRE_FALSE(server.IsConnected());
+  client_thread.join();
+}
+
+TEST_CASE("transport - declared length over caller buffer is kBufferFull", "[transport][tcp][hardening]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+
+  std::thread client_thread([port]() {
+    auto sock_r = osp::TcpSocket::Create();
+    if (!sock_r.has_value())
+      return;
+    osp::TcpSocket sock = static_cast<osp::TcpSocket&&>(sock_r.value());
+    auto addr_r = osp::SocketAddress::FromIpv4("127.0.0.1", port);
+    if (!addr_r.has_value() || !sock.Connect(addr_r.value()).has_value())
+      return;
+
+    osp::FrameHeader hdr;
+    hdr.magic = osp::kFrameMagicV0;
+    hdr.length = 256;  // within MAX_FRAME_SIZE but larger than the caller buffer
+    hdr.type_index = 0;
+    hdr.sender_id = 1;
+    uint8_t hdr_buf[osp::FrameCodec::kHeaderSize];
+    osp::FrameCodec::EncodeHeader(hdr, hdr_buf, sizeof(hdr_buf));
+    (void)sock.Send(hdr_buf, osp::FrameCodec::kHeaderSize);
+  });
+
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+
+  osp::FrameHeaderV1 hdr_v1;
+  uint8_t buf[64];
+  auto r = server.RecvFrameAuto(hdr_v1, buf, sizeof(buf));
+  REQUIRE_FALSE(r.has_value());
+  REQUIRE(r.get_error() == osp::TransportError::kBufferFull);
+  REQUIRE(server.IsConnected());
+  client_thread.join();
+}
+
+TEST_CASE("transport - SendFrame oversize is kPayloadTooLarge", "[transport][tcp][hardening]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+  osp::TcpTransport client;
+  auto ep = osp::Endpoint::FromString("127.0.0.1", port);
+  REQUIRE(client.Connect(ep).has_value());
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+
+  uint8_t one = 0;
+  auto r = client.SendFrame(0, 1, &one, OSP_TRANSPORT_MAX_FRAME_SIZE + 1U);
+  REQUIRE_FALSE(r.has_value());
+  REQUIRE(r.get_error() == osp::TransportError::kPayloadTooLarge);
+  REQUIRE(client.IsConnected());
+}
+
+TEST_CASE("transport - v2 crc roundtrip and mix with v0/v1", "[transport][tcp][v2][hardening]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+  osp::TcpTransport client;
+  auto ep = osp::Endpoint::FromString("127.0.0.1", port);
+  REQUIRE(client.Connect(ep).has_value());
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+
+  uint8_t p0[2] = {0x11, 0x22};
+  uint8_t p1[2] = {0x33, 0x44};
+  uint8_t p2[2] = {0x55, 0x66};
+  REQUIRE(client.SendFrame(0, 1, p0, sizeof(p0)).has_value());
+  REQUIRE(client.SendFrameV1(0, 1, 7, 123, p1, sizeof(p1)).has_value());
+  REQUIRE(client.SendFrameV2(0, 1, 8, 456, p2, sizeof(p2)).has_value());
+
+  osp::FrameHeaderV1 hdr;
+  uint8_t buf[16];
+  auto r0 = server.RecvFrameAuto(hdr, buf, sizeof(buf));
+  REQUIRE(r0.has_value());
+  REQUIRE(hdr.magic == osp::kFrameMagicV0);
+  REQUIRE(buf[0] == 0x11);
+
+  auto r1 = server.RecvFrameAuto(hdr, buf, sizeof(buf));
+  REQUIRE(r1.has_value());
+  REQUIRE(hdr.magic == osp::kFrameMagicV1);
+  REQUIRE(hdr.seq_num == 7);
+  REQUIRE(buf[0] == 0x33);
+
+  auto r2 = server.RecvFrameAuto(hdr, buf, sizeof(buf));
+  REQUIRE(r2.has_value());
+  REQUIRE(hdr.magic == osp::kFrameMagicV2);
+  REQUIRE(hdr.seq_num == 8);
+  REQUIRE(buf[0] == 0x55);
+  REQUIRE(server.IntegrityUncheckedCount() == 2);
+  REQUIRE(server.CrcErrorCount() == 0);
+}
+
+TEST_CASE("transport - v2 payload bit flip is kInvalidFrame", "[transport][tcp][v2][hardening]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+
+  std::thread client_thread([port]() {
+    auto sock_r = osp::TcpSocket::Create();
+    if (!sock_r.has_value())
+      return;
+    osp::TcpSocket sock = static_cast<osp::TcpSocket&&>(sock_r.value());
+    auto addr_r = osp::SocketAddress::FromIpv4("127.0.0.1", port);
+    if (!addr_r.has_value() || !sock.Connect(addr_r.value()).has_value())
+      return;
+
+    uint8_t payload[4] = {1, 2, 3, 4};
+    osp::FrameHeaderV2 hdr{};
+    hdr.magic = osp::kFrameMagicV2;
+    hdr.length = 4;
+    hdr.type_index = 0;
+    hdr.sender_id = 9;
+    hdr.seq_num = 1;
+    hdr.timestamp_ns = 0;
+    hdr.crc32 = 0;
+    uint8_t hdr_buf[osp::FrameCodec::kHeaderSizeV2];
+    osp::FrameCodec::EncodeHeaderV2(hdr, hdr_buf, sizeof(hdr_buf));
+    hdr.crc32 = osp::FrameCodec::Crc32HeaderAndPayload(hdr_buf, osp::FrameCodec::kHeaderSizeV2, payload, 4);
+    std::memcpy(hdr_buf + 26, &hdr.crc32, 4);
+    payload[0] ^= 0x01;
+    (void)sock.Send(hdr_buf, sizeof(hdr_buf));
+    (void)sock.Send(payload, 4);
+  });
+
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+  osp::FrameHeaderV1 hdr;
+  uint8_t buf[16];
+  auto r = server.RecvFrameAuto(hdr, buf, sizeof(buf));
+  REQUIRE_FALSE(r.has_value());
+  REQUIRE(r.get_error() == osp::TransportError::kInvalidFrame);
+  REQUIRE_FALSE(server.IsConnected());
+  REQUIRE(server.CrcErrorCount() == 1);
+  client_thread.join();
+}
+
+TEST_CASE("transport - v2 seq flip is kInvalidFrame", "[transport][tcp][v2][hardening]") {
+  osp::TcpListener listener;
+  uint16_t port = SetupListener(listener);
+
+  std::thread client_thread([port]() {
+    auto sock_r = osp::TcpSocket::Create();
+    if (!sock_r.has_value())
+      return;
+    osp::TcpSocket sock = static_cast<osp::TcpSocket&&>(sock_r.value());
+    auto addr_r = osp::SocketAddress::FromIpv4("127.0.0.1", port);
+    if (!addr_r.has_value() || !sock.Connect(addr_r.value()).has_value())
+      return;
+
+    uint8_t payload[4] = {1, 2, 3, 4};
+    osp::FrameHeaderV2 hdr{};
+    hdr.magic = osp::kFrameMagicV2;
+    hdr.length = 4;
+    hdr.type_index = 0;
+    hdr.sender_id = 9;
+    hdr.seq_num = 1;
+    hdr.timestamp_ns = 0;
+    hdr.crc32 = 0;
+    uint8_t hdr_buf[osp::FrameCodec::kHeaderSizeV2];
+    osp::FrameCodec::EncodeHeaderV2(hdr, hdr_buf, sizeof(hdr_buf));
+    hdr.crc32 = osp::FrameCodec::Crc32HeaderAndPayload(hdr_buf, osp::FrameCodec::kHeaderSizeV2, payload, 4);
+    std::memcpy(hdr_buf + 26, &hdr.crc32, 4);
+    hdr_buf[14] ^= 0x01;  // seq_num LSB
+    (void)sock.Send(hdr_buf, sizeof(hdr_buf));
+    (void)sock.Send(payload, 4);
+  });
+
+  auto accept_r = listener.Accept();
+  REQUIRE(accept_r.has_value());
+  osp::TcpTransport server;
+  server.AcceptFrom(static_cast<osp::TcpSocket&&>(accept_r.value()));
+  osp::FrameHeaderV1 hdr;
+  uint8_t buf[16];
+  auto r = server.RecvFrameAuto(hdr, buf, sizeof(buf));
+  REQUIRE_FALSE(r.has_value());
+  REQUIRE(r.get_error() == osp::TransportError::kInvalidFrame);
+  REQUIRE_FALSE(server.IsConnected());
+  client_thread.join();
+}
+
+TEST_CASE("transport - FrameHeaderV2 encode decode roundtrip", "[transport][codec][v2]") {
+  osp::FrameHeaderV2 original{};
+  original.magic = osp::kFrameMagicV2;
+  original.length = 12;
+  original.type_index = 3;
+  original.sender_id = 99;
+  original.seq_num = 7;
+  original.timestamp_ns = 123456789ULL;
+  original.crc32 = 0xA5A5A5A5u;
+
+  uint8_t buf[osp::FrameCodec::kHeaderSizeV2];
+  REQUIRE(osp::FrameCodec::EncodeHeaderV2(original, buf, sizeof(buf)) == osp::FrameCodec::kHeaderSizeV2);
+  osp::FrameHeaderV2 decoded{};
+  REQUIRE(osp::FrameCodec::DecodeHeaderV2(buf, sizeof(buf), decoded));
+  REQUIRE(decoded.magic == original.magic);
+  REQUIRE(decoded.length == original.length);
+  REQUIRE(decoded.seq_num == original.seq_num);
+  REQUIRE(decoded.crc32 == original.crc32);
+  REQUIRE(osp::FrameCodec::DetectVersion(buf, 4) == 2);
 }

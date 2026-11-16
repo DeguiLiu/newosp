@@ -77,8 +77,17 @@ static uint64_t Percentile(std::vector<uint64_t>& samples, double pct) {
 }
 
 // -- Throughput test ---------------------------------------------------------
+//
+// Two distinct metrics, reported separately:
+//   steady: drain every kDrainChunk publishes, so the ring working set stays
+//           cache-resident. This is the sustained throughput of the bus.
+//   burst:  fill the ring first, then drain. Almost all the time is spent on
+//           cold writes across the whole ring, so it measures burst capacity
+//           and backpressure, not the steady-state rate.
 
-template <typename Msg>
+static constexpr uint32_t kDrainChunk = 64;
+
+template <bool kSteady, typename Msg>
 static void RunThroughput(Bus& bus, const char* label, uint32_t count) {
   uint32_t received = 0;
   auto handle = bus.template Subscribe<Msg>([&received](const osp::MessageEnvelope<BenchPayload>&) { ++received; });
@@ -91,6 +100,10 @@ static void RunThroughput(Bus& bus, const char* label, uint32_t count) {
   for (uint32_t i = 0; i < count; ++i) {
     msg.id = i;
     bus.Publish(BenchPayload{msg}, 1);
+    if constexpr (kSteady) {
+      if (((i + 1) % kDrainChunk) == 0)
+        bus.ProcessBatch();
+    }
   }
   // Drain all published messages
   for (uint32_t round = 0; round < 1000; ++round) {
@@ -102,26 +115,39 @@ static void RunThroughput(Bus& bus, const char* label, uint32_t count) {
   uint64_t ns = ElapsedNs(t0, t1);
   double secs = static_cast<double>(ns) / 1e9;
   double mps = (secs > 0) ? (static_cast<double>(received) / secs / 1e6) : 0;
-  printf("  %-12s  %8u msgs  %8.2f ms  %8.3f M msgs/s  (rx %u)\n", label, count, secs * 1e3, mps, received);
+  double mbps = (secs > 0) ? (static_cast<double>(received) * sizeof(Msg) / secs / 1e6) : 0;
+  printf("  %-12s  %8u msgs  %8.2f ms  %8.3f M msgs/s  %8.1f MB/s  (rx %u)\n", label, count, secs * 1e3, mps, mbps,
+         received);
 
   bus.Unsubscribe(handle);
 }
 
 static void BenchThroughput(Bus& bus) {
-  printf("\n=== Throughput Test ===\n");
-  printf("  %-12s  %8s        %8s      %8s\n", "Payload", "Count", "Time", "Rate");
-  printf("  -----------------------------------------------------------\n");
+  printf("\n=== Throughput Test (steady state, drain every %u publishes) ===\n", kDrainChunk);
+  printf("  %-12s  %8s        %8s      %8s      %8s\n", "Payload", "Count", "Time", "Rate", "Bandwidth");
+  printf("  ---------------------------------------------------------------------------\n");
 
   static constexpr uint32_t kCounts[] = {10000, 100000};
   for (uint32_t n : kCounts) {
     bus.Reset();
-    RunThroughput<SmallMsg>(bus, "Small(24B)", n);
+    RunThroughput<true, SmallMsg>(bus, "Small(24B)", n);
     bus.Reset();
-    RunThroughput<MediumMsg>(bus, "Medium(64B)", n);
+    RunThroughput<true, MediumMsg>(bus, "Medium(64B)", n);
     bus.Reset();
-    RunThroughput<LargeMsg>(bus, "Large(256B)", n);
+    RunThroughput<true, LargeMsg>(bus, "Large(256B)", n);
     printf("\n");
   }
+
+  printf("=== Burst Test (fill ring first, then drain; capacity, not rate) ===\n");
+  printf("  %-12s  %8s        %8s      %8s      %8s\n", "Payload", "Count", "Time", "Rate", "Bandwidth");
+  printf("  ---------------------------------------------------------------------------\n");
+  static constexpr uint32_t kBurst = 100000;
+  bus.Reset();
+  RunThroughput<false, SmallMsg>(bus, "Small(24B)", kBurst);
+  bus.Reset();
+  RunThroughput<false, MediumMsg>(bus, "Medium(64B)", kBurst);
+  bus.Reset();
+  RunThroughput<false, LargeMsg>(bus, "Large(256B)", kBurst);
 }
 
 // -- End-to-end latency test -------------------------------------------------

@@ -316,9 +316,11 @@ int main(int argc, char* argv[]) {
       auto wait = ctx.notify_channel.WaitReadable(500);
       if (wait.has_value()) {
         NotifyMsg msg;
-        uint32_t len = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
-        if (len == sizeof(msg)) {
+        auto read = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+        if (read.has_value() && read.value() == sizeof(msg)) {
           ProcessBlock(ctx, msg.block_id);
+        } else if (!read.has_value() && read.get_error() != osp::ShmError::kEmpty) {
+          OSP_LOG_WARN("Logging", "notify read failed: %d", static_cast<int>(read.get_error()));
         }
       }
       if ((osp::SteadyNowUs() - ctx.last_frame_us) > 3000000) {
@@ -332,10 +334,12 @@ int main(int argc, char* argv[]) {
       auto wait = ctx.notify_channel.WaitReadable(1000);
       if (wait.has_value()) {
         NotifyMsg msg;
-        uint32_t len = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
-        if (len == sizeof(msg)) {
+        auto read = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+        if (read.has_value() && read.value() == sizeof(msg)) {
           ProcessBlock(ctx, msg.block_id);
           sm.Dispatch({kEvtDataResumed});
+        } else if (!read.has_value() && read.get_error() != osp::ShmError::kEmpty) {
+          OSP_LOG_WARN("Logging", "notify read failed: %d", static_cast<int>(read.get_error()));
         }
       }
 

@@ -200,7 +200,19 @@ class SingleThreadExecutor {
  public:
   using BusType = AsyncBus<PayloadVariant>;
 
-  SingleThreadExecutor() noexcept : node_count_(0), running_(false) {
+  SingleThreadExecutor() noexcept : bus_(&BusType::Instance()), node_count_(0), running_(false) {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct an executor bound to a specific bus instance.
+   *
+   * Nodes added to this executor must be bound to the same instance, e.g.
+   * `Node<PayloadVariant> node(bus)`.
+   */
+  explicit SingleThreadExecutor(BusType& bus) noexcept : bus_(&bus), node_count_(0), running_(false) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -281,7 +293,7 @@ class SingleThreadExecutor {
    *
    * @return Number of messages processed.
    */
-  uint32_t SpinOnce() noexcept { return BusType::Instance().ProcessBatch(); }
+  uint32_t SpinOnce() noexcept { return bus_->ProcessBatch(); }
 
   /**
    * @brief Stop the executor.
@@ -300,6 +312,7 @@ class SingleThreadExecutor {
   uint32_t NodeCount() const noexcept { return node_count_; }
 
  private:
+  BusType* bus_;
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
@@ -327,13 +340,32 @@ class StaticExecutor {
  public:
   using BusType = AsyncBus<PayloadVariant>;
 
-  StaticExecutor() noexcept : node_count_(0), running_(false), sleep_() {
+  StaticExecutor() noexcept : bus_(&BusType::Instance()), node_count_(0), running_(false), sleep_() {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
   }
 
-  explicit StaticExecutor(const SleepStrategy& sleep) noexcept : node_count_(0), running_(false), sleep_(sleep) {
+  explicit StaticExecutor(const SleepStrategy& sleep) noexcept
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), sleep_(sleep) {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct an executor bound to a specific bus instance.
+   *
+   * Nodes added to this executor must be bound to the same instance.
+   */
+  explicit StaticExecutor(BusType& bus) noexcept : bus_(&bus), node_count_(0), running_(false), sleep_() {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  StaticExecutor(BusType& bus, const SleepStrategy& sleep) noexcept
+      : bus_(&bus), node_count_(0), running_(false), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -439,7 +471,7 @@ class StaticExecutor {
    */
   void DispatchLoop() noexcept {
     detail::BeatLoop(heartbeat_, running_, [this]() {
-      uint32_t processed = BusType::Instance().ProcessBatch();
+      uint32_t processed = bus_->ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
       } else {
@@ -448,6 +480,7 @@ class StaticExecutor {
     });
   }
 
+  BusType* bus_;
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
@@ -480,7 +513,8 @@ class PinnedExecutor {
    * @brief Construct a pinned executor bound to the specified CPU core.
    * @param cpu_core The CPU core index to pin the dispatcher thread to.
    */
-  explicit PinnedExecutor(int32_t cpu_core) noexcept : node_count_(0), running_(false), cpu_core_(cpu_core), sleep_() {
+  explicit PinnedExecutor(int32_t cpu_core) noexcept
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), cpu_core_(cpu_core), sleep_() {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -492,7 +526,26 @@ class PinnedExecutor {
    * @param sleep Sleep strategy instance.
    */
   PinnedExecutor(int32_t cpu_core, const SleepStrategy& sleep) noexcept
-      : node_count_(0), running_(false), cpu_core_(cpu_core), sleep_(sleep) {
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), cpu_core_(cpu_core), sleep_(sleep) {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct a pinned executor bound to a specific bus instance.
+   *
+   * Nodes added to this executor must be bound to the same instance.
+   */
+  PinnedExecutor(int32_t cpu_core, BusType& bus) noexcept
+      : bus_(&bus), node_count_(0), running_(false), cpu_core_(cpu_core), sleep_() {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  PinnedExecutor(int32_t cpu_core, BusType& bus, const SleepStrategy& sleep) noexcept
+      : bus_(&bus), node_count_(0), running_(false), cpu_core_(cpu_core), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -574,7 +627,7 @@ class PinnedExecutor {
    */
   void DispatchLoop() noexcept {
     detail::BeatLoop(heartbeat_, running_, [this]() {
-      uint32_t processed = BusType::Instance().ProcessBatch();
+      uint32_t processed = bus_->ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
       } else {
@@ -619,6 +672,7 @@ class PinnedExecutor {
 #endif
   }
 
+  BusType* bus_;
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
@@ -632,6 +686,18 @@ class PinnedExecutor {
 // RealtimeConfig
 // ============================================================================
 
+enum class ExecutorError : uint8_t {
+  kNone = 0U,
+  kAlreadyRunning,
+  kThreadStartFailed,
+  kMlockFailed,
+  kAffinityInvalid,
+  kAffinityFailed,
+  kSchedFailed,
+  kConfigTimeout,
+  kUnsupported,
+};
+
 /**
  * @brief Realtime scheduling configuration (inspired by CyberRT Processor).
  *
@@ -639,11 +705,12 @@ class PinnedExecutor {
  * and CPU affinity for realtime execution contexts.
  */
 struct RealtimeConfig {
-  int32_t sched_policy = 0;    // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
-  int32_t sched_priority = 0;  // SCHED_FIFO: 1-99, higher = more priority
-  bool lock_memory = false;    // mlockall(MCL_CURRENT | MCL_FUTURE)
-  uint32_t stack_size = 0;     // 0=system default, non-zero=preallocated stack
-  int32_t cpu_affinity = -1;   // -1=no binding, >=0=bind to specific CPU core
+  int32_t sched_policy = 0;       // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
+  int32_t sched_priority = 0;     // SCHED_FIFO: 1-99, higher = more priority
+  bool lock_memory = false;       // mlockall(MCL_CURRENT | MCL_FUTURE)
+  uint32_t stack_size = 0;        // 0=system default, non-zero=preallocated stack
+  int32_t cpu_affinity = -1;      // -1=no binding, >=0=bind to specific CPU core
+  bool require_realtime = false;  // true=fail startup if any realtime setup fails
 };
 
 // ============================================================================
@@ -671,7 +738,7 @@ class RealtimeExecutor {
    * @param cfg Realtime configuration (scheduling, affinity, memory locking).
    */
   explicit RealtimeExecutor(const RealtimeConfig& cfg) noexcept
-      : node_count_(0), running_(false), config_(cfg), sleep_() {
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), config_(cfg), sleep_() {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -683,7 +750,26 @@ class RealtimeExecutor {
    * @param sleep Sleep strategy instance.
    */
   RealtimeExecutor(const RealtimeConfig& cfg, const SleepStrategy& sleep) noexcept
-      : node_count_(0), running_(false), config_(cfg), sleep_(sleep) {
+      : bus_(&BusType::Instance()), node_count_(0), running_(false), config_(cfg), sleep_(sleep) {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  /**
+   * @brief Construct a realtime executor bound to a specific bus instance.
+   *
+   * Nodes added to this executor must be bound to the same instance.
+   */
+  RealtimeExecutor(const RealtimeConfig& cfg, BusType& bus) noexcept
+      : bus_(&bus), node_count_(0), running_(false), config_(cfg), sleep_() {
+    for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
+      nodes_[i] = nullptr;
+    }
+  }
+
+  RealtimeExecutor(const RealtimeConfig& cfg, BusType& bus, const SleepStrategy& sleep) noexcept
+      : bus_(&bus), node_count_(0), running_(false), config_(cfg), sleep_(sleep) {
     for (uint32_t i = 0; i < OSP_EXECUTOR_MAX_NODES; ++i) {
       nodes_[i] = nullptr;
     }
@@ -729,11 +815,35 @@ class RealtimeExecutor {
    * and stack_size as configured.
    * On non-Linux: falls back to normal thread (logs warning).
    */
-  void Start() noexcept {
-    bool expected = false;
-    if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-      return;  // Already running
+  void Start() noexcept { (void)StartChecked(); }
+
+  /**
+   * @brief Start and report whether the requested realtime properties were
+   *        actually applied.
+   *
+   * With require_realtime == true, StartChecked() waits for the dispatcher
+   * thread to apply mlockall/affinity/scheduling and fails closed if any of
+   * them fails. With require_realtime == false it preserves the historical
+   * best-effort behavior, but GetLastError() still records the failure.
+   */
+  expected<void, ExecutorError> StartChecked() noexcept {
+    bool was_running = false;
+    if (!running_.compare_exchange_strong(was_running, true, std::memory_order_acq_rel)) {
+      return expected<void, ExecutorError>::error(ExecutorError::kAlreadyRunning);
     }
+
+    last_error_.store(ExecutorError::kNone, std::memory_order_relaxed);
+    config_state_.store(0U, std::memory_order_release);
+
+#if defined(OSP_PLATFORM_LINUX)
+    if (config_.cpu_affinity < -1 || config_.cpu_affinity >= CPU_SETSIZE) {
+      return FailStart(ExecutorError::kAffinityInvalid);
+    }
+#else
+    if (config_.require_realtime) {
+      return FailStart(ExecutorError::kUnsupported);
+    }
+#endif
 
 #if defined(OSP_PLATFORM_LINUX)
     // A custom stack size is only honored by pthread_create; osp::Thread on
@@ -746,22 +856,41 @@ class RealtimeExecutor {
       int32_t rc = pthread_create(&rt_thread_, &attr, &RealtimeExecutor::ThreadEntry, this);
       pthread_attr_destroy(&attr);
       if (rc != 0) {
-        (void)std::fprintf(stderr, "RealtimeExecutor: pthread_create failed (errno=%d)\n", rc);
-        running_.store(false, std::memory_order_release);
-        return;
+        return FailStart(ExecutorError::kThreadStartFailed);
       }
       use_pthread_.store(true, std::memory_order_release);
-      return;
-    }
+    } else
 #endif
-    ThreadOptions opts;
-    opts.name = "rt-exec";
-    if (!dispatch_thread_.Start(opts, [this]() {
-          ApplyRealtimeConfig(config_);
-          DispatchLoop();
-        })) {
-      running_.store(false, std::memory_order_release);
+    {
+      ThreadOptions opts;
+      opts.name = "rt-exec";
+      if (!dispatch_thread_.Start(opts, [this]() { RunWithConfig(); })) {
+        return FailStart(ExecutorError::kThreadStartFailed);
+      }
     }
+
+    if (config_.require_realtime) {
+      for (uint32_t i = 0U; i < 1000U; ++i) {
+        if (config_state_.load(std::memory_order_acquire) != 0U) {
+          break;
+        }
+        osp::ThreadSleepUs(1000U);
+      }
+      const uint8_t state = config_state_.load(std::memory_order_acquire);
+      if (state == 0U) {
+        const ExecutorError err = ExecutorError::kConfigTimeout;
+        last_error_.store(err, std::memory_order_relaxed);
+        Stop();
+        return expected<void, ExecutorError>::error(err);
+      }
+      if (state == 2U) {
+        const ExecutorError err = last_error_.load(std::memory_order_relaxed);
+        Stop();
+        return expected<void, ExecutorError>::error(err);
+      }
+    }
+
+    return expected<void, ExecutorError>::success();
   }
 
   /**
@@ -797,15 +926,34 @@ class RealtimeExecutor {
   /** @brief Get the realtime configuration. */
   const RealtimeConfig& GetConfig() const noexcept { return config_; }
 
+  /** @brief Last realtime-configuration error observed by the dispatcher. */
+  ExecutorError GetLastError() const noexcept { return last_error_.load(std::memory_order_relaxed); }
+
   /** @brief Set heartbeat for external watchdog monitoring. */
   void SetHeartbeat(ThreadHeartbeat* hb) noexcept { heartbeat_ = hb; }
 
  private:
+  expected<void, ExecutorError> FailStart(ExecutorError error) noexcept {
+    running_.store(false, std::memory_order_release);
+    last_error_.store(error, std::memory_order_relaxed);
+    return expected<void, ExecutorError>::error(error);
+  }
+
+  void RunWithConfig() noexcept {
+    const ExecutorError error = ApplyRealtimeConfig(config_);
+    last_error_.store(error, std::memory_order_relaxed);
+    config_state_.store(error == ExecutorError::kNone ? 1U : 2U, std::memory_order_release);
+    if (config_.require_realtime && error != ExecutorError::kNone) {
+      running_.store(false, std::memory_order_release);
+      return;
+    }
+    DispatchLoop();
+  }
+
 #if defined(OSP_PLATFORM_LINUX)
   static void* ThreadEntry(void* arg) {
     auto* self = static_cast<RealtimeExecutor*>(arg);
-    self->ApplyRealtimeConfig(self->config_);
-    self->DispatchLoop();
+    self->RunWithConfig();
     return nullptr;
   }
 #endif
@@ -815,7 +963,7 @@ class RealtimeExecutor {
    */
   void DispatchLoop() noexcept {
     detail::BeatLoop(heartbeat_, running_, [this]() {
-      uint32_t processed = BusType::Instance().ProcessBatch();
+      uint32_t processed = bus_->ProcessBatch();
       if (processed == 0) {
         sleep_.OnIdle();
       } else {
@@ -832,18 +980,19 @@ class RealtimeExecutor {
    *
    * @param cfg Realtime configuration to apply.
    */
-  static void ApplyRealtimeConfig(const RealtimeConfig& cfg) noexcept {
+  static ExecutorError ApplyRealtimeConfig(const RealtimeConfig& cfg) noexcept {
 #if defined(OSP_PLATFORM_LINUX)
     // 1. Lock memory if requested
     if (cfg.lock_memory) {
       int32_t rc = mlockall(MCL_CURRENT | MCL_FUTURE);
       if (rc != 0) {
         (void)std::fprintf(stderr, "RealtimeExecutor: mlockall failed (errno=%d)\n", errno);
+        return ExecutorError::kMlockFailed;
       }
     }
 
     // 2. Set CPU affinity if requested
-    if (cfg.cpu_affinity >= 0 && cfg.cpu_affinity < CPU_SETSIZE) {
+    if (cfg.cpu_affinity >= 0) {
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
       CPU_SET(cfg.cpu_affinity, &cpuset);
@@ -853,6 +1002,7 @@ class RealtimeExecutor {
                            "RealtimeExecutor: pthread_setaffinity_np failed "
                            "(errno=%d)\n",
                            rc);
+        return ExecutorError::kAffinityFailed;
       }
     }
 
@@ -866,13 +1016,20 @@ class RealtimeExecutor {
                            "RealtimeExecutor: pthread_setschedparam failed "
                            "(policy=%d, priority=%d, errno=%d)\n",
                            cfg.sched_policy, cfg.sched_priority, rc);
+        return ExecutorError::kSchedFailed;
       }
     }
+    return ExecutorError::kNone;
 #else
+    if (cfg.require_realtime) {
+      return ExecutorError::kUnsupported;
+    }
     (void)cfg;
+    return ExecutorError::kNone;
 #endif
   }
 
+  BusType* bus_;
   Node<PayloadVariant>* nodes_[OSP_EXECUTOR_MAX_NODES];
   uint32_t node_count_;
   std::atomic<bool> running_;
@@ -880,6 +1037,8 @@ class RealtimeExecutor {
   RealtimeConfig config_;
   ThreadHeartbeat* heartbeat_{nullptr};
   SleepStrategy sleep_;
+  std::atomic<ExecutorError> last_error_{ExecutorError::kNone};
+  std::atomic<uint8_t> config_state_{0U};
 #if defined(OSP_PLATFORM_LINUX)
   pthread_t rt_thread_{};
   std::atomic<bool> use_pthread_{false};
