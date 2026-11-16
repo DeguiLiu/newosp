@@ -65,6 +65,7 @@
 
 #include "osp/platform.hpp"
 #include "osp/span.hpp"
+#include "osp/crc32.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <climits>
@@ -145,73 +146,6 @@ static constexpr uint32_t kFrameChannelVersion = 1u;
 
 static constexpr uint32_t kFrameSegmentHeaderBytes = 64u;  ///< SegmentHeader size
 static constexpr uint32_t kFrameSlotHeaderBytes = 64u;     ///< FrameSlotHeader size
-
-// ============================================================================
-// CRC-32 (IEEE 802.3 / zlib), slice-by-8 table-driven.  Matches Python
-// zlib.crc32 byte-for-byte (poly 0xEDB88320, init 0xFFFFFFFF, final xor).
-//
-// The inner loop consumes 8 bytes per iteration using the standard zlib
-// slice-by-8 tables: v[0] is the ordinary byte-at-a-time table and v[j] is the
-// contribution of a byte followed by j zero bytes (zlib make_crc_table
-// construction).  Pure C++17, no SIMD/ISA dependency, so it is platform-neutral
-// (ARM-Linux / GCC / Clang / MSVC).
-// ============================================================================
-
-namespace frame_channel_detail {
-
-constexpr uint32_t kCrc32Poly = 0xEDB88320u;
-
-constexpr uint32_t Crc32TableEntry(uint32_t i) noexcept {
-  uint32_t c = i;
-  for (uint32_t k = 0; k < 8; ++k) {
-    c = (c & 1u) ? (kCrc32Poly ^ (c >> 1u)) : (c >> 1u);
-  }
-  return c;
-}
-
-struct Crc32Slice8Table {
-  uint32_t v[8][256];
-  constexpr Crc32Slice8Table() noexcept : v{} {
-    // v[0] = standard byte-at-a-time table.
-    for (uint32_t i = 0; i < 256; ++i) {
-      v[0][i] = Crc32TableEntry(i);
-    }
-    // v[j][i] = v[0][i] advanced by j zero bytes (byte followed by j zeros).
-    for (uint32_t i = 0; i < 256; ++i) {
-      uint32_t c = v[0][i];
-      for (uint32_t j = 1; j < 8; ++j) {
-        c = v[0][c & 0xFFu] ^ (c >> 8u);
-        v[j][i] = c;
-      }
-    }
-  }
-};
-
-}  // namespace frame_channel_detail
-
-/// @brief CRC-32 (zlib-compatible) over [data, data+len).
-inline uint32_t FrameCrc32(const uint8_t* data, uint32_t len) noexcept {
-  static constexpr frame_channel_detail::Crc32Slice8Table kTable{};
-  uint32_t crc = 0xFFFFFFFFu;
-  while (len >= 8u) {
-    const uint32_t b0 = data[0];
-    const uint32_t b1 = data[1];
-    const uint32_t b2 = data[2];
-    const uint32_t b3 = data[3];
-    const uint32_t x = crc ^ (b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u));
-    crc = kTable.v[7][x & 0xFFu] ^ kTable.v[6][(x >> 8u) & 0xFFu] ^ kTable.v[5][(x >> 16u) & 0xFFu] ^
-          kTable.v[4][(x >> 24u) & 0xFFu] ^ kTable.v[3][data[4]] ^ kTable.v[2][data[5]] ^ kTable.v[1][data[6]] ^
-          kTable.v[0][data[7]];
-    data += 8;
-    len -= 8u;
-  }
-  while (len > 0u) {
-    crc = kTable.v[0][(crc ^ data[0]) & 0xFFu] ^ (crc >> 8u);
-    ++data;
-    --len;
-  }
-  return crc ^ 0xFFFFFFFFu;
-}
 
 // ============================================================================
 // Shared-memory wire structs (byte layout mirrored by hcs_core/frame_channel.py)

@@ -36,6 +36,7 @@
 #define OSP_TRANSPORT_HPP_
 
 #include "osp/bus.hpp"
+#include "osp/crc32.hpp"
 #include "osp/node.hpp"
 #include "osp/platform.hpp"
 #include "osp/socket.hpp"
@@ -66,7 +67,8 @@ enum class TransportError : uint8_t {
   kInvalidFrame,
   kBufferFull,
   kNotConnected,
-  kWouldBlock  ///< Kernel send/recv buffer full (EAGAIN). Transient error.
+  kWouldBlock,  ///< Kernel send/recv buffer full (EAGAIN). Transient error.
+  kPayloadTooLarge  ///< Send payload exceeds OSP_TRANSPORT_MAX_FRAME_SIZE.
 };
 
 // ============================================================================
@@ -119,6 +121,7 @@ enum class SocketTransportType : uint8_t { kTcp = 0, kUdp = 1 };
  */
 inline constexpr uint32_t kFrameMagicV0 = 0x4F535000;   ///< v0 magic ("OSP\0")
 inline constexpr uint32_t kFrameMagicV1 = 0x4F535001;   ///< v1 magic ("OSP\1")
+inline constexpr uint32_t kFrameMagicV2 = 0x4F535002;   ///< v2 magic ("OSP\2")
 inline constexpr uint32_t kFrameMagic = kFrameMagicV0;  ///< Default (backward compat)
 
 /**
@@ -146,6 +149,20 @@ struct FrameHeaderV1 {
   uint32_t sender_id;     ///< Sender node identifier.
   uint32_t seq_num;       ///< Monotonically increasing sequence number.
   uint64_t timestamp_ns;  ///< steady_clock nanoseconds.
+};
+
+/**
+ * @brief v2 frame header: v1 fields plus a CRC32 covering header (except
+ *        magic/crc) and payload. Detects corruption; does not recover order.
+ */
+struct FrameHeaderV2 {
+  uint32_t magic;         ///< 0x4F535002
+  uint32_t length;        ///< Payload length in bytes.
+  uint16_t type_index;    ///< Variant index of the payload type.
+  uint32_t sender_id;     ///< Sender node identifier.
+  uint32_t seq_num;       ///< Monotonically increasing sequence number.
+  uint64_t timestamp_ns;  ///< steady_clock nanoseconds.
+  uint32_t crc32;         ///< IEEE 802.3 CRC of header[4..crc) + payload.
 };
 
 // ============================================================================
@@ -207,6 +224,10 @@ struct Serializer {
  *
  * Monitors incoming sequence numbers to detect packet loss, reordering,
  * and duplicates. Assumes monotonically increasing sequence numbers.
+ *
+ * Detection only: a gap advances expected_seq_ and returns true. A late
+ * packet (reorder/duplicate) returns false and is not buffered or delivered.
+ * Callers that need recovery must retry at a higher layer.
  */
 class SequenceTracker {
  public:
@@ -319,6 +340,7 @@ class FrameCodec {
  public:
   static constexpr uint32_t kHeaderSize = 14;    // v0: 4+4+2+4
   static constexpr uint32_t kHeaderSizeV1 = 26;  // v1: 14 + 4 + 8
+  static constexpr uint32_t kHeaderSizeV2 = 30;  // v1 + crc32
 
   /**
    * @brief Encode a FrameHeader (v0) into a byte buffer.
@@ -396,7 +418,7 @@ class FrameCodec {
    * @brief Detect frame version from magic field.
    * @param buf Input buffer (must be at least 4 bytes).
    * @param buf_size Size of the input buffer.
-   * @return 0 for v0, 1 for v1, UINT8_MAX for unknown/invalid.
+   * @return 0 for v0, 1 for v1, 2 for v2, UINT8_MAX for unknown/invalid.
    */
   static uint8_t DetectVersion(const uint8_t* buf, uint32_t buf_size) noexcept {
     if (buf_size < 4)
@@ -407,7 +429,45 @@ class FrameCodec {
       return 0;
     if (magic == kFrameMagicV1)
       return 1;
+    if (magic == kFrameMagicV2)
+      return 2;
     return UINT8_MAX;
+  }
+
+  static uint32_t EncodeHeaderV2(const FrameHeaderV2& hdr, uint8_t* buf, uint32_t buf_size) noexcept {
+    if (buf_size < kHeaderSizeV2)
+      return 0;
+    std::memcpy(buf + 0, &hdr.magic, 4);
+    std::memcpy(buf + 4, &hdr.length, 4);
+    std::memcpy(buf + 8, &hdr.type_index, 2);
+    std::memcpy(buf + 10, &hdr.sender_id, 4);
+    std::memcpy(buf + 14, &hdr.seq_num, 4);
+    std::memcpy(buf + 18, &hdr.timestamp_ns, 8);
+    std::memcpy(buf + 26, &hdr.crc32, 4);
+    return kHeaderSizeV2;
+  }
+
+  static bool DecodeHeaderV2(const uint8_t* buf, uint32_t buf_size, FrameHeaderV2& hdr) noexcept {
+    if (buf_size < kHeaderSizeV2)
+      return false;
+    std::memcpy(&hdr.magic, buf + 0, 4);
+    std::memcpy(&hdr.length, buf + 4, 4);
+    std::memcpy(&hdr.type_index, buf + 8, 2);
+    std::memcpy(&hdr.sender_id, buf + 10, 4);
+    std::memcpy(&hdr.seq_num, buf + 14, 4);
+    std::memcpy(&hdr.timestamp_ns, buf + 18, 8);
+    std::memcpy(&hdr.crc32, buf + 26, 4);
+    return true;
+  }
+
+  /// CRC32 over header bytes after magic and before crc, plus payload.
+  static uint32_t Crc32HeaderAndPayload(const uint8_t* hdr, uint32_t hdr_size, const void* payload,
+                                        uint32_t payload_len) noexcept {
+    uint32_t crc = Crc32Update(0xFFFFFFFFu, hdr + 4, hdr_size - 8U);
+    if (payload_len > 0U && payload != nullptr) {
+      crc = Crc32Update(crc, static_cast<const uint8_t*>(payload), payload_len);
+    }
+    return crc ^ 0xFFFFFFFFu;
   }
 };
 
@@ -431,7 +491,13 @@ class TcpTransport {
 
   // Move-only
   TcpTransport(TcpTransport&& other) noexcept
-      : socket_(static_cast<TcpSocket&&>(other.socket_)), connected_(other.connected_) {
+      : socket_(static_cast<TcpSocket&&>(other.socket_)),
+        connected_(other.connected_),
+        send_version_(other.send_version_),
+        integrity_unchecked_(other.integrity_unchecked_),
+        crc_error_count_(other.crc_error_count_),
+        inject_send_budget_(other.inject_send_budget_),
+        inject_recv_budget_(other.inject_recv_budget_) {
     other.connected_ = false;
   }
 
@@ -440,6 +506,11 @@ class TcpTransport {
       Close();
       socket_ = static_cast<TcpSocket&&>(other.socket_);
       connected_ = other.connected_;
+      send_version_ = other.send_version_;
+      integrity_unchecked_ = other.integrity_unchecked_;
+      crc_error_count_ = other.crc_error_count_;
+      inject_send_budget_ = other.inject_send_budget_;
+      inject_recv_budget_ = other.inject_recv_budget_;
       other.connected_ = false;
     }
     return *this;
@@ -506,7 +577,7 @@ class TcpTransport {
     }
 
     if (payload_len > OSP_TRANSPORT_MAX_FRAME_SIZE) {
-      return expected<void, TransportError>::error(TransportError::kBufferFull);
+      return expected<void, TransportError>::error(TransportError::kPayloadTooLarge);
     }
 
     // Encode header
@@ -518,20 +589,7 @@ class TcpTransport {
 
     uint8_t hdr_buf[FrameCodec::kHeaderSize];
     FrameCodec::EncodeHeader(hdr, hdr_buf, sizeof(hdr_buf));
-
-    // Send header
-    auto r = SendAll(hdr_buf, FrameCodec::kHeaderSize);
-    if (!r.has_value())
-      return r;
-
-    // Send payload
-    if (payload_len > 0 && payload != nullptr) {
-      r = SendAll(payload, payload_len);
-      if (!r.has_value())
-        return r;
-    }
-
-    return expected<void, TransportError>::success();
+    return SendFrameBytes(hdr_buf, FrameCodec::kHeaderSize, payload, payload_len);
   }
 
   /**
@@ -543,7 +601,7 @@ class TcpTransport {
    */
   expected<void, TransportError> SendFrame(uint16_t type_index, uint32_t sender_id, byte_span payload) noexcept {
     if (payload.size() > OSP_TRANSPORT_MAX_FRAME_SIZE) {
-      return expected<void, TransportError>::error(TransportError::kBufferFull);
+      return expected<void, TransportError>::error(TransportError::kPayloadTooLarge);
     }
     return SendFrame(type_index, sender_id, payload.data(), payload.size_u32());
   }
@@ -560,34 +618,17 @@ class TcpTransport {
       return expected<uint32_t, TransportError>::error(TransportError::kNotConnected);
     }
 
-    // Receive header
     uint8_t hdr_buf[FrameCodec::kHeaderSize];
-    auto r = RecvAll(hdr_buf, FrameCodec::kHeaderSize);
+    auto r = RecvAll(hdr_buf, FrameCodec::kHeaderSize, false);
     if (!r.has_value())
       return expected<uint32_t, TransportError>::error(r.get_error());
 
-    if (!FrameCodec::DecodeHeader(hdr_buf, FrameCodec::kHeaderSize, hdr)) {
+    if (!FrameCodec::DecodeHeader(hdr_buf, FrameCodec::kHeaderSize, hdr) || hdr.magic != kFrameMagic) {
+      connected_ = false;
       return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
     }
 
-    // Validate magic
-    if (hdr.magic != kFrameMagic) {
-      return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
-    }
-
-    // Validate payload size
-    if (hdr.length > buf_size) {
-      return expected<uint32_t, TransportError>::error(TransportError::kBufferFull);
-    }
-
-    // Receive payload
-    if (hdr.length > 0) {
-      auto pr = RecvAll(payload_buf, hdr.length);
-      if (!pr.has_value())
-        return expected<uint32_t, TransportError>::error(pr.get_error());
-    }
-
-    return expected<uint32_t, TransportError>::success(hdr.length);
+    return RecvDeclaredPayload(hdr.length, payload_buf, buf_size);
   }
 
   /**
@@ -618,7 +659,7 @@ class TcpTransport {
     }
 
     if (payload_len > OSP_TRANSPORT_MAX_FRAME_SIZE) {
-      return expected<void, TransportError>::error(TransportError::kBufferFull);
+      return expected<void, TransportError>::error(TransportError::kPayloadTooLarge);
     }
 
     // Encode v1 header
@@ -632,20 +673,7 @@ class TcpTransport {
 
     uint8_t hdr_buf[FrameCodec::kHeaderSizeV1];
     FrameCodec::EncodeHeaderV1(hdr, hdr_buf, sizeof(hdr_buf));
-
-    // Send header
-    auto r = SendAll(hdr_buf, FrameCodec::kHeaderSizeV1);
-    if (!r.has_value())
-      return r;
-
-    // Send payload
-    if (payload_len > 0 && payload != nullptr) {
-      r = SendAll(payload, payload_len);
-      if (!r.has_value())
-        return r;
-    }
-
-    return expected<void, TransportError>::success();
+    return SendFrameBytes(hdr_buf, FrameCodec::kHeaderSizeV1, payload, payload_len);
   }
 
   /**
@@ -660,13 +688,58 @@ class TcpTransport {
   expected<void, TransportError> SendFrameV1(uint16_t type_index, uint32_t sender_id, uint32_t seq_num,
                                              uint64_t timestamp_ns, byte_span payload) noexcept {
     if (payload.size() > OSP_TRANSPORT_MAX_FRAME_SIZE) {
-      return expected<void, TransportError>::error(TransportError::kBufferFull);
+      return expected<void, TransportError>::error(TransportError::kPayloadTooLarge);
     }
     return SendFrameV1(type_index, sender_id, seq_num, timestamp_ns, payload.data(), payload.size_u32());
   }
 
+  expected<void, TransportError> SendFrameV2(uint16_t type_index, uint32_t sender_id, uint32_t seq_num,
+                                             uint64_t timestamp_ns, const void* payload,
+                                             uint32_t payload_len) noexcept {
+    if (!connected_) {
+      return expected<void, TransportError>::error(TransportError::kNotConnected);
+    }
+    if (payload_len > OSP_TRANSPORT_MAX_FRAME_SIZE) {
+      return expected<void, TransportError>::error(TransportError::kPayloadTooLarge);
+    }
+
+    FrameHeaderV2 hdr;
+    hdr.magic = kFrameMagicV2;
+    hdr.length = payload_len;
+    hdr.type_index = type_index;
+    hdr.sender_id = sender_id;
+    hdr.seq_num = seq_num;
+    hdr.timestamp_ns = timestamp_ns;
+    hdr.crc32 = 0;
+
+    uint8_t hdr_buf[FrameCodec::kHeaderSizeV2];
+    FrameCodec::EncodeHeaderV2(hdr, hdr_buf, sizeof(hdr_buf));
+    hdr.crc32 = FrameCodec::Crc32HeaderAndPayload(hdr_buf, FrameCodec::kHeaderSizeV2, payload, payload_len);
+    std::memcpy(hdr_buf + 26, &hdr.crc32, 4);
+    return SendFrameBytes(hdr_buf, FrameCodec::kHeaderSizeV2, payload, payload_len);
+  }
+
+  expected<void, TransportError> SendConfigured(uint16_t type_index, uint32_t sender_id, uint32_t seq_num,
+                                                uint64_t timestamp_ns, const void* payload,
+                                                uint32_t payload_len) noexcept {
+    if (send_version_ == 2U) {
+      return SendFrameV2(type_index, sender_id, seq_num, timestamp_ns, payload, payload_len);
+    }
+    if (send_version_ == 1U) {
+      return SendFrameV1(type_index, sender_id, seq_num, timestamp_ns, payload, payload_len);
+    }
+    return SendFrame(type_index, sender_id, payload, payload_len);
+  }
+
+  void SetSendVersion(uint8_t version) noexcept { send_version_ = version; }
+  uint8_t SendVersion() const noexcept { return send_version_; }
+  uint64_t IntegrityUncheckedCount() const noexcept { return integrity_unchecked_; }
+  uint64_t CrcErrorCount() const noexcept { return crc_error_count_; }
+  void TestSetSendBudget(uint32_t n) noexcept { inject_send_budget_ = n; }
+  void TestSetRecvBudget(uint32_t n) noexcept { inject_recv_budget_ = n; }
+
   /**
-   * @brief Receive a framed message with auto-detection (handles both v0 and v1).
+   * @brief Receive a framed message with auto-detection (v0, v1, or v2).
    * @param hdr_v1 Output v1 header (seq_num and timestamp_ns are 0 for v0 frames).
    * @param payload_buf Buffer to receive the payload into.
    * @param buf_size Size of the payload buffer.
@@ -678,89 +751,95 @@ class TcpTransport {
       return expected<uint32_t, TransportError>::error(TransportError::kNotConnected);
     }
 
-    // Peek at first 4 bytes to detect version
     uint8_t magic_buf[4];
-    auto r = RecvAll(magic_buf, 4);
+    auto r = RecvAll(magic_buf, 4, false);
     if (!r.has_value())
       return expected<uint32_t, TransportError>::error(r.get_error());
 
-    uint8_t version = FrameCodec::DetectVersion(magic_buf, 4);
+    const uint8_t version = FrameCodec::DetectVersion(magic_buf, 4);
+    if (version == UINT8_MAX) {
+      connected_ = false;
+      return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
+    }
 
     if (version == 0) {
-      // v0 frame: read remaining 10 bytes of header
       uint8_t hdr_buf[FrameCodec::kHeaderSize];
       std::memcpy(hdr_buf, magic_buf, 4);
-      auto r2 = RecvAll(hdr_buf + 4, FrameCodec::kHeaderSize - 4);
+      auto r2 = RecvAll(hdr_buf + 4, FrameCodec::kHeaderSize - 4, true);
       if (!r2.has_value())
         return expected<uint32_t, TransportError>::error(r2.get_error());
 
       FrameHeader hdr;
-      if (!FrameCodec::DecodeHeader(hdr_buf, FrameCodec::kHeaderSize, hdr)) {
+      if (!FrameCodec::DecodeHeader(hdr_buf, FrameCodec::kHeaderSize, hdr) || hdr.magic != kFrameMagicV0) {
+        connected_ = false;
         return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
       }
 
-      // Validate magic
-      if (hdr.magic != kFrameMagicV0) {
-        return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
-      }
+      auto pr = RecvDeclaredPayload(hdr.length, payload_buf, buf_size);
+      if (!pr.has_value())
+        return pr;
 
-      // Validate payload size
-      if (hdr.length > buf_size) {
-        return expected<uint32_t, TransportError>::error(TransportError::kBufferFull);
-      }
-
-      // Receive payload
-      if (hdr.length > 0) {
-        auto pr = RecvAll(payload_buf, hdr.length);
-        if (!pr.has_value())
-          return expected<uint32_t, TransportError>::error(pr.get_error());
-      }
-
-      // Convert to v1 header (seq_num and timestamp_ns are 0)
+      ++integrity_unchecked_;
       hdr_v1.magic = hdr.magic;
       hdr_v1.length = hdr.length;
       hdr_v1.type_index = hdr.type_index;
       hdr_v1.sender_id = hdr.sender_id;
       hdr_v1.seq_num = 0;
       hdr_v1.timestamp_ns = 0;
-
       return expected<uint32_t, TransportError>::success(hdr.length);
+    }
 
-    } else if (version == 1) {
-      // v1 frame: read remaining 22 bytes of header
+    if (version == 1) {
       uint8_t hdr_buf[FrameCodec::kHeaderSizeV1];
       std::memcpy(hdr_buf, magic_buf, 4);
-      auto r2 = RecvAll(hdr_buf + 4, FrameCodec::kHeaderSizeV1 - 4);
+      auto r2 = RecvAll(hdr_buf + 4, FrameCodec::kHeaderSizeV1 - 4, true);
       if (!r2.has_value())
         return expected<uint32_t, TransportError>::error(r2.get_error());
 
-      if (!FrameCodec::DecodeHeaderV1(hdr_buf, FrameCodec::kHeaderSizeV1, hdr_v1)) {
+      if (!FrameCodec::DecodeHeaderV1(hdr_buf, FrameCodec::kHeaderSizeV1, hdr_v1) || hdr_v1.magic != kFrameMagicV1) {
+        connected_ = false;
         return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
       }
 
-      // Validate magic
-      if (hdr_v1.magic != kFrameMagicV1) {
-        return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
-      }
+      auto pr = RecvDeclaredPayload(hdr_v1.length, payload_buf, buf_size);
+      if (!pr.has_value())
+        return pr;
 
-      // Validate payload size
-      if (hdr_v1.length > buf_size) {
-        return expected<uint32_t, TransportError>::error(TransportError::kBufferFull);
-      }
-
-      // Receive payload
-      if (hdr_v1.length > 0) {
-        auto pr = RecvAll(payload_buf, hdr_v1.length);
-        if (!pr.has_value())
-          return expected<uint32_t, TransportError>::error(pr.get_error());
-      }
-
+      ++integrity_unchecked_;
       return expected<uint32_t, TransportError>::success(hdr_v1.length);
+    }
 
-    } else {
-      // Unknown version
+    uint8_t hdr_buf[FrameCodec::kHeaderSizeV2];
+    std::memcpy(hdr_buf, magic_buf, 4);
+    auto r2 = RecvAll(hdr_buf + 4, FrameCodec::kHeaderSizeV2 - 4, true);
+    if (!r2.has_value())
+      return expected<uint32_t, TransportError>::error(r2.get_error());
+
+    FrameHeaderV2 hdr_v2;
+    if (!FrameCodec::DecodeHeaderV2(hdr_buf, FrameCodec::kHeaderSizeV2, hdr_v2) || hdr_v2.magic != kFrameMagicV2) {
+      connected_ = false;
       return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
     }
+
+    auto pr = RecvDeclaredPayload(hdr_v2.length, payload_buf, buf_size);
+    if (!pr.has_value())
+      return pr;
+
+    const uint32_t got = FrameCodec::Crc32HeaderAndPayload(hdr_buf, FrameCodec::kHeaderSizeV2, payload_buf,
+                                                           hdr_v2.length);
+    if (got != hdr_v2.crc32) {
+      connected_ = false;
+      ++crc_error_count_;
+      return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
+    }
+
+    hdr_v1.magic = hdr_v2.magic;
+    hdr_v1.length = hdr_v2.length;
+    hdr_v1.type_index = hdr_v2.type_index;
+    hdr_v1.sender_id = hdr_v2.sender_id;
+    hdr_v1.seq_num = hdr_v2.seq_num;
+    hdr_v1.timestamp_ns = hdr_v2.timestamp_ns;
+    return expected<uint32_t, TransportError>::success(hdr_v2.length);
   }
 
   /** @brief Check if the transport is connected. */
@@ -773,42 +852,75 @@ class TcpTransport {
   }
 
  private:
+  expected<void, TransportError> SendFrameBytes(const uint8_t* hdr, uint32_t hdr_len, const void* payload,
+                                                uint32_t payload_len) noexcept {
+    auto r = SendAll(hdr, hdr_len, false);
+    if (!r.has_value())
+      return r;
+    if (payload_len > 0U && payload != nullptr) {
+      return SendAll(payload, payload_len, true);
+    }
+    return expected<void, TransportError>::success();
+  }
+
+  expected<uint32_t, TransportError> RecvDeclaredPayload(uint32_t length, void* payload_buf,
+                                                         uint32_t buf_size) noexcept {
+    if (length > OSP_TRANSPORT_MAX_FRAME_SIZE) {
+      connected_ = false;
+      return expected<uint32_t, TransportError>::error(TransportError::kInvalidFrame);
+    }
+    if (length > buf_size) {
+      // Caller buffer too small: keep the connection and report kBufferFull so
+      // the caller can retry with a larger buffer (pre-refactor behavior).
+      return expected<uint32_t, TransportError>::error(TransportError::kBufferFull);
+    }
+    if (length > 0U) {
+      auto pr = RecvAll(payload_buf, length, true);
+      if (!pr.has_value())
+        return expected<uint32_t, TransportError>::error(pr.get_error());
+    }
+    return expected<uint32_t, TransportError>::success(length);
+  }
+
+  expected<void, TransportError> SendAll(const void* data, uint32_t len) noexcept { return SendAll(data, len, false); }
+
   /**
-   * @brief Send exactly len bytes over the socket.
-   * @param data Pointer to the data to send.
-   * @param len Number of bytes to send.
-   * @return Success, kSendFailed (fatal), or kWouldBlock (kernel buffer full
-   *         after retries exhausted).
-   *
-   * @note  Current implementation is synchronous with bounded EAGAIN retry.
-   *        On EAGAIN the call yields and retries up to kMaxEagainRetries times.
-   *        If the kernel send buffer is still full after retries, kWouldBlock
-   *        is returned WITHOUT marking the connection as failed -- the caller
-   *        may retry later or implement a user-space send buffer.
-   *
-   *        **Known limitation**: This approach blocks the calling thread during
-   *        retries. For high-throughput TCP scenarios, an async send buffer
-   *        (SPSC byte ring + EPOLLOUT-driven flush) should replace this
-   *        synchronous retry loop. See docs/design_zh.md transport section.
+   * @brief Send exactly len bytes. If this call or the current frame has already
+   *        put any byte on the wire, kWouldBlock becomes kSendFailed and the
+   *        connection is closed so the stream cannot desynchronize.
    */
-  expected<void, TransportError> SendAll(const void* data, uint32_t len) noexcept {
+  expected<void, TransportError> SendAll(const void* data, uint32_t len, bool frame_started) noexcept {
     static constexpr uint32_t kMaxEagainRetries = 16;
     const uint8_t* ptr = static_cast<const uint8_t*>(data);
     uint32_t remaining = len;
     uint32_t eagain_count = 0;
+    uint32_t sent_this_call = 0;
     while (remaining > 0) {
-      auto r = socket_.Send(ptr, remaining);
+      uint32_t want = remaining;
+      if (inject_send_budget_ != 0xFFFFFFFFu) {
+        if (inject_send_budget_ == 0U) {
+          if (sent_this_call > 0U || frame_started) {
+            connected_ = false;
+            return expected<void, TransportError>::error(TransportError::kSendFailed);
+          }
+          return expected<void, TransportError>::error(TransportError::kWouldBlock);
+        }
+        if (want > inject_send_budget_)
+          want = inject_send_budget_;
+      }
+      auto r = socket_.Send(ptr, want);
       if (!r.has_value()) {
         if (r.get_error() == SocketError::kWouldBlock) {
           if (++eagain_count > kMaxEagainRetries) {
-            // Kernel send buffer persistently full -- report to caller
-            // without tearing down the connection.
+            if (sent_this_call > 0U || frame_started) {
+              connected_ = false;
+              return expected<void, TransportError>::error(TransportError::kSendFailed);
+            }
             return expected<void, TransportError>::error(TransportError::kWouldBlock);
           }
           osp::ThreadYield();
           continue;
         }
-        // Fatal socket error (EPIPE, ECONNRESET, etc.)
         connected_ = false;
         return expected<void, TransportError>::error(TransportError::kSendFailed);
       }
@@ -817,30 +929,45 @@ class TcpTransport {
         return expected<void, TransportError>::error(TransportError::kSendFailed);
       }
       uint32_t sent = static_cast<uint32_t>(r.value());
+      if (inject_send_budget_ != 0xFFFFFFFFu)
+        inject_send_budget_ -= sent;
       ptr += sent;
       remaining -= sent;
-      eagain_count = 0;  // Reset on progress.
+      sent_this_call += sent;
+      eagain_count = 0;
     }
     return expected<void, TransportError>::success();
   }
 
-  /**
-   * @brief Receive exactly len bytes from the socket.
-   * @param data Pointer to the receive buffer.
-   * @param len Number of bytes to receive.
-   * @return Success, kRecvFailed (fatal), or kWouldBlock (no data after
-   *         retries exhausted).
-   */
-  expected<void, TransportError> RecvAll(void* data, uint32_t len) noexcept {
+  expected<void, TransportError> RecvAll(void* data, uint32_t len) noexcept { return RecvAll(data, len, false); }
+
+  expected<void, TransportError> RecvAll(void* data, uint32_t len, bool frame_started) noexcept {
     static constexpr uint32_t kMaxEagainRetries = 16;
     uint8_t* ptr = static_cast<uint8_t*>(data);
     uint32_t remaining = len;
     uint32_t eagain_count = 0;
+    uint32_t recvd_this_call = 0;
     while (remaining > 0) {
-      auto r = socket_.Recv(ptr, remaining);
+      uint32_t want = remaining;
+      if (inject_recv_budget_ != 0xFFFFFFFFu) {
+        if (inject_recv_budget_ == 0U) {
+          if (recvd_this_call > 0U || frame_started) {
+            connected_ = false;
+            return expected<void, TransportError>::error(TransportError::kRecvFailed);
+          }
+          return expected<void, TransportError>::error(TransportError::kWouldBlock);
+        }
+        if (want > inject_recv_budget_)
+          want = inject_recv_budget_;
+      }
+      auto r = socket_.Recv(ptr, want);
       if (!r.has_value()) {
         if (r.get_error() == SocketError::kWouldBlock) {
           if (++eagain_count > kMaxEagainRetries) {
+            if (recvd_this_call > 0U || frame_started) {
+              connected_ = false;
+              return expected<void, TransportError>::error(TransportError::kRecvFailed);
+            }
             return expected<void, TransportError>::error(TransportError::kWouldBlock);
           }
           osp::ThreadYield();
@@ -850,28 +977,36 @@ class TcpTransport {
         return expected<void, TransportError>::error(TransportError::kRecvFailed);
       }
       if (r.value() == 0) {
-        // Connection closed by peer
         connected_ = false;
         return expected<void, TransportError>::error(TransportError::kRecvFailed);
       }
       uint32_t received = static_cast<uint32_t>(r.value());
+      if (inject_recv_budget_ != 0xFFFFFFFFu)
+        inject_recv_budget_ -= received;
       ptr += received;
       remaining -= received;
+      recvd_this_call += received;
+      eagain_count = 0;
     }
     return expected<void, TransportError>::success();
   }
 
-  /// @brief Send all bytes of a read-only view (see SendAll(data, len)).
   expected<void, TransportError> SendAll(byte_span data) noexcept { return SendAll(data.data(), data.size_u32()); }
 
-  /// @brief Receive exactly the view size into a writable view (see RecvAll(data, len)).
   expected<void, TransportError> RecvAll(writable_byte_span data) noexcept {
     return RecvAll(data.data(), data.size_u32());
   }
 
   TcpSocket socket_;
   bool connected_;
+  uint8_t send_version_{0};
+  uint64_t integrity_unchecked_{0};
+  uint64_t crc_error_count_{0};
+  uint32_t inject_send_budget_{0xFFFFFFFFu};
+  uint32_t inject_recv_budget_{0xFFFFFFFFu};
 };
+
+
 
 // ============================================================================
 // NetworkNode<PayloadVariant> - Node with Remote Pub/Sub
@@ -959,24 +1094,41 @@ class NetworkNode : public Node<PayloadVariant> {
       return r;
 
     publishers_[slot].type_index = type_idx;
+    publishers_[slot].next_seq = 0;
+    publishers_[slot].transport.SetSendVersion(send_version_);
+    const uint32_t generation = publishers_[slot].generation.fetch_add(1U, std::memory_order_acq_rel) + 1U;
     publishers_[slot].active.store(true, std::memory_order_release);
     pub_count_.fetch_add(1U, std::memory_order_relaxed);
 
-    // Subscribe locally to type T: forward matching messages over transport.
-    // We capture the slot index to send through the correct transport.
     RemotePublisher* pub_ptr = &publishers_[slot];
     uint32_t sender_id = this->Id();
+    std::atomic<uint32_t>* pub_count = &pub_count_;
 
-    auto sub_r = this->template Subscribe<T>([pub_ptr, sender_id](const T& data, const MessageHeader& /*hdr*/) {
-      if (!pub_ptr->active.load(std::memory_order_acquire))
+    auto sub_r = this->template Subscribe<T>([pub_ptr, generation, sender_id, pub_count](
+                                                 const T& data, const MessageHeader& /*hdr*/) {
+      // A slot reused by a later AdvertiseTo must not revive this callback.
+      if (!pub_ptr->active.load(std::memory_order_acquire) ||
+          pub_ptr->generation.load(std::memory_order_acquire) != generation) {
         return;
+      }
 
       uint8_t payload_buf[OSP_TRANSPORT_MAX_FRAME_SIZE];
       uint32_t len = Serializer<T>::Serialize(data, payload_buf, sizeof(payload_buf));
       if (len == 0)
         return;
 
-      static_cast<void>(pub_ptr->transport.SendFrame(pub_ptr->type_index, sender_id, payload_buf, len));
+      const uint32_t seq = pub_ptr->next_seq;
+      pub_ptr->next_seq = seq + 1U;
+      auto send_r = pub_ptr->transport.SendConfigured(pub_ptr->type_index, sender_id, seq, SteadyNowNs(), payload_buf,
+                                                      len);
+      if (!send_r.has_value()) {
+        pub_ptr->transport.Close();
+        bool was_active = true;
+        if (pub_ptr->active.compare_exchange_strong(was_active, false, std::memory_order_release,
+                                                    std::memory_order_relaxed)) {
+          pub_count->fetch_sub(1U, std::memory_order_relaxed);
+        }
+      }
     });
 
     if (!sub_r.has_value()) {
@@ -1053,10 +1205,21 @@ class NetworkNode : public Node<PayloadVariant> {
       }
 
       RecvFrameSlot slot;
-      auto r = subscribers_[i].transport.RecvFrame(slot.header, slot.payload, sizeof(slot.payload));
-      if (!r.has_value())
+      FrameHeaderV1 hdr_v1{};
+      auto r = subscribers_[i].transport.RecvFrameAuto(hdr_v1, slot.payload, sizeof(slot.payload));
+      if (!r.has_value()) {
+        if (r.get_error() == TransportError::kWouldBlock)
+          continue;
+        subscribers_[i].transport.Close();
+        subscribers_[i].active.store(false, std::memory_order_release);
+        sub_count_.fetch_sub(1U, std::memory_order_relaxed);
         continue;
+      }
 
+      slot.header.magic = hdr_v1.magic;
+      slot.header.length = hdr_v1.length;
+      slot.header.type_index = hdr_v1.type_index;
+      slot.header.sender_id = hdr_v1.sender_id;
       slot.payload_len = r.value();
       if (subscribers_[i].recv_ring.Push(slot)) {
         ++buffered;
@@ -1191,12 +1354,21 @@ class NetworkNode : public Node<PayloadVariant> {
   /** @brief Get the number of frames dropped due to full recv_ring. */
   uint64_t RecvRingDrops() const noexcept { return recv_ring_drops_.load(std::memory_order_relaxed); }
 
+  void SetSendVersion(uint8_t version) noexcept {
+    send_version_ = version;
+    for (uint32_t i = 0; i < kMaxRemoteConnections; ++i) {
+      publishers_[i].transport.SetSendVersion(version);
+    }
+  }
+
  private:
   static constexpr uint32_t kMaxRemoteConnections = 8;
 
   struct RemotePublisher {
     TcpTransport transport;
     uint16_t type_index;
+    uint32_t next_seq{0};
+    std::atomic<uint32_t> generation{0};
     std::atomic<bool> active{false};
   };
 
@@ -1247,6 +1419,7 @@ class NetworkNode : public Node<PayloadVariant> {
   std::atomic<uint64_t> recv_ring_drops_{0};
   TcpListener listener_;
   bool listening_;
+  uint8_t send_version_{0};
 };
 
 #endif  // defined(OSP_PLATFORM_LINUX) || defined(OSP_PLATFORM_MACOS)

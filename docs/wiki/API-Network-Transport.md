@@ -815,7 +815,7 @@ reader.Read(buf, size);
 | `error_rate_window` | `uint32_t` | 100 | 错误率窗口大小 |
 | `degraded_error_threshold` | `uint32_t` | 10 | 降级错误阈值 |
 | `failed_error_threshold` | `uint32_t` | 30 | 失败错误阈值 |
-| `max_frames_per_second` | `uint32_t` | 1000 | 最大帧率 (0=无限制) |
+| `max_frames_per_second` | `uint32_t` | 1000 | 最大帧率 (0=无限制)；相邻帧最小间隔 1000/N 微秒，无突发 |
 | `write_retry_count` | `uint32_t` | 3 | 写重试次数 |
 | `write_retry_delay_us` | `uint32_t` | 1000 | 写重试延迟 (微秒) |
 
