@@ -40,6 +40,7 @@
 
 #include <cerrno>
 #include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -81,7 +82,52 @@ enum class ShmError : uint8_t {
   kAlreadyExists,
   kLayoutMismatch,
   kOwnerAlive,
+  // Appended in layout v2; existing values must not change.
+  kInvalidArgument,
+  kInvalidState,
+  kEvicted,
+  kConsumerStuck,
+  kCorrupt,
+  kMessageTooLarge,
+  kWaitInterrupted,
+  kNone,
 };
+
+/// @brief Channel health state reported by Health().
+enum class ShmState : uint8_t { kHealthy, kDegraded, kFaulted };
+
+/// @brief Point-in-time health counters for one shared-memory endpoint.
+struct ShmHealthSnapshot {
+  ShmState state{ShmState::kHealthy};
+  ShmError last_error{ShmError::kNone};
+  uint64_t reap_epoch{0};
+  uint32_t active_consumers{0};
+  uint32_t stale_consumers{0};
+  uint64_t oldest_pending_us{0};
+  uint64_t reaped_total{0};
+  uint64_t evicted_total{0};
+  uint64_t read_evicted_total{0};
+  uint64_t reap_deferred_total{0};
+  uint64_t read_conflict_total{0};
+  uint64_t consumer_stuck_total{0};
+  uint64_t orphan_state2_total{0};
+  uint64_t orphan_state3_total{0};
+  uint64_t generation_wrap_total{0};
+  uint64_t write_stall_events{0};
+  uint64_t wait_timeouts{0};
+  uint64_t corrupt_total{0};
+  uint64_t dropped_newest{0};
+};
+
+/// @brief Fault event delivered outside the hot path.
+struct ShmFaultEvent {
+  uint16_t code{0U};
+  uint32_t channel_hash{0U};
+  uint32_t consumer_id{0U};
+  uint64_t detail{0U};
+};
+
+using ShmFaultReporter = void (*)(const ShmFaultEvent&, void* ctx);
 
 // Huge pages: reduces TLB misses for large shared memory segments (e.g. video
 // frames).  Requires system-level huge page reservation:
@@ -106,7 +152,9 @@ enum class ShmLayoutKind : uint32_t {
 };
 
 inline constexpr uint32_t kShmLayoutMagic = 0x4F53484DU;  // "OSHM"
-inline constexpr uint16_t kShmLayoutVersion = 1U;
+// v2 adds the ring header size to the layout hash and a fault_flags word to
+// the MPSC slot ring. v1 segments are rejected at attach.
+inline constexpr uint16_t kShmLayoutVersion = 2U;
 
 struct alignas(64) ShmLayoutHeader {
   uint32_t magic;
@@ -126,7 +174,7 @@ struct alignas(64) ShmLayoutHeader {
 static_assert(sizeof(ShmLayoutHeader) == 64U, "ShmLayoutHeader must be 64 bytes");
 
 inline constexpr uint32_t ShmLayoutHash(ShmLayoutKind kind, uint32_t slot_size, uint32_t slot_count,
-                                        uint32_t total_size) noexcept {
+                                        uint32_t total_size, uint32_t header_payload_size) noexcept {
   uint32_t hash = 2166136261U;  // FNV-1a
   const auto mix = [&hash](uint32_t value) { hash = (hash ^ value) * 16777619U; };
   mix(kShmLayoutVersion);
@@ -134,11 +182,12 @@ inline constexpr uint32_t ShmLayoutHash(ShmLayoutKind kind, uint32_t slot_size, 
   mix(slot_size);
   mix(slot_count);
   mix(total_size);
+  mix(header_payload_size);
   return hash;
 }
 
 inline void WriteShmLayoutHeader(void* base, ShmLayoutKind kind, uint32_t slot_size, uint32_t slot_count,
-                                 uint32_t total_size) noexcept {
+                                 uint32_t total_size, uint32_t header_payload_size) noexcept {
   auto* header = static_cast<ShmLayoutHeader*>(base);
   header->magic = kShmLayoutMagic;
   header->version = kShmLayoutVersion;
@@ -147,7 +196,7 @@ inline void WriteShmLayoutHeader(void* base, ShmLayoutKind kind, uint32_t slot_s
   header->slot_size = slot_size;
   header->slot_count = slot_count;
   header->total_size = total_size;
-  header->layout_hash = ShmLayoutHash(kind, slot_size, slot_count, total_size);
+  header->layout_hash = ShmLayoutHash(kind, slot_size, slot_count, total_size, header_payload_size);
   header->epoch = SteadyNowUs();
   header->owner_pid = static_cast<int32_t>(::getpid());
   header->flags = 0U;
@@ -155,7 +204,8 @@ inline void WriteShmLayoutHeader(void* base, ShmLayoutKind kind, uint32_t slot_s
 }
 
 inline expected<ShmLayoutHeader*, ShmError> ValidateShmLayout(void* base, uint32_t total_size, ShmLayoutKind kind,
-                                                              uint32_t slot_size, uint32_t slot_count) noexcept {
+                                                              uint32_t slot_size, uint32_t slot_count,
+                                                              uint32_t header_payload_size) noexcept {
   if (base == nullptr || total_size < sizeof(ShmLayoutHeader)) {
     return expected<ShmLayoutHeader*, ShmError>::error(ShmError::kLayoutMismatch);
   }
@@ -163,7 +213,7 @@ inline expected<ShmLayoutHeader*, ShmError> ValidateShmLayout(void* base, uint32
   if (header->magic != kShmLayoutMagic || header->version != kShmLayoutVersion ||
       header->header_size != sizeof(ShmLayoutHeader) || header->kind != static_cast<uint32_t>(kind) ||
       header->slot_size != slot_size || header->slot_count != slot_count || header->total_size != total_size ||
-      header->layout_hash != ShmLayoutHash(kind, slot_size, slot_count, total_size)) {
+      header->layout_hash != ShmLayoutHash(kind, slot_size, slot_count, total_size, header_payload_size)) {
     return expected<ShmLayoutHeader*, ShmError>::error(ShmError::kLayoutMismatch);
   }
   return expected<ShmLayoutHeader*, ShmError>::success(header);
@@ -462,13 +512,15 @@ class ShmRingBuffer final {
    */
   static ShmRingBuffer* InitAt(void* shm_addr, uint32_t total_size = Size()) noexcept {
     OSP_ASSERT(shm_addr != nullptr);
-    WriteShmLayoutHeader(shm_addr, ShmLayoutKind::kSlotRing, SlotSize, SlotCount, total_size);
+    WriteShmLayoutHeader(shm_addr, ShmLayoutKind::kSlotRing, SlotSize, SlotCount, total_size,
+                         static_cast<uint32_t>(sizeof(ShmRingBuffer)));
     auto* rb = reinterpret_cast<ShmRingBuffer*>(  // NOLINT
         static_cast<uint8_t*>(shm_addr) + kLayoutOffset);
 
     // Initialize atomics using placement new
     new (&rb->producer_pos_) std::atomic<uint32_t>(0);
     new (&rb->consumer_pos_) std::atomic<uint32_t>(0);
+    new (&rb->fault_flags_) std::atomic<uint32_t>(0);
 
     for (uint32_t i = 0; i < SlotCount; ++i) {
       new (&rb->slots_[i].sequence) std::atomic<uint32_t>(i);
@@ -484,7 +536,8 @@ class ShmRingBuffer final {
    * @return Pointer to the ShmRingBuffer.
    */
   static expected<ShmRingBuffer*, ShmError> AttachChecked(void* shm_addr, uint32_t total_size) noexcept {
-    auto valid = ValidateShmLayout(shm_addr, total_size, ShmLayoutKind::kSlotRing, SlotSize, SlotCount);
+    auto valid = ValidateShmLayout(shm_addr, total_size, ShmLayoutKind::kSlotRing, SlotSize, SlotCount,
+                                   static_cast<uint32_t>(sizeof(ShmRingBuffer)));
     if (!valid.has_value()) {
       return expected<ShmRingBuffer*, ShmError>::error(valid.get_error());
     }
@@ -497,6 +550,12 @@ class ShmRingBuffer final {
    * @return Size in bytes.
    */
   static constexpr uint32_t Size() noexcept { return kLayoutOffset + sizeof(ShmRingBuffer); }
+
+  /// @brief Bit0: a defensive check found a corrupted slot or header.
+  static constexpr uint32_t kFaultCorrupt = 1U << 0U;
+
+  /// @brief Corruption flags raised by this ring (0 = healthy).
+  uint32_t FaultFlags() const noexcept { return fault_flags_.load(std::memory_order_acquire); }
 
   /**
    * @brief Try to push data into the ring buffer (non-blocking).
@@ -565,8 +624,16 @@ class ShmRingBuffer final {
     std::atomic_thread_fence(std::memory_order_acquire);
 
     // Copy data out
-    size = slot.size;
-    std::memcpy(data, slot.data, size);
+    const uint32_t msg_size = slot.size;
+    if (msg_size > SlotSize) {
+      // A peer process or an older writer may corrupt the slot size. Never
+      // memcpy an untrusted length; leave the slot unpublished so the
+      // consumer stops instead of reading past the slot.
+      fault_flags_.fetch_or(kFaultCorrupt, std::memory_order_release);
+      return false;
+    }
+    size = msg_size;
+    std::memcpy(data, slot.data, msg_size);
 
     // Release slot back to producers
     slot.sequence.store(cons_pos + SlotCount, std::memory_order_release);
@@ -594,10 +661,17 @@ class ShmRingBuffer final {
 
   static_assert(std::is_standard_layout<Slot>::value, "Slot must be standard layout for shared memory");
 
+ public:
+  /// @brief Slot stride and offset from the ring object start (shared-memory ABI).
+  static constexpr uint32_t kSlotStride = static_cast<uint32_t>(sizeof(Slot));
+  static constexpr uint32_t kSlotsOffset = static_cast<uint32_t>(offsetof(ShmRingBuffer, slots_));
+
+ private:
   // Cache line aligned to prevent false sharing between producer and consumer
   alignas(64) std::atomic<uint32_t> producer_pos_;
   char pad_[64 - sizeof(std::atomic<uint32_t>)];
   alignas(64) std::atomic<uint32_t> consumer_pos_;
+  alignas(64) std::atomic<uint32_t> fault_flags_;
   Slot slots_[SlotCount];
 
   // Private constructor - use InitAt/AttachChecked
@@ -884,7 +958,7 @@ class ShmSpscByteRing final {
     OSP_ASSERT(total_size > kLayoutOffset + kHeaderSize);
     ShmSpscByteRing ring;
     uint32_t cap = RoundDownPow2(total_size - kLayoutOffset - kHeaderSize);
-    WriteShmLayoutHeader(shm_base, ShmLayoutKind::kSpscByteRing, cap, 0U, total_size);
+    WriteShmLayoutHeader(shm_base, ShmLayoutKind::kSpscByteRing, cap, 0U, total_size, kHeaderSize);
     ring.header_ = reinterpret_cast<ShmByteRingHeader*>(  // NOLINT
         static_cast<uint8_t*>(shm_base) + kLayoutOffset);
     ring.data_ = static_cast<uint8_t*>(shm_base) + kLayoutOffset + kHeaderSize;
@@ -906,7 +980,7 @@ class ShmSpscByteRing final {
       return expected<ShmSpscByteRing, ShmError>::error(ShmError::kLayoutMismatch);
     }
     const uint32_t cap = RoundDownPow2(total_size - kLayoutOffset - kHeaderSize);
-    auto valid = ValidateShmLayout(shm_base, total_size, ShmLayoutKind::kSpscByteRing, cap, 0U);
+    auto valid = ValidateShmLayout(shm_base, total_size, ShmLayoutKind::kSpscByteRing, cap, 0U, kHeaderSize);
     if (!valid.has_value()) {
       return expected<ShmSpscByteRing, ShmError>::error(valid.get_error());
     }
@@ -939,7 +1013,12 @@ class ShmSpscByteRing final {
    * @return true if successful, false if not enough space.
    */
   bool Write(const void* data, uint32_t len) noexcept {
-    const uint32_t total = len + 4;
+    // Validate before computing len + 4: a wrapped total would pass the
+    // capacity check and turn into an out-of-bounds memcpy.
+    if (len == 0U || header_->capacity <= 4U || len > header_->capacity - 4U) {
+      return false;
+    }
+    const uint32_t total = len + 4U;
     if (WriteableBytes() < total) {
       return false;
     }
@@ -954,7 +1033,8 @@ class ShmSpscByteRing final {
   uint32_t WriteableBytes() const noexcept {
     const uint32_t head = header_->head.load(std::memory_order_relaxed);
     const uint32_t tail = header_->tail.load(std::memory_order_acquire);
-    return header_->capacity - (head - tail);
+    const uint32_t used = head - tail;
+    return (used >= header_->capacity) ? 0U : (header_->capacity - used);
   }
 
   // ---- Consumer API ----
@@ -974,7 +1054,7 @@ class ShmSpscByteRing final {
     }
     uint32_t msg_len = 0;
     ReadRaw(tail, &msg_len, 4);
-    if (msg_len == 0 || available < msg_len + 4) {
+    if (msg_len == 0U || msg_len > available - 4U) {
       return 0;
     }
     if (msg_len > max_len) {
@@ -1060,6 +1140,34 @@ inline int FutexWait(std::atomic<uint32_t>* addr, uint32_t expected_val, uint32_
   ts.tv_nsec = static_cast<long>((timeout_ms % 1000) * 1000000L);  // NOLINT
   uint32_t* raw = reinterpret_cast<uint32_t*>(addr);               // NOLINT
   return static_cast<int>(::syscall(SYS_futex, raw, FUTEX_WAIT, expected_val, &ts, nullptr, 0));
+}
+
+/// @brief Remaining time to an absolute microsecond deadline, rounded up.
+inline uint32_t RemainingMsCeil(uint64_t deadline_us) noexcept {
+  const uint64_t now = SteadyNowUs();
+  if (now >= deadline_us) {
+    return 0U;
+  }
+  const uint64_t ms = (deadline_us - now + 999U) / 1000U;
+  return (ms > UINT32_MAX) ? UINT32_MAX : static_cast<uint32_t>(ms);
+}
+
+/**
+ * @brief Classify a futex wait return value.
+ * @return 0 = recheck the predicate (woken, EAGAIN, EINTR), 1 = ETIMEDOUT,
+ *         2 = any other error.
+ */
+inline int FutexWaitOutcome(int rc) noexcept {
+  if (rc == 0) {
+    return 0;
+  }
+  if (errno == ETIMEDOUT) {
+    return 1;
+  }
+  if (errno == EAGAIN || errno == EINTR) {
+    return 0;
+  }
+  return 2;
 }
 
 /// @brief Wake one waiter on a futex word.
@@ -1215,18 +1323,40 @@ class ShmByteChannel final {
    * @param timeout_ms Timeout in milliseconds.
    */
   expected<void, ShmError> WaitReadable(uint32_t timeout_ms) noexcept {
-    // Fast path: data already available
-    if (ring_.HasData()) {
-      return expected<void, ShmError>::success();
+    const uint64_t deadline = SteadyNowUs() + static_cast<uint64_t>(timeout_ms) * 1000U;
+    for (;;) {
+      if (ring_.HasData()) {
+        return expected<void, ShmError>::success();
+      }
+      // Read the wait word first, then re-check: a producer that publishes
+      // between the two makes the futex return EAGAIN instead of sleeping.
+      const uint32_t head = ring_.HeadPtr()->load(std::memory_order_acquire);
+      if (ring_.HasData()) {
+        return expected<void, ShmError>::success();
+      }
+      if (timeout_ms == 0U) {
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+#if OSP_SHM_WAIT_SPIN_US > 0
+      const uint64_t spin_end = SteadyNowUs() + OSP_SHM_WAIT_SPIN_US;
+      while (SteadyNowUs() < spin_end) {
+        if (ring_.HasData()) {
+          return expected<void, ShmError>::success();
+        }
+      }
+#endif
+      const uint32_t remaining = detail::RemainingMsCeil(deadline);
+      if (remaining == 0U) {
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+      const int outcome = detail::FutexWaitOutcome(detail::FutexWait(ring_.HeadPtr(), head, remaining));
+      if (outcome == 1) {
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+      if (outcome == 2) {
+        return expected<void, ShmError>::error(ShmError::kWaitInterrupted);
+      }
     }
-    // Futex wait: sleep until head changes
-    uint32_t cur_head = ring_.HeadPtr()->load(std::memory_order_acquire);
-    detail::FutexWait(ring_.HeadPtr(), cur_head, timeout_ms);
-    // Re-check after wake
-    if (ring_.HasData()) {
-      return expected<void, ShmError>::success();
-    }
-    return expected<void, ShmError>::error(ShmError::kTimeout);
   }
 
   /// @brief Notify waiting reader (explicit, for batch writes without per-write wake).
@@ -1261,6 +1391,35 @@ class ShmByteChannel final {
 // ShmSpmcByteRing - Single-Producer Multi-Consumer byte-stream ring buffer
 // ============================================================================
 
+/// @brief Consumer reaping policy (writer side).
+enum class ReapPolicy : uint8_t { kNone, kOnFull, kSupervisor };
+
+/// @brief Writer-side channel configuration.
+struct ShmChannelConfig {
+  uint64_t stale_timeout_us{3000000};  ///< Alive-but-idle consumer becomes "stuck" after this
+  uint32_t reap_interval_ms{100};      ///< Supervisor tick period
+  uint32_t grace_us{2000000};          ///< Max time allowed in a transient slot state
+  ReapPolicy reap_policy{ReapPolicy::kNone};
+  bool evict_alive_slow{false};  ///< Also reap alive consumers whose tail stalls
+};
+
+/// @brief Consumer identity returned by RegisterConsumer(const ShmChannelConfig&).
+struct ConsumerHandle {
+  uint32_t id{0U};
+  int32_t pool_slot{-1};  ///< Lease pool slot, -1 when leasing is disabled
+  uint32_t generation{0U};
+};
+
+/// @brief 16-byte block reference carried by the SPMC channel in lease mode.
+struct ShmBlockRef {
+  uint32_t block_id{0U};
+  uint32_t block_generation{0U};
+  uint32_t size{0U};
+  uint32_t pool_hash{0U};
+};
+
+static_assert(sizeof(ShmBlockRef) == 16U, "ShmBlockRef must be 16 bytes");
+
 /**
  * @brief Header for SPMC byte ring buffer (shared memory safe).
  * One head + per-consumer tails[]; fields written by one side and read by the
@@ -1268,12 +1427,27 @@ class ShmByteChannel final {
  * safety. Each consumer has an independent tail for independent reading.
  */
 struct ShmSpmcByteRingHeader {
-  std::atomic<uint32_t> head;                                ///< Producer write position (monotonically increasing)
-  uint32_t capacity;                                         ///< Data area size (must be power of 2)
-  uint32_t max_consumers;                                    ///< Maximum number of consumers
-  std::atomic<uint32_t> consumer_count;                      ///< Active consumer count (atomic CAS)
-  std::atomic<uint32_t> tails[OSP_SHM_SPMC_MAX_CONSUMERS];   ///< Per-consumer read positions (atomic: read by producer)
-  std::atomic<uint32_t> active[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< 1=active, 0=inactive
+  static constexpr uint32_t kStateMask = 0x3U;
+  static constexpr uint32_t kGuardShift = 2U;
+
+  /// @brief Pack state (low 2 bits) and read guard (high 30 bits).
+  static constexpr uint32_t Pack(uint32_t state, uint32_t guard) noexcept {
+    return (guard << kGuardShift) | (state & kStateMask);
+  }
+  static constexpr uint32_t StateOf(uint32_t word) noexcept { return word & kStateMask; }
+  static constexpr uint32_t GuardOf(uint32_t word) noexcept { return word >> kGuardShift; }
+
+  std::atomic<uint32_t> head;                               ///< Producer write position (monotonically increasing)
+  uint32_t capacity;                                        ///< Data area size (must be power of 2)
+  uint32_t max_consumers;                                   ///< Maximum number of consumers
+  std::atomic<uint32_t> consumer_count;                     ///< Active consumer count (atomic CAS)
+  std::atomic<uint32_t> space_seq;                          ///< Tail advance counter (wait plane)
+  std::atomic<uint32_t> reap_epoch;                         ///< Diagnostics: successful reap count
+  std::atomic<uint32_t> tails[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< Per-consumer read positions
+  std::atomic<uint32_t> slot_state[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< state 0/1/2/3 + read guard
+  std::atomic<uint32_t> generation[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< Per-consumer generation
+  std::atomic<uint32_t> flags[OSP_SHM_SPMC_MAX_CONSUMERS];       ///< evicted/stale/stuck/corrupt
+  std::atomic<uint32_t> pid[OSP_SHM_SPMC_MAX_CONSUMERS];         ///< Consumer pid for liveness
 };
 
 static_assert(std::atomic<uint32_t>::is_always_lock_free,
@@ -1292,6 +1466,11 @@ class ShmSpmcByteRing final {
   static constexpr uint32_t kHeaderSize = static_cast<uint32_t>(sizeof(ShmSpmcByteRingHeader));
   static constexpr uint32_t kLayoutOffset = sizeof(ShmLayoutHeader);
 
+  /// @brief Per-consumer flag bits stored in header_->flags[].
+  static constexpr uint32_t kFlagEvicted = 1U << 0U;
+  static constexpr uint32_t kFlagStuck = 1U << 2U;
+  static constexpr uint32_t kFlagCorrupt = 1U << 3U;
+
   ShmSpmcByteRing() noexcept : header_(nullptr), data_(nullptr), mask_(0) {}
 
   /**
@@ -1309,7 +1488,7 @@ class ShmSpmcByteRing final {
     }
     ShmSpmcByteRing ring;
     uint32_t cap = RoundDownPow2(total_size - kLayoutOffset - kHeaderSize);
-    WriteShmLayoutHeader(shm_base, ShmLayoutKind::kSpmcByteRing, cap, max_consumers, total_size);
+    WriteShmLayoutHeader(shm_base, ShmLayoutKind::kSpmcByteRing, cap, max_consumers, total_size, kHeaderSize);
     ring.header_ = reinterpret_cast<ShmSpmcByteRingHeader*>(  // NOLINT
         static_cast<uint8_t*>(shm_base) + kLayoutOffset);
     ring.data_ = static_cast<uint8_t*>(shm_base) + kLayoutOffset + kHeaderSize;
@@ -1317,9 +1496,14 @@ class ShmSpmcByteRing final {
     ring.header_->capacity = cap;
     ring.header_->max_consumers = max_consumers;
     ring.header_->consumer_count.store(0, std::memory_order_relaxed);
+    ring.header_->space_seq.store(0, std::memory_order_relaxed);
+    ring.header_->reap_epoch.store(0, std::memory_order_relaxed);
     for (uint32_t i = 0; i < OSP_SHM_SPMC_MAX_CONSUMERS; ++i) {
       ring.header_->tails[i].store(0, std::memory_order_relaxed);
-      ring.header_->active[i].store(0, std::memory_order_relaxed);
+      ring.header_->slot_state[i].store(0, std::memory_order_relaxed);
+      ring.header_->generation[i].store(0, std::memory_order_relaxed);
+      ring.header_->flags[i].store(0, std::memory_order_relaxed);
+      ring.header_->pid[i].store(0, std::memory_order_relaxed);
     }
     std::atomic_thread_fence(std::memory_order_release);
     ring.mask_ = cap - 1;
@@ -1337,7 +1521,7 @@ class ShmSpmcByteRing final {
     const auto* layout = static_cast<const ShmLayoutHeader*>(shm_base);
     const uint32_t cap = RoundDownPow2(total_size - kLayoutOffset - kHeaderSize);
     const uint32_t max_consumers = layout->slot_count;
-    auto valid = ValidateShmLayout(shm_base, total_size, ShmLayoutKind::kSpmcByteRing, cap, max_consumers);
+    auto valid = ValidateShmLayout(shm_base, total_size, ShmLayoutKind::kSpmcByteRing, cap, max_consumers, kHeaderSize);
     if (!valid.has_value() || max_consumers == 0U || max_consumers > OSP_SHM_SPMC_MAX_CONSUMERS) {
       return expected<ShmSpmcByteRing, ShmError>::error(ShmError::kLayoutMismatch);
     }
@@ -1360,33 +1544,82 @@ class ShmSpmcByteRing final {
 
   // ---- Consumer registration ----
 
-  /**
-   * @brief Register a new consumer. Returns consumer_id (0..max-1) or -1 if full.
-   * Consumer's tail is set to current head (starts reading from now).
-   */
-  int32_t RegisterConsumer() noexcept {
-    // Atomic CAS loop to claim a slot
+  /// @brief Register a consumer with generation tracking and return its handle.
+  expected<ConsumerHandle, ShmError> RegisterConsumer(const ShmChannelConfig& config) noexcept {
+    (void)config;  // Policies are applied on the writer side, not per consumer.
     for (uint32_t i = 0; i < header_->max_consumers; ++i) {
-      uint32_t expected = 0;
-      if (header_->active[i].compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
-                                                     std::memory_order_relaxed)) {
-        // Set tail to current head (consumer starts from "now")
-        header_->tails[i].store(header_->head.load(std::memory_order_acquire), std::memory_order_relaxed);
-        header_->consumer_count.fetch_add(1, std::memory_order_relaxed);
-        return static_cast<int32_t>(i);
+      uint32_t expected_word = 0U;
+      if (!header_->slot_state[i].compare_exchange_strong(expected_word, ShmSpmcByteRingHeader::Pack(2U, 0U),
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_relaxed)) {
+        continue;
       }
+      const uint32_t next_generation = header_->generation[i].load(std::memory_order_relaxed) + 1U;
+      if (next_generation == 0U) {
+        // Generation exhausted: refuse instead of silently wrapping.
+        uint32_t expected_free = ShmSpmcByteRingHeader::Pack(2U, 0U);
+        (void)header_->slot_state[i].compare_exchange_strong(expected_free, 0U, std::memory_order_acq_rel,
+                                                             std::memory_order_relaxed);
+        ++generation_wrap_total_;
+        MarkFault(ShmError::kInvalidState);
+        ReportFault(ShmError::kInvalidState, i, next_generation);
+        return expected<ConsumerHandle, ShmError>::error(ShmError::kInvalidState);
+      }
+      header_->tails[i].store(header_->head.load(std::memory_order_acquire), std::memory_order_relaxed);
+      header_->generation[i].store(next_generation, std::memory_order_release);
+      header_->pid[i].store(static_cast<uint32_t>(::getpid()), std::memory_order_release);
+      header_->flags[i].store(0U, std::memory_order_relaxed);
+      uint32_t expected_active = ShmSpmcByteRingHeader::Pack(2U, 0U);
+      if (!header_->slot_state[i].compare_exchange_strong(expected_active, ShmSpmcByteRingHeader::Pack(1U, 0U),
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_relaxed)) {
+        // Tick reaped the registering slot; do not publish as active.
+        uint32_t expected_release = ShmSpmcByteRingHeader::Pack(2U, 0U);
+        (void)header_->slot_state[i].compare_exchange_strong(expected_release, 0U, std::memory_order_acq_rel,
+                                                             std::memory_order_relaxed);
+        continue;
+      }
+      header_->consumer_count.fetch_add(1U, std::memory_order_release);
+      detail::FutexWakeAll(&header_->consumer_count);
+      return expected<ConsumerHandle, ShmError>::success(ConsumerHandle{i, -1, next_generation});
     }
-    return -1;  // No slots available
+    return expected<ConsumerHandle, ShmError>::error(ShmError::kFull);
   }
 
-  /// @brief Unregister a consumer, freeing its slot.
-  void UnregisterConsumer(int32_t consumer_id) noexcept {
-    if (consumer_id < 0 || static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
-      return;
+  /// @brief Unregister by handle. Idempotent when the handle is already stale.
+  expected<void, ShmError> UnregisterConsumer(ConsumerHandle handle) noexcept {
+    if (handle.id >= header_->max_consumers) {
+      return expected<void, ShmError>::error(ShmError::kInvalidArgument);
     }
-    if (header_->active[static_cast<uint32_t>(consumer_id)].exchange(0, std::memory_order_acq_rel) == 1) {
-      header_->consumer_count.fetch_sub(1, std::memory_order_relaxed);
+    uint32_t word = header_->slot_state[handle.id].load(std::memory_order_acquire);
+    if (ShmSpmcByteRingHeader::StateOf(word) != 1U) {
+      return expected<void, ShmError>::success();
     }
+    if (ShmSpmcByteRingHeader::GuardOf(word) != 0U) {
+      return expected<void, ShmError>::error(ShmError::kInvalidState);
+    }
+    if (header_->generation[handle.id].load(std::memory_order_acquire) != handle.generation) {
+      return expected<void, ShmError>::success();
+    }
+    uint32_t expected_word = ShmSpmcByteRingHeader::Pack(1U, 0U);
+    if (!header_->slot_state[handle.id].compare_exchange_strong(expected_word, 0U, std::memory_order_acq_rel,
+                                                                std::memory_order_relaxed)) {
+      return (ShmSpmcByteRingHeader::StateOf(expected_word) == 1U)
+                 ? expected<void, ShmError>::error(ShmError::kInvalidState)
+                 : expected<void, ShmError>::success();
+    }
+    header_->consumer_count.fetch_sub(1U, std::memory_order_release);
+    detail::FutexWakeAll(&header_->consumer_count);
+    return expected<void, ShmError>::success();
+  }
+
+  /// @brief Reopen after eviction: unregister (idempotent) then register again.
+  expected<ConsumerHandle, ShmError> Reopen(ConsumerHandle handle, const ShmChannelConfig& config) noexcept {
+    auto closed = UnregisterConsumer(handle);
+    if (!closed.has_value()) {
+      return expected<ConsumerHandle, ShmError>::error(closed.get_error());
+    }
+    return RegisterConsumer(config);
   }
 
   /// @brief Number of active consumers.
@@ -1400,8 +1633,14 @@ class ShmSpmcByteRing final {
    * @return true if successful, false if not enough space.
    */
   bool Write(const void* data, uint32_t len) noexcept {
-    const uint32_t total = len + 4;
+    // Validate before computing len + 4: a wrapped total would pass the
+    // capacity check and turn into an out-of-bounds memcpy.
+    if (len == 0U || header_->capacity <= 4U || len > header_->capacity - 4U) {
+      return false;
+    }
+    const uint32_t total = len + 4U;
     if (WriteableBytes() < total) {
+      (void)DetectUnderflow();
       return false;
     }
     const uint32_t head = header_->head.load(std::memory_order_relaxed);
@@ -1411,61 +1650,393 @@ class ShmSpmcByteRing final {
     return true;
   }
 
+  /**
+   * @brief Checked write. On full, applies ReapPolicy before reporting kFull.
+   * @return kInvalidArgument for zero length, kMessageTooLarge beyond capacity.
+   */
+  expected<void, ShmError> WriteChecked(const void* data, uint32_t len,
+                                        const ShmChannelConfig& cfg = ShmChannelConfig{}) noexcept {
+    if (header_ == nullptr) {
+      return expected<void, ShmError>::error(ShmError::kInvalidState);
+    }
+    if (len == 0U) {
+      return expected<void, ShmError>::error(ShmError::kInvalidArgument);
+    }
+    if (header_->capacity <= 4U || len > header_->capacity - 4U) {
+      return expected<void, ShmError>::error(ShmError::kMessageTooLarge);
+    }
+    const uint32_t total = len + 4U;
+    if (WriteableBytes() < total) {
+      if (DetectUnderflow()) {
+        return expected<void, ShmError>::error(ShmError::kCorrupt);
+      }
+      if (cfg.reap_policy == ReapPolicy::kOnFull) {
+        (void)ReapStaleConsumers(SteadyNowUs(), cfg);
+      }
+    }
+    if (WriteableBytes() < total) {
+      ++write_stall_events_;
+      ++dropped_newest_;
+      return expected<void, ShmError>::error(ShmError::kFull);
+    }
+    const uint32_t head = header_->head.load(std::memory_order_relaxed);
+    WriteRaw(head, &len, 4U);
+    WriteRaw(head + 4U, data, len);
+    header_->head.store(head + total, std::memory_order_release);
+    return expected<void, ShmError>::success();
+  }
+
   /// @brief Available bytes for writing (limited by slowest consumer).
   uint32_t WriteableBytes() const noexcept {
     const uint32_t head = header_->head.load(std::memory_order_relaxed);
     const uint32_t slowest = SlowestTail();
-    return header_->capacity - (head - slowest);
+    const uint32_t used = head - slowest;
+    return (used >= header_->capacity) ? 0U : (header_->capacity - used);
+  }
+
+  // ---- Writer-side progress detection ----
+
+  /**
+   * @brief Reap dead consumers, and stuck live ones when explicitly allowed.
+   * @param now_us Monotonic timestamp from SteadyNowUs().
+   * @param cfg Thresholds; evict_alive_slow gates eviction of live consumers.
+   * @return Number of slots reclaimed.
+   */
+  uint32_t ReapStaleConsumers(uint64_t now_us, const ShmChannelConfig& cfg = ShmChannelConfig{}) noexcept {
+    if (header_ == nullptr) {
+      return 0U;
+    }
+    uint32_t reaped = 0U;
+    for (uint32_t i = 0; i < header_->max_consumers; ++i) {
+      const uint32_t word = header_->slot_state[i].load(std::memory_order_acquire);
+      if (ShmSpmcByteRingHeader::StateOf(word) != 1U) {
+        continue;
+      }
+      const uint32_t generation = header_->generation[i].load(std::memory_order_acquire);
+      const pid_t pid = static_cast<pid_t>(header_->pid[i].load(std::memory_order_acquire));
+      const bool alive = IsProcessAlive(pid);
+      if (!alive) {
+        // Dead consumers are judged immediately; the generation CAS inside
+        // TryReap still protects against a slot reused during this scan.
+        if (TryReap(i, generation, true)) {
+          ++reaped;
+          observed_generation_[i] = header_->generation[i].load(std::memory_order_acquire);
+          observed_tail_[i] = header_->tails[i].load(std::memory_order_acquire);
+          last_progress_us_[i] = now_us;
+        }
+        continue;
+      }
+      if (generation != observed_generation_[i]) {
+        // New consumer generation: restart stall tracking without judging it.
+        observed_generation_[i] = generation;
+        observed_tail_[i] = header_->tails[i].load(std::memory_order_acquire);
+        last_progress_us_[i] = now_us;
+        continue;
+      }
+      const uint32_t tail = header_->tails[i].load(std::memory_order_acquire);
+      if (tail != observed_tail_[i]) {
+        observed_tail_[i] = tail;
+        last_progress_us_[i] = now_us;
+        // A consumer that resumes must stop being reported as stuck.
+        header_->flags[i].fetch_and(~kFlagStuck, std::memory_order_release);
+        continue;
+      }
+      const bool backlog = (header_->head.load(std::memory_order_acquire) != tail);
+      const bool stalled = (now_us - last_progress_us_[i]) >= cfg.stale_timeout_us;
+      if (!backlog || !stalled) {
+        continue;
+      }
+      // An alive but idle consumer is defective, not dead: mark it and only
+      // evict when the deployment explicitly accepts the data loss.
+      const uint32_t previous_flags = header_->flags[i].fetch_or(kFlagStuck, std::memory_order_release);
+      if ((previous_flags & kFlagStuck) == 0U) {
+        ++consumer_stuck_total_;
+        ReportFault(ShmError::kConsumerStuck, i, now_us - last_progress_us_[i]);
+      }
+      if (!cfg.evict_alive_slow) {
+        continue;
+      }
+      if (TryReap(i, generation, false)) {
+        ++reaped;
+        observed_generation_[i] = header_->generation[i].load(std::memory_order_acquire);
+        observed_tail_[i] = header_->tails[i].load(std::memory_order_acquire);
+        last_progress_us_[i] = now_us;
+      }
+    }
+    return reaped;
+  }
+
+  /// @brief Supervisor entry: clean transient orphans, then scan consumers once.
+  expected<void, ShmError> Tick(uint64_t now_us, const ShmChannelConfig& cfg = ShmChannelConfig{}) noexcept {
+    if (header_ == nullptr) {
+      return expected<void, ShmError>::error(ShmError::kInvalidState);
+    }
+    ReapOrphans(now_us, cfg.grace_us);
+    (void)ReapStaleConsumers(now_us, cfg);
+    return expected<void, ShmError>::success();
+  }
+
+  /**
+   * @brief Reset all consumer state. The caller must stop every endpoint first.
+   * @return kInvalidState when a slot is transient, being read, or generation
+   *         exhausted; nothing is modified in that case.
+   */
+  expected<void, ShmError> ResetAfterQuiesce() noexcept {
+    if (header_ == nullptr) {
+      return expected<void, ShmError>::error(ShmError::kInvalidState);
+    }
+    const uint32_t n = header_->max_consumers;
+    uint32_t snapshot[OSP_SHM_SPMC_MAX_CONSUMERS];
+    uint32_t snapshot_generation[OSP_SHM_SPMC_MAX_CONSUMERS];
+    for (uint32_t i = 0; i < n; ++i) {
+      const uint32_t word = header_->slot_state[i].load(std::memory_order_acquire);
+      const uint32_t state = ShmSpmcByteRingHeader::StateOf(word);
+      const uint32_t generation = header_->generation[i].load(std::memory_order_acquire);
+      if ((state != 0U && state != 1U) || ShmSpmcByteRingHeader::GuardOf(word) != 0U ||
+          generation == UINT32_MAX) {
+        return expected<void, ShmError>::error(ShmError::kInvalidState);
+      }
+      snapshot[i] = word;
+      snapshot_generation[i] = generation;
+    }
+    // Occupy every slot, including free ones, so a racing registration cannot
+    // slip in and be wiped by the commit phase.
+    for (uint32_t i = 0; i < n; ++i) {
+      if (header_->generation[i].load(std::memory_order_acquire) != snapshot_generation[i]) {
+        RollbackReset(snapshot, i);
+        return expected<void, ShmError>::error(ShmError::kInvalidState);
+      }
+      uint32_t expected_word = snapshot[i];
+      if (!header_->slot_state[i].compare_exchange_strong(expected_word, ShmSpmcByteRingHeader::Pack(3U, 0U),
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_relaxed)) {
+        RollbackReset(snapshot, i);
+        return expected<void, ShmError>::error(ShmError::kInvalidState);
+      }
+      // Close the free -> register -> free ABA window: a generation change
+      // after the CAS means this slot now belongs to a new consumer.
+      if (header_->generation[i].load(std::memory_order_acquire) != snapshot_generation[i]) {
+        uint32_t occupied = ShmSpmcByteRingHeader::Pack(3U, 0U);
+        (void)header_->slot_state[i].compare_exchange_strong(occupied, snapshot[i], std::memory_order_acq_rel,
+                                                             std::memory_order_relaxed);
+        RollbackReset(snapshot, i);
+        return expected<void, ShmError>::error(ShmError::kInvalidState);
+      }
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+      header_->slot_state[i].store(0U, std::memory_order_release);
+      header_->generation[i].fetch_add(1U, std::memory_order_release);
+      header_->tails[i].store(0U, std::memory_order_relaxed);
+      header_->flags[i].store(0U, std::memory_order_relaxed);
+      header_->pid[i].store(0U, std::memory_order_relaxed);
+      observed_generation_[i] = 0U;
+      observed_tail_[i] = 0U;
+      last_progress_us_[i] = 0U;
+      transient_since_us_[i] = 0U;
+    }
+    header_->consumer_count.store(0U, std::memory_order_release);
+    header_->head.store(0U, std::memory_order_release);
+    header_->space_seq.store(0U, std::memory_order_release);
+    detail::FutexWakeAll(&header_->consumer_count);
+    detail::FutexWakeAll(&header_->head);
+    detail::FutexWakeAll(&header_->space_seq);
+    reaped_total_ = 0U;
+    evicted_total_ = 0U;
+    read_evicted_total_ = 0U;
+    reap_deferred_total_ = 0U;
+    read_conflict_total_ = 0U;
+    consumer_stuck_total_ = 0U;
+    orphan_state2_total_ = 0U;
+    orphan_state3_total_ = 0U;
+    generation_wrap_total_ = 0U;
+    write_stall_events_ = 0U;
+    wait_timeouts_ = 0U;
+    corrupt_total_ = 0U;
+    dropped_newest_ = 0U;
+    last_error_ = ShmError::kNone;
+    return expected<void, ShmError>::success();
+  }
+
+  // ---- Wait plane ----
+
+  /**
+   * @brief Wait until a payload of @p needed bytes plus its 4-byte length prefix
+   *        can be written.
+   * @param needed Payload bytes required, in 1..Capacity()-4.
+   * @param timeout_ms Relative timeout; 0 degenerates to a single check.
+   */
+  expected<void, ShmError> WaitWritable(uint32_t needed, uint32_t timeout_ms) noexcept {
+    if (header_ == nullptr) {
+      return expected<void, ShmError>::error(ShmError::kInvalidState);
+    }
+    if (needed == 0U || header_->capacity <= 4U || needed > header_->capacity - 4U) {
+      return expected<void, ShmError>::error(ShmError::kInvalidArgument);
+    }
+    const uint32_t wire = needed + 4U;
+    const uint64_t deadline = SteadyNowUs() + static_cast<uint64_t>(timeout_ms) * 1000U;
+    for (;;) {
+      if (WriteableBytes() >= wire) {
+        return expected<void, ShmError>::success();
+      }
+      // Read the wait word first; a tail advance in between yields EAGAIN.
+      const uint32_t seq = header_->space_seq.load(std::memory_order_acquire);
+      if (WriteableBytes() >= wire) {
+        return expected<void, ShmError>::success();
+      }
+      if (timeout_ms == 0U) {
+        ++wait_timeouts_;
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+#if OSP_SHM_WAIT_SPIN_US > 0
+      const uint64_t spin_end = SteadyNowUs() + OSP_SHM_WAIT_SPIN_US;
+      while (SteadyNowUs() < spin_end) {
+        if (WriteableBytes() >= wire) {
+          return expected<void, ShmError>::success();
+        }
+      }
+#endif
+      const uint32_t remaining = detail::RemainingMsCeil(deadline);
+      if (remaining == 0U) {
+        ++wait_timeouts_;
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+      const int outcome = detail::FutexWaitOutcome(detail::FutexWait(&header_->space_seq, seq, remaining));
+      if (outcome == 1) {
+        ++wait_timeouts_;
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+      if (outcome == 2) {
+        return expected<void, ShmError>::error(ShmError::kWaitInterrupted);
+      }
+    }
+  }
+
+  /// @brief Wait until at least @p count consumers are registered.
+  expected<void, ShmError> WaitConsumers(uint32_t count, uint32_t timeout_ms) noexcept {
+    if (header_ == nullptr) {
+      return expected<void, ShmError>::error(ShmError::kInvalidState);
+    }
+    if (count == 0U || count > header_->max_consumers) {
+      return expected<void, ShmError>::error(ShmError::kInvalidArgument);
+    }
+    const uint64_t deadline = SteadyNowUs() + static_cast<uint64_t>(timeout_ms) * 1000U;
+    for (;;) {
+      if (header_->consumer_count.load(std::memory_order_acquire) >= count) {
+        return expected<void, ShmError>::success();
+      }
+      const uint32_t observed = header_->consumer_count.load(std::memory_order_acquire);
+      if (header_->consumer_count.load(std::memory_order_acquire) >= count) {
+        return expected<void, ShmError>::success();
+      }
+      if (timeout_ms == 0U) {
+        ++wait_timeouts_;
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+      const uint32_t remaining = detail::RemainingMsCeil(deadline);
+      if (remaining == 0U) {
+        ++wait_timeouts_;
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+      const int outcome =
+          detail::FutexWaitOutcome(detail::FutexWait(&header_->consumer_count, observed, remaining));
+      if (outcome == 1) {
+        ++wait_timeouts_;
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+      if (outcome == 2) {
+        return expected<void, ShmError>::error(ShmError::kWaitInterrupted);
+      }
+    }
   }
 
   // ---- Consumer API ----
 
   /**
-   * @brief Read one length-prefixed message for a specific consumer.
-   * @param consumer_id Consumer slot index from RegisterConsumer().
-   * @param[out] out Buffer to receive payload.
-   * @param max_len Maximum payload size.
-   * @return Payload length, or 0 if no data available.
+   * @brief Generation-checked read. Returns kEvicted once the slot is reaped.
+   * The caller must serialize all reads that share one handle.
    */
-  uint32_t Read(int32_t consumer_id, void* out, uint32_t max_len) noexcept {
-    if (consumer_id < 0 || static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
-      return 0;
+  expected<uint32_t, ShmError> ReadChecked(ConsumerHandle handle, void* out, uint32_t max_len) noexcept {
+    if (handle.id >= header_->max_consumers) {
+      return expected<uint32_t, ShmError>::error(ShmError::kInvalidArgument);
     }
-    const uint32_t idx = static_cast<uint32_t>(consumer_id);
+    const uint32_t idx = handle.id;
+    const uint32_t word = header_->slot_state[idx].load(std::memory_order_acquire);
+    if (ShmSpmcByteRingHeader::StateOf(word) != 1U) {
+      ++read_evicted_total_;
+      return expected<uint32_t, ShmError>::error(ShmError::kEvicted);
+    }
+    if (ShmSpmcByteRingHeader::GuardOf(word) != 0U) {
+      ++read_conflict_total_;
+      return expected<uint32_t, ShmError>::error(ShmError::kInvalidState);
+    }
+    uint32_t expected_word = ShmSpmcByteRingHeader::Pack(1U, 0U);
+    if (!header_->slot_state[idx].compare_exchange_strong(expected_word, ShmSpmcByteRingHeader::Pack(1U, 1U),
+                                                           std::memory_order_acq_rel,
+                                                           std::memory_order_relaxed)) {
+      if (ShmSpmcByteRingHeader::StateOf(expected_word) == 1U) {
+        ++read_conflict_total_;
+        return expected<uint32_t, ShmError>::error(ShmError::kInvalidState);
+      }
+      ++read_evicted_total_;
+      return expected<uint32_t, ShmError>::error(ShmError::kEvicted);
+    }
+    if (header_->generation[idx].load(std::memory_order_acquire) != handle.generation) {
+      ReleaseGuard(idx);
+      ++read_evicted_total_;
+      return expected<uint32_t, ShmError>::error(ShmError::kEvicted);
+    }
     const uint32_t tail = header_->tails[idx].load(std::memory_order_relaxed);
     const uint32_t head = header_->head.load(std::memory_order_acquire);
     const uint32_t available = head - tail;
-    if (available < 4) {
-      return 0;
+    if (available < 4U) {
+      ReleaseGuard(idx);
+      return expected<uint32_t, ShmError>::error(ShmError::kEmpty);
     }
-    uint32_t msg_len = 0;
-    ReadRaw(tail, &msg_len, 4);
-    if (msg_len == 0 || available < msg_len + 4) {
-      return 0;
+    uint32_t msg_len = 0U;
+    ReadRaw(tail, &msg_len, 4U);
+    if (msg_len == 0U || msg_len > available - 4U) {
+      const uint32_t previous_flags = header_->flags[idx].fetch_or(kFlagCorrupt, std::memory_order_release);
+      if ((previous_flags & kFlagCorrupt) == 0U) {
+        ++corrupt_total_;
+        MarkFault(ShmError::kCorrupt);
+        ReportFault(ShmError::kCorrupt, idx, msg_len);
+      }
+      ReleaseGuard(idx);
+      return expected<uint32_t, ShmError>::error(ShmError::kCorrupt);
     }
     if (msg_len > max_len) {
-      // Message too large for output buffer; skip it
-      header_->tails[idx].store(tail + msg_len + 4, std::memory_order_release);
-      return 0;
+      ReleaseGuard(idx);
+      return expected<uint32_t, ShmError>::error(ShmError::kMessageTooLarge);
     }
-    ReadRaw(tail + 4, out, msg_len);
-    header_->tails[idx].store(tail + msg_len + 4, std::memory_order_release);
-    return msg_len;
+    ReadRaw(tail + 4U, out, msg_len);
+    // Re-check before publishing tail: a reaper may have taken the slot while
+    // we were copying only if the guard protocol was violated.
+    const uint32_t check = header_->slot_state[idx].load(std::memory_order_acquire);
+    if (ShmSpmcByteRingHeader::StateOf(check) != 1U ||
+        header_->generation[idx].load(std::memory_order_acquire) != handle.generation) {
+      ReleaseGuard(idx);
+      ++read_evicted_total_;
+      return expected<uint32_t, ShmError>::error(ShmError::kEvicted);
+    }
+    header_->tails[idx].store(tail + msg_len + 4U, std::memory_order_release);
+    NotifyTailAdvanced();
+    ReleaseGuard(idx);
+    return expected<uint32_t, ShmError>::success(msg_len);
   }
 
   /// @brief Available bytes for reading for a specific consumer.
-  uint32_t ReadableBytes(int32_t consumer_id) const noexcept {
-    if (consumer_id < 0 || static_cast<uint32_t>(consumer_id) >= header_->max_consumers) {
+  uint32_t ReadableBytes(ConsumerHandle handle) const noexcept {
+    if (handle.id >= header_->max_consumers) {
       return 0;
     }
-    const uint32_t idx = static_cast<uint32_t>(consumer_id);
+    const uint32_t idx = handle.id;
     const uint32_t tail = header_->tails[idx].load(std::memory_order_relaxed);
     const uint32_t head = header_->head.load(std::memory_order_acquire);
     return head - tail;
   }
 
   /// @brief Check if consumer has at least one complete message header.
-  bool HasData(int32_t consumer_id) const noexcept { return ReadableBytes(consumer_id) >= 4; }
+  bool HasData(ConsumerHandle handle) const noexcept { return ReadableBytes(handle) >= 4U; }
 
   /// @brief Data area capacity in bytes.
   uint32_t Capacity() const noexcept { return header_ ? header_->capacity : 0; }
@@ -1476,12 +2047,88 @@ class ShmSpmcByteRing final {
   /// @brief Maximum consumers supported.
   uint32_t MaxConsumers() const noexcept { return header_ ? header_->max_consumers : 0; }
 
+  /// @brief Install a fault reporter; events fire only on state transitions.
+  void SetFaultReporter(ShmFaultReporter reporter, void* ctx) noexcept {
+    fault_reporter_ = reporter;
+    fault_ctx_ = ctx;
+  }
+
+  /// @brief Lock-free health snapshot. Call from the writer thread.
+  ShmHealthSnapshot Health() const noexcept {
+    ShmHealthSnapshot snapshot{};
+    if (header_ == nullptr) {
+      snapshot.state = ShmState::kFaulted;
+      snapshot.last_error = ShmError::kInvalidState;
+      return snapshot;
+    }
+    const uint64_t now_us = SteadyNowUs();
+    uint32_t transient_slots = 0U;
+    snapshot.reap_epoch = header_->reap_epoch.load(std::memory_order_relaxed);
+    for (uint32_t i = 0; i < header_->max_consumers; ++i) {
+      const uint32_t word = header_->slot_state[i].load(std::memory_order_acquire);
+      const uint32_t state = ShmSpmcByteRingHeader::StateOf(word);
+      if (state == 2U || state == 3U) {
+        ++transient_slots;
+        continue;
+      }
+      if (state != 1U) {
+        continue;
+      }
+      ++snapshot.active_consumers;
+      if ((header_->flags[i].load(std::memory_order_acquire) & kFlagStuck) != 0U) {
+        ++snapshot.stale_consumers;
+      }
+      const uint32_t tail = header_->tails[i].load(std::memory_order_acquire);
+      if (tail != header_->head.load(std::memory_order_acquire)) {
+        const uint64_t since = last_progress_us_[i];
+        const uint64_t pending = (since == 0U || now_us < since) ? 0U : (now_us - since);
+        if (pending > snapshot.oldest_pending_us) {
+          snapshot.oldest_pending_us = pending;
+        }
+      }
+    }
+    snapshot.reaped_total = reaped_total_;
+    snapshot.evicted_total = evicted_total_;
+    snapshot.read_evicted_total = read_evicted_total_;
+    snapshot.reap_deferred_total = reap_deferred_total_;
+    snapshot.read_conflict_total = read_conflict_total_;
+    snapshot.consumer_stuck_total = consumer_stuck_total_;
+    snapshot.orphan_state2_total = orphan_state2_total_;
+    snapshot.orphan_state3_total = orphan_state3_total_;
+    snapshot.generation_wrap_total = generation_wrap_total_;
+    snapshot.write_stall_events = write_stall_events_;
+    snapshot.wait_timeouts = wait_timeouts_;
+    snapshot.corrupt_total = corrupt_total_;
+    snapshot.dropped_newest = dropped_newest_;
+    snapshot.last_error = last_error_;
+    if (last_error_ == ShmError::kCorrupt || last_error_ == ShmError::kInvalidState) {
+      snapshot.state = ShmState::kFaulted;
+    } else if (snapshot.stale_consumers > 0U || transient_slots > 0U) {
+      snapshot.state = ShmState::kDegraded;
+    }
+    return snapshot;
+  }
+
  private:
+  /// @brief Record the error that put the endpoint into the faulted state.
+  void MarkFault(ShmError code) noexcept { last_error_ = code; }
+
+  /// @brief Deliver a fault event outside the hot path.
+  void ReportFault(ShmError code, uint32_t consumer_id, uint64_t detail) noexcept {
+    if (fault_reporter_ == nullptr) {
+      return;
+    }
+    const auto* layout = reinterpret_cast<const ShmLayoutHeader*>(  // NOLINT
+        reinterpret_cast<const uint8_t*>(header_) - kLayoutOffset);
+    const ShmFaultEvent event{static_cast<uint16_t>(code), layout->layout_hash, consumer_id, detail};
+    fault_reporter_(event, fault_ctx_);
+  }
+
   /// @brief Find the slowest (minimum) tail among active consumers.
   uint32_t SlowestTail() const noexcept {
     uint32_t slowest = header_->head.load(std::memory_order_relaxed);  // If no consumers, full capacity
     for (uint32_t i = 0; i < header_->max_consumers; ++i) {
-      if (header_->active[i].load(std::memory_order_relaxed) != 0) {
+      if (ShmSpmcByteRingHeader::StateOf(header_->slot_state[i].load(std::memory_order_acquire)) == 1U) {
         const uint32_t t = header_->tails[i].load(std::memory_order_acquire);
         // Use signed comparison for monotonic wrap-around
         if (static_cast<int32_t>(slowest - t) > 0) {
@@ -1490,6 +2137,121 @@ class ShmSpmcByteRing final {
       }
     }
     return slowest;
+  }
+
+  /// @brief Treat head - slowest > capacity as corruption and stop writing.
+  bool DetectUnderflow() noexcept {
+    if (last_error_ == ShmError::kCorrupt) {
+      return true;  // already faulted and reported
+    }
+    const uint32_t head = header_->head.load(std::memory_order_relaxed);
+    const uint32_t used = head - SlowestTail();
+    if (used <= header_->capacity) {
+      return false;
+    }
+    ++corrupt_total_;
+    MarkFault(ShmError::kCorrupt);
+    ReportFault(ShmError::kCorrupt, UINT32_MAX, used);
+    return true;
+  }
+
+  /// @brief Restore occupied slots [0, count) to their pre-reset words.
+  void RollbackReset(const uint32_t* snapshot, uint32_t count) noexcept {
+    for (uint32_t j = 0; j < count; ++j) {
+      uint32_t expected = ShmSpmcByteRingHeader::Pack(3U, 0U);
+      (void)header_->slot_state[j].compare_exchange_strong(expected, snapshot[j], std::memory_order_acq_rel,
+                                                           std::memory_order_relaxed);
+    }
+  }
+
+  /// @brief Reap one slot. force=true is only used for a confirmed-dead owner.
+  bool TryReap(uint32_t idx, uint32_t generation, bool force) noexcept {
+    const uint32_t desired = ShmSpmcByteRingHeader::Pack(3U, 0U);
+    if (force) {
+      // The owner is gone, so a non-zero guard can never be released.
+      uint32_t word = header_->slot_state[idx].load(std::memory_order_acquire);
+      for (;;) {
+        if (ShmSpmcByteRingHeader::StateOf(word) != 1U) {
+          return false;
+        }
+        if (header_->slot_state[idx].compare_exchange_weak(word, desired, std::memory_order_acq_rel,
+                                                           std::memory_order_relaxed)) {
+          break;
+        }
+      }
+    } else {
+      uint32_t expected = ShmSpmcByteRingHeader::Pack(1U, 0U);
+      if (!header_->slot_state[idx].compare_exchange_strong(expected, desired, std::memory_order_acq_rel,
+                                                             std::memory_order_relaxed)) {
+        ++reap_deferred_total_;
+        return false;  // A reader holds the guard: defer to the next scan.
+      }
+    }
+    if (header_->generation[idx].load(std::memory_order_acquire) != generation) {
+      // A new consumer registered between the CAS and the commit: roll back.
+      uint32_t expected = desired;
+      (void)header_->slot_state[idx].compare_exchange_strong(expected, ShmSpmcByteRingHeader::Pack(1U, 0U),
+                                                             std::memory_order_acq_rel,
+                                                             std::memory_order_relaxed);
+      return false;
+    }
+    header_->tails[idx].store(header_->head.load(std::memory_order_acquire), std::memory_order_release);
+    header_->generation[idx].store(generation + 1U, std::memory_order_release);
+    header_->flags[idx].fetch_or(kFlagEvicted, std::memory_order_release);
+    header_->consumer_count.fetch_sub(1U, std::memory_order_release);
+    detail::FutexWakeAll(&header_->consumer_count);
+    header_->reap_epoch.fetch_add(1U, std::memory_order_relaxed);
+    header_->slot_state[idx].store(ShmSpmcByteRingHeader::Pack(0U, 0U), std::memory_order_release);
+    NotifyTailAdvanced();
+    ++reaped_total_;
+    ++evicted_total_;
+    ReportFault(ShmError::kEvicted, idx, generation);
+    return true;
+  }
+
+  /// @brief Recycle slots stuck in registering (2) or reaping (3) past grace.
+  void ReapOrphans(uint64_t now_us, uint32_t grace_us) noexcept {
+    for (uint32_t i = 0; i < header_->max_consumers; ++i) {
+      const uint32_t word = header_->slot_state[i].load(std::memory_order_acquire);
+      const uint32_t state = ShmSpmcByteRingHeader::StateOf(word);
+      if (state != 2U && state != 3U) {
+        transient_since_us_[i] = 0U;
+        continue;
+      }
+      if (transient_since_us_[i] == 0U) {
+        transient_since_us_[i] = (now_us == 0U) ? 1U : now_us;
+        continue;
+      }
+      if ((now_us - transient_since_us_[i]) < grace_us) {
+        continue;
+      }
+      uint32_t expected = word;
+      if (header_->slot_state[i].compare_exchange_strong(expected, 0U, std::memory_order_acq_rel,
+                                                         std::memory_order_relaxed)) {
+        if (state == 2U) {
+          ++orphan_state2_total_;
+        } else {
+          ++orphan_state3_total_;
+        }
+        header_->generation[i].fetch_add(1U, std::memory_order_acq_rel);
+        ReportFault(ShmError::kInvalidState, i, word);
+        transient_since_us_[i] = 0U;
+      }
+    }
+  }
+
+  /// @brief Drop the read guard; the slot must still be in state 1.
+  void ReleaseGuard(uint32_t idx) noexcept {
+    uint32_t expected = ShmSpmcByteRingHeader::Pack(1U, 1U);
+    (void)header_->slot_state[idx].compare_exchange_strong(expected, ShmSpmcByteRingHeader::Pack(1U, 0U),
+                                                           std::memory_order_acq_rel,
+                                                           std::memory_order_relaxed);
+  }
+
+  /// @brief Publish a tail advance to the wait plane (wakes one writer).
+  void NotifyTailAdvanced() noexcept {
+    header_->space_seq.fetch_add(1U, std::memory_order_release);
+    detail::FutexWake(&header_->space_seq);
   }
 
   void WriteRaw(uint32_t pos, const void* src, uint32_t len) noexcept {
@@ -1528,6 +2290,26 @@ class ShmSpmcByteRing final {
   ShmSpmcByteRingHeader* header_;
   uint8_t* data_;
   uint32_t mask_;
+  uint32_t observed_generation_[OSP_SHM_SPMC_MAX_CONSUMERS]{};
+  uint32_t observed_tail_[OSP_SHM_SPMC_MAX_CONSUMERS]{};
+  uint64_t last_progress_us_[OSP_SHM_SPMC_MAX_CONSUMERS]{};
+  uint64_t transient_since_us_[OSP_SHM_SPMC_MAX_CONSUMERS]{};
+  uint64_t reaped_total_{0};
+  uint64_t evicted_total_{0};
+  uint64_t read_evicted_total_{0};
+  uint64_t reap_deferred_total_{0};
+  uint64_t read_conflict_total_{0};
+  uint64_t consumer_stuck_total_{0};
+  uint64_t orphan_state2_total_{0};
+  uint64_t orphan_state3_total_{0};
+  uint64_t generation_wrap_total_{0};
+  uint64_t write_stall_events_{0};
+  uint64_t wait_timeouts_{0};
+  uint64_t corrupt_total_{0};
+  uint64_t dropped_newest_{0};
+  ShmError last_error_{ShmError::kNone};
+  ShmFaultReporter fault_reporter_{nullptr};
+  void* fault_ctx_{nullptr};
 };
 
 // ============================================================================
@@ -1547,11 +2329,11 @@ class ShmSpmcByteRing final {
  */
 class ShmSpmcByteChannel final {
  public:
-  ShmSpmcByteChannel() noexcept : is_writer_(false), consumer_id_(-1) {}
+  ShmSpmcByteChannel() noexcept : is_writer_(false) { config_.reap_policy = ReapPolicy::kOnFull; }
 
   ~ShmSpmcByteChannel() {
-    if (!is_writer_ && consumer_id_ >= 0 && ring_.Capacity() > 0) {
-      ring_.UnregisterConsumer(consumer_id_);
+    if (!is_writer_ && has_consumer_ && ring_.Capacity() > 0U) {
+      (void)ring_.UnregisterConsumer(consumer_);
     }
   }
 
@@ -1563,23 +2345,27 @@ class ShmSpmcByteChannel final {
       : shm_segment_(static_cast<SharedMemorySegment&&>(other.shm_segment_)),
         ring_(other.ring_),
         is_writer_(other.is_writer_),
-        consumer_id_(other.consumer_id_) {
+        consumer_(other.consumer_),
+        has_consumer_(other.has_consumer_),
+        config_(other.config_) {
     other.ring_ = ShmSpmcByteRing();
-    other.consumer_id_ = -1;
+    other.has_consumer_ = false;
   }
 
   ShmSpmcByteChannel& operator=(ShmSpmcByteChannel&& other) noexcept {
     if (this != &other) {
       // Unregister current consumer if active
-      if (!is_writer_ && consumer_id_ >= 0 && ring_.Capacity() > 0) {
-        ring_.UnregisterConsumer(consumer_id_);
+      if (!is_writer_ && has_consumer_ && ring_.Capacity() > 0U) {
+        (void)ring_.UnregisterConsumer(consumer_);
       }
       shm_segment_ = static_cast<SharedMemorySegment&&>(other.shm_segment_);
       ring_ = other.ring_;
       is_writer_ = other.is_writer_;
-      consumer_id_ = other.consumer_id_;
+      consumer_ = other.consumer_;
+      has_consumer_ = other.has_consumer_;
+      config_ = other.config_;
       other.ring_ = ShmSpmcByteRing();
-      other.consumer_id_ = -1;
+      other.has_consumer_ = false;
     }
     return *this;
   }
@@ -1658,10 +2444,12 @@ class ShmSpmcByteChannel final {
       return expected<ShmSpmcByteChannel, ShmError>::error(attached.get_error());
     }
     ch.ring_ = attached.value();
-    ch.consumer_id_ = ch.ring_.RegisterConsumer();
-    if (ch.consumer_id_ < 0) {
-      return expected<ShmSpmcByteChannel, ShmError>::error(ShmError::kFull);
+    auto registered = ch.ring_.RegisterConsumer(ch.config_);
+    if (!registered.has_value()) {
+      return expected<ShmSpmcByteChannel, ShmError>::error(registered.get_error());
     }
+    ch.consumer_ = registered.value();
+    ch.has_consumer_ = true;
     return expected<ShmSpmcByteChannel, ShmError>::success(static_cast<ShmSpmcByteChannel&&>(ch));
   }
 
@@ -1669,8 +2457,9 @@ class ShmSpmcByteChannel final {
    * @brief Write data and notify all waiting readers via futex.
    */
   expected<void, ShmError> Write(const void* data, uint32_t size) noexcept {
-    if (!ring_.Write(data, size)) {
-      return expected<void, ShmError>::error(ShmError::kFull);
+    auto written = ring_.WriteChecked(data, size, config_);
+    if (!written.has_value()) {
+      return written;
     }
     detail::FutexWakeAll(ring_.HeadPtr());
     return expected<void, ShmError>::success();
@@ -1682,22 +2471,65 @@ class ShmSpmcByteChannel final {
    * @param max_len Maximum payload size.
    * @return Payload length, or 0 if no data.
    */
-  uint32_t Read(void* data, uint32_t max_len) noexcept { return ring_.Read(consumer_id_, data, max_len); }
+  expected<uint32_t, ShmError> Read(void* data, uint32_t max_len) noexcept {
+    if (!has_consumer_) {
+      return expected<uint32_t, ShmError>::error(ShmError::kInvalidState);
+    }
+    return ring_.ReadChecked(consumer_, data, max_len);
+  }
 
   /**
    * @brief Wait for data using futex (microsecond-level latency).
    * @param timeout_ms Timeout in milliseconds.
    */
   expected<void, ShmError> WaitReadable(uint32_t timeout_ms) noexcept {
-    if (ring_.HasData(consumer_id_)) {
-      return expected<void, ShmError>::success();
+    const uint64_t deadline = SteadyNowUs() + static_cast<uint64_t>(timeout_ms) * 1000U;
+    for (;;) {
+      if (ring_.HasData(consumer_)) {
+        return expected<void, ShmError>::success();
+      }
+      // Read the wait word first, then re-check: a producer that publishes
+      // between the two makes the futex return EAGAIN instead of sleeping.
+      const uint32_t head = ring_.HeadPtr()->load(std::memory_order_acquire);
+      if (ring_.HasData(consumer_)) {
+        return expected<void, ShmError>::success();
+      }
+      if (timeout_ms == 0U) {
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+#if OSP_SHM_WAIT_SPIN_US > 0
+      const uint64_t spin_end = SteadyNowUs() + OSP_SHM_WAIT_SPIN_US;
+      while (SteadyNowUs() < spin_end) {
+        if (ring_.HasData(consumer_)) {
+          return expected<void, ShmError>::success();
+        }
+      }
+#endif
+      const uint32_t remaining = detail::RemainingMsCeil(deadline);
+      if (remaining == 0U) {
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+      const int outcome = detail::FutexWaitOutcome(detail::FutexWait(ring_.HeadPtr(), head, remaining));
+      if (outcome == 1) {
+        return expected<void, ShmError>::error(ShmError::kTimeout);
+      }
+      if (outcome == 2) {
+        return expected<void, ShmError>::error(ShmError::kWaitInterrupted);
+      }
     }
-    uint32_t cur_head = ring_.HeadPtr()->load(std::memory_order_acquire);
-    detail::FutexWait(ring_.HeadPtr(), cur_head, timeout_ms);
-    if (ring_.HasData(consumer_id_)) {
-      return expected<void, ShmError>::success();
-    }
-    return expected<void, ShmError>::error(ShmError::kTimeout);
+  }
+
+  /// @brief Supervisor tick for this channel's reaping policy.
+  expected<void, ShmError> Tick(uint64_t now_us) noexcept { return ring_.Tick(now_us, config_); }
+
+  /// @brief Wait until the ring can accept @p needed payload bytes.
+  expected<void, ShmError> WaitWritable(uint32_t needed, uint32_t timeout_ms) noexcept {
+    return ring_.WaitWritable(needed, timeout_ms);
+  }
+
+  /// @brief Wait until at least @p count readers are registered.
+  expected<void, ShmError> WaitConsumers(uint32_t count, uint32_t timeout_ms) noexcept {
+    return ring_.WaitConsumers(count, timeout_ms);
   }
 
   /// @brief Notify all waiting readers (explicit, for batch writes).
@@ -1711,7 +2543,7 @@ class ShmSpmcByteChannel final {
   }
 
   /// @brief Available bytes for reading (this consumer).
-  uint32_t ReadableBytes() const noexcept { return ring_.ReadableBytes(consumer_id_); }
+  uint32_t ReadableBytes() const noexcept { return ring_.ReadableBytes(consumer_); }
 
   /// @brief Available bytes for writing (producer only).
   uint32_t WriteableBytes() const noexcept { return ring_.WriteableBytes(); }
@@ -1722,8 +2554,17 @@ class ShmSpmcByteChannel final {
   /// @brief Number of active consumers.
   uint32_t ConsumerCount() const noexcept { return ring_.ConsumerCount(); }
 
+  /// @brief Health snapshot for this channel (writer side).
+  ShmHealthSnapshot Health() const noexcept { return ring_.Health(); }
+
+  /// @brief Install the fault reporter used by the underlying ring.
+  void SetFaultReporter(ShmFaultReporter reporter, void* ctx) noexcept { ring_.SetFaultReporter(reporter, ctx); }
+
   /// @brief This reader's consumer ID (-1 if writer).
-  int32_t ConsumerId() const noexcept { return consumer_id_; }
+  int32_t ConsumerId() const noexcept { return has_consumer_ ? static_cast<int32_t>(consumer_.id) : -1; }
+
+  /// @brief Generation-checked handle for this reader (invalid for writers).
+  ConsumerHandle Handle() const noexcept { return consumer_; }
 
   /// @brief Segment epoch (changes when CreateOrReplace rebuilds the segment).
   uint64_t Epoch() const noexcept { return shm_segment_.Epoch(); }
@@ -1732,7 +2573,209 @@ class ShmSpmcByteChannel final {
   SharedMemorySegment shm_segment_;
   ShmSpmcByteRing ring_;
   bool is_writer_;
-  int32_t consumer_id_;
+  ConsumerHandle consumer_{};
+  bool has_consumer_{false};
+  ShmChannelConfig config_{};
+};
+
+// ============================================================================
+// Block lease adapters: ShmSpmcByteChannel carries a ShmBlockRef, the pool
+// (DataDispatcher / ShmDispatcher) owns the payload and the refcount.
+// ============================================================================
+
+/// @brief Move-only RAII lease over one pool block.
+template <typename DispatcherT>
+class BlockLease final {
+ public:
+  BlockLease() noexcept = default;
+
+  BlockLease(DispatcherT* pool, int32_t pool_slot, ShmBlockRef ref) noexcept
+      : pool_(pool),
+        pool_slot_(pool_slot),
+        ref_(ref),
+        data_((pool != nullptr) ? pool->GetReadable(ref.block_id, ref.block_generation) : nullptr) {}
+
+  ~BlockLease() { Release(); }
+
+  BlockLease(const BlockLease&) = delete;
+  BlockLease& operator=(const BlockLease&) = delete;
+
+  BlockLease(BlockLease&& other) noexcept
+      : pool_(other.pool_), pool_slot_(other.pool_slot_), ref_(other.ref_), data_(other.data_) {
+    other.pool_ = nullptr;
+    other.data_ = nullptr;
+  }
+
+  BlockLease& operator=(BlockLease&& other) noexcept {
+    if (this != &other) {
+      Release();
+      pool_ = other.pool_;
+      pool_slot_ = other.pool_slot_;
+      ref_ = other.ref_;
+      data_ = other.data_;
+      other.pool_ = nullptr;
+      other.data_ = nullptr;
+    }
+    return *this;
+  }
+
+  const uint8_t* Data() const noexcept { return data_; }
+  uint32_t Size() const noexcept { return (data_ != nullptr) ? ref_.size : 0U; }
+  uint32_t Id() const noexcept { return ref_.block_id; }
+  uint32_t Generation() const noexcept { return ref_.block_generation; }
+  explicit operator bool() const noexcept { return data_ != nullptr; }
+
+  void Release() noexcept {
+    if (pool_ != nullptr && data_ != nullptr) {
+      bool owns_reference = true;
+      if (pool_slot_ >= 0) {
+        // Whoever clears the hold bit owns the reference. A concurrent
+        // RevokeConsumer that already claimed it must not be released twice.
+        owns_reference = pool_->ReleaseBlockHold(pool_slot_, ref_.block_id);
+      }
+      if (owns_reference) {
+        (void)pool_->Release(ref_.block_id, ref_.block_generation);
+      }
+    }
+    pool_ = nullptr;
+    data_ = nullptr;
+  }
+
+ private:
+  DispatcherT* pool_{nullptr};
+  int32_t pool_slot_{-1};
+  ShmBlockRef ref_{};
+  const uint8_t* data_{nullptr};
+};
+
+/// @brief Producer side: copy one payload into the pool and publish its ref.
+template <typename DispatcherT>
+class ShmLeaseProducer final {
+ public:
+  ShmLeaseProducer(ShmSpmcByteChannel& channel, DispatcherT& pool, uint32_t pool_hash = 0U) noexcept
+      : channel_(channel), pool_(pool), pool_hash_(pool_hash) {}
+
+  /**
+   * @brief Publish @p size bytes as a leased block.
+   * @param pool_slots Consumer pool slots whose holds are recorded now, so a
+   *        consumer that dies before acquiring the lease cannot leak the block.
+   * @param consumer_count Number of consumers expected to release the block.
+   */
+  expected<void, ShmError> Publish(const void* data, uint32_t size, const int32_t* pool_slots,
+                                   uint32_t consumer_count) noexcept {
+    if (data == nullptr || size == 0U || consumer_count == 0U || pool_slots == nullptr ||
+        consumer_count > OSP_JOB_MAX_CONSUMERS) {
+      return expected<void, ShmError>::error(ShmError::kInvalidArgument);
+    }
+    if (size > DispatcherT::PayloadCapacity()) {
+      return expected<void, ShmError>::error(ShmError::kMessageTooLarge);
+    }
+    // One reference per distinct consumer slot: duplicates would add refcounts
+    // that no hold bit can ever release.
+    int32_t unique_slots[OSP_JOB_MAX_CONSUMERS];
+    uint32_t unique_count = 0U;
+    for (uint32_t i = 0; i < consumer_count; ++i) {
+      const int32_t slot = pool_slots[i];
+      if (slot < 0 || slot >= static_cast<int32_t>(OSP_JOB_MAX_CONSUMERS)) {
+        return expected<void, ShmError>::error(ShmError::kInvalidArgument);
+      }
+      bool duplicate = false;
+      for (uint32_t j = 0; j < unique_count; ++j) {
+        if (unique_slots[j] == slot) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) {
+        unique_slots[unique_count++] = slot;
+      }
+    }
+    if (unique_count == 0U) {
+      return expected<void, ShmError>::error(ShmError::kInvalidArgument);
+    }
+    auto allocated = pool_.Alloc();
+    if (!allocated.has_value()) {
+      return expected<void, ShmError>::error(ShmError::kFull);
+    }
+    const uint32_t block_id = allocated.value();
+    const uint32_t generation = pool_.GetGeneration(block_id);
+    uint8_t* dst = pool_.GetWritable(block_id);
+    if (dst == nullptr) {
+      (void)pool_.Release(block_id, generation);
+      return expected<void, ShmError>::error(ShmError::kInvalidState);
+    }
+    std::memcpy(dst, data, size);
+    pool_.AddRef(block_id, unique_count);
+    for (uint32_t i = 0; i < unique_count; ++i) {
+      pool_.TrackBlockHold(unique_slots[i], block_id);
+    }
+    const ShmBlockRef ref{block_id, generation, size, pool_hash_};
+    auto written = channel_.Write(&ref, sizeof(ref));
+    if (!written.has_value()) {
+      for (uint32_t i = 0; i < unique_count; ++i) {
+        (void)pool_.TrackBlockRelease(unique_slots[i], block_id);
+      }
+      for (uint32_t i = 0; i < unique_count; ++i) {
+        (void)pool_.Release(block_id, generation);
+      }
+      return written;
+    }
+    return expected<void, ShmError>::success();
+  }
+
+ private:
+  ShmSpmcByteChannel& channel_;
+  DispatcherT& pool_;
+  uint32_t pool_hash_;
+};
+
+/// @brief Consumer side: read a block reference and hand back an RAII lease.
+template <typename DispatcherT>
+class ShmLeaseConsumer final {
+ public:
+  ShmLeaseConsumer(ShmSpmcByteChannel& channel, DispatcherT& pool, int32_t pool_slot) noexcept
+      : channel_(channel), pool_(pool), pool_slot_(pool_slot) {}
+
+  /// @brief Refresh the pool heartbeat. Call at least every
+  ///        OSP_JOB_CONSUMER_TIMEOUT_US while holding a lease; otherwise the
+  ///        producer's CleanupDeadConsumers may reclaim the block underneath it.
+  void Heartbeat() noexcept {
+    if (pool_slot_ >= 0) {
+      pool_.ConsumerHeartbeat(pool_slot_);
+    }
+  }
+
+  /// @brief Reclaim every block still held by this consumer and free its pool
+  ///        slot. Use on abnormal shutdown; normal shutdown can rely on lease
+  ///        destructors followed by pool unregistration.
+  uint32_t Revoke() noexcept { return (pool_slot_ >= 0) ? pool_.RevokeConsumer(pool_slot_) : 0U; }
+
+  expected<BlockLease<DispatcherT>, ShmError> ReadLease(uint32_t timeout_ms) noexcept {
+    Heartbeat();
+    auto ready = channel_.WaitReadable(timeout_ms);
+    if (!ready.has_value()) {
+      return expected<BlockLease<DispatcherT>, ShmError>::error(ready.get_error());
+    }
+    ShmBlockRef ref{};
+    auto read = channel_.Read(&ref, sizeof(ref));
+    if (!read.has_value()) {
+      return expected<BlockLease<DispatcherT>, ShmError>::error(read.get_error());
+    }
+    if (read.value() != sizeof(ref)) {
+      return expected<BlockLease<DispatcherT>, ShmError>::error(ShmError::kCorrupt);
+    }
+    Heartbeat();
+    BlockLease<DispatcherT> lease(&pool_, pool_slot_, ref);
+    if (!lease) {
+      return expected<BlockLease<DispatcherT>, ShmError>::error(ShmError::kEvicted);
+    }
+    return expected<BlockLease<DispatcherT>, ShmError>::success(static_cast<BlockLease<DispatcherT>&&>(lease));
+  }
+
+ private:
+  ShmSpmcByteChannel& channel_;
+  DispatcherT& pool_;
+  int32_t pool_slot_;
 };
 
 #endif  // OSP_PLATFORM_LINUX

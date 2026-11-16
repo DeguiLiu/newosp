@@ -1258,6 +1258,43 @@ class DataDispatcher {
     slot->holding_mask.fetch_and(~bit, std::memory_order_relaxed);
   }
 
+  /// @brief Clear a hold bit and report whether this caller owned it.
+  /// Exactly one of a lease destructor and RevokeConsumer wins the bit, so the
+  /// block reference is released once even when the two race.
+  template <typename S = Store>
+  auto ReleaseBlockHold(int32_t consumer_id, uint32_t block_id) noexcept
+      -> decltype(std::declval<S>().GetConsumerSlot(0U), bool()) {
+    if (consumer_id < 0 || static_cast<uint32_t>(consumer_id) >= store_.MaxConsumers()) {
+      return false;
+    }
+    if (block_id >= Store::Capacity()) {
+      return false;
+    }
+    detail::ConsumerSlot* slot = store_.GetConsumerSlot(static_cast<uint32_t>(consumer_id));
+    const uint64_t bit = static_cast<uint64_t>(1U) << block_id;
+    return (slot->holding_mask.fetch_and(~bit, std::memory_order_acq_rel) & bit) != 0U;
+  }
+
+  /// @brief Reclaim every block held by one consumer slot, then free the slot.
+  /// Call only after that consumer is evicted or has stopped.
+  template <typename S = Store>
+  auto RevokeConsumer(int32_t slot_id) noexcept -> decltype(std::declval<S>().GetConsumerSlot(0U), uint32_t()) {
+    if (slot_id < 0 || static_cast<uint32_t>(slot_id) >= store_.MaxConsumers()) {
+      return 0U;
+    }
+    detail::ConsumerSlot* slot = store_.GetConsumerSlot(static_cast<uint32_t>(slot_id));
+    uint64_t mask = slot->holding_mask.exchange(0U, std::memory_order_acq_rel);
+    uint32_t released = 0U;
+    for (uint32_t block_id = 0U; block_id < Store::Capacity(); ++block_id) {
+      if ((mask & (static_cast<uint64_t>(1U) << block_id)) != 0U) {
+        (void)Release(block_id);
+        ++released;
+      }
+    }
+    UnregisterConsumer(slot_id);
+    return released;
+  }
+
   /// @brief Reap held blocks of dead/inactive consumers. Returns blocks reclaimed.
   template <typename S = Store>
   auto CleanupDeadConsumers() noexcept -> decltype(std::declval<S>().GetConsumerSlot(0U), uint32_t()) {

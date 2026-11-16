@@ -211,6 +211,10 @@ if(OSP_WITH_LWIP)
     )
 endif()
 
+# --- Lease benchmark (manual; not registered with CTest) --------------------
+add_executable(bench_shm_lease bench_shm_lease.cpp)
+target_link_libraries(bench_shm_lease PRIVATE osp Threads::Threads)
+
 # --- Windows/MSVC portable test subset -------------------------------------
 # The full core suite depends on the POSIX layer (termios/fork/epoll/...), which
 # MSVC does not provide. On MSVC build and run only the tests whose module

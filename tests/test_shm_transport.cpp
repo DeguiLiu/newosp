@@ -5,6 +5,7 @@
  */
 
 #include "osp/shm_transport.hpp"
+#include "osp/data_dispatcher.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -1633,6 +1634,25 @@ TEST_CASE("shm_transport - Cross-process ShmByteChannel futex notification", "[s
 // ShmSpmcByteRing tests
 // ============================================================================
 
+namespace {
+
+osp::ConsumerHandle RegisterTestConsumer(osp::ShmSpmcByteRing& ring) {
+  auto handle = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(handle.has_value());
+  return handle.value();
+}
+
+uint32_t ShmSpmcState(osp::ShmSpmcByteRingHeader* header, uint32_t idx) {
+  return osp::ShmSpmcByteRingHeader::StateOf(header->slot_state[idx].load(std::memory_order_acquire));
+}
+
+uint32_t ReadTestMessage(osp::ShmSpmcByteRing& ring, osp::ConsumerHandle handle, void* out, uint32_t max_len) {
+  auto result = ring.ReadChecked(handle, out, max_len);
+  return result.has_value() ? result.value() : 0U;
+}
+
+}  // namespace
+
 TEST_CASE("ShmSpmcByteRing: InitAt and basic properties", "[shm][spmc]") {
   alignas(64) uint8_t buf[8192];
   constexpr uint32_t kMaxConsumers = 4;
@@ -1649,46 +1669,42 @@ TEST_CASE("ShmSpmcByteRing: RegisterConsumer and UnregisterConsumer", "[shm][spm
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 8);
 
   // Register 3 consumers
-  int32_t c0 = ring.RegisterConsumer();
-  int32_t c1 = ring.RegisterConsumer();
-  int32_t c2 = ring.RegisterConsumer();
-  REQUIRE(c0 >= 0);
-  REQUIRE(c1 >= 0);
-  REQUIRE(c2 >= 0);
+  auto c0 = RegisterTestConsumer(ring);
+  auto c1 = RegisterTestConsumer(ring);
+  auto c2 = RegisterTestConsumer(ring);
   REQUIRE(ring.ConsumerCount() == 3);
 
   // Unregister one
-  ring.UnregisterConsumer(c1);
+  (void)ring.UnregisterConsumer(c1);
   REQUIRE(ring.ConsumerCount() == 2);
 
   // Unregister remaining
-  ring.UnregisterConsumer(c0);
-  ring.UnregisterConsumer(c2);
+  (void)ring.UnregisterConsumer(c0);
+  (void)ring.UnregisterConsumer(c2);
   REQUIRE(ring.ConsumerCount() == 0);
 }
 
-TEST_CASE("ShmSpmcByteRing: RegisterConsumer full returns -1", "[shm][spmc]") {
+TEST_CASE("ShmSpmcByteRing: RegisterConsumer full returns kFull", "[shm][spmc]") {
   alignas(64) uint8_t buf[8192];
   constexpr uint32_t kMaxConsumers = 3;
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), kMaxConsumers);
 
   // Register max consumers
-  std::vector<int32_t> ids;
+  std::vector<osp::ConsumerHandle> ids;
   for (uint32_t i = 0; i < kMaxConsumers; ++i) {
-    int32_t id = ring.RegisterConsumer();
-    REQUIRE(id >= 0);
-    ids.push_back(id);
+    ids.push_back(RegisterTestConsumer(ring));
   }
   REQUIRE(ring.ConsumerCount() == kMaxConsumers);
 
   // Next registration should fail
-  int32_t overflow = ring.RegisterConsumer();
-  REQUIRE(overflow == -1);
+  auto overflow = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE_FALSE(overflow.has_value());
+  REQUIRE(overflow.get_error() == osp::ShmError::kFull);
   REQUIRE(ring.ConsumerCount() == kMaxConsumers);
 
   // Cleanup
   for (auto id : ids) {
-    ring.UnregisterConsumer(id);
+    (void)ring.UnregisterConsumer(id);
   }
 }
 
@@ -1696,8 +1712,7 @@ TEST_CASE("ShmSpmcByteRing: single producer single consumer", "[shm][spmc]") {
   alignas(64) uint8_t buf[8192];
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
 
-  int32_t c0 = ring.RegisterConsumer();
-  REQUIRE(c0 >= 0);
+  auto c0 = RegisterTestConsumer(ring);
 
   // Write 3 messages
   const char* msgs[] = {"msg1", "msg2", "msg3"};
@@ -1709,13 +1724,13 @@ TEST_CASE("ShmSpmcByteRing: single producer single consumer", "[shm][spmc]") {
   // Read all from consumer 0
   for (const char* expected : msgs) {
     char recv[64];
-    uint32_t len = ring.Read(c0, recv, sizeof(recv));
+    uint32_t len = ReadTestMessage(ring, c0, recv, sizeof(recv));
     REQUIRE(len == std::strlen(expected) + 1);
     REQUIRE(std::strcmp(recv, expected) == 0);
   }
 
   REQUIRE_FALSE(ring.HasData(c0));
-  ring.UnregisterConsumer(c0);
+  (void)ring.UnregisterConsumer(c0);
 }
 
 TEST_CASE("ShmSpmcByteRing: multiple consumers read same data", "[shm][spmc]") {
@@ -1723,41 +1738,36 @@ TEST_CASE("ShmSpmcByteRing: multiple consumers read same data", "[shm][spmc]") {
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 8);
 
   // Register 3 consumers
-  int32_t c0 = ring.RegisterConsumer();
-  int32_t c1 = ring.RegisterConsumer();
-  int32_t c2 = ring.RegisterConsumer();
-  REQUIRE(c0 >= 0);
-  REQUIRE(c1 >= 0);
-  REQUIRE(c2 >= 0);
+  auto c0 = RegisterTestConsumer(ring);
+  auto c1 = RegisterTestConsumer(ring);
+  auto c2 = RegisterTestConsumer(ring);
 
   // Write a message
   const char msg[] = "broadcast message";
   REQUIRE(ring.Write(msg, sizeof(msg)));
 
   // All 3 consumers should read the same data
-  for (int32_t cid : {c0, c1, c2}) {
+  for (auto cid : {c0, c1, c2}) {
     REQUIRE(ring.HasData(cid));
     char recv[64];
-    uint32_t len = ring.Read(cid, recv, sizeof(recv));
+    uint32_t len = ReadTestMessage(ring, cid, recv, sizeof(recv));
     REQUIRE(len == sizeof(msg));
     REQUIRE(std::strcmp(recv, msg) == 0);
     REQUIRE_FALSE(ring.HasData(cid));
   }
 
   // Cleanup
-  ring.UnregisterConsumer(c0);
-  ring.UnregisterConsumer(c1);
-  ring.UnregisterConsumer(c2);
+  (void)ring.UnregisterConsumer(c0);
+  (void)ring.UnregisterConsumer(c1);
+  (void)ring.UnregisterConsumer(c2);
 }
 
 TEST_CASE("ShmSpmcByteRing: slowest consumer limits writeable", "[shm][spmc]") {
   alignas(64) uint8_t buf[4096];  // Small buffer
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
 
-  int32_t c0 = ring.RegisterConsumer();
-  int32_t c1 = ring.RegisterConsumer();
-  REQUIRE(c0 >= 0);
-  REQUIRE(c1 >= 0);
+  auto c0 = RegisterTestConsumer(ring);
+  auto c1 = RegisterTestConsumer(ring);
 
   // Fill buffer with messages
   uint32_t written = 0;
@@ -1775,7 +1785,7 @@ TEST_CASE("ShmSpmcByteRing: slowest consumer limits writeable", "[shm][spmc]") {
   uint32_t c0_read = 0;
   while (ring.HasData(c0)) {
     char recv[64];
-    if (ring.Read(c0, recv, sizeof(recv)) > 0) {
+    if (ReadTestMessage(ring, c0, recv, sizeof(recv)) > 0) {
       ++c0_read;
     }
   }
@@ -1786,14 +1796,14 @@ TEST_CASE("ShmSpmcByteRing: slowest consumer limits writeable", "[shm][spmc]") {
 
   // Consumer 1 reads one message
   char recv[64];
-  REQUIRE(ring.Read(c1, recv, sizeof(recv)) > 0);
+  REQUIRE(ReadTestMessage(ring, c1, recv, sizeof(recv)) > 0);
 
   // WriteableBytes should increase
   REQUIRE(ring.WriteableBytes() > writeable_before);
 
   // Cleanup
-  ring.UnregisterConsumer(c0);
-  ring.UnregisterConsumer(c1);
+  (void)ring.UnregisterConsumer(c0);
+  (void)ring.UnregisterConsumer(c1);
 }
 
 TEST_CASE("ShmSpmcByteRing: consumer re-registration gets current head", "[shm][spmc]") {
@@ -1808,8 +1818,7 @@ TEST_CASE("ShmSpmcByteRing: consumer re-registration gets current head", "[shm][
   }
 
   // Register consumer after writes
-  int32_t c0 = ring.RegisterConsumer();
-  REQUIRE(c0 >= 0);
+  auto c0 = RegisterTestConsumer(ring);
 
   // Consumer should NOT see old messages (starts from current head)
   REQUIRE_FALSE(ring.HasData(c0));
@@ -1821,21 +1830,19 @@ TEST_CASE("ShmSpmcByteRing: consumer re-registration gets current head", "[shm][
   // Consumer should see new message
   REQUIRE(ring.HasData(c0));
   char recv[64];
-  uint32_t len = ring.Read(c0, recv, sizeof(recv));
+  uint32_t len = ReadTestMessage(ring, c0, recv, sizeof(recv));
   REQUIRE(len == sizeof(new_msg));
   REQUIRE(std::strcmp(recv, new_msg) == 0);
 
-  ring.UnregisterConsumer(c0);
+  (void)ring.UnregisterConsumer(c0);
 }
 
 TEST_CASE("ShmSpmcByteRing: wrap-around with multiple consumers", "[shm][spmc]") {
   alignas(64) uint8_t buf[4096];
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
 
-  int32_t c0 = ring.RegisterConsumer();
-  int32_t c1 = ring.RegisterConsumer();
-  REQUIRE(c0 >= 0);
-  REQUIRE(c1 >= 0);
+  auto c0 = RegisterTestConsumer(ring);
+  auto c1 = RegisterTestConsumer(ring);
 
   // Fill and drain multiple rounds
   for (uint32_t round = 0; round < 3; ++round) {
@@ -1852,11 +1859,11 @@ TEST_CASE("ShmSpmcByteRing: wrap-around with multiple consumers", "[shm][spmc]")
     REQUIRE(written > 0);
 
     // Both consumers drain
-    for (int32_t cid : {c0, c1}) {
+    for (auto cid : {c0, c1}) {
       uint32_t read_count = 0;
       while (ring.HasData(cid)) {
         char recv[64];
-        if (ring.Read(cid, recv, sizeof(recv)) > 0) {
+        if (ReadTestMessage(ring, cid, recv, sizeof(recv)) > 0) {
           ++read_count;
         }
       }
@@ -1864,8 +1871,8 @@ TEST_CASE("ShmSpmcByteRing: wrap-around with multiple consumers", "[shm][spmc]")
     }
   }
 
-  ring.UnregisterConsumer(c0);
-  ring.UnregisterConsumer(c1);
+  (void)ring.UnregisterConsumer(c0);
+  (void)ring.UnregisterConsumer(c1);
 }
 
 TEST_CASE("ShmSpmcByteRing: concurrent producer + consumers (TSan)", "[shm][spmc]") {
@@ -1877,10 +1884,9 @@ TEST_CASE("ShmSpmcByteRing: concurrent producer + consumers (TSan)", "[shm][spmc
   auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4);
 
   constexpr int kConsumers = 3;
-  int32_t cids[kConsumers];
+  osp::ConsumerHandle cids[kConsumers];
   for (int i = 0; i < kConsumers; ++i) {
-    cids[i] = ring.RegisterConsumer();
-    REQUIRE(cids[i] >= 0);
+    cids[i] = RegisterTestConsumer(ring);
   }
 
   constexpr uint32_t kTotal = 3000;
@@ -1905,7 +1911,7 @@ TEST_CASE("ShmSpmcByteRing: concurrent producer + consumers (TSan)", "[shm][spmc
       char recv[64];
       uint32_t n = 0;
       while (true) {
-        if (ring.Read(cid, recv, sizeof(recv)) > 0) {
+        if (ReadTestMessage(ring, cid, recv, sizeof(recv)) > 0) {
           ++n;
           continue;
         }
@@ -1929,7 +1935,7 @@ TEST_CASE("ShmSpmcByteRing: concurrent producer + consumers (TSan)", "[shm][spmc
   }
 
   for (int i = 0; i < kConsumers; ++i) {
-    ring.UnregisterConsumer(cids[i]);
+    (void)ring.UnregisterConsumer(cids[i]);
   }
 }
 
@@ -1990,8 +1996,9 @@ TEST_CASE("ShmSpmcByteChannel: all readers receive same data", "[shm][spmc]") {
   // All 3 readers should receive identical data
   for (auto* reader : {&reader0, &reader1, &reader2}) {
     char recv[64];
-    uint32_t len = reader->Read(recv, sizeof(recv));
-    REQUIRE(len == sizeof(msg));
+    auto read = reader->Read(recv, sizeof(recv));
+    REQUIRE(read.has_value());
+    REQUIRE(read.value() == sizeof(msg));
     REQUIRE(std::strcmp(recv, msg) == 0);
   }
 
@@ -2097,8 +2104,8 @@ TEST_CASE("ShmSpmcByteChannel: cross-process multi-consumer", "[shm][spmc][fork]
       _exit(2);
 
     char recv[64];
-    uint32_t len = reader.Read(recv, sizeof(recv));
-    if (len == 0)
+    auto read = reader.Read(recv, sizeof(recv));
+    if (!read.has_value() || read.value() == 0U)
       _exit(3);
     if (std::strcmp(recv, "multi-consumer test") != 0)
       _exit(4);
@@ -2121,8 +2128,8 @@ TEST_CASE("ShmSpmcByteChannel: cross-process multi-consumer", "[shm][spmc][fork]
       _exit(2);
 
     char recv[64];
-    uint32_t len = reader.Read(recv, sizeof(recv));
-    if (len == 0)
+    auto read = reader.Read(recv, sizeof(recv));
+    if (!read.has_value() || read.value() == 0U)
       _exit(3);
     if (std::strcmp(recv, "multi-consumer test") != 0)
       _exit(4);
@@ -2187,8 +2194,8 @@ TEST_CASE("ShmSpmcByteChannel: cross-process futex wakeall", "[shm][spmc][fork]"
       _exit(3);
 
     uint32_t val = 0;
-    uint32_t len = reader.Read(&val, sizeof(val));
-    if (len != sizeof(uint32_t) || val != 0xCAFE)
+    auto read = reader.Read(&val, sizeof(val));
+    if (!read.has_value() || read.value() != sizeof(uint32_t) || val != 0xCAFE)
       _exit(4);
 
     _exit(0);
@@ -2206,6 +2213,1231 @@ TEST_CASE("ShmSpmcByteChannel: cross-process futex wakeall", "[shm][spmc][fork]"
   REQUIRE(WEXITSTATUS(status) == 0);
 
   writer.Unlink();
+}
+
+// ============================================================================
+// S0: length validation and writeable clamp ([shm][safety])
+// ============================================================================
+
+namespace {
+
+struct FaultSink {
+  int count{0};
+  uint16_t last_code{0};
+  uint32_t last_consumer{0};
+};
+
+void CountFault(const osp::ShmFaultEvent& event, void* ctx) {
+  auto* sink = static_cast<FaultSink*>(ctx);
+  ++sink->count;
+  sink->last_code = event.code;
+  sink->last_consumer = event.consumer_id;
+}
+
+}  // namespace
+
+TEST_CASE("shm_safety - zero length rejected", "[shm][safety]") {
+  auto seg_r = osp::SharedMemorySegment::ForceReplace("test_shm_safety_zero_len", 4096);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+
+  const char payload = 'x';
+  REQUIRE_FALSE(ring.Write(nullptr, 0U));
+  REQUIRE(ring.WriteableBytes() == ring.Capacity());
+  REQUIRE(ring.ReadableBytes() == 0U);
+
+  // The ring keeps working after the rejected write.
+  REQUIRE(ring.Write(&payload, 1U));
+  char out[4] = {};
+  REQUIRE(ring.Read(out, sizeof(out)) == 1U);
+  REQUIRE(out[0] == 'x');
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_safety - spmc zero length rejected", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4U);
+  auto c0 = RegisterTestConsumer(ring);
+
+  const char payload = 'x';
+  REQUIRE_FALSE(ring.Write(nullptr, 0U));
+  REQUIRE(ring.WriteableBytes() == ring.Capacity());
+  REQUIRE(ring.ReadableBytes(c0) == 0U);
+
+  REQUIRE(ring.Write(&payload, 1U));
+  char out[4] = {};
+  auto read = ring.ReadChecked(c0, out, sizeof(out));
+  REQUIRE(read.has_value());
+  REQUIRE(read.value() == 1U);
+  REQUIRE(out[0] == 'x');
+
+  (void)ring.UnregisterConsumer(c0);
+}
+
+TEST_CASE("shm_safety - oversize payload rejected", "[shm][safety]") {
+  auto seg_r = osp::SharedMemorySegment::ForceReplace("test_shm_safety_oversize", 4096);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+  const uint32_t capacity = ring.Capacity();
+  REQUIRE(capacity > 8U);
+
+  // One byte beyond the largest payload that fits with its 4-byte prefix.
+  std::vector<uint8_t> too_big(capacity - 3U, 0x5AU);
+  REQUIRE_FALSE(ring.Write(too_big.data(), static_cast<uint32_t>(too_big.size())));
+  REQUIRE(ring.ReadableBytes() == 0U);
+
+  // The exact-fit payload must still be accepted.
+  std::vector<uint8_t> exact(capacity - 4U, 0x5AU);
+  REQUIRE(ring.Write(exact.data(), static_cast<uint32_t>(exact.size())));
+  REQUIRE(ring.ReadableBytes() == capacity);
+  std::vector<uint8_t> out(capacity - 4U);
+  REQUIRE(ring.Read(out.data(), static_cast<uint32_t>(out.size())) == capacity - 4U);
+  REQUIRE(out[0] == 0x5AU);
+  REQUIRE(out[out.size() - 1U] == 0x5AU);
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_safety - oversize fork", "[shm][safety][fork]") {
+  // Pre-fix the child dies on the wrapped length: len + 4 == 0 passes the
+  // capacity check and the memcpy walks past the mapping.
+#if defined(__SANITIZE_THREAD__)
+  SKIP("Skipped under ThreadSanitizer (fork + shm)");
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+  SKIP("Skipped under ThreadSanitizer (fork + shm)");
+#endif
+#endif
+  int fds[2];
+  REQUIRE(pipe(fds) == 0);
+  const pid_t pid = fork();
+  REQUIRE(pid >= 0);
+
+  if (pid == 0) {
+    close(fds[0]);
+    auto seg_r = osp::SharedMemorySegment::ForceReplace("test_shm_safety_oversize_fork", 4096);
+    if (!seg_r.has_value()) {
+      _exit(2);
+    }
+    auto ring = osp::ShmSpscByteRing::InitAt(seg_r.value().Data(), seg_r.value().Size());
+    const char byte = 0;
+    const bool accepted = ring.Write(&byte, 0xFFFFFFFCU);  // UINT32_MAX - 3
+    const char code = accepted ? 1 : 0;
+    const ssize_t written = write(fds[1], &code, 1);
+    close(fds[1]);
+    seg_r.value().Unlink();
+    _exit(written == 1 ? 0 : 3);
+  }
+
+  close(fds[1]);
+  char code = -1;
+  const ssize_t got = read(fds[0], &code, 1);
+  close(fds[0]);
+  int status = 0;
+  REQUIRE(waitpid(pid, &status, 0) == pid);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(got == 1);
+  REQUIRE(code == 0);
+}
+
+TEST_CASE("shm_safety - corrupt length does not advance tail", "[shm][safety]") {
+  auto seg_r = osp::SharedMemorySegment::ForceReplace("test_shm_safety_corrupt_len", 4096);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+
+  auto* header = reinterpret_cast<osp::ShmByteRingHeader*>(  // NOLINT
+      static_cast<uint8_t*>(seg.Data()) + sizeof(osp::ShmLayoutHeader));
+  uint8_t* data = reinterpret_cast<uint8_t*>(header) + sizeof(osp::ShmByteRingHeader);
+  const uint32_t bogus_len = 0xFFFFFFFEU;  // + 4 wraps to 2
+  std::memcpy(data, &bogus_len, sizeof(bogus_len));
+  header->head.store(2U * sizeof(bogus_len), std::memory_order_relaxed);
+
+  char out[32] = {};
+  REQUIRE(ring.Read(out, sizeof(out)) == 0U);
+  REQUIRE(ring.ReadableBytes() == 2U * sizeof(bogus_len));
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_safety - writeable no underflow", "[shm][safety]") {
+  auto seg_r = osp::SharedMemorySegment::ForceReplace("test_shm_safety_underflow", 4096);
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+  auto ring = osp::ShmSpscByteRing::InitAt(seg.Data(), seg.Size());
+  const uint32_t capacity = ring.Capacity();
+
+  auto* header = reinterpret_cast<osp::ShmByteRingHeader*>(  // NOLINT
+      static_cast<uint8_t*>(seg.Data()) + sizeof(osp::ShmLayoutHeader));
+  header->tail.store(0U, std::memory_order_relaxed);
+  header->head.store(capacity * 3U, std::memory_order_relaxed);
+
+  REQUIRE(ring.WriteableBytes() == 0U);
+  const char byte = 'y';
+  REQUIRE_FALSE(ring.Write(&byte, 1U));
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_safety - spmc writeable no underflow", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 2U);
+  auto c0 = RegisterTestConsumer(ring);
+  const uint32_t capacity = ring.Capacity();
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->tails[c0.id].store(0U, std::memory_order_relaxed);
+  header->head.store(capacity * 3U, std::memory_order_relaxed);
+
+  REQUIRE(ring.WriteableBytes() == 0U);
+  const char byte = 'y';
+  REQUIRE_FALSE(ring.Write(&byte, 1U));
+  const auto health = ring.Health();
+  REQUIRE(health.corrupt_total >= 1U);
+  REQUIRE(health.state == osp::ShmState::kFaulted);
+  REQUIRE_FALSE(ring.Write(&byte, 1U));
+
+  (void)ring.UnregisterConsumer(c0);
+}
+
+TEST_CASE("shm_safety - layout v1 segment rejected", "[shm][safety]") {
+  using RingBuffer = osp::ShmRingBuffer<128, 16>;
+  auto seg_r = osp::SharedMemorySegment::ForceReplace("test_shm_safety_layout_v1", RingBuffer::Size());
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+  REQUIRE(RingBuffer::InitAt(seg.Data(), seg.Size()) != nullptr);
+  REQUIRE(RingBuffer::AttachChecked(seg.Data(), seg.Size()).has_value());
+
+  auto* layout = static_cast<osp::ShmLayoutHeader*>(seg.Data());
+  const uint16_t saved = layout->version;
+  layout->version = 1U;
+  auto v1 = RingBuffer::AttachChecked(seg.Data(), seg.Size());
+  REQUIRE_FALSE(v1.has_value());
+  REQUIRE(v1.get_error() == osp::ShmError::kLayoutMismatch);
+
+  layout->version = saved;
+  REQUIRE(RingBuffer::AttachChecked(seg.Data(), seg.Size()).has_value());
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_safety - layout hash covers header size", "[shm][safety]") {
+  alignas(64) uint8_t buf[256] = {};
+  constexpr uint32_t kRingHeaderSize = 48U;
+  osp::WriteShmLayoutHeader(buf, osp::ShmLayoutKind::kSpscByteRing, 128U, 0U, sizeof(buf), kRingHeaderSize);
+
+  auto ok = osp::ValidateShmLayout(buf, sizeof(buf), osp::ShmLayoutKind::kSpscByteRing, 128U, 0U, kRingHeaderSize);
+  REQUIRE(ok.has_value());
+
+  auto wrong = osp::ValidateShmLayout(buf, sizeof(buf), osp::ShmLayoutKind::kSpscByteRing, 128U, 0U,
+                                      kRingHeaderSize + 4U);
+  REQUIRE_FALSE(wrong.has_value());
+  REQUIRE(wrong.get_error() == osp::ShmError::kLayoutMismatch);
+}
+
+TEST_CASE("shm_safety - mpsc fault flags clear on healthy path", "[shm][safety]") {
+  using RingBuffer = osp::ShmRingBuffer<64, 8>;
+  auto seg_r = osp::SharedMemorySegment::ForceReplace("test_shm_safety_fault_flags", RingBuffer::Size());
+  REQUIRE(seg_r.has_value());
+  auto& seg = seg_r.value();
+  auto* ring = RingBuffer::InitAt(seg.Data(), seg.Size());
+  REQUIRE(ring != nullptr);
+  REQUIRE(ring->FaultFlags() == 0U);
+
+  const uint32_t value = 0x1234U;
+  REQUIRE(ring->TryPush(&value, sizeof(value)));
+  uint32_t out = 0;
+  uint32_t size = 0;
+  REQUIRE(ring->TryPop(&out, size));
+  REQUIRE(size == sizeof(value));
+  REQUIRE(out == value);
+  REQUIRE(ring->FaultFlags() == 0U);
+
+  seg.Unlink();
+}
+
+TEST_CASE("shm_safety - register returns generation handle", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 2U);
+  const osp::ShmChannelConfig cfg{};
+
+  auto h0 = ring.RegisterConsumer(cfg);
+  REQUIRE(h0.has_value());
+  REQUIRE(h0.value().pool_slot == -1);
+  REQUIRE(h0.value().generation == 1U);
+
+  auto h1 = ring.RegisterConsumer(cfg);
+  REQUIRE(h1.has_value());
+  REQUIRE(h1.value().id != h0.value().id);
+  REQUIRE(h1.value().generation == 1U);
+  REQUIRE(ring.ConsumerCount() == 2U);
+
+  REQUIRE(ring.UnregisterConsumer(h0.value()).has_value());
+  REQUIRE(ring.ConsumerCount() == 1U);
+  REQUIRE(ring.UnregisterConsumer(h0.value()).has_value());  // idempotent
+  REQUIRE(ring.ConsumerCount() == 1U);
+
+  REQUIRE(ring.UnregisterConsumer(h1.value()).has_value());
+  REQUIRE(ring.ConsumerCount() == 0U);
+}
+
+TEST_CASE("shm_safety - readchecked payload, empty and evicted", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 2U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  char out[8] = {};
+  auto empty = ring.ReadChecked(h.value(), out, sizeof(out));
+  REQUIRE_FALSE(empty.has_value());
+  REQUIRE(empty.get_error() == osp::ShmError::kEmpty);
+
+  const char payload[] = "abc";
+  REQUIRE(ring.Write(payload, 3U));
+  auto got = ring.ReadChecked(h.value(), out, sizeof(out));
+  REQUIRE(got.has_value());
+  REQUIRE(got.value() == 3U);
+  REQUIRE(std::memcmp(out, payload, 3U) == 0);
+
+  REQUIRE(ring.UnregisterConsumer(h.value()).has_value());
+  auto evicted = ring.ReadChecked(h.value(), out, sizeof(out));
+  REQUIRE_FALSE(evicted.has_value());
+  REQUIRE(evicted.get_error() == osp::ShmError::kEvicted);
+  REQUIRE(ring.Health().read_evicted_total == 1U);
+}
+
+TEST_CASE("shm_safety - reap dead consumer restores write space", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+  REQUIRE(ring.WriteableBytes() < sizeof(payload));
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->pid[0].store(0x7FFFFFF0U, std::memory_order_release);
+
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 1000U;
+  REQUIRE(ring.ReapStaleConsumers(1000U, cfg) == 1U);
+  REQUIRE(ring.ConsumerCount() == 0U);
+  REQUIRE(ring.WriteableBytes() == ring.Capacity());
+
+  char out[8] = {};
+  auto evicted = ring.ReadChecked(h.value(), out, sizeof(out));
+  REQUIRE_FALSE(evicted.has_value());
+  REQUIRE(evicted.get_error() == osp::ShmError::kEvicted);
+}
+
+TEST_CASE("shm_safety - alive stuck consumer is not evicted by default", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 1000U;
+  REQUIRE(ring.ReapStaleConsumers(1000U, cfg) == 0U);  // starts stall tracking
+  REQUIRE(ring.ReapStaleConsumers(5000U, cfg) == 0U);  // stuck but alive
+  REQUIRE(ring.ConsumerCount() == 1U);
+  REQUIRE(ring.WriteableBytes() < sizeof(payload));
+
+  cfg.evict_alive_slow = true;
+  REQUIRE(ring.ReapStaleConsumers(6000U, cfg) == 1U);
+  REQUIRE(ring.WriteableBytes() == ring.Capacity());
+}
+
+TEST_CASE("shm_safety - writechecked recovers after dead consumer", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+
+  osp::ShmChannelConfig cfg{};
+  cfg.reap_policy = osp::ReapPolicy::kOnFull;
+  cfg.stale_timeout_us = 1000U;
+  auto full = ring.WriteChecked(payload, sizeof(payload), cfg);
+  REQUIRE_FALSE(full.has_value());
+  REQUIRE(full.get_error() == osp::ShmError::kFull);
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->pid[0].store(0x7FFFFFF0U, std::memory_order_release);
+  REQUIRE(ring.WriteChecked(payload, sizeof(payload), cfg).has_value());
+  REQUIRE(ring.ConsumerCount() == 0U);
+}
+
+TEST_CASE("shm_safety - orphan transient states reclaimed", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+
+  osp::ShmChannelConfig cfg{};
+  cfg.grace_us = 1000U;
+
+  header->slot_state[0].store(osp::ShmSpmcByteRingHeader::Pack(2U, 0U), std::memory_order_release);
+  REQUIRE_FALSE(ring.RegisterConsumer(osp::ShmChannelConfig{}).has_value());
+  REQUIRE(ring.Tick(1000U, cfg).has_value());
+  REQUIRE(ring.Tick(3000U, cfg).has_value());
+  REQUIRE(ring.Health().orphan_state2_total == 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+  REQUIRE(ring.UnregisterConsumer(h.value()).has_value());
+
+  header->slot_state[0].store(osp::ShmSpmcByteRingHeader::Pack(3U, 0U), std::memory_order_release);
+  REQUIRE(ring.Tick(4000U, cfg).has_value());
+  REQUIRE(ring.Tick(6000U, cfg).has_value());
+  REQUIRE(ring.Health().orphan_state3_total == 1U);
+  REQUIRE(ring.RegisterConsumer(osp::ShmChannelConfig{}).has_value());
+}
+
+TEST_CASE("shm_safety - concurrent read on one handle is rejected", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->slot_state[0].store(osp::ShmSpmcByteRingHeader::Pack(1U, 1U), std::memory_order_release);
+
+  char out[8] = {};
+  auto conflict = ring.ReadChecked(h.value(), out, sizeof(out));
+  REQUIRE_FALSE(conflict.has_value());
+  REQUIRE(conflict.get_error() == osp::ShmError::kInvalidState);
+  REQUIRE(ring.Health().read_conflict_total == 1U);
+}
+
+TEST_CASE("shm_safety - reset after quiesce", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 2U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+  const char payload = 'z';
+  REQUIRE(ring.Write(&payload, 1U));
+
+  REQUIRE(ring.ResetAfterQuiesce().has_value());
+  REQUIRE(ring.ConsumerCount() == 0U);
+  REQUIRE(ring.WriteableBytes() == ring.Capacity());
+
+  char out[4] = {};
+  auto evicted = ring.ReadChecked(h.value(), out, sizeof(out));
+  REQUIRE_FALSE(evicted.has_value());
+  REQUIRE(evicted.get_error() == osp::ShmError::kEvicted);
+
+  auto again = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(again.has_value());
+  REQUIRE(again.value().generation == 3U);
+}
+
+TEST_CASE("shm_safety - reset refuses transient slot", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->slot_state[0].store(osp::ShmSpmcByteRingHeader::Pack(2U, 0U), std::memory_order_release);
+
+  auto reset = ring.ResetAfterQuiesce();
+  REQUIRE_FALSE(reset.has_value());
+  REQUIRE(reset.get_error() == osp::ShmError::kInvalidState);
+}
+
+TEST_CASE("shm_safety - wait writable wakes on tail advance", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto c0 = RegisterTestConsumer(ring);
+
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+
+  std::thread reader([&ring, c0] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    char out[128] = {};
+    (void)ring.ReadChecked(c0, out, sizeof(out));
+  });
+
+  const uint64_t t0 = osp::SteadyNowUs();
+  auto waited = ring.WaitWritable(sizeof(payload), 1000U);
+  const uint64_t elapsed = osp::SteadyNowUs() - t0;
+  reader.join();
+
+  REQUIRE(waited.has_value());
+  REQUIRE(elapsed < 500000U);
+  (void)ring.UnregisterConsumer(c0);
+}
+
+TEST_CASE("shm_safety - wait writable timeout maps to kTimeout", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto c0 = RegisterTestConsumer(ring);
+
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+
+  const uint64_t t0 = osp::SteadyNowUs();
+  auto waited = ring.WaitWritable(sizeof(payload), 100U);
+  const uint64_t elapsed = osp::SteadyNowUs() - t0;
+
+  REQUIRE_FALSE(waited.has_value());
+  REQUIRE(waited.get_error() == osp::ShmError::kTimeout);
+  REQUIRE(elapsed >= 100000U);
+  REQUIRE(elapsed < 400000U);
+  (void)ring.UnregisterConsumer(c0);
+}
+
+TEST_CASE("shm_safety - wait consumers wakes on registration", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 2U);
+
+  std::atomic<bool> ok{false};
+  std::thread waiter([&ring, &ok] { ok.store(ring.WaitConsumers(2U, 1000U).has_value()); });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  auto h0 = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h0.has_value());
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  auto h1 = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h1.has_value());
+
+  waiter.join();
+  REQUIRE(ok.load());
+  REQUIRE(ring.UnregisterConsumer(h0.value()).has_value());
+  REQUIRE(ring.UnregisterConsumer(h1.value()).has_value());
+}
+
+TEST_CASE("shm_safety - wait readable wakes", "[shm][safety]") {
+  const char* name = "test_shm_safety_wait_readable";
+  auto wr = osp::ShmSpmcByteChannel::ForceReplaceWriter(name, 8192, 2U);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+  auto rd = osp::ShmSpmcByteChannel::OpenReader(name);
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
+
+  std::atomic<bool> ok{false};
+  std::atomic<uint64_t> elapsed{0};
+  std::thread waiter([&reader, &ok, &elapsed] {
+    const uint64_t t0 = osp::SteadyNowUs();
+    ok.store(reader.WaitReadable(1000U).has_value());
+    elapsed.store(osp::SteadyNowUs() - t0);
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const uint32_t value = 7U;
+  REQUIRE(writer.Write(&value, sizeof(value)).has_value());
+  waiter.join();
+
+  REQUIRE(ok.load());
+  REQUIRE(elapsed.load() < 500000U);
+  writer.Unlink();
+}
+
+TEST_CASE("shm_safety - reaper defers while guard held", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  const char payload[64] = {};
+  REQUIRE(ring.Write(payload, sizeof(payload)));
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  // Simulate a reader that is inside the copy step.
+  header->slot_state[0].store(osp::ShmSpmcByteRingHeader::Pack(1U, 1U), std::memory_order_release);
+
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 0U;
+  cfg.evict_alive_slow = true;
+  REQUIRE(ring.ReapStaleConsumers(1000U, cfg) == 0U);  // starts stall tracking
+  REQUIRE(ring.ReapStaleConsumers(2000U, cfg) == 0U);  // guard blocks the CAS
+  REQUIRE(ring.ConsumerCount() == 1U);
+  REQUIRE(ring.WriteableBytes() <= ring.Capacity());
+  REQUIRE(ring.Health().reap_deferred_total == 1U);
+
+  header->slot_state[0].store(osp::ShmSpmcByteRingHeader::Pack(1U, 0U), std::memory_order_release);
+  (void)ring.ReapStaleConsumers(3000U, cfg);
+  REQUIRE(ring.ConsumerCount() == 0U);
+}
+
+TEST_CASE("shm_safety - reap race threads keep state consistent", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 4U);
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 0U;
+  cfg.evict_alive_slow = true;
+
+  std::thread registrar([&ring] {
+    for (int i = 0; i < 2000; ++i) {
+      auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+      if (h.has_value()) {
+        (void)ring.UnregisterConsumer(h.value());
+      }
+    }
+  });
+  for (int i = 0; i < 2000; ++i) {
+    (void)ring.ReapStaleConsumers(osp::SteadyNowUs(), cfg);
+  }
+  registrar.join();
+
+  REQUIRE(ring.ConsumerCount() == 0U);
+  REQUIRE(ring.WriteableBytes() == ring.Capacity());
+}
+
+TEST_CASE("shm_safety - health reports healthy and active", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 2U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  const auto health = ring.Health();
+  REQUIRE(health.state == osp::ShmState::kHealthy);
+  REQUIRE(health.last_error == osp::ShmError::kNone);
+  REQUIRE(health.active_consumers == 1U);
+  REQUIRE(health.stale_consumers == 0U);
+  REQUIRE(health.evicted_total == 0U);
+}
+
+TEST_CASE("shm_safety - health reports stuck as degraded", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+  const char payload[64] = {};
+  REQUIRE(ring.Write(payload, sizeof(payload)));
+
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 0U;
+  REQUIRE(ring.ReapStaleConsumers(1000U, cfg) == 0U);
+  REQUIRE(ring.ReapStaleConsumers(2000U, cfg) == 0U);
+
+  const auto health = ring.Health();
+  REQUIRE(health.state == osp::ShmState::kDegraded);
+  REQUIRE(health.stale_consumers == 1U);
+  REQUIRE(health.consumer_stuck_total == 1U);
+  REQUIRE(health.active_consumers == 1U);
+
+  // A consumer that resumes must drop out of the stuck set.
+  char out[128] = {};
+  REQUIRE(ring.ReadChecked(h.value(), out, sizeof(out)).has_value());
+  (void)ring.ReapStaleConsumers(3000U, cfg);
+  const auto resumed = ring.Health();
+  REQUIRE(resumed.stale_consumers == 0U);
+  REQUIRE(resumed.state == osp::ShmState::kHealthy);
+}
+
+TEST_CASE("shm_safety - health reports corruption as faulted", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  uint8_t* data = reinterpret_cast<uint8_t*>(header) + sizeof(osp::ShmSpmcByteRingHeader);
+  const uint32_t bogus_len = 0xFFFFFFFEU;
+  std::memcpy(data, &bogus_len, sizeof(bogus_len));
+  header->head.store(8U, std::memory_order_relaxed);
+
+  char out[16] = {};
+  auto read = ring.ReadChecked(h.value(), out, sizeof(out));
+  REQUIRE_FALSE(read.has_value());
+  REQUIRE(read.get_error() == osp::ShmError::kCorrupt);
+
+  const auto health = ring.Health();
+  REQUIRE(health.state == osp::ShmState::kFaulted);
+  REQUIRE(health.last_error == osp::ShmError::kCorrupt);
+  REQUIRE(health.corrupt_total == 1U);
+}
+
+TEST_CASE("shm_safety - fault reporter receives eviction", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+  const char payload[64] = {};
+  REQUIRE(ring.Write(payload, sizeof(payload)));
+
+  FaultSink sink;
+  ring.SetFaultReporter(CountFault, &sink);
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->pid[0].store(0x7FFFFFF0U, std::memory_order_release);
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 1000U;
+  REQUIRE(ring.ReapStaleConsumers(1000U, cfg) == 1U);
+
+  REQUIRE(sink.count == 1);
+  REQUIRE(sink.last_code == static_cast<uint16_t>(osp::ShmError::kEvicted));
+  REQUIRE(sink.last_consumer == 0U);
+  REQUIRE(ring.Health().evicted_total == 1U);
+}
+
+TEST_CASE("shm_safety - wait timeout counter is reported", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  (void)RegisterTestConsumer(ring);
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+
+  auto waited = ring.WaitWritable(sizeof(payload), 50U);
+  REQUIRE_FALSE(waited.has_value());
+  REQUIRE(waited.get_error() == osp::ShmError::kTimeout);
+  REQUIRE(ring.Health().wait_timeouts == 1U);
+}
+
+TEST_CASE("shm_safety - health reports generation wrap", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->generation[0].store(0xFFFFFFFFU, std::memory_order_relaxed);
+
+  auto refused = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE_FALSE(refused.has_value());
+  REQUIRE(refused.get_error() == osp::ShmError::kInvalidState);
+
+  const auto health = ring.Health();
+  REQUIRE(health.generation_wrap_total == 1U);
+  REQUIRE(health.state == osp::ShmState::kFaulted);
+  REQUIRE(health.last_error == osp::ShmError::kInvalidState);
+
+  // The slot is released, so a reset generation can register again.
+  header->generation[0].store(0U, std::memory_order_relaxed);
+  REQUIRE(ring.RegisterConsumer(osp::ShmChannelConfig{}).has_value());
+}
+
+TEST_CASE("shm_safety - wait writable requires length prefix", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto c0 = RegisterTestConsumer(ring);
+
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+  const uint32_t free_bytes = ring.WriteableBytes();
+  REQUIRE(free_bytes < sizeof(payload) + 4U);
+
+  if (free_bytes == 0U) {
+    auto waited = ring.WaitWritable(1U, 0U);
+    REQUIRE_FALSE(waited.has_value());
+    REQUIRE(waited.get_error() == osp::ShmError::kTimeout);
+  } else {
+    auto waited = ring.WaitWritable(free_bytes, 0U);
+    REQUIRE_FALSE(waited.has_value());
+    REQUIRE(waited.get_error() == osp::ShmError::kTimeout);
+  }
+
+  (void)ring.UnregisterConsumer(c0);
+}
+
+TEST_CASE("shm_safety - reap wakes wait writable", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->pid[0].store(0x7FFFFFF0U, std::memory_order_release);
+
+  std::thread reaper([&ring] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    osp::ShmChannelConfig cfg{};
+    cfg.stale_timeout_us = 1000U;
+    (void)ring.ReapStaleConsumers(1000U, cfg);
+  });
+
+  const uint64_t t0 = osp::SteadyNowUs();
+  auto waited = ring.WaitWritable(sizeof(payload), 1000U);
+  const uint64_t elapsed = osp::SteadyNowUs() - t0;
+  reaper.join();
+
+  REQUIRE(waited.has_value());
+  REQUIRE(elapsed < 500000U);
+  REQUIRE(ring.Write(payload, sizeof(payload)));
+}
+
+TEST_CASE("shm_safety - register succeeds after tick reaps state 2", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+
+  osp::ShmChannelConfig cfg{};
+  cfg.grace_us = 1U;
+  header->slot_state[0].store(osp::ShmSpmcByteRingHeader::Pack(2U, 0U), std::memory_order_release);
+  REQUIRE(ring.Tick(1U, cfg).has_value());
+  REQUIRE(ring.Tick(3U, cfg).has_value());
+  REQUIRE(ShmSpmcState(header, 0) == 0U);
+
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+  REQUIRE(ring.ConsumerCount() == 1U);
+  REQUIRE(ShmSpmcState(header, 0) == 1U);
+  REQUIRE(ring.UnregisterConsumer(h.value()).has_value());
+}
+
+TEST_CASE("shm_safety - reset refuses guard-held slot without partial clear", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 2U);
+  auto h0 = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  auto h1 = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h0.has_value());
+  REQUIRE(h1.has_value());
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  const uint32_t generation_before = header->generation[0].load(std::memory_order_acquire);
+  header->slot_state[1].store(osp::ShmSpmcByteRingHeader::Pack(1U, 1U), std::memory_order_release);
+
+  auto reset = ring.ResetAfterQuiesce();
+  REQUIRE_FALSE(reset.has_value());
+  REQUIRE(reset.get_error() == osp::ShmError::kInvalidState);
+  REQUIRE(ShmSpmcState(header, 0) == 1U);
+  REQUIRE(ShmSpmcState(header, 1) == 1U);
+  REQUIRE(ring.ConsumerCount() == 2U);
+  REQUIRE(header->generation[0].load(std::memory_order_acquire) == generation_before);
+
+  header->slot_state[1].store(osp::ShmSpmcByteRingHeader::Pack(1U, 0U), std::memory_order_release);
+  REQUIRE(ring.UnregisterConsumer(h0.value()).has_value());
+  REQUIRE(ring.UnregisterConsumer(h1.value()).has_value());
+}
+
+TEST_CASE("shm_safety - write stall counters are reported", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  (void)RegisterTestConsumer(ring);
+
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+  auto stalled = ring.WriteChecked(payload, sizeof(payload));
+  REQUIRE_FALSE(stalled.has_value());
+  REQUIRE(stalled.get_error() == osp::ShmError::kFull);
+
+  const auto health = ring.Health();
+  REQUIRE(health.write_stall_events == 1U);
+  REQUIRE(health.dropped_newest == 1U);
+}
+
+TEST_CASE("shm_safety - reopen after eviction", "[shm][safety]") {
+  alignas(64) uint8_t buf[8192];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->pid[0].store(0x7FFFFFF0U, std::memory_order_release);
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 1000U;
+  REQUIRE(ring.ReapStaleConsumers(1000U, cfg) == 1U);
+
+  char out[16] = {};
+  auto evicted = ring.ReadChecked(h.value(), out, sizeof(out));
+  REQUIRE_FALSE(evicted.has_value());
+  REQUIRE(evicted.get_error() == osp::ShmError::kEvicted);
+
+  auto reopened = ring.Reopen(h.value(), cfg);
+  REQUIRE(reopened.has_value());
+  REQUIRE(reopened.value().generation > h.value().generation);
+
+  const char payload[] = "back";
+  REQUIRE(ring.Write(payload, 4U));
+  auto read = ring.ReadChecked(reopened.value(), out, sizeof(out));
+  REQUIRE(read.has_value());
+  REQUIRE(read.value() == 4U);
+  REQUIRE(std::memcmp(out, payload, 4U) == 0);
+}
+
+TEST_CASE("shm_safety - supervisor policy does not scan on write", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+  REQUIRE(h.has_value());
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+
+  auto* header = reinterpret_cast<osp::ShmSpmcByteRingHeader*>(  // NOLINT
+      buf + sizeof(osp::ShmLayoutHeader));
+  header->pid[0].store(0x7FFFFFF0U, std::memory_order_release);
+
+  osp::ShmChannelConfig cfg{};
+  cfg.reap_policy = osp::ReapPolicy::kSupervisor;
+  cfg.stale_timeout_us = 1000U;
+  auto supervised = ring.WriteChecked(payload, sizeof(payload), cfg);
+  REQUIRE_FALSE(supervised.has_value());
+  REQUIRE(supervised.get_error() == osp::ShmError::kFull);
+  REQUIRE(ring.ConsumerCount() == 1U);
+
+  cfg.reap_policy = osp::ReapPolicy::kOnFull;
+  REQUIRE(ring.WriteChecked(payload, sizeof(payload), cfg).has_value());
+  REQUIRE(ring.ConsumerCount() == 0U);
+}
+
+TEST_CASE("shm_safety - zombie consumer thread is marked stuck", "[shm][safety]") {
+  alignas(64) uint8_t buf[4096];
+  auto ring = osp::ShmSpmcByteRing::InitAt(buf, sizeof(buf), 1U);
+  std::thread zombie([&ring] {
+    auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+    (void)h;  // exits without unregistering: same pid, tail frozen
+  });
+  zombie.join();
+  REQUIRE(ring.ConsumerCount() == 1U);
+
+  const char payload[64] = {};
+  REQUIRE(ring.Write(payload, sizeof(payload)));
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 0U;
+  REQUIRE(ring.ReapStaleConsumers(1000U, cfg) == 0U);
+  REQUIRE(ring.ReapStaleConsumers(2000U, cfg) == 0U);
+
+  const auto health = ring.Health();
+  REQUIRE(health.stale_consumers == 1U);
+  REQUIRE(health.state == osp::ShmState::kDegraded);
+  REQUIRE(ring.ConsumerCount() == 1U);
+}
+
+TEST_CASE("shm_safety - lease publish and consume", "[shm][safety]") {
+  using LeasePool = osp::ShmDispatcher<256, 8>;
+  static LeasePool pool;
+  auto seg = osp::SharedMemorySegment::ForceReplace("test_shm_lease_pool",
+                                                    osp::detail::ShmStore<256, 8>::RequiredShmSize());
+  REQUIRE(seg.has_value());
+  pool.Init(LeasePool::Config{}, seg.value().Data(), seg.value().Size());
+  const int32_t pool_slot = pool.RegisterConsumer(static_cast<uint32_t>(::getpid()));
+  REQUIRE(pool_slot >= 0);
+  REQUIRE(pool.FreeBlocks() == 8U);
+
+  auto wr = osp::ShmSpmcByteChannel::ForceReplaceWriter("test_shm_lease_channel", 8192U, 2U);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+  auto rd = osp::ShmSpmcByteChannel::OpenReader("test_shm_lease_channel");
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
+
+  osp::ShmLeaseProducer<LeasePool> producer(writer, pool, 0xA5A5U);
+  osp::ShmLeaseConsumer<LeasePool> consumer(reader, pool, pool_slot);
+
+  const std::vector<uint8_t> payload(128U, 0x5AU);
+  REQUIRE(producer.Publish(payload.data(), static_cast<uint32_t>(payload.size()), &pool_slot, 1U).has_value());
+  REQUIRE(pool.FreeBlocks() == 7U);
+
+  auto lease = consumer.ReadLease(100U);
+  REQUIRE(lease.has_value());
+  REQUIRE(lease.value().Size() == payload.size());
+  REQUIRE(lease.value().Data()[0] == 0x5AU);
+  REQUIRE(lease.value().Data()[payload.size() - 1U] == 0x5AU);
+
+  lease.value().Release();
+  REQUIRE(pool.FreeBlocks() == 8U);
+  writer.Unlink();
+}
+
+TEST_CASE("shm_safety - lease revoke reclaims held block", "[shm][safety]") {
+  using LeasePool = osp::ShmDispatcher<256, 8>;
+  static LeasePool pool;
+  auto seg = osp::SharedMemorySegment::ForceReplace("test_shm_lease_revoke_pool",
+                                                    osp::detail::ShmStore<256, 8>::RequiredShmSize());
+  REQUIRE(seg.has_value());
+  pool.Init(LeasePool::Config{}, seg.value().Data(), seg.value().Size());
+  const int32_t pool_slot = pool.RegisterConsumer(static_cast<uint32_t>(::getpid()));
+  REQUIRE(pool_slot >= 0);
+
+  auto wr = osp::ShmSpmcByteChannel::ForceReplaceWriter("test_shm_lease_revoke_channel", 8192U, 2U);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+  osp::ShmLeaseProducer<LeasePool> producer(writer, pool, 0U);
+
+  const uint8_t payload[64] = {};
+  REQUIRE(producer.Publish(payload, sizeof(payload), &pool_slot, 1U).has_value());
+  REQUIRE(pool.FreeBlocks() == 7U);
+
+  // Simulate a consumer that dies before acquiring the lease.
+  REQUIRE(pool.RevokeConsumer(pool_slot) == 1U);
+  REQUIRE(pool.FreeBlocks() == 8U);
+  writer.Unlink();
+}
+
+TEST_CASE("shm_safety - lease rejects payload beyond block size", "[shm][safety]") {
+  using SmallPool = osp::ShmDispatcher<64, 4>;
+  static SmallPool pool;
+  auto seg = osp::SharedMemorySegment::ForceReplace("test_shm_lease_small_pool",
+                                                    osp::detail::ShmStore<64, 4>::RequiredShmSize());
+  REQUIRE(seg.has_value());
+  pool.Init(SmallPool::Config{}, seg.value().Data(), seg.value().Size());
+  const int32_t pool_slot = pool.RegisterConsumer(static_cast<uint32_t>(::getpid()));
+  REQUIRE(pool_slot >= 0);
+
+  auto wr = osp::ShmSpmcByteChannel::ForceReplaceWriter("test_shm_lease_small_channel", 4096U, 2U);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+  osp::ShmLeaseProducer<SmallPool> producer(writer, pool, 0U);
+
+  const uint8_t payload[128] = {};
+  auto published = producer.Publish(payload, sizeof(payload), &pool_slot, 1U);
+  REQUIRE_FALSE(published.has_value());
+  REQUIRE(published.get_error() == osp::ShmError::kMessageTooLarge);
+  REQUIRE(pool.FreeBlocks() == 4U);
+  writer.Unlink();
+}
+
+TEST_CASE("shm_safety - lease validates consumer slots", "[shm][safety]") {
+  using LeasePool = osp::ShmDispatcher<256, 8>;
+  static LeasePool pool;
+  auto seg = osp::SharedMemorySegment::ForceReplace("test_shm_lease_validate_pool",
+                                                    osp::detail::ShmStore<256, 8>::RequiredShmSize());
+  REQUIRE(seg.has_value());
+  pool.Init(LeasePool::Config{}, seg.value().Data(), seg.value().Size());
+  const int32_t pool_slot = pool.RegisterConsumer(static_cast<uint32_t>(::getpid()));
+  REQUIRE(pool_slot >= 0);
+
+  auto wr = osp::ShmSpmcByteChannel::ForceReplaceWriter("test_shm_lease_validate_channel", 8192U, 2U);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+  osp::ShmLeaseProducer<LeasePool> producer(writer, pool, 0U);
+
+  auto rd = osp::ShmSpmcByteChannel::OpenReader("test_shm_lease_validate_channel");
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
+  osp::ShmLeaseConsumer<LeasePool> consumer(reader, pool, pool_slot);
+
+  const uint8_t payload[32] = {};
+  const int32_t duplicate_slots[2] = {pool_slot, pool_slot};
+  REQUIRE(producer.Publish(payload, sizeof(payload), duplicate_slots, 2U).has_value());
+  REQUIRE(pool.FreeBlocks() == 7U);
+
+  // The duplicate collapsed to one reference: one release frees the block.
+  auto lease = consumer.ReadLease(100U);
+  REQUIRE(lease.has_value());
+  lease.value().Release();
+  REQUIRE(pool.FreeBlocks() == 8U);
+
+  const int32_t invalid_slots[1] = {9999};
+  auto rejected = producer.Publish(payload, sizeof(payload), invalid_slots, 1U);
+  REQUIRE_FALSE(rejected.has_value());
+  REQUIRE(rejected.get_error() == osp::ShmError::kInvalidArgument);
+  REQUIRE(pool.FreeBlocks() == 8U);
+  writer.Unlink();
+}
+
+TEST_CASE("shm_safety - lease release and revoke release once", "[shm][safety]") {
+  using LeasePool = osp::ShmDispatcher<256, 8>;
+  static LeasePool pool;
+  auto seg = osp::SharedMemorySegment::ForceReplace("test_shm_lease_race_pool",
+                                                    osp::detail::ShmStore<256, 8>::RequiredShmSize());
+  REQUIRE(seg.has_value());
+  pool.Init(LeasePool::Config{}, seg.value().Data(), seg.value().Size());
+  const int32_t pool_slot = pool.RegisterConsumer(static_cast<uint32_t>(::getpid()));
+  REQUIRE(pool_slot >= 0);
+
+  auto wr = osp::ShmSpmcByteChannel::ForceReplaceWriter("test_shm_lease_race_channel", 8192U, 2U);
+  REQUIRE(wr.has_value());
+  auto writer = static_cast<osp::ShmSpmcByteChannel&&>(wr.value());
+  auto rd = osp::ShmSpmcByteChannel::OpenReader("test_shm_lease_race_channel");
+  REQUIRE(rd.has_value());
+  auto reader = static_cast<osp::ShmSpmcByteChannel&&>(rd.value());
+
+  osp::ShmLeaseProducer<LeasePool> producer(writer, pool, 0U);
+  osp::ShmLeaseConsumer<LeasePool> consumer(reader, pool, pool_slot);
+  const uint8_t payload[32] = {};
+  REQUIRE(producer.Publish(payload, sizeof(payload), &pool_slot, 1U).has_value());
+
+  auto lease = consumer.ReadLease(100U);
+  REQUIRE(lease.has_value());
+  REQUIRE(pool.FreeBlocks() == 7U);
+
+  // Revoke wins the hold bit: the later lease destructor must not release again.
+  REQUIRE(pool.RevokeConsumer(pool_slot) == 1U);
+  REQUIRE(pool.FreeBlocks() == 8U);
+  lease.value().Release();
+  REQUIRE(pool.FreeBlocks() == 8U);
+  writer.Unlink();
+}
+
+TEST_CASE("shm_safety - dead consumer via fork is reaped", "[shm][safety][fork]") {
+#if defined(__SANITIZE_THREAD__)
+  SKIP("Skipped under ThreadSanitizer (fork + shm)");
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+  SKIP("Skipped under ThreadSanitizer (fork + shm)");
+#endif
+#endif
+  auto seg = osp::SharedMemorySegment::ForceReplace("test_shm_safety_fork_dead",
+                                                    osp::ShmSpmcByteRing::RequiredSize(4096U));
+  REQUIRE(seg.has_value());
+  auto ring = osp::ShmSpmcByteRing::InitAt(seg.value().Data(), seg.value().Size(), 2U);
+
+  int fds[2];
+  REQUIRE(pipe(fds) == 0);
+  const pid_t pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    close(fds[0]);
+    auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+    const char ok = h.has_value() ? 1 : 0;
+    (void)write(fds[1], &ok, 1);
+    close(fds[1]);
+    _exit(0);  // exits without unregistering
+  }
+  close(fds[1]);
+  char ok = 0;
+  REQUIRE(read(fds[0], &ok, 1) == 1);
+  close(fds[0]);
+  REQUIRE(ok == 1);
+  int status = 0;
+  REQUIRE(waitpid(pid, &status, 0) == pid);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(ring.ConsumerCount() == 1U);
+
+  const char payload[64] = {};
+  while (ring.Write(payload, sizeof(payload))) {
+  }
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 1000U;
+  REQUIRE(ring.ReapStaleConsumers(1000U, cfg) == 1U);
+  REQUIRE(ring.ConsumerCount() == 0U);
+  REQUIRE(ring.WriteableBytes() == ring.Capacity());
+  seg.value().Unlink();
+}
+
+TEST_CASE("shm_safety - paused consumer is only marked stuck", "[shm][safety][fork]") {
+#if defined(__SANITIZE_THREAD__)
+  SKIP("Skipped under ThreadSanitizer (fork + shm)");
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+  SKIP("Skipped under ThreadSanitizer (fork + shm)");
+#endif
+#endif
+  auto seg = osp::SharedMemorySegment::ForceReplace("test_shm_safety_fork_paused",
+                                                    osp::ShmSpmcByteRing::RequiredSize(4096U));
+  REQUIRE(seg.has_value());
+  auto ring = osp::ShmSpmcByteRing::InitAt(seg.value().Data(), seg.value().Size(), 2U);
+
+  int fds[2];
+  REQUIRE(pipe(fds) == 0);
+  const pid_t pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    close(fds[0]);
+    auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+    const char ok = h.has_value() ? 1 : 0;
+    (void)write(fds[1], &ok, 1);
+    close(fds[1]);
+    raise(SIGSTOP);
+    _exit(0);
+  }
+  close(fds[1]);
+  char ok = 0;
+  REQUIRE(read(fds[0], &ok, 1) == 1);
+  close(fds[0]);
+  REQUIRE(ok == 1);
+  int status = 0;
+  REQUIRE(waitpid(pid, &status, WUNTRACED) == pid);
+  REQUIRE(WIFSTOPPED(status));
+
+  const char payload[64] = {};
+  REQUIRE(ring.Write(payload, sizeof(payload)));
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 0U;
+  REQUIRE(ring.ReapStaleConsumers(1000U, cfg) == 0U);
+  REQUIRE(ring.ReapStaleConsumers(2000U, cfg) == 0U);
+  REQUIRE(ring.ConsumerCount() == 1U);
+  REQUIRE(ring.Health().stale_consumers == 1U);
+
+  REQUIRE(kill(pid, SIGCONT) == 0);
+  REQUIRE(waitpid(pid, &status, 0) == pid);
+  (void)ring.ReapStaleConsumers(3000U, cfg);
+  REQUIRE(ring.ConsumerCount() == 0U);
+  seg.value().Unlink();
+}
+
+TEST_CASE("shm_safety - reap race across processes", "[shm][safety][fork]") {
+#if defined(__SANITIZE_THREAD__)
+  SKIP("Skipped under ThreadSanitizer (fork + shm)");
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+  SKIP("Skipped under ThreadSanitizer (fork + shm)");
+#endif
+#endif
+  auto seg = osp::SharedMemorySegment::ForceReplace("test_shm_safety_fork_race",
+                                                    osp::ShmSpmcByteRing::RequiredSize(4096U));
+  REQUIRE(seg.has_value());
+  auto ring = osp::ShmSpmcByteRing::InitAt(seg.value().Data(), seg.value().Size(), 4U);
+
+  const pid_t pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    for (int i = 0; i < 500; ++i) {
+      auto h = ring.RegisterConsumer(osp::ShmChannelConfig{});
+      if (h.has_value()) {
+        (void)ring.UnregisterConsumer(h.value());
+      }
+    }
+    _exit(0);
+  }
+
+  osp::ShmChannelConfig cfg{};
+  cfg.stale_timeout_us = 0U;
+  cfg.evict_alive_slow = true;
+  for (int i = 0; i < 500; ++i) {
+    (void)ring.ReapStaleConsumers(osp::SteadyNowUs(), cfg);
+  }
+  int status = 0;
+  REQUIRE(waitpid(pid, &status, 0) == pid);
+  REQUIRE(WIFEXITED(status));
+  (void)ring.ReapStaleConsumers(osp::SteadyNowUs(), cfg);
+  REQUIRE(ring.ConsumerCount() == 0U);
+  REQUIRE(ring.WriteableBytes() == ring.Capacity());
+  seg.value().Unlink();
+}
+
+TEST_CASE("shm_safety - corrupt slot size is rejected", "[shm][safety]") {
+  using RingBuffer = osp::ShmRingBuffer<64, 8>;
+  auto seg = osp::SharedMemorySegment::ForceReplace("test_shm_safety_corrupt_slot", RingBuffer::Size());
+  REQUIRE(seg.has_value());
+  auto* ring = RingBuffer::InitAt(seg.value().Data(), seg.value().Size());
+  REQUIRE(ring != nullptr);
+  const uint32_t value = 7U;
+  REQUIRE(ring->TryPush(&value, sizeof(value)));
+
+  auto* base = static_cast<uint8_t*>(seg.value().Data());
+  auto* slot_size = reinterpret_cast<uint32_t*>(  // NOLINT
+      base + RingBuffer::kLayoutOffset + RingBuffer::kSlotsOffset + 4U);
+  *slot_size = 0xFFFFU;
+
+  uint32_t out = 0;
+  uint32_t size = 0;
+  REQUIRE_FALSE(ring->TryPop(&out, size));
+  REQUIRE((ring->FaultFlags() & RingBuffer::kFaultCorrupt) != 0U);
+  seg.value().Unlink();
 }
 
 #endif  // OSP_PLATFORM_LINUX

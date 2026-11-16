@@ -1143,10 +1143,18 @@ class ShmByteChannel {
 class ShmSpmcByteRing {
   static ShmSpmcByteRing InitAt(void* shm_base, uint32_t total_size, uint32_t max_consumers);
   static expected<ShmSpmcByteRing, ShmError> AttachChecked(void* shm_base, uint32_t total_size);
-  int32_t RegisterConsumer();                       // 返回 consumer_id, -1 = 满
-  void UnregisterConsumer(int32_t consumer_id);
-  bool Write(const void* data, uint32_t len);       // 检查最慢消费者
-  uint32_t Read(int32_t consumer_id, void* out, uint32_t max_len);
+  expected<ConsumerHandle, ShmError> RegisterConsumer(const ShmChannelConfig&);
+  expected<void, ShmError> UnregisterConsumer(ConsumerHandle);
+  expected<ConsumerHandle, ShmError> Reopen(ConsumerHandle, const ShmChannelConfig&);
+  expected<uint32_t, ShmError> ReadChecked(ConsumerHandle, void* out, uint32_t max_len);
+  expected<void, ShmError> WriteChecked(const void* data, uint32_t len, const ShmChannelConfig& = {});
+  expected<void, ShmError> WaitWritable(uint32_t needed, uint32_t timeout_ms);
+  expected<void, ShmError> WaitConsumers(uint32_t count, uint32_t timeout_ms);
+  expected<void, ShmError> Tick(uint64_t now_us, const ShmChannelConfig& = {});
+  uint32_t ReapStaleConsumers(uint64_t now_us, const ShmChannelConfig& = {});
+  expected<void, ShmError> ResetAfterQuiesce();
+  ShmHealthSnapshot Health() const noexcept;
+  void SetFaultReporter(ShmFaultReporter reporter, void* ctx) noexcept;
   uint32_t ConsumerCount() const noexcept;
 };
 
@@ -1155,13 +1163,27 @@ class ShmSpmcByteChannel {
   static expected<ShmSpmcByteChannel, ShmError> CreateWriter(const char* name, uint32_t capacity, uint32_t max_consumers);
   static expected<ShmSpmcByteChannel, ShmError> CreateOrReplaceWriter(const char* name, uint32_t capacity, uint32_t max_consumers);
   static expected<ShmSpmcByteChannel, ShmError> OpenReader(const char* name);  // 自动 RegisterConsumer
-  expected<void, ShmError> Write(const void* data, uint32_t size);  // 自动 futex wake ALL
-  uint32_t Read(void* data, uint32_t max_len);
+  expected<void, ShmError> Write(const void* data, uint32_t size);  // kOnFull 回收后重试, wake ALL
+  expected<uint32_t, ShmError> Read(void* data, uint32_t max_len);  // kEmpty/kEvicted/kCorrupt
   expected<void, ShmError> WaitReadable(uint32_t timeout_ms);
+  expected<void, ShmError> WaitWritable(uint32_t needed, uint32_t timeout_ms);
+  expected<void, ShmError> Tick(uint64_t now_us);
+  ShmHealthSnapshot Health() const noexcept;
   uint32_t ConsumerCount() const noexcept;
   int32_t ConsumerId() const noexcept;
 };
 ```
+
+**v2 安全语义（源码不兼容）**:
+
+- 布局版本升到 2，`kSlotRing`、`kSpscByteRing`、`kSpmcByteRing` 的 v1 段 attach 均返回 `kLayoutMismatch`；`layout_hash` 纳入 ring header 尺寸。
+- SPMC 消费者用 `ConsumerHandle{id, pool_slot, generation}` 标识；`slot_state` 低 2 位是状态、高 30 位是读 guard，注册、读取、回收都对同一个字做 CAS。
+- 读路径只有 `ReadChecked`：空返回 `kEmpty`，被回收返回 `kEvicted`，损坏返回 `kCorrupt`，缓冲区不足返回 `kMessageTooLarge`。
+- 删除 `RegisterConsumer()`、`UnregisterConsumer(int32_t)`、`Read(int32_t,...)`；`ReadableBytes` 与 `HasData` 改为接收 `ConsumerHandle`。调用方编译期会直接报错，不存在静默降级。
+- `ShmSpmcByteChannel::Read` 返回 `expected<uint32_t, ShmError>`；示例与业务必须区分 `kEmpty` 与 `kEvicted`，后者需要 `Reopen` 而不是当作“暂时没数据”。
+- 写入在计算 `len + 4` 前拒绝零长度与超容量，`WriteableBytes()` 内置下溢钳位。
+- 写者通过 `Tick`/`ReapStaleConsumers`/`WriteChecked` 的 `kOnFull` 策略回收死消费者；存活但停滞的消费者只标记 stuck，`evict_alive_slow` 才驱逐。
+- `Health()` 与 `SetFaultReporter` 提供可检测性出口，`ResetAfterQuiesce()` 是唯一原地恢复路径。
 
 **ShmSpscByteRing 设计要点**:
 

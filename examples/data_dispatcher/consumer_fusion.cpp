@@ -320,9 +320,11 @@ int main(int argc, char* argv[]) {
       auto wait = ctx.notify_channel.WaitReadable(500);
       if (wait.has_value()) {
         NotifyMsg msg;
-        uint32_t len = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
-        if (len == sizeof(msg)) {
+        auto read = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+        if (read.has_value() && read.value() == sizeof(msg)) {
           ProcessBlock(ctx, msg.block_id);
+        } else if (!read.has_value() && read.get_error() != osp::ShmError::kEmpty) {
+          OSP_LOG_WARN("Fusion", "notify read failed: %d", static_cast<int>(read.get_error()));
         }
       }
       // Overload detection: if notify channel is backing up
@@ -335,8 +337,8 @@ int main(int argc, char* argv[]) {
       uint32_t skipped = 0;
       while (ctx.notify_channel.ReadableBytes() > sizeof(NotifyMsg)) {
         NotifyMsg msg;
-        uint32_t len = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
-        if (len == sizeof(msg)) {
+        auto read = ctx.notify_channel.Read(reinterpret_cast<uint8_t*>(&msg), sizeof(msg));
+        if (read.has_value() && read.value() == sizeof(msg)) {
           // Release without processing (skip)
           uint32_t gen = ctx.disp.GetGeneration(msg.block_id);
           if (ctx.consumer_id >= 0) {

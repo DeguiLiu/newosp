@@ -156,6 +156,11 @@
 #define OSP_SHM_SPMC_MAX_CONSUMERS 8
 #endif
 
+/// Shared-memory wait-plane spin before entering futex (0 disables).
+#ifndef OSP_SHM_WAIT_SPIN_US
+#define OSP_SHM_WAIT_SPIN_US 50
+#endif
+
 // ============================================================================
 // 2. Capacity limits
 // ============================================================================
