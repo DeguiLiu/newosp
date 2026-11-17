@@ -85,7 +85,9 @@ inline uint32_t Crc32(const uint8_t* data, uint32_t len) noexcept {
 }
 
 /// @brief Alias kept for FrameChannel call sites.
-inline uint32_t FrameCrc32(const uint8_t* data, uint32_t len) noexcept { return Crc32(data, len); }
+inline uint32_t FrameCrc32(const uint8_t* data, uint32_t len) noexcept {
+  return Crc32(data, len);
+}
 
 }  // namespace osp
 

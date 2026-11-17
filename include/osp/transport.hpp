@@ -67,7 +67,7 @@ enum class TransportError : uint8_t {
   kInvalidFrame,
   kBufferFull,
   kNotConnected,
-  kWouldBlock,  ///< Kernel send/recv buffer full (EAGAIN). Transient error.
+  kWouldBlock,      ///< Kernel send/recv buffer full (EAGAIN). Transient error.
   kPayloadTooLarge  ///< Send payload exceeds OSP_TRANSPORT_MAX_FRAME_SIZE.
 };
 
@@ -825,8 +825,8 @@ class TcpTransport {
     if (!pr.has_value())
       return pr;
 
-    const uint32_t got = FrameCodec::Crc32HeaderAndPayload(hdr_buf, FrameCodec::kHeaderSizeV2, payload_buf,
-                                                           hdr_v2.length);
+    const uint32_t got =
+        FrameCodec::Crc32HeaderAndPayload(hdr_buf, FrameCodec::kHeaderSizeV2, payload_buf, hdr_v2.length);
     if (got != hdr_v2.crc32) {
       connected_ = false;
       ++crc_error_count_;
@@ -1006,8 +1006,6 @@ class TcpTransport {
   uint32_t inject_recv_budget_{0xFFFFFFFFu};
 };
 
-
-
 // ============================================================================
 // NetworkNode<PayloadVariant> - Node with Remote Pub/Sub
 // ============================================================================
@@ -1104,32 +1102,32 @@ class NetworkNode : public Node<PayloadVariant> {
     uint32_t sender_id = this->Id();
     std::atomic<uint32_t>* pub_count = &pub_count_;
 
-    auto sub_r = this->template Subscribe<T>([pub_ptr, generation, sender_id, pub_count](
-                                                 const T& data, const MessageHeader& /*hdr*/) {
-      // A slot reused by a later AdvertiseTo must not revive this callback.
-      if (!pub_ptr->active.load(std::memory_order_acquire) ||
-          pub_ptr->generation.load(std::memory_order_acquire) != generation) {
-        return;
-      }
+    auto sub_r = this->template Subscribe<T>(
+        [pub_ptr, generation, sender_id, pub_count](const T& data, const MessageHeader& /*hdr*/) {
+          // A slot reused by a later AdvertiseTo must not revive this callback.
+          if (!pub_ptr->active.load(std::memory_order_acquire) ||
+              pub_ptr->generation.load(std::memory_order_acquire) != generation) {
+            return;
+          }
 
-      uint8_t payload_buf[OSP_TRANSPORT_MAX_FRAME_SIZE];
-      uint32_t len = Serializer<T>::Serialize(data, payload_buf, sizeof(payload_buf));
-      if (len == 0)
-        return;
+          uint8_t payload_buf[OSP_TRANSPORT_MAX_FRAME_SIZE];
+          uint32_t len = Serializer<T>::Serialize(data, payload_buf, sizeof(payload_buf));
+          if (len == 0)
+            return;
 
-      const uint32_t seq = pub_ptr->next_seq;
-      pub_ptr->next_seq = seq + 1U;
-      auto send_r = pub_ptr->transport.SendConfigured(pub_ptr->type_index, sender_id, seq, SteadyNowNs(), payload_buf,
-                                                      len);
-      if (!send_r.has_value()) {
-        pub_ptr->transport.Close();
-        bool was_active = true;
-        if (pub_ptr->active.compare_exchange_strong(was_active, false, std::memory_order_release,
-                                                    std::memory_order_relaxed)) {
-          pub_count->fetch_sub(1U, std::memory_order_relaxed);
-        }
-      }
-    });
+          const uint32_t seq = pub_ptr->next_seq;
+          pub_ptr->next_seq = seq + 1U;
+          auto send_r =
+              pub_ptr->transport.SendConfigured(pub_ptr->type_index, sender_id, seq, SteadyNowNs(), payload_buf, len);
+          if (!send_r.has_value()) {
+            pub_ptr->transport.Close();
+            bool was_active = true;
+            if (pub_ptr->active.compare_exchange_strong(was_active, false, std::memory_order_release,
+                                                        std::memory_order_relaxed)) {
+              pub_count->fetch_sub(1U, std::memory_order_relaxed);
+            }
+          }
+        });
 
     if (!sub_r.has_value()) {
       publishers_[slot].transport.Close();

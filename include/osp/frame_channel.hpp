@@ -63,9 +63,9 @@
 #ifndef OSP_FRAME_CHANNEL_HPP_
 #define OSP_FRAME_CHANNEL_HPP_
 
+#include "osp/crc32.hpp"
 #include "osp/platform.hpp"
 #include "osp/span.hpp"
-#include "osp/crc32.hpp"
 #include "osp/vocabulary.hpp"
 
 #include <climits>

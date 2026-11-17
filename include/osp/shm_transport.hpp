@@ -661,12 +661,6 @@ class ShmRingBuffer final {
 
   static_assert(std::is_standard_layout<Slot>::value, "Slot must be standard layout for shared memory");
 
- public:
-  /// @brief Slot stride and offset from the ring object start (shared-memory ABI).
-  static constexpr uint32_t kSlotStride = static_cast<uint32_t>(sizeof(Slot));
-  static constexpr uint32_t kSlotsOffset = static_cast<uint32_t>(offsetof(ShmRingBuffer, slots_));
-
- private:
   // Cache line aligned to prevent false sharing between producer and consumer
   alignas(64) std::atomic<uint32_t> producer_pos_;
   char pad_[64 - sizeof(std::atomic<uint32_t>)];
@@ -674,6 +668,12 @@ class ShmRingBuffer final {
   alignas(64) std::atomic<uint32_t> fault_flags_;
   Slot slots_[SlotCount];
 
+ public:
+  /// @brief Slot stride and offset from the ring object start (shared-memory ABI).
+  static constexpr uint32_t kSlotStride = static_cast<uint32_t>(sizeof(Slot));
+  static constexpr uint32_t kSlotsOffset = static_cast<uint32_t>(offsetof(ShmRingBuffer, slots_));
+
+ private:
   // Private constructor - use InitAt/AttachChecked
   ShmRingBuffer() = default;
 };
@@ -1437,13 +1437,13 @@ struct ShmSpmcByteRingHeader {
   static constexpr uint32_t StateOf(uint32_t word) noexcept { return word & kStateMask; }
   static constexpr uint32_t GuardOf(uint32_t word) noexcept { return word >> kGuardShift; }
 
-  std::atomic<uint32_t> head;                               ///< Producer write position (monotonically increasing)
-  uint32_t capacity;                                        ///< Data area size (must be power of 2)
-  uint32_t max_consumers;                                   ///< Maximum number of consumers
-  std::atomic<uint32_t> consumer_count;                     ///< Active consumer count (atomic CAS)
-  std::atomic<uint32_t> space_seq;                          ///< Tail advance counter (wait plane)
-  std::atomic<uint32_t> reap_epoch;                         ///< Diagnostics: successful reap count
-  std::atomic<uint32_t> tails[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< Per-consumer read positions
+  std::atomic<uint32_t> head;                                    ///< Producer write position (monotonically increasing)
+  uint32_t capacity;                                             ///< Data area size (must be power of 2)
+  uint32_t max_consumers;                                        ///< Maximum number of consumers
+  std::atomic<uint32_t> consumer_count;                          ///< Active consumer count (atomic CAS)
+  std::atomic<uint32_t> space_seq;                               ///< Tail advance counter (wait plane)
+  std::atomic<uint32_t> reap_epoch;                              ///< Diagnostics: successful reap count
+  std::atomic<uint32_t> tails[OSP_SHM_SPMC_MAX_CONSUMERS];       ///< Per-consumer read positions
   std::atomic<uint32_t> slot_state[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< state 0/1/2/3 + read guard
   std::atomic<uint32_t> generation[OSP_SHM_SPMC_MAX_CONSUMERS];  ///< Per-consumer generation
   std::atomic<uint32_t> flags[OSP_SHM_SPMC_MAX_CONSUMERS];       ///< evicted/stale/stuck/corrupt
@@ -1550,8 +1550,7 @@ class ShmSpmcByteRing final {
     for (uint32_t i = 0; i < header_->max_consumers; ++i) {
       uint32_t expected_word = 0U;
       if (!header_->slot_state[i].compare_exchange_strong(expected_word, ShmSpmcByteRingHeader::Pack(2U, 0U),
-                                                          std::memory_order_acq_rel,
-                                                          std::memory_order_relaxed)) {
+                                                          std::memory_order_acq_rel, std::memory_order_relaxed)) {
         continue;
       }
       const uint32_t next_generation = header_->generation[i].load(std::memory_order_relaxed) + 1U;
@@ -1571,8 +1570,7 @@ class ShmSpmcByteRing final {
       header_->flags[i].store(0U, std::memory_order_relaxed);
       uint32_t expected_active = ShmSpmcByteRingHeader::Pack(2U, 0U);
       if (!header_->slot_state[i].compare_exchange_strong(expected_active, ShmSpmcByteRingHeader::Pack(1U, 0U),
-                                                          std::memory_order_acq_rel,
-                                                          std::memory_order_relaxed)) {
+                                                          std::memory_order_acq_rel, std::memory_order_relaxed)) {
         // Tick reaped the registering slot; do not publish as active.
         uint32_t expected_release = ShmSpmcByteRingHeader::Pack(2U, 0U);
         (void)header_->slot_state[i].compare_exchange_strong(expected_release, 0U, std::memory_order_acq_rel,
@@ -1792,8 +1790,7 @@ class ShmSpmcByteRing final {
       const uint32_t word = header_->slot_state[i].load(std::memory_order_acquire);
       const uint32_t state = ShmSpmcByteRingHeader::StateOf(word);
       const uint32_t generation = header_->generation[i].load(std::memory_order_acquire);
-      if ((state != 0U && state != 1U) || ShmSpmcByteRingHeader::GuardOf(word) != 0U ||
-          generation == UINT32_MAX) {
+      if ((state != 0U && state != 1U) || ShmSpmcByteRingHeader::GuardOf(word) != 0U || generation == UINT32_MAX) {
         return expected<void, ShmError>::error(ShmError::kInvalidState);
       }
       snapshot[i] = word;
@@ -1808,8 +1805,7 @@ class ShmSpmcByteRing final {
       }
       uint32_t expected_word = snapshot[i];
       if (!header_->slot_state[i].compare_exchange_strong(expected_word, ShmSpmcByteRingHeader::Pack(3U, 0U),
-                                                          std::memory_order_acq_rel,
-                                                          std::memory_order_relaxed)) {
+                                                          std::memory_order_acq_rel, std::memory_order_relaxed)) {
         RollbackReset(snapshot, i);
         return expected<void, ShmError>::error(ShmError::kInvalidState);
       }
@@ -1937,8 +1933,7 @@ class ShmSpmcByteRing final {
         ++wait_timeouts_;
         return expected<void, ShmError>::error(ShmError::kTimeout);
       }
-      const int outcome =
-          detail::FutexWaitOutcome(detail::FutexWait(&header_->consumer_count, observed, remaining));
+      const int outcome = detail::FutexWaitOutcome(detail::FutexWait(&header_->consumer_count, observed, remaining));
       if (outcome == 1) {
         ++wait_timeouts_;
         return expected<void, ShmError>::error(ShmError::kTimeout);
@@ -1971,8 +1966,7 @@ class ShmSpmcByteRing final {
     }
     uint32_t expected_word = ShmSpmcByteRingHeader::Pack(1U, 0U);
     if (!header_->slot_state[idx].compare_exchange_strong(expected_word, ShmSpmcByteRingHeader::Pack(1U, 1U),
-                                                           std::memory_order_acq_rel,
-                                                           std::memory_order_relaxed)) {
+                                                          std::memory_order_acq_rel, std::memory_order_relaxed)) {
       if (ShmSpmcByteRingHeader::StateOf(expected_word) == 1U) {
         ++read_conflict_total_;
         return expected<uint32_t, ShmError>::error(ShmError::kInvalidState);
@@ -2182,7 +2176,7 @@ class ShmSpmcByteRing final {
     } else {
       uint32_t expected = ShmSpmcByteRingHeader::Pack(1U, 0U);
       if (!header_->slot_state[idx].compare_exchange_strong(expected, desired, std::memory_order_acq_rel,
-                                                             std::memory_order_relaxed)) {
+                                                            std::memory_order_relaxed)) {
         ++reap_deferred_total_;
         return false;  // A reader holds the guard: defer to the next scan.
       }
@@ -2191,8 +2185,7 @@ class ShmSpmcByteRing final {
       // A new consumer registered between the CAS and the commit: roll back.
       uint32_t expected = desired;
       (void)header_->slot_state[idx].compare_exchange_strong(expected, ShmSpmcByteRingHeader::Pack(1U, 0U),
-                                                             std::memory_order_acq_rel,
-                                                             std::memory_order_relaxed);
+                                                             std::memory_order_acq_rel, std::memory_order_relaxed);
       return false;
     }
     header_->tails[idx].store(header_->head.load(std::memory_order_acquire), std::memory_order_release);
@@ -2244,8 +2237,7 @@ class ShmSpmcByteRing final {
   void ReleaseGuard(uint32_t idx) noexcept {
     uint32_t expected = ShmSpmcByteRingHeader::Pack(1U, 1U);
     (void)header_->slot_state[idx].compare_exchange_strong(expected, ShmSpmcByteRingHeader::Pack(1U, 0U),
-                                                           std::memory_order_acq_rel,
-                                                           std::memory_order_relaxed);
+                                                           std::memory_order_acq_rel, std::memory_order_relaxed);
   }
 
   /// @brief Publish a tail advance to the wait plane (wakes one writer).
