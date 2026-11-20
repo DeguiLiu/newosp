@@ -236,6 +236,8 @@ inline void LogWriteVa(Level level, const char* category, const char* file, int 
   (void)vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
 
 #ifdef NDEBUG
+  (void)file;
+  (void)line;
   (void)std::fprintf(stderr, "[%s] [%s] [%s] %s\n", ts_buf, detail::LevelTag(level), category ? category : "-",
                      msg_buf);
 #else
