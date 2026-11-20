@@ -277,6 +277,7 @@ struct MockSession {
     session.write_fn = osp::detail::ShellPosixWrite;
     session.read_fn = osp::detail::ShellPosixRead;
     session.telnet_mode = false;
+    session.admin = true;  // Tests exercise functionality, not the privilege gate.
     session.iac_state = osp::detail::ShellSession::IacState::kNormal;
     session.esc_state = osp::detail::ShellSession::EscState::kNone;
     session.line_pos = 0;

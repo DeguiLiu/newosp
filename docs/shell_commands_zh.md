@@ -7,7 +7,7 @@
 - **本地 Console** (ConsoleShell): stdin/stdout，支持 raw mode 行编辑
 - **UART 串口** (UartShell): /dev/ttyS* 等设备，支持 5 种波特率
 
-**共享特性**: TAB 补全、历史记录（↑↓ 方向键）、IAC 协议过滤、ESC 序列解析
+**共享特性**: TAB 补全（命令名与子命令）、历史记录（↑↓ 方向键）、IAC 协议过滤、ESC 序列解析、命令级权限标记、未知命令近似建议
 
 ---
 
@@ -43,8 +43,12 @@
 | 命令 | 说明 |
 |------|------|
 | `help` | 列出所有已注册命令及简要描述 |
+| `help <cmd>` | 显示描述、`[admin]` 标记与子命令用法 |
+| `help <prefix>` | 按前缀列出命令（如 `help osp_`） |
+| `?` | `help` 的别名 |
+| `history` | 显示当前会话的命令历史（带序号） |
 
-`help` 命令在 Shell 启动时自动注册，无需用户代码调用。
+内置命令在 Shell 启动时自动注册，无需用户代码调用。
 
 ```
 osp> help
@@ -64,6 +68,10 @@ osp> help
 
 以下命令支持子命令分发，可通过参数执行运行时控制操作。
 所有修改仅影响内存，重启后恢复原值。
+
+有副作用的子命令标记为 admin：`osp_bus reset`、`osp_log level`、`osp_config set`、
+`osp_lifecycle` 的 `configure/activate/deactivate/cleanup/shutdown`。普通会话执行时返回
+`permission denied: admin session required`；只配置一组凭据时该会话自动具备 admin 权限。
 
 ### osp_log -- 日志级别控制
 
@@ -691,6 +699,14 @@ static int my_cmd(int argc, char* argv[]) {
 OSP_SHELL_CMD(my_cmd, "My module control");
 ```
 
+如需子命令 TAB 补全，在注册时把子命令表传给注册接口：
+
+```cpp
+osp::detail::GlobalCmdRegistry::Instance().Register(
+    "my_cmd", my_cmd, "My module control",
+    osp::ShellCmdFlags::kNone, kSubs, 2U);
+```
+
 使用效果：
 ```
 osp> my_cmd              # 调用默认 handler (sub_status)
@@ -700,6 +716,42 @@ osp> my_cmd help         # 自动生成帮助
 osp> my_cmd bogus        # "Unknown subcommand: bogus (try 'my_cmd help')"
 ```
 
+### 方式四：admin 命令
+
+只允许管理会话执行（需要 `DebugShell::Config::admin_username/admin_password`；
+本地 Console/UART 会话天然具备 admin 权限）：
+
+```cpp
+int my_reboot(int argc, char* argv[]) {
+    // dangerous operation...
+    return 0;
+}
+OSP_SHELL_CMD_ADMIN(my_reboot, "Reboot the target");
+```
+
+子命令级别的权限在 `ShellSubCmd` 中声明：
+
+```cpp
+static const osp::ShellSubCmd kSubs[] = {
+    {"status", nullptr, "Show status", sub_status},
+    {"reset",  nullptr, "Reset",       sub_reset, osp::ShellCmdFlags::kAdmin},
+};
+```
+
+### 方式五：命令别名
+
+别名在查找时解析，注册顺序无关，且继承目标的权限与子命令：
+
+```cpp
+// 静态注册（命令名需是合法标识符）
+OSP_SHELL_CMD_ALIAS(ps, osp_nodes, "Alias for osp_nodes");
+
+// 或运行时注册
+osp::detail::GlobalCmdRegistry::Instance().RegisterAlias("ps", "osp_nodes", "Alias for osp_nodes");
+```
+
+`help` 会把别名与目标一起列出；执行别名与执行目标完全等价。
+
 ---
 
 ## 命令总览
@@ -707,6 +759,8 @@ osp> my_cmd bogus        # "Unknown subcommand: bogus (try 'my_cmd help')"
 | 命令 | 类型 | 子命令 | 说明 |
 |------|------|--------|------|
 | `help` | 内置 | -- | 列出所有命令 |
+| `?` | 内置 | -- | `help` 别名 |
+| `history` | 内置 | -- | 当前会话命令历史 |
 | `osp_log` | 控制 | `status`, `level` | 日志级别查看与设置 |
 | `osp_config` | 控制 | `list`, `get`, `set` | 配置查看与运行时修改 |
 | `osp_bus` | 控制 | `status`, `reset` | 消息总线统计与重置 |
@@ -738,8 +792,11 @@ osp::DebugShell::Config cfg;
 cfg.port = 5090;
 cfg.max_connections = 4;
 cfg.prompt = "osp> ";
+cfg.bind_ip = "127.0.0.1";   // 默认 "0.0.0.0"
 cfg.username = "admin";      // nullptr = 无认证
 cfg.password = "secret";
+cfg.admin_username = "root"; // 可选：admin 身份，nullptr = 单凭据即 admin
+cfg.admin_password = "secret2";
 cfg.banner = "Welcome to newosp shell\r\n";
 
 osp::DebugShell shell(cfg);
@@ -756,8 +813,9 @@ osp> help
 **特性**:
 - IAC 协议自动过滤，telnet 客户端兼容
 - 支持多个并发连接
-- 可选认证 (username/password)
-- 3 次认证失败自动断开
+- 可选认证 (username/password)，标准 CRLF 输入
+- 3 次认证失败自动断开，每次失败退避 250 ms
+- 命令级权限：`[admin]` 命令仅 admin 会话可执行
 
 ### 本地 Console (ConsoleShell)
 
@@ -812,6 +870,7 @@ screen /dev/ttyUSB0 115200
 #define OSP_SHELL_LINE_BUF_SIZE 512    // 行缓冲大小，默认 256
 #define OSP_SHELL_HISTORY_SIZE 32      // 历史记录条数，默认 16
 #define OSP_SHELL_MAX_ARGS 32          // 最大参数数，默认 16
+#define OSP_SHELL_MAX_COMMANDS 128     // 顶层命令上限，默认 64
 ```
 
 ---

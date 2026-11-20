@@ -4,6 +4,15 @@
 
 ## 最新变更
 
+### 2026-11-20: Shell 会话安全与 MSH 取向可用性
+
+- 认证：修复 telnet CRLF 导致密码为空；失败退避 250 ms；会话槽复用清零 `authenticated/admin`。
+- IAC：新增 `kSubIac` 状态，子协商 payload 不再泄漏为命令输入。
+- 权限：`ShellCmdFlags::kAdmin`，顶层命令与子命令均可标记；`Config::admin_username/admin_password`；本地 Console/UART 为 admin。
+- 可用性：`help <cmd>` 显示子命令用法与 `[admin]`、`help <prefix>` 前缀检索、`?` 别名、`history`、未知命令近似建议、子命令 TAB 补全、命令别名注册。
+- 配置：`DebugShell::Config::bind_ip`、`OSP_SHELL_MAX_COMMANDS`。
+- 验证：shell 相关 4 个测试文件 59/22/6/24 例全部通过；uds_over_tcp 27 例通过。
+
 ### 2026-11-16: v0.9.4 共享内存安全与传输层加固（源码不兼容）
 
 - shm 布局 v2；`slot_state`+generation+pid 回收；`ReadChecked`/`WriteChecked`/`Reopen`/`ResetAfterQuiesce`；`WaitWritable`/`WaitConsumers`；`Health`/`FaultReporter`；租约适配器与 `RevokeConsumer`。

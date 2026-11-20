@@ -49,6 +49,7 @@
 #include "osp/vocabulary.hpp"
 
 #include <cerrno>
+#include <cinttypes>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -56,7 +57,9 @@
 #include <cstring>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
+#include <thread>
 
 #if OSP_NET_BACKEND == 0
 // POSIX host/socket headers. On the lwIP backend (OSP_NET_BACKEND == 1) these
@@ -86,6 +89,12 @@
 
 namespace osp {
 
+/// Maximum number of registered top-level commands. Override at build time to
+/// grow the registry; subcommands do not consume slots.
+#ifndef OSP_SHELL_MAX_COMMANDS
+#define OSP_SHELL_MAX_COMMANDS 64
+#endif
+
 // ============================================================================
 // Shell Types
 // ============================================================================
@@ -93,11 +102,23 @@ namespace osp {
 /// @brief Function pointer signature for shell commands.
 using ShellCmdFn = int (*)(int argc, char* argv[]);
 
+/// @brief Per-command privilege requirement.
+enum class ShellCmdFlags : uint8_t {
+  kNone = 0,   ///< Available to any authenticated session.
+  kAdmin = 1,  ///< Requires an admin session.
+};
+
+struct ShellSubCmd;  // defined after the session/argument helpers
+
 /// @brief Descriptor for a registered shell command.
 struct ShellCmd {
-  const char* name;  ///< Command name (must be a string literal or static).
-  const char* desc;  ///< Human-readable description.
-  ShellCmdFn func;   ///< Callback to invoke.
+  const char* name;                      ///< Command name (string literal or static).
+  const char* desc;                      ///< Human-readable description.
+  ShellCmdFn func;                       ///< Callback to invoke.
+  ShellCmdFlags flags{ShellCmdFlags::kNone};  ///< Privilege requirement.
+  const ShellSubCmd* subs{nullptr};      ///< Optional subcommand table.
+  uint32_t sub_count{0U};                ///< Number of entries in `subs`.
+  const char* alias_of{nullptr};         ///< Target command name for aliases.
 };
 
 // ============================================================================
@@ -176,11 +197,12 @@ struct ShellSession {
   EscState esc_state = EscState::kNone;
 
   // --- IAC protocol state (telnet only) ---
-  enum class IacState : uint8_t { kNormal = 0, kIac, kNego, kSub };
+  enum class IacState : uint8_t { kNormal = 0, kIac, kNego, kSub, kSubIac };
   IacState iac_state = IacState::kNormal;
 
   // --- Authentication state ---
   bool authenticated = false;
+  bool admin = false;  ///< Local sessions are admin; TCP needs admin credentials.
   uint8_t auth_attempts = 0;
 
   // --- Control ---
@@ -212,6 +234,9 @@ inline void ShellSessionInit(ShellSession& s, int read_fd, int write_fd, ShellWr
   s.line_pos = 0;
   s.hist_browsing = false;
   s.skip_next_lf = false;
+  s.authenticated = false;
+  s.admin = false;
+  s.auth_attempts = 0;
   s.active.store(true, std::memory_order_release);
 }
 
@@ -343,10 +368,15 @@ inline void HistoryDown(ShellSession& s) {
       return '\0';
 
     case ShellSession::IacState::kSub:
-      // Consume bytes until IAC SE (0xFF 0xF0).
+      // Consume the subnegotiation payload until IAC SE (0xFF 0xF0).
       if (byte == 0xFF) {
-        s.iac_state = ShellSession::IacState::kIac;
+        s.iac_state = ShellSession::IacState::kSubIac;
       }
+      return '\0';
+
+    case ShellSession::IacState::kSubIac:
+      // Only IAC SE ends the subnegotiation; any other IAC x stays inside it.
+      s.iac_state = (byte == 0xF0) ? ShellSession::IacState::kNormal : ShellSession::IacState::kSub;
       return '\0';
   }
   return '\0';
@@ -379,7 +409,19 @@ class GlobalCmdRegistry final {
    * @return success on OK; ShellError::kRegistryFull or kDuplicateName on
    *         failure.
    */
-  [[nodiscard]] inline expected<void, ShellError> Register(const char* name, ShellCmdFn fn, const char* desc) noexcept;
+  [[nodiscard]] inline expected<void, ShellError> Register(const char* name, ShellCmdFn fn, const char* desc,
+                                                          ShellCmdFlags flags = ShellCmdFlags::kNone,
+                                                          const ShellSubCmd* subs = nullptr,
+                                                          uint32_t sub_count = 0U) noexcept;
+
+  /**
+   * @brief Register an alias for an existing command.
+   *
+   * Resolution happens at lookup time, so the alias may be registered before
+   * or after its target. Aliases inherit flags and subcommands.
+   */
+  [[nodiscard]] inline expected<void, ShellError> RegisterAlias(const char* alias, const char* target,
+                                                                const char* desc = nullptr) noexcept;
 
   /**
    * @brief Find a command by exact name.
@@ -414,7 +456,7 @@ class GlobalCmdRegistry final {
   GlobalCmdRegistry(const GlobalCmdRegistry&) = delete;
   GlobalCmdRegistry& operator=(const GlobalCmdRegistry&) = delete;
 
-  static constexpr uint32_t kMaxCommands = 64;
+  static constexpr uint32_t kMaxCommands = OSP_SHELL_MAX_COMMANDS;
   ShellCmd cmds_[kMaxCommands] = {};
   uint32_t count_ = 0;
   mutable osp::Mutex mtx_;
@@ -424,8 +466,9 @@ class GlobalCmdRegistry final {
 // GlobalCmdRegistry inline implementation
 // ----------------------------------------------------------------------------
 
-inline expected<void, ShellError> GlobalCmdRegistry::Register(const char* name, ShellCmdFn fn,
-                                                              const char* desc) noexcept {
+inline expected<void, ShellError> GlobalCmdRegistry::Register(const char* name, ShellCmdFn fn, const char* desc,
+                                                              ShellCmdFlags flags, const ShellSubCmd* subs,
+                                                              uint32_t sub_count) noexcept {
   std::lock_guard<osp::Mutex> lock(mtx_);
   // Duplicate check
   for (uint32_t i = 0; i < count_; ++i) {
@@ -439,18 +482,56 @@ inline expected<void, ShellError> GlobalCmdRegistry::Register(const char* name, 
   cmds_[count_].name = name;
   cmds_[count_].desc = desc;
   cmds_[count_].func = fn;
+  cmds_[count_].flags = flags;
+  cmds_[count_].subs = subs;
+  cmds_[count_].sub_count = (nullptr != subs) ? sub_count : 0U;
+  ++count_;
+  return expected<void, ShellError>::success();
+}
+
+inline expected<void, ShellError> GlobalCmdRegistry::RegisterAlias(const char* alias, const char* target,
+                                                                  const char* desc) noexcept {
+  if (nullptr == alias || nullptr == target || '\0' == alias[0] || '\0' == target[0]) {
+    return expected<void, ShellError>::error(ShellError::kInvalidArgument);
+  }
+  std::lock_guard<osp::Mutex> lock(mtx_);
+  for (uint32_t i = 0; i < count_; ++i) {
+    if (std::strcmp(cmds_[i].name, alias) == 0) {
+      return expected<void, ShellError>::error(ShellError::kDuplicateName);
+    }
+  }
+  if (count_ >= kMaxCommands) {
+    return expected<void, ShellError>::error(ShellError::kRegistryFull);
+  }
+  cmds_[count_].name = alias;
+  cmds_[count_].desc = (nullptr != desc) ? desc : "command alias";
+  cmds_[count_].func = nullptr;
+  cmds_[count_].alias_of = target;
   ++count_;
   return expected<void, ShellError>::success();
 }
 
 inline const ShellCmd* GlobalCmdRegistry::Find(const char* name) const noexcept {
-  // Read-only scan; safe after registration phase.
+  // Read-only scan; safe after registration phase. Aliases resolve to their
+  // target so callers always see the effective command.
+  const ShellCmd* cmd = nullptr;
   for (uint32_t i = 0; i < count_; ++i) {
     if (std::strcmp(cmds_[i].name, name) == 0) {
-      return &cmds_[i];
+      cmd = &cmds_[i];
+      break;
     }
   }
-  return nullptr;
+  for (uint32_t depth = 0U; nullptr != cmd && nullptr != cmd->alias_of && depth < 4U; ++depth) {
+    const char* target = cmd->alias_of;
+    cmd = nullptr;
+    for (uint32_t i = 0; i < count_; ++i) {
+      if (std::strcmp(cmds_[i].name, target) == 0) {
+        cmd = &cmds_[i];
+        break;
+      }
+    }
+  }
+  return cmd;
 }
 
 inline uint32_t GlobalCmdRegistry::AutoComplete(const char* prefix, char* out_buf, uint32_t buf_size) const noexcept {
@@ -582,7 +663,59 @@ struct ShellSubCmd {
   const char* args_desc;  ///< Argument hint (e.g. "<level>"), nullptr if none.
   const char* help;       ///< One-line help text.
   ShellCmdFn handler;     ///< Subcommand handler.
+  ShellCmdFlags flags{ShellCmdFlags::kNone};  ///< Privilege requirement.
 };
+
+/// @brief Complete a subcommand token against a table.
+/// @return Number of matching entries; @p out_buf receives the full name for a
+///         single match, or the longest common prefix for several matches.
+[[nodiscard]] inline uint32_t ShellCompleteSub(const ShellSubCmd* table, uint32_t count, const char* prefix,
+                                               char* out_buf, uint32_t buf_size) noexcept {
+  if (nullptr == table || nullptr == prefix || nullptr == out_buf || buf_size < 2U) {
+    return 0U;
+  }
+  const uint32_t prefix_len = static_cast<uint32_t>(std::strlen(prefix));
+  uint32_t first = count;
+  uint32_t matches = 0U;
+  for (uint32_t i = 0U; i < count; ++i) {
+    if (std::strncmp(table[i].name, prefix, prefix_len) == 0) {
+      if (count == first) {
+        first = i;
+      }
+      ++matches;
+    }
+  }
+  if (0U == matches) {
+    out_buf[0] = '\0';
+    return 0U;
+  }
+  if (1U == matches) {
+    const char* full = table[first].name;
+    const uint32_t len = static_cast<uint32_t>(std::strlen(full));
+    const uint32_t copy = (len < buf_size - 1U) ? len : (buf_size - 1U);
+    std::memcpy(out_buf, full, copy);
+    out_buf[copy] = '\0';
+    return 1U;
+  }
+  const char* base = table[first].name;
+  uint32_t common = static_cast<uint32_t>(std::strlen(base));
+  for (uint32_t i = first + 1U; i < count; ++i) {
+    if (std::strncmp(table[i].name, prefix, prefix_len) != 0) {
+      continue;
+    }
+    const char* other = table[i].name;
+    uint32_t j = 0U;
+    while (j < common && base[j] == other[j]) {
+      ++j;
+    }
+    common = j;
+  }
+  const uint32_t copy = (common < buf_size - 1U) ? common : (buf_size - 1U);
+  std::memcpy(out_buf, base, copy);
+  out_buf[copy] = '\0';
+  return matches;
+}
+
 
 /// @brief Parse a string as int32_t (base 10).
 /// Rejects null, empty, trailing non-digit characters, and overflow.
@@ -661,6 +794,58 @@ namespace detail {
 /// @brief Handle Tab key press: auto-complete command name.
 inline void TabComplete(ShellSession& s, const char* prompt) noexcept {
   s.line_buf[s.line_pos] = '\0';
+
+  // "<command> <prefix>" completes the subcommand token when the command
+  // registered a subcommand table.
+  const char* space = std::strchr(s.line_buf, ' ');
+  if (nullptr != space) {
+    const std::size_t name_len = static_cast<std::size_t>(space - s.line_buf);
+    const char* prefix = space + 1;
+    const ShellCmd* cmd = nullptr;
+    if (name_len < 64U) {
+      char name[64] = {};
+      std::memcpy(name, s.line_buf, name_len);
+      cmd = GlobalCmdRegistry::Instance().Find(name);
+    }
+    if (nullptr == cmd || nullptr == cmd->subs || 0U == cmd->sub_count) {
+      return;
+    }
+    char completion[64] = {};
+    const uint32_t matches = ShellCompleteSub(cmd->subs, cmd->sub_count, prefix, completion, sizeof(completion));
+    if (0U == matches) {
+      return;
+    }
+    if (matches > 1U) {
+      ShellSessionWrite(s, "\r\n");
+      const std::size_t prefix_len = std::strlen(prefix);
+      for (uint32_t i = 0; i < cmd->sub_count; ++i) {
+        if (std::strncmp(cmd->subs[i].name, prefix, prefix_len) == 0) {
+          ShellSessionWrite(s, cmd->subs[i].name);
+          ShellSessionWrite(s, "  ");
+        }
+      }
+      ShellSessionWrite(s, "\r\n");
+      ShellSessionWrite(s, prompt);
+    } else {
+      for (uint32_t i = 0; i < s.line_pos; ++i) {
+        ShellSessionWrite(s, "\b \b", 3);
+      }
+    }
+    const std::size_t keep = name_len + 1U;
+    uint32_t comp_len = static_cast<uint32_t>(std::strlen(completion));
+    if (keep + comp_len > OSP_SHELL_LINE_BUF_SIZE - 2U) {
+      comp_len = static_cast<uint32_t>(OSP_SHELL_LINE_BUF_SIZE - 2U - keep);
+    }
+    std::memcpy(&s.line_buf[keep], completion, comp_len);
+    s.line_pos = static_cast<uint32_t>(keep + comp_len);
+    if (1U == matches && s.line_pos < OSP_SHELL_LINE_BUF_SIZE - 1U) {
+      s.line_buf[s.line_pos++] = ' ';
+    }
+    s.line_buf[s.line_pos] = '\0';
+    ShellSessionWrite(s, s.line_buf, s.line_pos);
+    return;
+  }
+
   char completion[64] = {};
   const uint32_t matches = GlobalCmdRegistry::Instance().AutoComplete(s.line_buf, completion, sizeof(completion));
 
@@ -828,6 +1013,11 @@ inline void ShellExecuteLine(ShellSession& s) {
 
   const ShellCmd* cmd = GlobalCmdRegistry::Instance().Find(argv[0]);
   if (cmd != nullptr) {
+    if (ShellCmdFlags::kAdmin == cmd->flags && !s.admin) {
+      static constexpr char kDenied[] = "permission denied: admin session required\r\n";
+      ShellSessionWrite(s, kDenied, sizeof(kDenied) - 1U);
+      return;
+    }
     CurrentSession() = &s;
     cmd->func(argc, argv);
     CurrentSession() = nullptr;
@@ -836,6 +1026,23 @@ inline void ShellExecuteLine(ShellSession& s) {
     int n = std::snprintf(msg, sizeof(msg), "unknown command: %s\r\n", argv[0]);
     if (n > 0) {
       ShellSessionWrite(s, msg, static_cast<size_t>(n));
+    }
+    // Suggest commands sharing a prefix of at least three characters.
+    const std::size_t token_len = std::strlen(argv[0]);
+    uint32_t suggested = 0U;
+    GlobalCmdRegistry::Instance().ForEach([&](const ShellCmd& cmd) {
+      std::size_t shared = 0U;
+      while (shared < token_len && cmd.name[shared] == argv[0][shared]) {
+        ++shared;
+      }
+      if (shared >= 3U && suggested < 3U) {
+        ShellSessionWrite(s, (0U == suggested) ? "did you mean: " : ", ");
+        ShellSessionWrite(s, cmd.name);
+        ++suggested;
+      }
+    });
+    if (0U != suggested) {
+      ShellSessionWrite(s, "?\r\n");
     }
   }
 }
@@ -853,8 +1060,9 @@ inline void ShellExecuteLine(ShellSession& s) {
  */
 class ShellAutoReg {
  public:
-  ShellAutoReg(const char* name, ShellCmdFn func, const char* desc) {
-    (void)detail::GlobalCmdRegistry::Instance().Register(name, func, desc);
+  ShellAutoReg(const char* name, ShellCmdFn func, const char* desc,
+               ShellCmdFlags flags = ShellCmdFlags::kNone) {
+    (void)detail::GlobalCmdRegistry::Instance().Register(name, func, desc, flags);
   }
 };
 
@@ -871,6 +1079,22 @@ class ShellAutoReg {
  */
 #define OSP_SHELL_CMD(cmd, desc) static ::osp::ShellAutoReg OSP_CONCAT(_shell_reg_, cmd)(#cmd, cmd, desc)
 
+/// @brief Register a command that only an admin session may execute.
+#define OSP_SHELL_CMD_ADMIN(cmd, desc) \
+  static ::osp::ShellAutoReg OSP_CONCAT(_shell_reg_, cmd)(#cmd, cmd, desc, ::osp::ShellCmdFlags::kAdmin)
+
+/// @brief Statically registers an alias for an existing command.
+class ShellAliasAutoReg {
+ public:
+  ShellAliasAutoReg(const char* alias, const char* target, const char* desc) {
+    (void)detail::GlobalCmdRegistry::Instance().RegisterAlias(alias, target, desc);
+  }
+};
+
+/// @brief Register `alias` as another name for `target`.
+#define OSP_SHELL_CMD_ALIAS(alias, target, desc) \
+  static ::osp::ShellAliasAutoReg OSP_CONCAT(_shell_alias_, alias)(#alias, #target, desc)
+
 // ============================================================================
 // Built-in "help" command
 // ============================================================================
@@ -878,33 +1102,89 @@ class ShellAutoReg {
 namespace detail {
 
 /**
- * @brief Built-in "help" command that lists all registered commands.
+ * @brief Built-in "help" command: list commands or describe one command.
  */
-inline int ShellBuiltinHelp(int /*argc*/, char* /*argv*/[]) {
+inline int ShellBuiltinHelp(int argc, char* argv[]) {
   ShellSession* sess = CurrentSession();
   if (sess == nullptr)
     return -1;
   char buf[256];
-  GlobalCmdRegistry::Instance().ForEach([&](const ShellCmd& cmd) {
-    int n = std::snprintf(buf, sizeof(buf), "  %-16s - %s\r\n", cmd.name, cmd.desc ? cmd.desc : "");
-    if (n > 0) {
+  const auto emit = [&](int n) {
+    if (n > 0 && static_cast<size_t>(n) < sizeof(buf)) {
       ShellSessionWrite(*sess, buf, static_cast<size_t>(n));
     }
+  };
+  if (argc >= 2) {
+    const ShellCmd* cmd = GlobalCmdRegistry::Instance().Find(argv[1]);
+    if (cmd != nullptr) {
+      emit(std::snprintf(buf, sizeof(buf), "%s - %s%s\r\n", cmd->name, cmd->desc != nullptr ? cmd->desc : "",
+                         (ShellCmdFlags::kAdmin == cmd->flags) ? " [admin]" : ""));
+      if (nullptr != cmd->subs && 0U != cmd->sub_count) {
+        emit(std::snprintf(buf, sizeof(buf), "Usage: %s <subcommand>\r\n", cmd->name));
+        for (uint32_t i = 0; i < cmd->sub_count; ++i) {
+          const ShellSubCmd& sub = cmd->subs[i];
+          emit(std::snprintf(buf, sizeof(buf), "  %-12s %-22s %s%s\r\n", sub.name,
+                             sub.args_desc != nullptr ? sub.args_desc : "", sub.help != nullptr ? sub.help : "",
+                             (ShellCmdFlags::kAdmin == sub.flags) ? " [admin]" : ""));
+        }
+      }
+      return 0;
+    }
+    // Prefix search for grouped discovery, e.g. "help osp_".
+    const std::size_t prefix_len = std::strlen(argv[1]);
+    bool any = false;
+    GlobalCmdRegistry::Instance().ForEach([&](const ShellCmd& c) {
+      if (std::strncmp(c.name, argv[1], prefix_len) == 0) {
+        any = true;
+        emit(std::snprintf(buf, sizeof(buf), "  %-16s - %s%s\r\n", c.name, c.desc != nullptr ? c.desc : "",
+                           (ShellCmdFlags::kAdmin == c.flags) ? " [admin]" : ""));
+      }
+    });
+    if (!any) {
+      emit(std::snprintf(buf, sizeof(buf), "unknown command: %s\r\n", argv[1]));
+      return -1;
+    }
+    return 0;
+  }
+  GlobalCmdRegistry::Instance().ForEach([&](const ShellCmd& cmd) {
+    emit(std::snprintf(buf, sizeof(buf), "  %-16s - %s%s\r\n", cmd.name, cmd.desc != nullptr ? cmd.desc : "",
+                       (ShellCmdFlags::kAdmin == cmd.flags) ? " [admin]" : ""));
   });
   return 0;
 }
 
-/// @brief Auto-register the built-in help command.
-inline bool RegisterHelpOnce() noexcept {
+/// @brief Built-in "history" command: print this session's command history.
+inline int ShellBuiltinHistory(int /*argc*/, char* /*argv*/[]) {
+  ShellSession* sess = CurrentSession();
+  if (sess == nullptr)
+    return -1;
+  const uint32_t total = (sess->hist_count < OSP_SHELL_HISTORY_SIZE) ? sess->hist_count : OSP_SHELL_HISTORY_SIZE;
+  const uint32_t first = (sess->hist_count < OSP_SHELL_HISTORY_SIZE) ? 0U : sess->hist_head;
+  for (uint32_t i = 0; i < total; ++i) {
+    const uint32_t idx = (first + i) % OSP_SHELL_HISTORY_SIZE;
+    char buf[OSP_SHELL_LINE_BUF_SIZE + 16];
+    int n = std::snprintf(buf, sizeof(buf), "%4" PRIu32 "  %s\r\n", i + 1U, sess->history[idx]);
+    if (n > 0) {
+      ShellSessionWrite(*sess, buf, static_cast<size_t>(n));
+    }
+  }
+  return 0;
+}
+
+/// @brief Auto-register the built-in commands.
+inline bool RegisterBuiltinsOnce() noexcept {
   static const bool done = []() {
-    (void)GlobalCmdRegistry::Instance().Register("help", ShellBuiltinHelp, "List all commands");
+    auto& reg = GlobalCmdRegistry::Instance();
+    (void)reg.Register("help", ShellBuiltinHelp, "List commands or show command help");
+    (void)reg.RegisterAlias("?", "help", "Alias for help");
+    (void)reg.Register("history", ShellBuiltinHistory, "Show command history");
     return true;
   }();
   return done;
 }
 
-/// @brief Trigger help registration at static-init time.
-static const bool kHelpRegistered OSP_UNUSED = RegisterHelpOnce();
+/// @brief Trigger built-in registration at static-init time.
+static const bool kBuiltinsRegistered OSP_UNUSED = RegisterBuiltinsOnce();
 
 }  // namespace detail
 
@@ -995,6 +1275,15 @@ inline int ShellDispatch(int argc, char* argv[], const ShellSubCmd* table, uint3
   }
   for (uint32_t i = 0; i < count; ++i) {
     if (std::strcmp(argv[1], table[i].name) == 0) {
+      if (ShellCmdFlags::kAdmin == table[i].flags) {
+        // No active session means an internal call (tests, programmatic use);
+        // only remote sessions are subject to the privilege gate.
+        detail::ShellSession* sess = detail::CurrentSession();
+        if (sess != nullptr && !sess->admin) {
+          ShellPrintf("permission denied: admin session required\r\n");
+          return -1;
+        }
+      }
       return table[i].handler(argc - 1, argv + 1);
     }
   }
@@ -1036,9 +1325,20 @@ class DebugShell final {
     const char* banner;        ///< Banner shown on connect (nullptr = none).
     const char* username;      ///< Auth username (nullptr = no auth).
     const char* password;      ///< Auth password.
+    const char* admin_username;  ///< Optional admin username (admin commands).
+    const char* admin_password;  ///< Optional admin password.
+    const char* bind_ip;       ///< Listen address; "0.0.0.0" accepts any.
 
     Config() noexcept
-        : port(5090), max_connections(2), prompt("osp> "), banner(nullptr), username(nullptr), password(nullptr) {}
+        : port(5090),
+          max_connections(2),
+          prompt("osp> "),
+          banner(nullptr),
+          username(nullptr),
+          password(nullptr),
+          admin_username(nullptr),
+          admin_password(nullptr),
+          bind_ip("0.0.0.0") {}
   };
 
   /**
@@ -1047,7 +1347,7 @@ class DebugShell final {
    */
   explicit DebugShell(const Config& cfg = Config{}) : cfg_(cfg) {
     // Ensure built-in help is registered.
-    detail::RegisterHelpOnce();
+    detail::RegisterBuiltinsOnce();
   }
 
   ~DebugShell() { Stop(); }
@@ -1162,7 +1462,9 @@ inline expected<void, ShellError> DebugShell::Start() {
   struct sockaddr_in addr;
   std::memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = socket_api::Htonl(INADDR_ANY);
+  if (nullptr == cfg_.bind_ip || 1 != ::inet_pton(AF_INET, cfg_.bind_ip, &addr.sin_addr)) {
+    return expected<void, ShellError>::error(ShellError::kBindFailed);
+  }
   addr.sin_port = socket_api::Htons(cfg_.port);
 
   if (socket_api::Bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -1287,7 +1589,7 @@ inline void DebugShell::AcceptLoop() {
         // Initialize session for TCP telnet.
         detail::ShellSessionInit(sessions_[i], client_fd, client_fd, detail::ShellTcpWrite, detail::ShellTcpRead, true);
         sessions_[i].authenticated = (cfg_.username == nullptr);
-        sessions_[i].auth_attempts = 0;
+        sessions_[i].admin = (cfg_.username == nullptr);
         sessions_[i].active.store(true, std::memory_order_release);
         if (sessions_[i].thread.Start(ThreadOptions{"shl-sess"}, [this, i]() { SessionLoop(sessions_[i]); })) {
           placed = true;
@@ -1329,15 +1631,17 @@ inline bool DebugShell::RunAuth(Session& s) {
       char ch = detail::FilterIac(s, byte);
       if (ch == '\0')
         continue;
-      if (ch == '\r' || ch == '\n') {
-        if (ch == '\r')
-          s.skip_next_lf = true;
-        break;
-      }
+      // CRLF dedup must run before the line terminator check, otherwise the
+      // '\n' of a "\r\n" pair terminates the next field as an empty value.
       if (s.skip_next_lf) {
         s.skip_next_lf = false;
         if (ch == '\n')
           continue;
+      }
+      if (ch == '\r' || ch == '\n') {
+        if (ch == '\r')
+          s.skip_next_lf = true;
+        break;
       }
       if (ch == 0x7F || ch == 0x08) {
         if (upos > 0) {
@@ -1365,15 +1669,15 @@ inline bool DebugShell::RunAuth(Session& s) {
       char ch = detail::FilterIac(s, byte);
       if (ch == '\0')
         continue;
-      if (ch == '\r' || ch == '\n') {
-        if (ch == '\r')
-          s.skip_next_lf = true;
-        break;
-      }
       if (s.skip_next_lf) {
         s.skip_next_lf = false;
         if (ch == '\n')
           continue;
+      }
+      if (ch == '\r' || ch == '\n') {
+        if (ch == '\r')
+          s.skip_next_lf = true;
+        break;
       }
       if (ch == 0x7F || ch == 0x08) {
         if (ppos > 0) {
@@ -1390,14 +1694,26 @@ inline bool DebugShell::RunAuth(Session& s) {
     pass_buf[ppos] = '\0';
     detail::ShellSessionWrite(s, "\r\n");
 
-    // Verify credentials.
-    if (ConstantTimeEquals(user_buf, cfg_.username) && ConstantTimeEquals(pass_buf, cfg_.password)) {
+    // Verify credentials. Both comparisons always run to avoid timing bias.
+    const bool user_ok = ConstantTimeEquals(user_buf, cfg_.username);
+    const bool pass_ok = ConstantTimeEquals(pass_buf, cfg_.password);
+    bool ok = user_ok && pass_ok;
+    bool admin = false;
+    if (!ok && nullptr != cfg_.admin_username && nullptr != cfg_.admin_password) {
+      admin = ConstantTimeEquals(user_buf, cfg_.admin_username) && ConstantTimeEquals(pass_buf, cfg_.admin_password);
+      ok = admin;
+    }
+    if (ok) {
+      // With a single credential pair there is no separate admin identity.
+      s.admin = admin || (nullptr == cfg_.admin_username);
       s.authenticated = true;
       detail::ShellSessionWrite(s, "\r\nAuthenticated.\r\n\r\n");
       return true;
     }
     ++s.auth_attempts;
     detail::ShellSessionWrite(s, "\r\nLogin incorrect.\r\n\r\n");
+    // Slow down brute force. Only this session thread sleeps.
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
   }
   detail::ShellSessionWrite(s, "Too many attempts. Disconnecting.\r\n");
   return false;
@@ -1516,7 +1832,7 @@ class ConsoleShell final {
     Config() noexcept : prompt("osp> "), read_fd(STDIN_FILENO), write_fd(STDOUT_FILENO), raw_mode(true) {}
   };
 
-  explicit ConsoleShell(const Config& cfg = Config{}) : cfg_(cfg) { detail::RegisterHelpOnce(); }
+  explicit ConsoleShell(const Config& cfg = Config{}) : cfg_(cfg) { detail::RegisterBuiltinsOnce(); }
 
   ~ConsoleShell() { Stop(); }
 
@@ -1583,6 +1899,7 @@ inline expected<void, ShellError> ConsoleShell::Start() noexcept {
 
   detail::ShellSessionInit(session_, cfg_.read_fd, cfg_.write_fd, detail::ShellPosixWrite, detail::ShellPosixRead,
                            false);
+  session_.admin = true;  // Local console is a trusted session.
 
   running_.store(true, std::memory_order_release);
   (void)thread_.Start(ThreadOptions{"shl-con"}, [this]() { RunLoop(); });
@@ -1607,6 +1924,7 @@ inline void ConsoleShell::Run() noexcept {
 
   detail::ShellSessionInit(session_, cfg_.read_fd, cfg_.write_fd, detail::ShellPosixWrite, detail::ShellPosixRead,
                            false);
+  session_.admin = true;  // Local console is a trusted session.
   running_.store(true, std::memory_order_release);
 
   RunLoop();
@@ -1672,7 +1990,7 @@ class UartShell final {
     Config() noexcept : device("/dev/ttyS0"), baudrate(115200), prompt("osp> "), override_fd(-1) {}
   };
 
-  explicit UartShell(const Config& cfg = Config{}) : cfg_(cfg) { detail::RegisterHelpOnce(); }
+  explicit UartShell(const Config& cfg = Config{}) : cfg_(cfg) { detail::RegisterBuiltinsOnce(); }
 
   ~UartShell() { Stop(); }
 
@@ -1770,6 +2088,7 @@ inline expected<void, ShellError> UartShell::Start() noexcept {
   }
 
   detail::ShellSessionInit(session_, uart_fd_, uart_fd_, detail::ShellPosixWrite, detail::ShellPosixRead, false);
+  session_.admin = true;  // Local UART is a trusted session.
 
   running_.store(true, std::memory_order_release);
   (void)thread_.Start(ThreadOptions{"shl-uart"}, [this]() { RunLoop(); });

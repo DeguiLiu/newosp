@@ -186,12 +186,13 @@ inline void RegisterBusStats(BusType& bus) {
 
   static const ShellSubCmd kSubs[] = {
       {"status", nullptr, "Show bus statistics", +sub_status},
-      {"reset", nullptr, "Reset all counters", +sub_reset},
+      {"reset", nullptr, "Reset all counters", +sub_reset, ShellCmdFlags::kAdmin},
   };
 
   static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 2U, +show_status); };
 
-  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_bus", +cmd, "AsyncBus statistics and control");
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_bus", +cmd, "AsyncBus statistics and control",
+                                                           ShellCmdFlags::kNone, kSubs, 2U);
 }
 
 /// Register osp_pool command.
@@ -407,17 +408,18 @@ inline void RegisterLifecycle(LifecycleNodeType& node) {
 
   static const ShellSubCmd kSubs[] = {
       {"status", nullptr, "Show current state", +sub_status},
-      {"configure", nullptr, "Transition: configure", +sub_configure},
-      {"activate", nullptr, "Transition: activate", +sub_activate},
-      {"deactivate", nullptr, "Transition: deactivate", +sub_deactivate},
-      {"cleanup", nullptr, "Transition: cleanup", +sub_cleanup},
-      {"shutdown", nullptr, "Transition: shutdown", +sub_shutdown},
+      {"configure", nullptr, "Transition: configure", +sub_configure, ShellCmdFlags::kAdmin},
+      {"activate", nullptr, "Transition: activate", +sub_activate, ShellCmdFlags::kAdmin},
+      {"deactivate", nullptr, "Transition: deactivate", +sub_deactivate, ShellCmdFlags::kAdmin},
+      {"cleanup", nullptr, "Transition: cleanup", +sub_cleanup, ShellCmdFlags::kAdmin},
+      {"shutdown", nullptr, "Transition: shutdown", +sub_shutdown, ShellCmdFlags::kAdmin},
   };
 
   static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 6U, +show_status); };
 
   (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_lifecycle", +cmd,
-                                                            "Lifecycle node state and transitions");
+                                                            "Lifecycle node state and transitions",
+                                                            ShellCmdFlags::kNone, kSubs, 6U);
 }
 
 /// Register osp_qos command (prints a QoS profile).
@@ -554,12 +556,13 @@ inline void RegisterLog() {
 
   static const ShellSubCmd kSubs[] = {
       {"status", nullptr, "Show current log level", +sub_status},
-      {"level", "<0-5|debug|info|warn|error|fatal|off>", "Set log level", +sub_level},
+      {"level", "<0-5|debug|info|warn|error|fatal|off>", "Set log level", +sub_level, ShellCmdFlags::kAdmin},
   };
 
   static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 2U, +show_status); };
 
-  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_log", +cmd, "Log level display and control");
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_log", +cmd, "Log level display and control",
+                                                           ShellCmdFlags::kNone, kSubs, 2U);
 }
 
 /// Register osp_config command.
@@ -615,12 +618,14 @@ inline void RegisterConfig(ConfigType& cfg) {
   static const ShellSubCmd kSubs[] = {
       {"list", "[section]", "List config entries", +sub_list},
       {"get", "<section> <key>", "Get a config value", +sub_get},
-      {"set", "<section> <key> <value>", "Set a config value (in-memory)", +sub_set},
+      {"set", "<section> <key> <value>", "Set a config value (in-memory)", +sub_set, ShellCmdFlags::kAdmin},
   };
 
   static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 3U, +show_list); };
 
-  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_config", +cmd, "Runtime config view and modification");
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_config", +cmd,
+                                                           "Runtime config view and modification",
+                                                           ShellCmdFlags::kNone, kSubs, 3U);
 }
 
 }  // namespace shell_cmd

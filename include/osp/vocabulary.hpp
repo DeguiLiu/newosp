@@ -64,7 +64,8 @@ enum class ShellError : uint8_t {
   kBindFailed,
   kAlreadyRunning,
   kAuthFailed,
-  kDeviceOpenFailed
+  kDeviceOpenFailed,
+  kInvalidArgument
 };
 
 enum class MemPoolError : uint8_t { kPoolExhausted = 0, kInvalidPointer };

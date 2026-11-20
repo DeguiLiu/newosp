@@ -16,6 +16,7 @@
 // PTY support for UART tests.
 #include <fcntl.h>
 #include <stdlib.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 static int test_cmd_a(int /*argc*/, char* /*argv*/[]) {
@@ -461,11 +462,23 @@ TEST_CASE("FilterIac: subnegotiation consumed", "[shell][iac]") {
   REQUIRE(osp::detail::FilterIac(s, 'x') == '\0');
 
   // IAC SE (0xFF 0xF0) ends subnegotiation.
-  REQUIRE(osp::detail::FilterIac(s, 0xFF) == '\0');  // -> kIac
-  REQUIRE(s.iac_state == osp::detail::ShellSession::IacState::kIac);
-  // SE (0xF0) is not WILL/WONT/DO/DONT/SB, so resets to kNormal.
+  REQUIRE(osp::detail::FilterIac(s, 0xFF) == '\0');  // -> kSubIac
+  REQUIRE(s.iac_state == osp::detail::ShellSession::IacState::kSubIac);
   REQUIRE(osp::detail::FilterIac(s, 0xF0) == '\0');
   REQUIRE(s.iac_state == osp::detail::ShellSession::IacState::kNormal);
+
+  // Regression: an IAC followed by a non-SE byte inside a subnegotiation must
+  // stay inside it, otherwise payload bytes leak into the command stream.
+  REQUIRE(osp::detail::FilterIac(s, 0xFF) == '\0');
+  REQUIRE(osp::detail::FilterIac(s, 0xFA) == '\0');
+  REQUIRE(osp::detail::FilterIac(s, 0xFF) == '\0');
+  REQUIRE(osp::detail::FilterIac(s, 0x01) == '\0');
+  REQUIRE(s.iac_state == osp::detail::ShellSession::IacState::kSub);
+  REQUIRE(osp::detail::FilterIac(s, 'z') == '\0');
+  REQUIRE(osp::detail::FilterIac(s, 0xFF) == '\0');
+  REQUIRE(osp::detail::FilterIac(s, 0xF0) == '\0');
+  REQUIRE(s.iac_state == osp::detail::ShellSession::IacState::kNormal);
+  REQUIRE(osp::detail::FilterIac(s, 'q') == 'q');
 }
 
 TEST_CASE("FilterIac: IAC IAC produces literal 0xFF", "[shell][iac]") {
@@ -1163,4 +1176,192 @@ TEST_CASE("ReplaceLine: updates line buffer and position", "[shell][edit]") {
 
   REQUIRE(s.line_pos == 11);
   REQUIRE(std::strcmp(s.line_buf, "new_content") == 0);
+}
+
+// ============================================================================
+// Command privilege tests
+// ============================================================================
+
+namespace {
+
+int priv_echo_cmd(int /*argc*/, char* /*argv*/[]) {
+  osp::ShellPrintf("priv-ran\r\n");
+  return 0;
+}
+
+std::string ReadPending(int fd) {
+  std::string out;
+  char buf[256];
+  ssize_t n = 0;
+  while ((n = ::recv(fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+    out.append(buf, static_cast<std::size_t>(n));
+  }
+  return out;
+}
+
+void ExecuteLine(osp::detail::ShellSession& s, const char* line, bool admin) {
+  std::strncpy(s.line_buf, line, sizeof(s.line_buf) - 1U);
+  s.line_pos = static_cast<uint32_t>(std::strlen(line));
+  s.admin = admin;
+  osp::detail::ShellExecuteLine(s);
+  s.line_pos = 0;
+  s.line_buf[0] = '\0';
+}
+
+}  // namespace
+
+TEST_CASE("GlobalCmdRegistry stores the admin flag", "[shell][privilege]") {
+  auto& reg = osp::detail::GlobalCmdRegistry::Instance();
+  (void)reg.Register("priv_admin_unique", priv_echo_cmd, "admin only", osp::ShellCmdFlags::kAdmin);
+  (void)reg.Register("priv_user_unique", priv_echo_cmd, "user command");
+  REQUIRE(reg.Find("priv_admin_unique")->flags == osp::ShellCmdFlags::kAdmin);
+  REQUIRE(reg.Find("priv_user_unique")->flags == osp::ShellCmdFlags::kNone);
+}
+
+TEST_CASE("ShellExecuteLine denies admin commands to user sessions", "[shell][privilege]") {
+  int sv[2];
+  REQUIRE(0 == ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+  osp::detail::ShellSession s{};
+  osp::detail::ShellSessionInit(s, sv[0], sv[0], osp::detail::ShellTcpWrite, osp::detail::ShellTcpRead, true);
+
+  ExecuteLine(s, "priv_admin_unique", false);
+  REQUIRE(ReadPending(sv[1]).find("permission denied") != std::string::npos);
+
+  ExecuteLine(s, "priv_admin_unique", true);
+  REQUIRE(ReadPending(sv[1]).find("priv-ran") != std::string::npos);
+
+  ExecuteLine(s, "help priv_admin_unique", false);
+  REQUIRE(ReadPending(sv[1]).find("[admin]") != std::string::npos);
+
+  ExecuteLine(s, "history", false);
+  REQUIRE(ReadPending(sv[1]).find("priv_admin_unique") != std::string::npos);
+
+  ::close(sv[0]);
+  ::close(sv[1]);
+}
+
+TEST_CASE("ShellDispatch gates admin subcommands", "[shell][privilege]") {
+  const osp::ShellSubCmd kSubs[] = {
+      {"open", nullptr, "open sub", priv_echo_cmd},
+      {"locked", nullptr, "admin sub", priv_echo_cmd, osp::ShellCmdFlags::kAdmin},
+  };
+  int sv[2];
+  REQUIRE(0 == ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+  osp::detail::ShellSession s{};
+  osp::detail::ShellSessionInit(s, sv[0], sv[0], osp::detail::ShellTcpWrite, osp::detail::ShellTcpRead, true);
+  osp::detail::CurrentSession() = &s;
+
+  char name[] = "fam";
+  char sub[] = "locked";
+  char* argv[] = {name, sub};
+  s.admin = false;
+  REQUIRE(-1 == osp::ShellDispatch(2, argv, kSubs, 2U, nullptr));
+  REQUIRE(ReadPending(sv[1]).find("permission denied") != std::string::npos);
+
+  s.admin = true;
+  REQUIRE(0 == osp::ShellDispatch(2, argv, kSubs, 2U, nullptr));
+  REQUIRE(ReadPending(sv[1]).find("priv-ran") != std::string::npos);
+
+  osp::detail::CurrentSession() = nullptr;
+  ::close(sv[0]);
+  ::close(sv[1]);
+}
+
+TEST_CASE("Tab completion completes subcommand tokens", "[shell][completion]") {
+  static const osp::ShellSubCmd kSubs[] = {
+      {"status", nullptr, "status", priv_echo_cmd},
+      {"set", nullptr, "set", priv_echo_cmd},
+      {"start", nullptr, "start", priv_echo_cmd},
+  };
+  auto& reg = osp::detail::GlobalCmdRegistry::Instance();
+  (void)reg.Register("fam_unique", priv_echo_cmd, "family", osp::ShellCmdFlags::kNone, kSubs, 3U);
+
+  int sv[2];
+  REQUIRE(0 == ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+  osp::detail::ShellSession s{};
+  osp::detail::ShellSessionInit(s, sv[0], sv[0], osp::detail::ShellTcpWrite, osp::detail::ShellTcpRead, true);
+
+  // Two candidates sharing "st": list them and keep the common prefix.
+  std::strcpy(s.line_buf, "fam_unique st");
+  s.line_pos = static_cast<uint32_t>(std::strlen(s.line_buf));
+  osp::detail::TabComplete(s, "osp> ");
+  const std::string listed = ReadPending(sv[1]);
+  REQUIRE(listed.find("status") != std::string::npos);
+  REQUIRE(listed.find("start") != std::string::npos);
+  REQUIRE(std::strcmp(s.line_buf, "fam_unique sta") == 0);
+
+  // Unique candidate: complete and append a space.
+  std::strcpy(s.line_buf, "fam_unique se");
+  s.line_pos = static_cast<uint32_t>(std::strlen(s.line_buf));
+  osp::detail::TabComplete(s, "osp> ");
+  (void)ReadPending(sv[1]);
+  REQUIRE(std::strcmp(s.line_buf, "fam_unique set ") == 0);
+
+  ::close(sv[0]);
+  ::close(sv[1]);
+}
+
+TEST_CASE("Aliases resolve to their target command", "[shell][alias]") {
+  auto& reg = osp::detail::GlobalCmdRegistry::Instance();
+  (void)reg.Register("alias_target_unique", priv_echo_cmd, "target command");
+  REQUIRE(reg.RegisterAlias("at_alias_unique", "alias_target_unique", "alias").has_value());
+  const osp::ShellCmd* cmd = reg.Find("at_alias_unique");
+  REQUIRE(cmd != nullptr);
+  REQUIRE(cmd->func == priv_echo_cmd);
+
+  int sv[2];
+  REQUIRE(0 == ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+  osp::detail::ShellSession s{};
+  osp::detail::ShellSessionInit(s, sv[0], sv[0], osp::detail::ShellTcpWrite, osp::detail::ShellTcpRead, true);
+
+  ExecuteLine(s, "at_alias_unique", true);
+  REQUIRE(ReadPending(sv[1]).find("priv-ran") != std::string::npos);
+
+  ::close(sv[0]);
+  ::close(sv[1]);
+}
+
+TEST_CASE("help shows subcommand usage and admin marks", "[shell][help]") {
+  static const osp::ShellSubCmd kSubs[] = {
+      {"status", nullptr, "show status", priv_echo_cmd},
+      {"set", "<value>", "set value", priv_echo_cmd, osp::ShellCmdFlags::kAdmin},
+  };
+  auto& reg = osp::detail::GlobalCmdRegistry::Instance();
+  (void)reg.Register("help_sub_unique", priv_echo_cmd, "family command", osp::ShellCmdFlags::kNone, kSubs, 2U);
+
+  int sv[2];
+  REQUIRE(0 == ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+  osp::detail::ShellSession s{};
+  osp::detail::ShellSessionInit(s, sv[0], sv[0], osp::detail::ShellTcpWrite, osp::detail::ShellTcpRead, true);
+
+  ExecuteLine(s, "help help_sub_unique", true);
+  const std::string out = ReadPending(sv[1]);
+  REQUIRE(out.find("Usage: help_sub_unique <subcommand>") != std::string::npos);
+  REQUIRE(out.find("set") != std::string::npos);
+  REQUIRE(out.find("[admin]") != std::string::npos);
+
+  // Prefix search lists the family.
+  ExecuteLine(s, "help help_sub_", true);
+  REQUIRE(ReadPending(sv[1]).find("help_sub_unique") != std::string::npos);
+
+  ::close(sv[0]);
+  ::close(sv[1]);
+}
+
+TEST_CASE("unknown command suggests similar names", "[shell][suggest]") {
+  auto& reg = osp::detail::GlobalCmdRegistry::Instance();
+  (void)reg.Register("suggest_target_unique", priv_echo_cmd, "target command");
+
+  int sv[2];
+  REQUIRE(0 == ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+  osp::detail::ShellSession s{};
+  osp::detail::ShellSessionInit(s, sv[0], sv[0], osp::detail::ShellTcpWrite, osp::detail::ShellTcpRead, true);
+
+  ExecuteLine(s, "suggest_targ_unique", true);
+  const std::string out = ReadPending(sv[1]);
+  REQUIRE(out.find("unknown command") != std::string::npos);
+  REQUIRE(out.find("did you mean: suggest_target_unique") != std::string::npos);
+
+  ::close(sv[0]);
+  ::close(sv[1]);
 }
