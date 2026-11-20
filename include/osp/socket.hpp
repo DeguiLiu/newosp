@@ -42,6 +42,7 @@
 #if OSP_HAS_NETWORK
 
 #include <cerrno>
+#include <array>
 #include <cstring>
 
 #if OSP_NET_BACKEND == 1
@@ -454,6 +455,27 @@ class SocketAddress {
       return expected<SocketAddress, SocketError>::error(SocketError::kInvalidFd);
     }
     return expected<SocketAddress, SocketError>::success(sa);
+  }
+
+  /**
+   * @brief Create an IPv4 socket address from four octets and a host-order port.
+   *
+   * Avoids the text round trip of FromIpv4() when the address is already bytes.
+   */
+  static expected<SocketAddress, SocketError> FromIpv4Bytes(
+      const std::array<uint8_t, 4>& ip, uint16_t port) noexcept {
+    SocketAddress sa;
+    sa.addr_.sin_family = AF_INET;
+    sa.addr_.sin_port = socket_api::Htons(port);
+    std::memcpy(&sa.addr_.sin_addr, ip.data(), ip.size());
+    return expected<SocketAddress, SocketError>::success(sa);
+  }
+
+  /** @brief The IPv4 address octets, in wire order. */
+  std::array<uint8_t, 4> Ipv4Address() const noexcept {
+    std::array<uint8_t, 4> octets{};
+    std::memcpy(octets.data(), &addr_.sin_addr, octets.size());
+    return octets;
   }
 
   /** @brief Raw pointer to the underlying sockaddr structure. */
