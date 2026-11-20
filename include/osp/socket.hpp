@@ -704,6 +704,70 @@ class UdpSocket {
     return expected<void, SocketError>::success();
   }
 
+  /** @brief Allow binding to a port another socket already bound. */
+  expected<void, SocketError> SetReuseAddress(bool enable) noexcept {
+    if (fd_ < 0) {
+      return expected<void, SocketError>::error(SocketError::kInvalidFd);
+    }
+    int32_t option = enable ? 1 : 0;
+    if (socket_api::SetSockOpt(fd_, SOL_SOCKET, SO_REUSEADDR, &option,
+                               static_cast<socklen_t>(sizeof(option))) < 0) {
+      return expected<void, SocketError>::error(SocketError::kSetOptFailed);
+    }
+    return expected<void, SocketError>::success();
+  }
+
+  /**
+   * @brief Join an IPv4 multicast group on @p interface_address (all-zero = any).
+   *
+   * Used by SOME/IP-SD to receive FindService and Subscribe messages sent to
+   * 239.255.0.255:30490.
+   */
+  expected<void, SocketError> JoinMulticastGroup(
+      const SocketAddress& group, const std::array<uint8_t, 4>& interface_address) noexcept {
+#if defined(IP_ADD_MEMBERSHIP)
+    if (fd_ < 0) {
+      return expected<void, SocketError>::error(SocketError::kInvalidFd);
+    }
+    ip_mreq request{};
+    const std::array<uint8_t, 4> group_octets = group.Ipv4Address();
+    std::memcpy(&request.imr_multiaddr, group_octets.data(), group_octets.size());
+    std::memcpy(&request.imr_interface, interface_address.data(), interface_address.size());
+    if (socket_api::SetSockOpt(fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &request,
+                               static_cast<socklen_t>(sizeof(request))) < 0) {
+      return expected<void, SocketError>::error(SocketError::kSetOptFailed);
+    }
+    return expected<void, SocketError>::success();
+#else
+    (void)group;
+    (void)interface_address;
+    return expected<void, SocketError>::error(SocketError::kNotSupported);
+#endif
+  }
+
+  /** @brief Leave an IPv4 multicast group previously joined on the same interface. */
+  expected<void, SocketError> LeaveMulticastGroup(
+      const SocketAddress& group, const std::array<uint8_t, 4>& interface_address) noexcept {
+#if defined(IP_DROP_MEMBERSHIP)
+    if (fd_ < 0) {
+      return expected<void, SocketError>::error(SocketError::kInvalidFd);
+    }
+    ip_mreq request{};
+    const std::array<uint8_t, 4> group_octets = group.Ipv4Address();
+    std::memcpy(&request.imr_multiaddr, group_octets.data(), group_octets.size());
+    std::memcpy(&request.imr_interface, interface_address.data(), interface_address.size());
+    if (socket_api::SetSockOpt(fd_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &request,
+                               static_cast<socklen_t>(sizeof(request))) < 0) {
+      return expected<void, SocketError>::error(SocketError::kSetOptFailed);
+    }
+    return expected<void, SocketError>::success();
+#else
+    (void)group;
+    (void)interface_address;
+    return expected<void, SocketError>::error(SocketError::kNotSupported);
+#endif
+  }
+
   expected<int32_t, SocketError> SendTo(const void* data, size_t len, const SocketAddress& dest) noexcept {
     if (fd_ < 0) {
       return expected<int32_t, SocketError>::error(SocketError::kInvalidFd);
