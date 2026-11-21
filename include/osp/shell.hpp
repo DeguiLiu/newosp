@@ -112,13 +112,13 @@ struct ShellSubCmd;  // defined after the session/argument helpers
 
 /// @brief Descriptor for a registered shell command.
 struct ShellCmd {
-  const char* name;                      ///< Command name (string literal or static).
-  const char* desc;                      ///< Human-readable description.
-  ShellCmdFn func;                       ///< Callback to invoke.
+  const char* name;                           ///< Command name (string literal or static).
+  const char* desc;                           ///< Human-readable description.
+  ShellCmdFn func;                            ///< Callback to invoke.
   ShellCmdFlags flags{ShellCmdFlags::kNone};  ///< Privilege requirement.
-  const ShellSubCmd* subs{nullptr};      ///< Optional subcommand table.
-  uint32_t sub_count{0U};                ///< Number of entries in `subs`.
-  const char* alias_of{nullptr};         ///< Target command name for aliases.
+  const ShellSubCmd* subs{nullptr};           ///< Optional subcommand table.
+  uint32_t sub_count{0U};                     ///< Number of entries in `subs`.
+  const char* alias_of{nullptr};              ///< Target command name for aliases.
 };
 
 // ============================================================================
@@ -410,9 +410,9 @@ class GlobalCmdRegistry final {
    *         failure.
    */
   [[nodiscard]] inline expected<void, ShellError> Register(const char* name, ShellCmdFn fn, const char* desc,
-                                                          ShellCmdFlags flags = ShellCmdFlags::kNone,
-                                                          const ShellSubCmd* subs = nullptr,
-                                                          uint32_t sub_count = 0U) noexcept;
+                                                           ShellCmdFlags flags = ShellCmdFlags::kNone,
+                                                           const ShellSubCmd* subs = nullptr,
+                                                           uint32_t sub_count = 0U) noexcept;
 
   /**
    * @brief Register an alias for an existing command.
@@ -490,7 +490,7 @@ inline expected<void, ShellError> GlobalCmdRegistry::Register(const char* name, 
 }
 
 inline expected<void, ShellError> GlobalCmdRegistry::RegisterAlias(const char* alias, const char* target,
-                                                                  const char* desc) noexcept {
+                                                                   const char* desc) noexcept {
   if (nullptr == alias || nullptr == target || '\0' == alias[0] || '\0' == target[0]) {
     return expected<void, ShellError>::error(ShellError::kInvalidArgument);
   }
@@ -659,10 +659,10 @@ inline int ShellSplit(char* cmd, uint32_t length, char* argv[kMaxArgs]) {
 
 /// @brief Subcommand descriptor for dispatch table.
 struct ShellSubCmd {
-  const char* name;       ///< Subcommand name (e.g. "status", "set").
-  const char* args_desc;  ///< Argument hint (e.g. "<level>"), nullptr if none.
-  const char* help;       ///< One-line help text.
-  ShellCmdFn handler;     ///< Subcommand handler.
+  const char* name;                           ///< Subcommand name (e.g. "status", "set").
+  const char* args_desc;                      ///< Argument hint (e.g. "<level>"), nullptr if none.
+  const char* help;                           ///< One-line help text.
+  ShellCmdFn handler;                         ///< Subcommand handler.
   ShellCmdFlags flags{ShellCmdFlags::kNone};  ///< Privilege requirement.
 };
 
@@ -715,7 +715,6 @@ struct ShellSubCmd {
   out_buf[copy] = '\0';
   return matches;
 }
-
 
 /// @brief Parse a string as int32_t (base 10).
 /// Rejects null, empty, trailing non-digit characters, and overflow.
@@ -1060,8 +1059,7 @@ inline void ShellExecuteLine(ShellSession& s) {
  */
 class ShellAutoReg {
  public:
-  ShellAutoReg(const char* name, ShellCmdFn func, const char* desc,
-               ShellCmdFlags flags = ShellCmdFlags::kNone) {
+  ShellAutoReg(const char* name, ShellCmdFn func, const char* desc, ShellCmdFlags flags = ShellCmdFlags::kNone) {
     (void)detail::GlobalCmdRegistry::Instance().Register(name, func, desc, flags);
   }
 };
@@ -1319,15 +1317,15 @@ class DebugShell final {
  public:
   /// @brief Shell configuration.
   struct Config {
-    uint16_t port;             ///< TCP listen port.
-    uint32_t max_connections;  ///< Maximum concurrent sessions.
-    const char* prompt;        ///< Prompt string sent to clients.
-    const char* banner;        ///< Banner shown on connect (nullptr = none).
-    const char* username;      ///< Auth username (nullptr = no auth).
-    const char* password;      ///< Auth password.
+    uint16_t port;               ///< TCP listen port.
+    uint32_t max_connections;    ///< Maximum concurrent sessions.
+    const char* prompt;          ///< Prompt string sent to clients.
+    const char* banner;          ///< Banner shown on connect (nullptr = none).
+    const char* username;        ///< Auth username (nullptr = no auth).
+    const char* password;        ///< Auth password.
     const char* admin_username;  ///< Optional admin username (admin commands).
     const char* admin_password;  ///< Optional admin password.
-    const char* bind_ip;       ///< Listen address; "0.0.0.0" accepts any.
+    const char* bind_ip;         ///< Listen address; "0.0.0.0" accepts any.
 
     Config() noexcept
         : port(5090),

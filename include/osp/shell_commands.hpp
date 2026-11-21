@@ -192,7 +192,7 @@ inline void RegisterBusStats(BusType& bus) {
   static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 2U, +show_status); };
 
   (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_bus", +cmd, "AsyncBus statistics and control",
-                                                           ShellCmdFlags::kNone, kSubs, 2U);
+                                                            ShellCmdFlags::kNone, kSubs, 2U);
 }
 
 /// Register osp_pool command.
@@ -417,9 +417,8 @@ inline void RegisterLifecycle(LifecycleNodeType& node) {
 
   static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 6U, +show_status); };
 
-  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_lifecycle", +cmd,
-                                                            "Lifecycle node state and transitions",
-                                                            ShellCmdFlags::kNone, kSubs, 6U);
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register(
+      "osp_lifecycle", +cmd, "Lifecycle node state and transitions", ShellCmdFlags::kNone, kSubs, 6U);
 }
 
 /// Register osp_qos command (prints a QoS profile).
@@ -562,7 +561,7 @@ inline void RegisterLog() {
   static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 2U, +show_status); };
 
   (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_log", +cmd, "Log level display and control",
-                                                           ShellCmdFlags::kNone, kSubs, 2U);
+                                                            ShellCmdFlags::kNone, kSubs, 2U);
 }
 
 /// Register osp_config command.
@@ -623,9 +622,8 @@ inline void RegisterConfig(ConfigType& cfg) {
 
   static auto cmd = [](int argc, char* argv[]) -> int { return ShellDispatch(argc, argv, kSubs, 3U, +show_list); };
 
-  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_config", +cmd,
-                                                           "Runtime config view and modification",
-                                                           ShellCmdFlags::kNone, kSubs, 3U);
+  (void)osp::detail::GlobalCmdRegistry::Instance().Register("osp_config", +cmd, "Runtime config view and modification",
+                                                            ShellCmdFlags::kNone, kSubs, 3U);
 }
 
 }  // namespace shell_cmd

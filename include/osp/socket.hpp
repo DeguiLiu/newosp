@@ -42,8 +42,9 @@
 #if OSP_HAS_NETWORK
 
 #include <cerrno>
-#include <array>
 #include <cstring>
+
+#include <array>
 
 #if OSP_NET_BACKEND == 1
 // RT-Thread SAL / lwIP socket API. LWIP_COMPAT_SOCKETS must be 0 (its lwip
@@ -462,8 +463,7 @@ class SocketAddress {
    *
    * Avoids the text round trip of FromIpv4() when the address is already bytes.
    */
-  static expected<SocketAddress, SocketError> FromIpv4Bytes(
-      const std::array<uint8_t, 4>& ip, uint16_t port) noexcept {
+  static expected<SocketAddress, SocketError> FromIpv4Bytes(const std::array<uint8_t, 4>& ip, uint16_t port) noexcept {
     SocketAddress sa;
     sa.addr_.sin_family = AF_INET;
     sa.addr_.sin_port = socket_api::Htons(port);
@@ -710,8 +710,7 @@ class UdpSocket {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
     }
     int32_t option = enable ? 1 : 0;
-    if (socket_api::SetSockOpt(fd_, SOL_SOCKET, SO_REUSEADDR, &option,
-                               static_cast<socklen_t>(sizeof(option))) < 0) {
+    if (socket_api::SetSockOpt(fd_, SOL_SOCKET, SO_REUSEADDR, &option, static_cast<socklen_t>(sizeof(option))) < 0) {
       return expected<void, SocketError>::error(SocketError::kSetOptFailed);
     }
     return expected<void, SocketError>::success();
@@ -723,8 +722,8 @@ class UdpSocket {
    * Used by SOME/IP-SD to receive FindService and Subscribe messages sent to
    * 239.255.0.255:30490.
    */
-  expected<void, SocketError> JoinMulticastGroup(
-      const SocketAddress& group, const std::array<uint8_t, 4>& interface_address) noexcept {
+  expected<void, SocketError> JoinMulticastGroup(const SocketAddress& group,
+                                                 const std::array<uint8_t, 4>& interface_address) noexcept {
 #if defined(IP_ADD_MEMBERSHIP)
     if (fd_ < 0) {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
@@ -733,8 +732,8 @@ class UdpSocket {
     const std::array<uint8_t, 4> group_octets = group.Ipv4Address();
     std::memcpy(&request.imr_multiaddr, group_octets.data(), group_octets.size());
     std::memcpy(&request.imr_interface, interface_address.data(), interface_address.size());
-    if (socket_api::SetSockOpt(fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &request,
-                               static_cast<socklen_t>(sizeof(request))) < 0) {
+    if (socket_api::SetSockOpt(fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &request, static_cast<socklen_t>(sizeof(request))) <
+        0) {
       return expected<void, SocketError>::error(SocketError::kSetOptFailed);
     }
     return expected<void, SocketError>::success();
@@ -746,8 +745,8 @@ class UdpSocket {
   }
 
   /** @brief Leave an IPv4 multicast group previously joined on the same interface. */
-  expected<void, SocketError> LeaveMulticastGroup(
-      const SocketAddress& group, const std::array<uint8_t, 4>& interface_address) noexcept {
+  expected<void, SocketError> LeaveMulticastGroup(const SocketAddress& group,
+                                                  const std::array<uint8_t, 4>& interface_address) noexcept {
 #if defined(IP_DROP_MEMBERSHIP)
     if (fd_ < 0) {
       return expected<void, SocketError>::error(SocketError::kInvalidFd);
@@ -756,8 +755,8 @@ class UdpSocket {
     const std::array<uint8_t, 4> group_octets = group.Ipv4Address();
     std::memcpy(&request.imr_multiaddr, group_octets.data(), group_octets.size());
     std::memcpy(&request.imr_interface, interface_address.data(), interface_address.size());
-    if (socket_api::SetSockOpt(fd_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &request,
-                               static_cast<socklen_t>(sizeof(request))) < 0) {
+    if (socket_api::SetSockOpt(fd_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &request, static_cast<socklen_t>(sizeof(request))) <
+        0) {
       return expected<void, SocketError>::error(SocketError::kSetOptFailed);
     }
     return expected<void, SocketError>::success();
