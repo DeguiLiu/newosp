@@ -1219,6 +1219,11 @@ TEST_CASE("GlobalCmdRegistry stores the admin flag", "[shell][privilege]") {
 }
 
 TEST_CASE("ShellExecuteLine denies admin commands to user sessions", "[shell][privilege]") {
+  // ctest runs every case in its own process, so this case cannot rely on the
+  // registration done by the test above.
+  auto& reg = osp::detail::GlobalCmdRegistry::Instance();
+  (void)reg.Register("priv_admin_unique", priv_echo_cmd, "admin only", osp::ShellCmdFlags::kAdmin);
+
   int sv[2];
   REQUIRE(0 == ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
   osp::detail::ShellSession s{};
