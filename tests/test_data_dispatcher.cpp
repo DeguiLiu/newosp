@@ -19,8 +19,8 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <thread>
-#include <utility>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 using namespace osp;
@@ -1517,4 +1517,69 @@ TEST_CASE("ShmStore cross-process: concurrent alloc and release", "[job_pool][Sh
   REQUIRE(parent_d.AllocBlocks() == 0U);
 
   CleanupTestShm(shm_name, ptr, size);
+}
+
+// ============================================================================
+// Pipeline -- failing handler (P1-6)
+// ============================================================================
+
+TEST_CASE("Pipeline: failing handler aborts the block and skips successors", "[job_pool][pipeline][failure]") {
+  std::atomic<uint32_t> s0_calls{0U};
+  std::atomic<uint32_t> s1_calls{0U};
+  std::atomic<uint32_t> faults{0U};
+
+  auto fail_handler = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* ctx) {
+    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
+    return false;
+  };
+  auto next_handler = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* ctx) {
+    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
+  };
+
+  Disp<64, 4> d;
+  Disp<64, 4>::Config cfg;
+  cfg.name = "fail_pipeline";
+  d.Init(cfg);
+
+  FaultReporter reporter;
+  reporter.fn = [](uint16_t /*idx*/, uint32_t /*detail*/, FaultPriority /*pri*/, void* ctx) {
+    static_cast<std::atomic<uint32_t>*>(ctx)->fetch_add(1U);
+  };
+  reporter.ctx = &faults;
+  d.SetFaultReporter(reporter, 3U);
+
+  StageConfig s0{};
+  s0.name = "fail";
+  s0.handler_ex = fail_handler;
+  s0.handler_ctx = &s0_calls;
+  auto i0 = d.AddStage(s0);
+  REQUIRE(i0 == 0);
+
+  auto i1 = d.AddStage({"next", next_handler, &s1_calls, 0U});
+  REQUIRE(i1 == 1);
+  REQUIRE(d.AddEdge(i0, i1));
+  d.SetEntryStage(i0);
+
+  auto r = d.Alloc();
+  REQUIRE(r.has_value());
+  d.Submit(r.value(), 0U);
+
+  REQUIRE(s0_calls.load() == 1U);
+  REQUIRE(s1_calls.load() == 0U);  // no fan-out after a failure
+  REQUIRE(faults.load() == 1U);
+  REQUIRE(d.FreeBlocks() == Disp<64, 4>::Capacity());
+}
+
+TEST_CASE("Pipeline: handler and handler_ex are mutually exclusive", "[job_pool][pipeline][failure]") {
+  Pipeline<2, 2> pipe;
+  auto plain = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* /*ctx*/) {};
+  auto failing = [](const uint8_t* /*data*/, uint32_t /*len*/, uint32_t /*block_id*/, void* /*ctx*/) { return true; };
+
+  StageConfig cfg{};
+  cfg.name = "both";
+  cfg.handler = plain;
+  cfg.handler_ex = failing;
+
+  REQUIRE(pipe.AddStage(cfg) == -1);
+  REQUIRE(pipe.StageCount() == 0U);
 }

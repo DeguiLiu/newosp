@@ -508,6 +508,11 @@ struct ShmNotify {
 /// @param ctx User context pointer.
 using JobHandler = void (*)(const uint8_t* data, uint32_t len, uint32_t block_id, void* ctx);
 
+/// @brief Handler that can report a processing failure.
+/// @return false to abort the block: the stage latches kError, reports the
+///         fault and does not fan out to successors.
+using JobHandlerEx = bool (*)(const uint8_t* data, uint32_t len, uint32_t block_id, void* ctx);
+
 // ============================================================================
 // StageConfig -- DAG node configuration
 // ============================================================================
@@ -517,6 +522,8 @@ struct StageConfig {
   JobHandler handler;   ///< Processing function
   void* handler_ctx;    ///< Handler context
   uint32_t timeout_ms;  ///< Per-block timeout for this stage (0 = none)
+  /// Failure-reporting variant; set at most one of handler/handler_ex.
+  JobHandlerEx handler_ex{nullptr};
 };
 
 // ============================================================================
@@ -540,9 +547,10 @@ class Pipeline {
   // --------------------------------------------------------------------------
 
   /// @brief Add a stage to the pipeline.
-  /// @return Stage index on success, or -1 if full.
+  /// @return Stage index on success, or -1 if full or if both handler and
+  ///         handler_ex are set (they are mutually exclusive).
   int32_t AddStage(const StageConfig& cfg) noexcept {
-    if (stage_count_ >= MaxStages) {
+    if (stage_count_ >= MaxStages || (cfg.handler != nullptr && cfg.handler_ex != nullptr)) {
       return -1;
     }
     auto& slot = stages_[stage_count_];
@@ -630,10 +638,21 @@ class Pipeline {
     auto& slot = stages_[idx];
 
     // Execute handler
+    bool ok = true;
     if (slot.config.handler != nullptr) {
       const uint8_t* data = disp.GetReadable(block_id);
       uint32_t len = disp.GetPayloadSize(block_id);
       slot.config.handler(data, len, block_id, slot.config.handler_ctx);
+    } else if (slot.config.handler_ex != nullptr) {
+      const uint8_t* data = disp.GetReadable(block_id);
+      uint32_t len = disp.GetPayloadSize(block_id);
+      ok = slot.config.handler_ex(data, len, block_id, slot.config.handler_ctx);
+    }
+
+    if (!ok) {
+      // The stage reported a failure: kError, fault, release, no fan-out.
+      disp.AbortBlock(block_id);
+      return;
     }
 
     // Trigger successors
@@ -1352,6 +1371,29 @@ class DataDispatcher {
       }
     }
     return reclaimed;
+  }
+
+  /**
+   * @brief Abort a block whose pipeline stage reported failure.
+   *
+   * Latches kError, reports the fault against the configured slot, then
+   * releases this stage's reference. Successors must not run: the caller
+   * returns instead of completing the stage.
+   */
+  void AbortBlock(uint32_t block_id) noexcept {
+    if (block_id >= Capacity()) {
+      return;
+    }
+    DataBlock* blk = store_.GetBlock(block_id);
+    const BlockState st = blk->GetState();
+    if (st != BlockState::kProcessing && st != BlockState::kReady) {
+      return;  // Already aborted, timed out or recycled.
+    }
+    blk->SetState(BlockState::kError);
+    if (fault_reporter_.fn != nullptr) {
+      fault_reporter_.Report(fault_slot_, block_id, FaultPriority::kHigh);
+    }
+    (void)Release(block_id);
   }
 
  private:

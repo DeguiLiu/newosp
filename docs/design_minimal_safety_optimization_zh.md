@@ -2,7 +2,7 @@
 
 **结论先行**：先做 P0-a（P0-1/P0-2/P0-3 + 编译期失败可见性），关闭“故障丢失、监督失效、配置静默”三条最高风险路径；P0-b（P0-4/P0-5）涉及 ABI/API 与迁移，必须单独提交。P1 做失败可见性和可分析性；P2 不要混进同一个提交。
 
-**实施状态（2026-11-15）**：P0-1、P0-2、P0-3、P0-5 已完成；P0-4 已完成（布局头、attach 校验、owner 存活检查、force-replace 分离、裸 `AttachAt()` 删除）。P0-4 是 ABI 变更，必须单独版本发布。P1-3 已完成：`OSP_SAFETY_PROFILE`、有界淘汰扫描、分级丢弃统计。
+**实施状态（2026-11-21）**：P0-1、P0-2、P0-3、P0-5 已完成；P0-4 已完成（布局头、attach 校验、owner 存活检查、force-replace 分离、裸 `AttachAt()` 删除）。P0-4 是 ABI 变更，必须单独版本发布。P1-3 已完成：`OSP_SAFETY_PROFILE`、有界淘汰扫描、分级丢弃统计。P1-4 已完成：executor 支持注入 bus。P1-6 已完成：pipeline handler 可返回失败并进入故障路径。
 
 ## 1. 目标
 
@@ -483,6 +483,13 @@ OSP_STRICT_NODISCARD=1
 风险：
 
 - 新增函数指针字段会增加 `StageConfig` 大小；仍为固定布局，无堆。
+
+实施记录（2026-11-21）：
+
+- 新增 `JobHandlerEx`，`StageConfig::handler_ex` 追加在结构体末尾并默认 `nullptr`，保留既有四元聚合初始化。
+- `Pipeline::AddStage()` 拒绝同时设置 `handler` 与 `handler_ex`（返回 -1）。
+- `Pipeline::ExecuteStage()` 在 `handler_ex` 返回 false 时调用新公开的 `DataDispatcher::AbortBlock()`：置 `kError`、按 `fault_slot_` 上报 `FaultPriority::kHigh`、释放当前 stage 引用，随后直接返回，不执行 `OnStageComplete()`，后继 stage 不会运行。
+- 验收：`test_data_dispatcher.cpp` 新增两个用例（失败中止 + 后继不执行 + 故障 1 次 + 块回收到空闲池；`handler`/`handler_ex` 互斥）。
 
 ### P1-7 QoS 与文档口径
 
