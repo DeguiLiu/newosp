@@ -4,13 +4,15 @@
 
 ## 最新变更
 
-### 2026-11-20: Shell 会话安全与 MSH 取向可用性
+### 2026-11-21: v0.9.5 Shell 会话安全、Socket 组播与 CI 修复
 
 - 认证：修复 telnet CRLF 导致密码为空；失败退避 250 ms；会话槽复用清零 `authenticated/admin`。
 - IAC：新增 `kSubIac` 状态，子协商 payload 不再泄漏为命令输入。
 - 权限：`ShellCmdFlags::kAdmin`，顶层命令与子命令均可标记；`Config::admin_username/admin_password`；本地 Console/UART 为 admin。
 - 可用性：`help <cmd>` 显示子命令用法与 `[admin]`、`help <prefix>` 前缀检索、`?` 别名、`history`、未知命令近似建议、子命令 TAB 补全、命令别名注册。
 - 配置：`DebugShell::Config::bind_ip`、`OSP_SHELL_MAX_COMMANDS`。
+- Socket：`SocketAddress` 增加 IPv4 字节访问器；`UdpSocket` 增加 `JoinMulticastGroup`/`LeaveMulticastGroup` 与 `SO_REUSEADDR`/`SO_REUSEPORT` 选项。
+- 修复：release 构建下日志未使用参数告警；`ShmRingBuffer` 布局常量与头文件格式；`[shell][privilege]` 用例改为自注册命令，适配 ctest 逐用例进程隔离。
 - 验证：shell 相关 4 个测试文件 59/22/6/24 例全部通过；uds_over_tcp 27 例通过。
 
 ### 2026-11-16: v0.9.4 共享内存安全与传输层加固（源码不兼容）
