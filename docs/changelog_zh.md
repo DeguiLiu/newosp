@@ -4,6 +4,15 @@
 
 ## 最新变更
 
+### 2026-11-21: v0.9.6 Pipeline handler 失败可见
+
+- `JobHandlerEx`：stage handler 可返回 false。`StageConfig::handler_ex` 追加在结构体末尾并默认 `nullptr`，保留既有四元聚合初始化。
+- `Pipeline::AddStage()` 拒绝同时设置 `handler` 与 `handler_ex`。
+- 失败路径：`Pipeline::ExecuteStage()` 调用新增的 `DataDispatcher::AbortBlock()`——块置 `kError`、按 `fault_slot_` 上报 `FaultPriority::kHigh`、释放本 stage 引用，后继 stage 不执行。
+- 验证：`[pipeline]` 9 用例通过（含失败中止与互斥两个新用例）；全量 1420 例 0 失败；CI 10/10。
+
+---
+
 ### 2026-11-21: v0.9.5 Shell 会话安全、Socket 组播与 CI 修复
 
 - 认证：修复 telnet CRLF 导致密码为空；失败退避 250 ms；会话槽复用清零 `authenticated/admin`。
